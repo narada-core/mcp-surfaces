@@ -9,7 +9,7 @@ project root, and bounded stdout. The site's authored SQL snapshot remains the
 authority; generated SQLite/JSON files are derived outputs. Every tool is
 replayable, virtual-only, and disabled by default in the local-site projection.
 
-Tools:
+## Tools
 
 - `project_state_guidance`
 - `project_state_doctor`
@@ -18,10 +18,17 @@ Tools:
 - `project_state_project_list` / `project_state_project_show`
 - `project_state_matrix`
 - `project_state_gaps`
+- `project_state_handoff`
 - `project_state_standards_list` / `project_state_standard_show`
 - `project_state_applicability`
 - `project_state_standard_trace` / `project_state_standard_gaps`
 - `project_state_validate`
+
+`project_state_handoff` returns the site's auditable virtual-only release
+summary: lifecycle/maturity cells for every object, repository evidence with
+replay commands, every deferred gate, and explicit re-entry triggers. It does
+not grant physical, qualification, supplier, external-evidence, or flight
+credit.
 
 The standards tools expose the site's bounded applicability profile and trace
 internal control paraphrases to program, project, object, lifecycle cell,
@@ -31,3 +38,9 @@ certification, qualification, or flight credit.
 
 The projection receives `--project-root {site_root}`. Callers cannot replace the
 root or CLI path through tool arguments.
+
+## Verification
+
+```powershell
+pnpm --filter @narada-core/project-state-mcp test
+```

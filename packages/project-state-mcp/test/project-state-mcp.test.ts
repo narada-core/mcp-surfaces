@@ -10,6 +10,7 @@ assert.deepEqual(names.sort(), [
   'project_state_command_map',
   'project_state_doctor',
   'project_state_gaps',
+  'project_state_handoff',
   'project_state_guidance',
   'project_state_matrix',
   'project_state_program_list',
@@ -62,6 +63,10 @@ try {
   assert.equal(trace.result.args.includes('trace'), true);
   assert.equal(trace.result.args.includes('iso-15288-2023'), true);
   assert.equal(trace.result.args.includes('open_gap'), true);
+  const handoffResponse = await handleRequest({ jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'project_state_handoff', arguments: { project_id: 'NRC600' } } }, state) as JsonRpcResponse;
+  const handoff = JSON.parse(String(handoffResponse.result?.content?.[0]?.text));
+  assert.equal(handoff.result.args.includes('handoff'), true);
+  assert.equal(handoff.result.args.includes('NRC600'), true);
 } finally {
   await rm(fixtureDir, { recursive: true, force: true });
 }

@@ -11,6 +11,7 @@ const READ_ONLY_TOOLS = [
   'project_state_project_show',
   'project_state_matrix',
   'project_state_gaps',
+  'project_state_handoff',
   'project_state_standards_list',
   'project_state_standard_show',
   'project_state_applicability',

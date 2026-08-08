@@ -57,6 +57,7 @@ try {
   assert.equal(names.includes('project_state_validate'), true);
   assert.equal(names.includes('project_state_standard_trace'), true);
   assert.equal(names.includes('project_state_standard_gaps'), true);
+  assert.equal(names.includes('project_state_handoff'), true);
   assert.equal(names.includes('project_state_guidance'), true);
   assert.equal(stderr.trim(), '');
 } finally {

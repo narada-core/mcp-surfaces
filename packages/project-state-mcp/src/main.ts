@@ -81,6 +81,16 @@ const COMMANDS: CommandSpec[] = [
     },
   },
   {
+    tool: 'project_state_handoff',
+    cli: 'handoff [--program] [--project]',
+    args: (input) => ['handoff', ...optionalFlag(input, 'program_id', '--program'), ...optionalFlag(input, 'project_id', '--project')],
+    description: 'Read the auditable virtual-only release handoff with lifecycle/maturity status, evidence replay commands, deferred gates, and explicit re-entry triggers.',
+    properties: {
+      program_id: stringSchema('Optional canonical program id filter.'),
+      project_id: stringSchema('Optional canonical project id filter.'),
+    },
+  },
+  {
     tool: 'project_state_standards_list',
     cli: 'standards list [--selection <selection>]',
     args: (input) => ['standards', 'list', ...optionalFlag(input, 'selection', '--selection')],
