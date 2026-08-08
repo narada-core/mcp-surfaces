@@ -1,0 +1,3211 @@
+[
+  {
+    "name": "task_lifecycle_doctor",
+    "description": "Inspect Task Lifecycle MCP readiness without mutating. Defaults to a concise startup-safe summary; pass verbose=true or detail=full for full diagnostics.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "verbose": {
+          "type": "boolean",
+          "description": "Return full diagnostics. Defaults false."
+        },
+        "detail": {
+          "type": "string",
+          "description": "Optional detail level. Use full for full diagnostics; default returns summary."
+        }
+      },
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_doctor",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_restart",
+    "description": "Canonical action: restart (task_lifecycle_restart). Request, inspect, or acknowledge an external restart of the task-lifecycle stdio MCP server. Does not self-restart the current process.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "description": "request, status, acknowledge, or clear. Default request."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Optional reason for the restart request or acknowledgement."
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_restart",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_list",
+    "description": "Canonical action: list (task_lifecycle_list). List site-local tasks with optional status, agent, and tag filters. Tags are descriptive labels only and do not change routing or authorization.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "description": "Filter by status: draft, opened, claimed, in_review, closed, confirmed, etc."
+        },
+        "agent_id": {
+          "type": "string",
+          "description": "Filter by assigned agent_id."
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "Normalized task tag."
+          },
+          "description": "Filter by one or more site-local tags."
+        },
+        "tag_match": {
+          "type": "string",
+          "enum": [
+            "any",
+            "all"
+          ],
+          "description": "When tags are provided, match any or all tags. Defaults to all."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Maximum results; defaults to 50."
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_list",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_tags_update",
+    "description": "Canonical action: tags update (task_lifecycle_tags_update). Replace the complete site-local tag set for a task. The change is audited with before/after tags, actor, reason, and timestamp; tags never affect routing, priority, dependencies, review, closure, or authorization.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task_number": {
+          "type": "number",
+          "description": "Task number whose tags should be replaced."
+        },
+        "agent_id": {
+          "type": "string",
+          "description": "Agent id performing the tag update."
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "Normalized lowercase kebab-case tag."
+          },
+          "description": "Complete replacement tag set. Use [] to clear all tags."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Concise reason for the tag replacement; recorded in the audit event."
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [
+        "task_number",
+        "agent_id",
+        "tags",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_tags_update",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_show",
+    "description": "Canonical action: show (task_lifecycle_show). Show full task details: lifecycle, spec, assignment, and observations.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task_number": {
+          "type": "number",
+          "description": "Task number to inspect."
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [
+        "task_number"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_show",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_diagnose_task_ref",
+    "description": "Canonical action: diagnose task ref (task_lifecycle_diagnose_task_ref). Diagnose task_id/task_number collisions, missing projections, and unsafe directive references before report or closeout.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Optional lifecycle task_id to diagnose."
+        },
+        "task_number": {
+          "type": "number",
+          "description": "Optional task number to compare against task_id."
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_diagnose_task_ref",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_roster",
+    "description": "Canonical action: roster (task_lifecycle_roster). List the agent roster.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_roster",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_roster_admit",
+    "description": "Canonical action: roster admit (task_lifecycle_roster_admit). Append an admitted roster identity event and project it into the agent_roster read model.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "agent_id": {
+          "type": "string",
+          "description": "Canonical agent identity to admit into task lifecycle roster authority."
+        },
+        "role": {
+          "type": "string",
+          "description": "Canonical role for the agent."
+        },
+        "actor_agent_id": {
+          "type": "string",
+          "description": "Verified session agent recording the roster admission."
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "Capability name."
+          },
+          "description": "Capabilities to project for this roster identity."
+        },
+        "operator_identity": {
+          "type": "string",
+          "description": "Optional operator identity associated with the agent."
+        },
+        "authority_basis": {
+          "type": "object",
+          "description": "Required authority basis for roster admission.",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "description": "Authority basis kind."
+            },
+            "summary": {
+              "type": "string",
+              "description": "Short authority basis summary."
+            }
+          },
+          "required": [
+            "kind",
+            "summary"
+          ],
+          "additionalProperties": true
+        },
+        "reason": {
+          "type": "string",
+          "description": "Optional admission reason."
+        },
+        "dry_run": {
+          "type": "boolean",
+          "description": "Plan only; do not append event or project roster."
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [
+        "agent_id",
+        "role",
+        "actor_agent_id",
+        "authority_basis"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_roster_admit",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_claim",
+    "description": "Canonical action: claim (task_lifecycle_claim). Claim an unassigned task for an agent. If the claiming agent differs from preferred_agent_id, include authority_basis { kind, summary }.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task_number": {
+          "type": "number",
+          "description": "Task number to claim."
+        },
+        "agent_id": {
+          "type": "string",
+          "description": "Agent id claiming the task."
+        },
+        "authority_basis": {
+          "type": "object",
+          "description": "Required when the task has a different preferred_agent_id.",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "description": "Authority basis kind."
+            },
+            "summary": {
+              "type": "string",
+              "description": "Short authority basis summary."
+            }
+          },
+          "required": [
+            "kind",
+            "summary"
+          ],
+          "additionalProperties": true
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [
+        "task_number",
+        "agent_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_claim",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_continue",
+    "description": "Canonical action: continue (task_lifecycle_continue). Continue a task that is in needs_continuation or evidence_repair state.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task_number": {
+          "type": "number",
+          "description": "Task number to continue."
+        },
+        "agent_id": {
+          "type": "string",
+          "description": "Agent id continuing the task."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Continuation reason: evidence_repair, review_fix, handoff, blocked_agent, operator_override."
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [
+        "task_number",
+        "agent_id",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_continue",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_unclaim",
+    "description": "Canonical action: unclaim (task_lifecycle_unclaim). Release an active task assignment.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task_number": {
+          "type": "number",
+          "description": "Task number to unclaim."
+        },
+        "agent_id": {
+          "type": "string",
+          "description": "Optional agent_id guard; must match current claimant."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Release reason."
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [
+        "task_number"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_unclaim",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_next",
+    "description": "Canonical action: next (task_lifecycle_next). Get the next recommended action for an agent: active work, dependency obligations, or claimable tasks.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "agent_id": {
+          "type": "string",
+          "description": "Agent id to query workboard for."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Maximum results per category; defaults to 8."
+        },
+        "last_workboard_check_at": {
+          "type": "string",
+          "description": "ISO timestamp of the agent's last workboard check. Enables state_freshness computation."
+        },
+        "view": {
+          "type": "string",
+          "description": "Optional output view. Use \"concise\" for a small next-action packet without full workboard sections."
+        },
+        "concise": {
+          "type": "boolean",
+          "description": "When true, return only the concise next-action packet."
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [
+        "agent_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_next",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_workboard_snapshot",
+    "description": "Canonical action: workboard snapshot (task_lifecycle_workboard_snapshot). Return a read-only, trace-ready workboard evidence packet for IS movement. Does not claim, route, rank, or reconcile tasks.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "agent_id": {
+          "type": "string",
+          "description": "Agent id to query workboard evidence for."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Maximum sample items per category; defaults to 8."
+        },
+        "last_workboard_check_at": {
+          "type": "string",
+          "description": "ISO timestamp of the agent's last workboard check. Enables freshness evidence."
+        },
+        "previous_snapshot": {
+          "type": "object",
+          "description": "Optional prior snapshot payload for drift comparison.",
+          "additionalProperties": true
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [
+        "agent_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_workboard_snapshot",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_obligations",
+    "description": "Canonical action: obligations (task_lifecycle_obligations). List directed obligations and ordinary dependency work for an agent.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "agent_id": {
+          "type": "string",
+          "description": "Agent id to query obligations for."
+        },
+        "status": {
+          "type": "string",
+          "description": "Filter by status: open, completed, rejected. Defaults to open."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Maximum dependency work items to include; defaults to 50."
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [
+        "agent_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_obligations",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_inspect",
+    "description": "Canonical action: inspect (task_lifecycle_inspect). Deep-inspect a task: lifecycle state, evidence summary, assignment, obligations, and reports.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task_number": {
+          "type": "number",
+          "description": "Task number to inspect."
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [
+        "task_number"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_inspect",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_evidence_preflight",
+    "description": "Canonical action: evidence preflight (task_lifecycle_evidence_preflight). Report finish/admission requirements and exact remediation before closeout. Does not mutate task state.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task_number": {
+          "type": "number",
+          "description": "Task number to check before finish."
+        },
+        "include_unrelated_changed_files": {
+          "type": "boolean",
+          "description": "If true, include all git-changed files under the site root in the changed-file evidence summary. Default false scopes to task-relevant paths."
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [
+        "task_number"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_evidence_preflight",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_self_certification_preflight",
+    "description": "Canonical action: self certification preflight (task_lifecycle_self_certification_preflight). Validate self-certification guard metadata for task/CAPA/evidence/chapter/final-summary surfaces without mutating authority state.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "self_certification": {
+          "type": "object",
+          "description": "Self-certification guard packet. Fields include target_category, subject_principal, actor_principal, requires_independent_review, reviewer_eligibility_ref, independent_review_ref, operator_acceptance_ref, misleading_completion_answer, allowed_pending_state, closure_state.",
+          "additionalProperties": true
+        },
+        "surface": {
+          "type": "string",
+          "description": "Surface being checked, e.g. task_lifecycle_finish, task_lifecycle_review, task_lifecycle_close, evidence_admission, capa_closeout, operator_final_summary."
+        },
+        "summary": {
+          "type": "string",
+          "description": "Optional summary/final text to include in target and terminal-claim detection."
+        },
+        "body": {
+          "type": "string",
+          "description": "Optional body/chapter/packet text to include in target and terminal-claim detection."
+        },
+        "actor_principal": {
+          "type": "string",
+          "description": "Optional actor/closer/reviewer principal if not already in the packet."
+        },
+        "terminal_correction_claim": {
+          "type": "boolean",
+          "description": "Set true when the surface would assert terminal correction/closure."
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [
+        "self_certification"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_self_certification_preflight",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_admit_evidence",
+    "description": "Canonical action: admit evidence (task_lifecycle_admit_evidence). Admit evidence for a task through the admission gate (report, verification, criteria).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task_number": {
+          "type": "number",
+          "description": "Task number to admit evidence for."
+        },
+        "agent_id": {
+          "type": "string",
+          "description": "Agent id performing the admission."
+        },
+        "self_certification": {
+          "type": "object",
+          "description": "Optional self-certification guard packet for closure-sensitive architect-failure/deception/trust evidence.",
+          "additionalProperties": true
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [
+        "task_number",
+        "agent_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_admit_evidence",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_prove_criteria",
+    "description": "Canonical action: prove criteria (task_lifecycle_prove_criteria). Auto-check all acceptance criteria in the task body and run evidence admission. This tool does not accept a summary; use task_lifecycle_disposition_closeout or task_lifecycle_submit_report for summary/report evidence.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task_number": {
+          "type": "number",
+          "description": "Task number to prove criteria for."
+        },
+        "agent_id": {
+          "type": "string",
+          "description": "Agent id performing the proof."
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [
+        "task_number",
+        "agent_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_prove_criteria",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_closeout",
+    "description": "Canonical action: closeout (task_lifecycle_closeout). Readable alias for task_lifecycle_disposition_closeout. Mutates task notes, inbox disposition evidence, criteria, and finish state only when requested by arguments.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task_number": {
+          "type": "number",
+          "description": "Task number to close out."
+        },
+        "agent_id": {
+          "type": "string",
+          "description": "Agent id performing the close-out."
+        },
+        "envelope_id": {
+          "type": "string",
+          "description": "Optional envelope id. If omitted, the task body is scanned for env_<id>."
+        },
+        "disposition": {
+          "type": "string",
+          "description": "Optional disposition label, e.g. already_promoted, acknowledged, dismissed, no_code."
+        },
+        "summary": {
+          "type": "string",
+          "description": "Optional close-out summary."
+        },
+        "dry_run": {
+          "type": "boolean",
+          "description": "Plan without writing task notes or finishing."
+        },
+        "prove_criteria": {
+          "type": "boolean",
+          "description": "Auto-check criteria after writing notes. Default false."
+        },
+        "finish": {
+          "type": "boolean",
+          "description": "Finish the task after writing/proving. Default false."
+        },
+        "changed_files": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "Repo-relative changed file path."
+          },
+          "description": "Explicit changed-file evidence for the optional finish report."
+        },
+        "no_files_changed": {
+          "type": "boolean",
+          "description": "Explicitly declare that the optional finish legitimately changed no files."
+        },
+        "include_unrelated_changed_files": {
+          "type": "boolean",
+          "description": "If true, include all git-changed files under the site root in the finish report. Default false scopes to task-relevant paths."
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [
+        "task_number",
+        "agent_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_closeout",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_disposition_closeout",
+    "description": "Canonical action: disposition closeout (task_lifecycle_disposition_closeout). Prepare or complete a lightweight inbox-disposition close-out: resolve envelope status, write execution/verification notes, optionally prove criteria and finish, and return task-owned changed files.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task_number": {
+          "type": "number",
+          "description": "Task number to close out."
+        },
+        "agent_id": {
+          "type": "string",
+          "description": "Agent id performing the close-out."
+        },
+        "envelope_id": {
+          "type": "string",
+          "description": "Optional envelope id. If omitted, the task body is scanned for env_<id>."
+        },
+        "disposition": {
+          "type": "string",
+          "description": "Optional disposition label, e.g. already_promoted, acknowledged, dismissed, no_code."
+        },
+        "summary": {
+          "type": "string",
+          "description": "Optional close-out summary."
+        },
+        "dry_run": {
+          "type": "boolean",
+          "description": "Plan without writing task notes or finishing."
+        },
+        "prove_criteria": {
+          "type": "boolean",
+          "description": "Auto-check criteria after writing notes. Default false."
+        },
+        "finish": {
+          "type": "boolean",
+          "description": "Finish the task after writing/proving. Default false."
+        },
+        "changed_files": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "Repo-relative changed file path."
+          },
+          "description": "Explicit changed-file evidence for the optional finish report."
+        },
+        "no_files_changed": {
+          "type": "boolean",
+          "description": "Explicitly declare that the optional finish legitimately changed no files."
+        },
+        "include_unrelated_changed_files": {
+          "type": "boolean",
+          "description": "If true, include all git-changed files under the site root in the finish report. Default false scopes to task-relevant paths."
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [
+        "task_number",
+        "agent_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_disposition_closeout",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_audit",
+    "description": "Canonical action: audit (task_lifecycle_audit). Timeline of recent task lifecycle events: claims, reports, reviews, admissions, closes.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "since": {
+          "type": "string",
+          "description": "ISO timestamp start. Defaults to 24 hours ago."
+        },
+        "until": {
+          "type": "string",
+          "description": "ISO timestamp end. Defaults to now."
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_audit",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_submit_report",
+    "description": "Canonical action: submit report (task_lifecycle_submit_report). Readable alias for task_lifecycle_finish. Finish a claimed task by submitting a report. If the task has an outcome contract, include outcome and optional findings; contract_id is inferred from the task. Use payload_ref only for long companion fields; top-level task_number and agent_id remain authoritative.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task_number": {
+          "type": "number",
+          "description": "Task number to finish."
+        },
+        "agent_id": {
+          "type": "string",
+          "description": "Agent id finishing the task."
+        },
+        "summary": {
+          "type": "string",
+          "description": "Finish summary."
+        },
+        "directive_id": {
+          "type": "string",
+          "description": "Optional first-class directive id that caused this report. Prefer this structured field over summary tokens."
+        },
+        "outcome": {
+          "type": "string",
+          "description": "Structured outcome for tasks with an outcome contract. Allowed values are inferred from the task contract, for example accepted, accepted_with_notes, rejected, completed, or blocked."
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "description": "Structured findings for outcome-contract tasks. Use [] when there are no findings."
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "Evidence reference."
+          },
+          "description": "Optional evidence references supporting the structured outcome."
+        },
+        "reviewer": {
+          "type": "string",
+          "description": "Optional admitted reviewer agent id or unique reviewer role alias for the generated review-contract dependency routing."
+        },
+        "changed_files": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "Repo-relative changed file path."
+          },
+          "description": "Explicit changed-file evidence for this finish report."
+        },
+        "no_files_changed": {
+          "type": "boolean",
+          "description": "Explicitly declare that this finish legitimately changed no files."
+        },
+        "include_unrelated_changed_files": {
+          "type": "boolean",
+          "description": "If true, include all git-changed files under the site root in the finish report. Default false scopes to task-relevant paths."
+        },
+        "authority_basis": {
+          "type": "object",
+          "description": "Required when conflict-of-interest policy allows explicit operator override for an outcome-contract dependency task.",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "description": "Authority basis kind."
+            },
+            "summary": {
+              "type": "string",
+              "description": "Short authority basis summary."
+            }
+          },
+          "required": [
+            "kind",
+            "summary"
+          ],
+          "additionalProperties": true
+        },
+        "recovery_truthfulness": {
+          "type": "object",
+          "description": "Required for serious-failure recovery finish/report claims. Fields: known_facts, inferences, uncertainty, changed, not_changed, remaining_work, evidence_limits, capa_open_status, state. terminal_corrected additionally requires repository_durability / commit-push state plus no open residual work.",
+          "additionalProperties": true
+        },
+        "self_certification": {
+          "type": "object",
+          "description": "Required for architect-failure/deception/trust same-subject terminal correction claims. Fields: target_category, subject_principal, requires_independent_review, misleading_completion_answer, allowed_pending_state, plus independent_review_ref/reviewer_eligibility_ref or operator_acceptance_ref for terminal same-subject correction.",
+          "additionalProperties": true
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref carrying long finish/report companion fields such as summary, changed_files, outcome, findings, recovery_truthfulness, or self_certification. Payload fields are merged with top-level arguments; top-level task_number and agent_id win."
+        }
+      },
+      "required": [
+        "task_number",
+        "agent_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_submit_report",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_finish",
+    "description": "Canonical action: finish (task_lifecycle_finish). Finish a claimed task by submitting a report. If the task has an outcome contract, include outcome and optional findings; contract_id is inferred from the task. Use payload_ref only for long companion fields; top-level task_number and agent_id remain authoritative.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task_number": {
+          "type": "number",
+          "description": "Task number to finish."
+        },
+        "agent_id": {
+          "type": "string",
+          "description": "Agent id finishing the task."
+        },
+        "summary": {
+          "type": "string",
+          "description": "Finish summary."
+        },
+        "directive_id": {
+          "type": "string",
+          "description": "Optional first-class directive id that caused this report. Prefer this structured field over summary tokens."
+        },
+        "outcome": {
+          "type": "string",
+          "description": "Structured outcome for tasks with an outcome contract. Allowed values are inferred from the task contract, for example accepted, accepted_with_notes, rejected, completed, or blocked."
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "description": "Structured findings for outcome-contract tasks. Use [] when there are no findings."
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "Evidence reference."
+          },
+          "description": "Optional evidence references supporting the structured outcome."
+        },
+        "reviewer": {
+          "type": "string",
+          "description": "Optional admitted reviewer agent id or unique reviewer role alias for the generated review-contract dependency routing."
+        },
+        "changed_files": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "Repo-relative changed file path."
+          },
+          "description": "Explicit changed-file evidence for this finish report."
+        },
+        "no_files_changed": {
+          "type": "boolean",
+          "description": "Explicitly declare that this finish legitimately changed no files."
+        },
+        "include_unrelated_changed_files": {
+          "type": "boolean",
+          "description": "If true, include all git-changed files under the site root in the finish report. Default false scopes to task-relevant paths."
+        },
+        "authority_basis": {
+          "type": "object",
+          "description": "Required when conflict-of-interest policy allows explicit operator override for an outcome-contract dependency task.",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "description": "Authority basis kind."
+            },
+            "summary": {
+              "type": "string",
+              "description": "Short authority basis summary."
+            }
+          },
+          "required": [
+            "kind",
+            "summary"
+          ],
+          "additionalProperties": true
+        },
+        "recovery_truthfulness": {
+          "type": "object",
+          "description": "Required for serious-failure recovery finish/report claims. Fields: known_facts, inferences, uncertainty, changed, not_changed, remaining_work, evidence_limits, capa_open_status, state. terminal_corrected additionally requires repository_durability / commit-push state plus no open residual work.",
+          "additionalProperties": true
+        },
+        "self_certification": {
+          "type": "object",
+          "description": "Required for architect-failure/deception/trust same-subject terminal correction claims. Fields: target_category, subject_principal, requires_independent_review, misleading_completion_answer, allowed_pending_state, plus independent_review_ref/reviewer_eligibility_ref or operator_acceptance_ref for terminal same-subject correction.",
+          "additionalProperties": true
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref carrying long finish/report companion fields such as summary, changed_files, outcome, findings, recovery_truthfulness, or self_certification. Payload fields are merged with top-level arguments; top-level task_number and agent_id win."
+        }
+      },
+      "required": [
+        "task_number",
+        "agent_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_finish",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_close",
+    "description": "Canonical action: close (task_lifecycle_close). Close a task. Requires the task to be in a closable state.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task_number": {
+          "type": "number",
+          "description": "Task number to close."
+        },
+        "agent_id": {
+          "type": "string",
+          "description": "Agent id closing the task."
+        },
+        "mode": {
+          "type": "string",
+          "description": "Closure mode: operator_direct, peer_reviewed, agent_finish, emergency. Defaults to agent_finish."
+        },
+        "no_continuation_needed": {
+          "type": "string",
+          "description": "Rationale for closing without a continuation task (for design-only/spike tasks)."
+        },
+        "self_certification": {
+          "type": "object",
+          "description": "Optional self-certification guard packet for architect-failure/deception/trust closeout.",
+          "additionalProperties": true
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [
+        "task_number",
+        "agent_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_close",
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_dependency_disposition_record",
+    "description": "Canonical action: dependency disposition record (task_lifecycle_dependency_disposition_record). Record explicit disposition for a blocking dependency outcome. Use after dependency satisfaction reports disposition_required=true; required_outcome_id is inferred from the latest outcome when omitted.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "dependency_id": {
+          "type": "string",
+          "description": "Dependency id whose blocking outcome is being dispositioned."
+        },
+        "agent_id": {
+          "type": "string",
+          "description": "Agent id recording the disposition."
+        },
+        "kind": {
+          "type": "string",
+          "description": "Disposition kind: remediation_task, covered_by_existing_task, routed_obligation, operator_decision_required, operator_deferred, or out_of_scope_or_rejected."
+        },
+        "summary": {
+          "type": "string",
+          "description": "Concise disposition summary and authority rationale."
+        },
+        "required_outcome_id": {
+          "type": "string",
+          "description": "Optional specific task_outcomes.outcome_id. Defaults to latest outcome on the required task."
+        },
+        "status": {
+          "type": "string",
+          "description": "Disposition status. Defaults to open, or deferred for operator_deferred/out_of_scope_or_rejected."
+        },
+        "target_task_id": {
+          "type": "string",
+          "description": "Optional task_id for remediation_task or covered_by_existing_task disposition."
+        },
+        "routed_obligation_id": {
+          "type": "string",
+          "description": "Optional directed obligation id for routed_obligation disposition."
+        },
+        "authority_basis": {
+          "type": "object",
+          "description": "Required authority basis for operator_deferred and out_of_scope_or_rejected dispositions; optional otherwise.",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "description": "Authority basis kind."
+            },
+            "summary": {
+              "type": "string",
+              "description": "Short authority basis summary."
+            }
+          },
+          "required": [
+            "kind",
+            "summary"
+          ],
+          "additionalProperties": true
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [
+        "dependency_id",
+        "agent_id",
+        "kind",
+        "summary"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_dependency_disposition_record",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_search",
+    "description": "Canonical action: search (task_lifecycle_search). Search tasks by title or content.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Search query string."
+        },
+        "status": {
+          "type": "string",
+          "description": "Optional status filter."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Maximum results; defaults to 20."
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_search",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_related",
+    "description": "Canonical action: related (task_lifecycle_related). Find site-local tasks related to a given task. Explicit tag overlap is preferred; derived title/goal/context terms are used only as a fallback.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task_number": {
+          "type": "number",
+          "description": "Task number to find related tasks for."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Maximum results; defaults to 8."
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [
+        "task_number"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_related",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_defer",
+    "description": "Canonical action: defer (task_lifecycle_defer). Defer a task. Valid for open work and compatibility review/dependency wait states.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task_number": {
+          "type": "number",
+          "description": "Task number to defer."
+        },
+        "agent_id": {
+          "type": "string",
+          "description": "Agent id deferring the task."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Optional reason for deferral."
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [
+        "task_number",
+        "agent_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_defer",
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_un_defer",
+    "description": "Canonical action: un defer (task_lifecycle_un_defer). Un-defer a deferred task. Restores unassigned tasks to opened and actively assigned tasks to claimed without changing the assignment.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task_number": {
+          "type": "number",
+          "description": "Task number to un-defer."
+        },
+        "agent_id": {
+          "type": "string",
+          "description": "Agent id performing the un-defer action."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Optional reason for un-deferral."
+        },
+        "authority_basis": {
+          "type": "object",
+          "description": "Required when the active assignment belongs to a different agent.",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "description": "Authority basis kind."
+            },
+            "summary": {
+              "type": "string",
+              "description": "Short authority basis summary."
+            }
+          },
+          "required": [
+            "kind",
+            "summary"
+          ],
+          "additionalProperties": true
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [
+        "task_number",
+        "agent_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_un_defer",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_reopen",
+    "description": "Canonical action: reopen (task_lifecycle_reopen). Reopen a closed or confirmed task.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task_number": {
+          "type": "number",
+          "description": "Task number to reopen."
+        },
+        "agent_id": {
+          "type": "string",
+          "description": "Agent id reopening the task."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Optional reason for reopening."
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [
+        "task_number",
+        "agent_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_reopen",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_review",
+    "description": "Canonical action: review (task_lifecycle_review). Compatibility migration tool for legacy review calls. Normal review work should be a review-contract dependency task finished with task_lifecycle_finish. This tool preserves old review-row readback while admitting dependency/outcome authority. For long findings, create payload { findings: [{ severity, description, location? }] } and retry with payload_ref plus top-level task_number, agent_id, and verdict.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task_number": {
+          "type": "number",
+          "description": "Legacy parent task number being reviewed."
+        },
+        "agent_id": {
+          "type": "string",
+          "description": "Reviewer agent id for compatibility migration."
+        },
+        "verdict": {
+          "type": "string",
+          "enum": [
+            "accepted",
+            "accepted_with_notes",
+            "rejected"
+          ],
+          "description": "Legacy verdict mapped to a review outcome: accepted, accepted_with_notes, rejected."
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "description": "Array of finding objects. Blocking findings must include one disposition: remediation_task, covered_by_existing_task, routed_obligation_id, operator_decision_required, operator_deferred_reason, or out_of_scope_or_rejected with authority_basis."
+        },
+        "single_operator_review": {
+          "type": "boolean",
+          "description": "Set to true to allow and annotate a same-operator review (reviewer and finisher share operator_identity)."
+        },
+        "auto_accept_single_operator": {
+          "type": "boolean",
+          "description": "Set to true to automatically accept and annotate a same-operator or singleton-role review in one call."
+        },
+        "self_certification": {
+          "type": "object",
+          "description": "Optional self-certification guard packet for architect-failure/deception/trust review.",
+          "additionalProperties": true
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [
+        "task_number",
+        "agent_id",
+        "verdict"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_review",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_record_observation",
+    "description": "Canonical action: record observation (task_lifecycle_record_observation). Readable alias for task_lifecycle_submit_observation. Writes a structured observation artifact; observation artifacts are context and do not satisfy verification gates by themselves.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task_number": {
+          "type": "number",
+          "description": "Optional task number to attach to."
+        },
+        "artifact_uri": {
+          "type": "string"
+        },
+        "content": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "source_operator": {
+          "type": "string",
+          "description": "Source operator name."
+        },
+        "agent_id": {
+          "type": "string",
+          "description": "Agent id."
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [
+        "artifact_uri"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_record_observation",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_submit_observation",
+    "description": "Canonical action: submit observation (task_lifecycle_submit_observation). Submit an observation artifact attached to a task or as a general observation.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task_number": {
+          "type": "number",
+          "description": "Optional task number to attach to."
+        },
+        "artifact_uri": {
+          "type": "string"
+        },
+        "content": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "source_operator": {
+          "type": "string",
+          "description": "Source operator name."
+        },
+        "agent_id": {
+          "type": "string",
+          "description": "Agent id."
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [
+        "artifact_uri"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_submit_observation",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_bridge_poll",
+    "description": "Canonical action: bridge poll (task_lifecycle_bridge_poll). Poll the inbox-to-task-lifecycle bridge: evaluate unprocessed envelopes and auto-materialize high-severity tasks.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "dry_run": {
+          "type": "boolean",
+          "description": "If true, evaluate without creating tasks."
+        },
+        "threshold": {
+          "type": "number",
+          "description": "Minimum severity to auto-materialize. Defaults to 50."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Maximum envelopes to evaluate. Defaults to 20."
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_bridge_poll",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_inbox_target",
+    "description": "Canonical action: inbox target (task_lifecycle_inbox_target). Target one inbox envelope by envelope_id for bridge preview/materialization or explicit disposition without relying on broad bridge polling order.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "envelope_id": {
+          "type": "string",
+          "description": "Inbox envelope ID to inspect or disposition."
+        },
+        "dry_run": {
+          "type": "boolean",
+          "description": "If true, preview the targeted action without mutation."
+        },
+        "disposition": {
+          "type": "string",
+          "description": "Disposition: materialize, acknowledge, already_routed, dismiss, defer, or preview. Defaults to materialize."
+        },
+        "principal": {
+          "type": "string",
+          "description": "Principal recorded on disposition evidence."
+        },
+        "agent_id": {
+          "type": "string",
+          "description": "Agent id used as fallback disposition principal."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Disposition reason; required for dismiss."
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [
+        "envelope_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_inbox_target",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_create",
+    "description": "Canonical action: create (task_lifecycle_create). Create a new task from an immutable payload_ref carrying title, goal, context, required work, non-goals, acceptance criteria, optional site-local tags, and optional preferred/target roles.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "payload_ref": {
+          "type": "string",
+          "description": "Required immutable transient payload ref such as mcp_payload:<id>@v1. Payload must contain the task definition."
+        }
+      },
+      "required": [
+        "payload_ref"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_create",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_executability_request",
+    "description": "Canonical action: executability request (task_lifecycle_executability_request). Request an asynchronous task executability assessment for a task. Idempotent: returns the existing pending request if one with identical digests already exists.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task_number": {
+          "type": "number",
+          "description": "Task number to assess."
+        },
+        "agent_id": {
+          "type": "string",
+          "description": "Agent id requesting the assessment."
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [
+        "task_number",
+        "agent_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_executability_request",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_executability_status",
+    "description": "Canonical action: executability status (task_lifecycle_executability_status). Show the current executability posture for a task: policy, latest request, admitted assessment, currency, and derived executable flag. Set include_assessment=true to read the full admitted assessment and evaluator provenance through MCP; the default remains compact.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task_number": {
+          "type": "number",
+          "description": "Task number to inspect."
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        },
+        "include_assessment": {
+          "type": "boolean",
+          "description": "When true, include the full admitted assessment, findings, and evaluator provenance. Defaults false."
+        }
+      },
+      "required": [
+        "task_number"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_executability_status",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_executability_requests_next",
+    "description": "Canonical action: executability requests next (task_lifecycle_executability_requests_next). Lease the next available executability request(s) for a consumer. Atomic: each request is leased to one consumer at a time; expired leases become available again.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "consumer_id": {
+          "type": "string",
+          "description": "Consumer identity acquiring the lease."
+        },
+        "lease_duration_minutes": {
+          "type": "number",
+          "description": "Lease duration in minutes. Defaults to 10."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Maximum requests to lease. Defaults to 1."
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [
+        "consumer_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_executability_requests_next",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_executability_complete",
+    "description": "Canonical action: executability complete (task_lifecycle_executability_complete). Admit an executability assessment for a leased request and mark the request completed.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "request_id": {
+          "type": "string",
+          "description": "Executability request id to complete."
+        },
+        "assessment": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Task executability assessment payload matching narada.task_executability_assessment.v1."
+        }
+      },
+      "required": [
+        "request_id",
+        "assessment"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_executability_complete",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_executability_override",
+    "description": "Canonical action: executability override (task_lifecycle_executability_override). Admit one durable, one-shot operator-authorized override for one exact task dispatch fingerprint.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task_number": {
+          "type": "number",
+          "description": "Task number whose dispatch is being overridden."
+        },
+        "agent_id": {
+          "type": "string",
+          "description": "Agent or operator identity admitting the override."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Reason for the one-shot override."
+        },
+        "authority_basis": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Durable authority basis with non-empty kind and summary."
+        },
+        "dispatch_fingerprint": {
+          "type": "string",
+          "description": "Optional exact dispatch fingerprint. Defaults to the current base environment fingerprint."
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [
+        "task_number",
+        "agent_id",
+        "reason",
+        "authority_basis"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_executability_override",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_executability_dispatch_check",
+    "description": "Canonical action: executability dispatch check (task_lifecycle_executability_dispatch_check). Check whether a concrete dispatch is allowed to proceed based on the current assessment or a one-shot operator override.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task_number": {
+          "type": "number",
+          "description": "Task number to check dispatch for."
+        },
+        "dispatch_fingerprint": {
+          "type": "string",
+          "description": "Optional dispatch fingerprint; computed from task and environment if omitted."
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [
+        "task_number"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_executability_dispatch_check",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_recurring_create",
+    "description": "Canonical action: recurring create (task_lifecycle_recurring_create). Create a recurring task definition. Manual trigger remains the default; scheduled daily trigger metadata can be enabled for due-run automation.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "Recurring task title."
+        },
+        "actor_agent_id": {
+          "type": "string",
+          "description": "Architect/operator agent id creating the recurrence."
+        },
+        "authority_basis": {
+          "type": "object",
+          "description": "Authority basis for creating the recurrence definition.",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "description": "Authority basis kind."
+            },
+            "summary": {
+              "type": "string",
+              "description": "Short authority basis summary."
+            }
+          },
+          "required": [
+            "kind",
+            "summary"
+          ],
+          "additionalProperties": true
+        },
+        "goal": {
+          "type": "string",
+          "description": "Task goal markdown used for generated instances."
+        },
+        "context": {
+          "type": "string",
+          "description": "Task context markdown used for generated instances."
+        },
+        "required_work": {
+          "type": "string",
+          "description": "Required work markdown used for generated instances."
+        },
+        "non_goals": {
+          "type": "string",
+          "description": "Non-goals markdown used for generated instances."
+        },
+        "acceptance_criteria": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "Acceptance criterion template."
+          },
+          "description": "Acceptance criteria template for generated task instances."
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "Normalized site-local tag."
+          },
+          "description": "Tags copied to every generated task instance."
+        },
+        "evidence_requirements": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "Evidence requirement."
+          },
+          "description": "Evidence expected from each generated run."
+        },
+        "target_role": {
+          "type": "string",
+          "description": "Target role for generated task instances."
+        },
+        "preferred_role": {
+          "type": "string",
+          "description": "Preferred role for generated task instances."
+        },
+        "trigger_description": {
+          "type": "string",
+          "description": "Human-readable trigger condition."
+        },
+        "trigger_mode": {
+          "type": "string",
+          "description": "Trigger mode: manual or schedule. Defaults to manual."
+        },
+        "schedule_kind": {
+          "type": "string",
+          "description": "Schedule kind for trigger_mode=schedule. V1 supports daily."
+        },
+        "schedule_timezone": {
+          "type": "string",
+          "description": "Schedule timezone metadata. V1 due calculation uses UTC; defaults to UTC."
+        },
+        "initial_status": {
+          "type": "string",
+          "description": "Initial status: draft or active. Defaults to active."
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [
+        "title",
+        "actor_agent_id",
+        "authority_basis"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_recurring_create",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_recurring_run_due",
+    "description": "Canonical action: recurring run due (task_lifecycle_recurring_run_due). Create due scheduled recurring task runs idempotently. V1 supports active daily UTC definitions and must be invoked by a sanctioned MCP/workloop surface.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "actor_agent_id": {
+          "type": "string",
+          "description": "Architect/operator agent id invoking due-run automation."
+        },
+        "authority_basis": {
+          "type": "object",
+          "description": "Authority basis for the automated due-run sweep.",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "description": "Authority basis kind."
+            },
+            "summary": {
+              "type": "string",
+              "description": "Short authority basis summary."
+            }
+          },
+          "required": [
+            "kind",
+            "summary"
+          ],
+          "additionalProperties": true
+        },
+        "current_time": {
+          "type": "string",
+          "description": "Optional ISO timestamp used for due calculation. Defaults to now."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Maximum due runs to create. Defaults to 20."
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [
+        "actor_agent_id",
+        "authority_basis"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_recurring_run_due",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_recurring_show",
+    "description": "Canonical action: recurring show (task_lifecycle_recurring_show). Show a recurring task definition and recent generated runs.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "recurrence_id": {
+          "type": "string",
+          "description": "Recurring task definition id."
+        },
+        "include_runs": {
+          "type": "boolean",
+          "description": "Include generated runs. Defaults true."
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [
+        "recurrence_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_recurring_show",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_recurring_list",
+    "description": "Canonical action: recurring list (task_lifecycle_recurring_list). List recurring task definitions.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "description": "Optional status filter: draft, active, suspended, retired."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Maximum definitions to return. Defaults to 50."
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_recurring_list",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_recurring_suspend",
+    "description": "Canonical action: recurring suspend (task_lifecycle_recurring_suspend). Suspend an active or draft recurring task definition.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "recurrence_id": {
+          "type": "string",
+          "description": "Recurring task definition id."
+        },
+        "actor_agent_id": {
+          "type": "string",
+          "description": "Architect/operator agent id suspending the recurrence."
+        },
+        "authority_basis": {
+          "type": "object",
+          "description": "Authority basis for suspending the recurrence definition.",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "description": "Authority basis kind."
+            },
+            "summary": {
+              "type": "string",
+              "description": "Short authority basis summary."
+            }
+          },
+          "required": [
+            "kind",
+            "summary"
+          ],
+          "additionalProperties": true
+        },
+        "reason": {
+          "type": "string",
+          "description": "Suspension reason."
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [
+        "recurrence_id",
+        "actor_agent_id",
+        "authority_basis",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_recurring_suspend",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_recurring_retire",
+    "description": "Canonical action: recurring retire (task_lifecycle_recurring_retire). Retire a recurring task definition.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "recurrence_id": {
+          "type": "string",
+          "description": "Recurring task definition id."
+        },
+        "actor_agent_id": {
+          "type": "string",
+          "description": "Architect/operator agent id retiring the recurrence."
+        },
+        "authority_basis": {
+          "type": "object",
+          "description": "Authority basis for retiring the recurrence definition.",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "description": "Authority basis kind."
+            },
+            "summary": {
+              "type": "string",
+              "description": "Short authority basis summary."
+            }
+          },
+          "required": [
+            "kind",
+            "summary"
+          ],
+          "additionalProperties": true
+        },
+        "reason": {
+          "type": "string",
+          "description": "Retirement reason."
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [
+        "recurrence_id",
+        "actor_agent_id",
+        "authority_basis",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_recurring_retire",
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_recurring_trigger",
+    "description": "Canonical action: recurring trigger (task_lifecycle_recurring_trigger). Manually trigger a recurring task definition and create one normal opened task instance.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "recurrence_id": {
+          "type": "string",
+          "description": "Recurring task definition id."
+        },
+        "actor_agent_id": {
+          "type": "string",
+          "description": "Architect/operator agent id triggering the recurrence."
+        },
+        "authority_basis": {
+          "type": "object",
+          "description": "Authority basis for manually triggering the recurrence.",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "description": "Authority basis kind."
+            },
+            "summary": {
+              "type": "string",
+              "description": "Short authority basis summary."
+            }
+          },
+          "required": [
+            "kind",
+            "summary"
+          ],
+          "additionalProperties": true
+        },
+        "run_reason": {
+          "type": "string",
+          "description": "Reason for this run."
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [
+        "recurrence_id",
+        "actor_agent_id",
+        "authority_basis",
+        "run_reason"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_recurring_trigger",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_recurring_runs",
+    "description": "Canonical action: recurring runs (task_lifecycle_recurring_runs). List generated runs for a recurring task definition.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "recurrence_id": {
+          "type": "string",
+          "description": "Recurring task definition id."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Maximum runs to return. Defaults to 20."
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [
+        "recurrence_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_recurring_runs",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_set_routing",
+    "description": "Canonical action: set routing (task_lifecycle_set_routing). Route an opened task to a target role, preferred agent, and/or relative priority without claiming it as that agent.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task_number": {
+          "type": "number",
+          "description": "Task number to route. Must currently be opened."
+        },
+        "actor_agent_id": {
+          "type": "string",
+          "description": "Architect/operator agent id performing the routing mutation."
+        },
+        "target_role": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Optional target role. Pass null to clear."
+        },
+        "preferred_agent_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Optional preferred agent id. Pass null to clear."
+        },
+        "relative_priority": {
+          "type": "number",
+          "description": "Optional relative priority for workboard ranking."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Reason/authority basis for the routing change."
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [
+        "task_number",
+        "actor_agent_id",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_set_routing",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_test_mcp_tool",
+    "description": "Canonical action: test mcp tool (task_lifecycle_test_mcp_tool). Spawn a fresh MCP server process and invoke a single tool to verify code changes without restarting the live session server.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "server_path": {
+          "type": "string",
+          "description": "Path to the MCP server script relative to site root (e.g., \"tools/task-lifecycle/task-mcp-server.mjs\")."
+        },
+        "tool_name": {
+          "type": "string",
+          "description": "Tool name to invoke on the spawned server."
+        },
+        "arguments": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Tool arguments object."
+        },
+        "timeout_seconds": {
+          "type": "number",
+          "description": "Fresh server invocation timeout in seconds. Defaults to 10, max 300."
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [
+        "server_path",
+        "tool_name"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_test_mcp_tool",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_run_tests",
+    "description": "Canonical action: run tests (task_lifecycle_run_tests). Run an approved test selector through Test MCP and record structured test evidence on a task.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "selector": {
+          "type": "string",
+          "description": "Test selector: task-lifecycle, typed-mcp, operator-surface, or all. Defaults to task-lifecycle."
+        },
+        "task_number": {
+          "type": "number",
+          "description": "Task number to attach structured test evidence to."
+        },
+        "agent_id": {
+          "type": "string",
+          "description": "Agent id running the tests."
+        },
+        "timeout_seconds": {
+          "type": "number",
+          "description": "Per-test timeout in seconds. Defaults to 120, max 300."
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
+        }
+      },
+      "required": [
+        "agent_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_run_tests",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "task_lifecycle_compatibility_reconcile",
+    "description": "Bounded, idempotent reconciliation of historical compatibility review records. Materializes missing task projections, repairs closure evidence from admitted outcomes, and releases stale assignments without creating new review outcomes.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "agent_id": {
+          "type": "string",
+          "description": "Agent id performing the reconciliation."
+        },
+        "task_numbers": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "description": "Optional explicit task numbers to reconcile; maximum 100. Omit to scan at most limit legacy-review records."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Maximum legacy compatibility records to inspect when task_numbers is omitted; defaults to 25 and is capped at 100."
+        },
+        "dry_run": {
+          "type": "boolean",
+          "description": "Plan the bounded reconciliation without mutating SQLite or task projections."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "agent_id"
+      ]
+    },
+    "annotations": {
+      "title": "task_lifecycle_compatibility_reconcile",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  {
+    "name": "task_lifecycle_guidance",
+    "description": "Show canonical operating guidance for task lifecycle workflows: ordinary work, blocked work, payloads, review/dependency state, and truthful closeout reporting.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workflow": {
+          "type": "string",
+          "description": "Optional guidance section: ordinary_task, blocked_task, payloads, review_and_dependencies, closeout_truthfulness, or all."
+        },
+        "tool": {
+          "type": "string",
+          "description": "Optional lifecycle tool name for tool-specific guidance, such as task_lifecycle_submit_work or task_lifecycle_report_blocked."
+        }
+      },
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_guidance",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  {
+    "name": "task_lifecycle_payload_schema",
+    "description": "Show accepted payload_ref shapes, inline length thresholds, and examples for lifecycle create, finish, closeout, blocked-report, review, and evidence payloads.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "tool": {
+          "type": "string",
+          "description": "Optional lifecycle tool name such as task_lifecycle_review or task_lifecycle_finish."
+        }
+      },
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_payload_schema",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  {
+    "name": "task_lifecycle_inspect_range",
+    "description": "Read-only compact inspection for an explicit task-number range or chapter membership, including closure/evidence posture.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "start_task_number": {
+          "type": "number",
+          "description": "First task number in the inclusive range."
+        },
+        "end_task_number": {
+          "type": "number",
+          "description": "Last task number in the inclusive range."
+        },
+        "chapter_id": {
+          "type": "string",
+          "description": "Optional chapter id to inspect instead of a numeric range."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Maximum tasks to return; defaults to 50."
+        },
+        "include_body": {
+          "type": "boolean",
+          "description": "Include task body snippets. Defaults false."
+        }
+      },
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_inspect_range",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  {
+    "name": "task_lifecycle_report_blocked",
+    "description": "Record exact blockers for claimed work without implying finish/completion. Defaults to deferring the task after writing a blocked report. For long next_action/blocker details, create a payload and call with payload_ref plus top-level task_number and agent_id.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task_number": {
+          "type": "number",
+          "description": "Task number to report blocked."
+        },
+        "agent_id": {
+          "type": "string",
+          "description": "Agent id reporting the blocker."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Concise blocker summary."
+        },
+        "blockers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "description": "Specific blocker objects, including evidence limits or required external decisions."
+        },
+        "next_action": {
+          "type": "string",
+          "description": "Concrete action needed to unblock continuation. Inline strings over the governed inline threshold should be carried in payload_ref."
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref carrying long reason, blockers, next_action, or defer. Payload fields are merged with top-level arguments; top-level task_number and agent_id win."
+        },
+        "defer": {
+          "type": "boolean",
+          "description": "When false, record the blocked report without transitioning to deferred. Defaults true."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "task_number",
+        "agent_id",
+        "reason"
+      ]
+    },
+    "annotations": {
+      "title": "task_lifecycle_report_blocked",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  {
+    "name": "task_lifecycle_chapter_add_task",
+    "description": "Add an existing task to a named chapter membership list. Defaults to appending after the current maximum order_index.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "chapter_id": {
+          "type": "string",
+          "description": "Stable chapter identifier."
+        },
+        "task_number": {
+          "type": "number",
+          "description": "Existing task number to add."
+        },
+        "order_index": {
+          "type": "number",
+          "description": "Optional explicit order index. Used as an insertion point only when append is false."
+        },
+        "append": {
+          "type": "boolean",
+          "description": "When omitted or true, append after the current maximum order_index."
+        },
+        "note": {
+          "type": "string",
+          "description": "Optional membership note."
+        },
+        "actor_agent_id": {
+          "type": "string",
+          "description": "Principal adding the membership."
+        }
+      },
+      "required": [
+        "chapter_id",
+        "task_number"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_chapter_add_task",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  {
+    "name": "task_lifecycle_chapter_show",
+    "description": "Show task memberships for one chapter, ordered by order_index.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "chapter_id": {
+          "type": "string",
+          "description": "Stable chapter identifier."
+        }
+      },
+      "required": [
+        "chapter_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "task_lifecycle_chapter_show",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  {
+    "name": "task_lifecycle_submit_work",
+    "description": "Compound governed work submission helper: optionally claim, write execution/verification notes, prove criteria, admit evidence, and finish while preserving primitive lifecycle records and gates.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task_number": {
+          "type": "number",
+          "description": "Task number to submit work for."
+        },
+        "agent_id": {
+          "type": "string",
+          "description": "Agent id submitting the work."
+        },
+        "summary": {
+          "type": "string",
+          "description": "Finish/report summary."
+        },
+        "execution_notes": {
+          "type": "string",
+          "description": "Substantive authored ## Execution Notes replacement text."
+        },
+        "verification": {
+          "type": "string",
+          "description": "Substantive authored ## Verification replacement text."
+        },
+        "reviewer": {
+          "type": "string",
+          "description": "Optional admitted reviewer agent id or unique reviewer role alias. Ordinary task finish defaults to the first reviewer-capable roster agent, then to the reviewer role, and always generates review-contract dependency work."
+        },
+        "changed_files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Changed-file evidence for finish. Mutually exclusive with no_files_changed."
+        },
+        "no_files_changed": {
+          "type": "boolean",
+          "description": "Declare no files changed for legitimate no-edit work. Mutually exclusive with changed_files."
+        },
+        "claim": {
+          "type": "boolean",
+          "description": "When true, call task_lifecycle_claim first. Defaults true unless task is already claimed."
+        },
+        "prove_criteria": {
+          "type": "boolean",
+          "description": "When true, call task_lifecycle_prove_criteria after writing notes. Defaults true."
+        },
+        "admit_evidence": {
+          "type": "boolean",
+          "description": "When true, call task_lifecycle_admit_evidence before finish. Defaults true."
+        },
+        "finish": {
+          "type": "boolean",
+          "description": "When true, call task_lifecycle_finish after evidence admission. Defaults true."
+        },
+        "resume_existing_work": {
+          "type": "boolean",
+          "description": "Resume a prior submit_work attempt without rewriting notes or duplicating proof/admission. Reuses the latest report by this agent and the existing substantive task sections, then performs remaining requested lifecycle transitions."
+        },
+        "payload_ref": {
+          "type": "string",
+          "description": "Optional immutable payload ref for long execution_notes, verification, summary, changed_files, or guard packets. Payload fields are merged with top-level arguments; top-level task_number and agent_id win."
+        },
+        "auto_materialize_payload": {
+          "type": "boolean",
+          "description": "Opt-in fallback for one-call long-field submit_work. When true and payload_ref is absent, the surface creates an immutable payload artifact from companion fields before executing; default false preserves inline length refusal."
+        },
+        "authority_basis": {
+          "type": "object",
+          "description": "Required by underlying claim when crossing role/preferred-agent gates.",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "description": "Authority kind: operator_direct_instruction, directed_obligation, or task_owner_handoff."
+            },
+            "summary": {
+              "type": "string",
+              "description": "Concise authority basis summary."
+            }
+          }
+        },
+        "recovery_truthfulness": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Passed through to task_lifecycle_finish when recovery truthfulness is triggered."
+        },
+        "self_certification": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Passed through to evidence admission/finish when self-certification gates are triggered."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "task_number",
+        "agent_id"
+      ]
+    },
+    "annotations": {
+      "title": "task_lifecycle_submit_work",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  {
+    "name": "task_lifecycle_evidence_supersede",
+    "description": "Submit immutable replacement execution evidence for a task already in review. The original report remains preserved; reviewers are directed to the replacement evidence.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task_number": {
+          "type": "number",
+          "description": "In-review task number whose execution evidence changed after submission."
+        },
+        "agent_id": {
+          "type": "string",
+          "description": "Agent id submitting the replacement evidence."
+        },
+        "supersedes_report_id": {
+          "type": "string",
+          "description": "Existing report id being superseded for review purposes."
+        },
+        "artifact_uri": {
+          "type": "string",
+          "description": "Durable URI of the replacement evidence artifact."
+        },
+        "summary": {
+          "type": "string",
+          "description": "Short truthful summary of the replacement implementation/evidence."
+        },
+        "verification_summary": {
+          "type": "string",
+          "description": "Focused verification performed after the replacement evidence was produced."
+        },
+        "changed_files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Changed files represented by the replacement evidence. Omit only with no_files_changed=true."
+        },
+        "no_files_changed": {
+          "type": "boolean",
+          "description": "Set true only when the replacement evidence changed no task-owned files."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "task_number",
+        "agent_id",
+        "supersedes_report_id",
+        "artifact_uri",
+        "summary",
+        "verification_summary"
+      ]
+    },
+    "annotations": {
+      "title": "task_lifecycle_evidence_supersede",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  {
+    "name": "task_lifecycle_dependency_declare",
+    "description": "Declare that an existing parent task is gated by an existing required task. Optional outcome_contract attaches the required task outcome shape; normal agents should prefer task-native helpers such as submit_work.reviewer when available.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "parent_task_number": {
+          "type": "number",
+          "description": "Parent task number that will be blocked by this dependency."
+        },
+        "required_task_number": {
+          "type": "number",
+          "description": "Existing required task number that must admit a satisfying outcome."
+        },
+        "agent_id": {
+          "type": "string",
+          "description": "Agent id declaring the dependency."
+        },
+        "kind": {
+          "type": "string",
+          "description": "Dependency kind, for example review, verification, operator_decision, or downstream_work."
+        },
+        "satisfying_outcomes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Outcomes on the required task that satisfy this dependency."
+        },
+        "outcome_contract": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Optional outcome contract for the required task. Fields: outcome_type, allowed_outcomes, satisfying_outcomes, blocking_outcomes, required_fields, capability_requirement."
+        },
+        "dependency_id": {
+          "type": "string",
+          "description": "Optional stable dependency id. Defaults to a deterministic id from parent, required task, and kind."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "parent_task_number",
+        "required_task_number",
+        "agent_id",
+        "kind",
+        "satisfying_outcomes"
+      ]
+    },
+    "annotations": {
+      "title": "task_lifecycle_dependency_declare",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  {
+    "name": "mcp_payload_create",
+    "description": "Create immutable transient MCP payload revision v1 under .ai/tmp/mcp-payloads/workspace.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "payload_id": {
+          "type": "string",
+          "description": "Optional stable id segment. Defaults to a generated id."
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Normal route for clients that can transmit nested objects: the non-empty domain object to store, e.g. {\"payload\":{\"summary\":\"...\"}}. Do not send with payload_json unless payload is exactly {} as a client placeholder."
+        },
+        "payload_json": {
+          "type": "string",
+          "description": "String route for clients that cannot transmit free-form nested objects, especially OpenCode: JSON object text, e.g. \"{\\\"summary\\\":\\\"...\\\"}\". Authoritative when present; may be accompanied only by payload:{} as a placeholder."
+        },
+        "allow_empty": {
+          "type": "boolean",
+          "description": "Set true only when intentionally creating an empty payload object."
+        },
+        "created_by": {
+          "type": "string",
+          "description": "Optional agent/principal for audit metadata."
+        }
+      }
+    },
+    "annotations": {
+      "title": "mcp_payload_create",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  {
+    "name": "mcp_payload_show",
+    "description": "Show an immutable transient MCP payload revision by ref.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ref": {
+          "type": "string",
+          "description": "Payload ref, e.g. mcp_payload:<id>@v1."
+        }
+      },
+      "required": [
+        "ref"
+      ]
+    },
+    "annotations": {
+      "title": "mcp_payload_show",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  {
+    "name": "mcp_payload_derive",
+    "description": "Derive a new immutable payload revision by applying an optional object overlay and explicit JSON Pointer deletions.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "source_ref": {
+          "type": "string",
+          "description": "Source payload ref, e.g. mcp_payload:<id>@v1."
+        },
+        "overlay": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Optional recursive object overlay. Null remains a value and never means deletion. Do not send with overlay_json unless overlay is exactly {} as a client placeholder."
+        },
+        "overlay_json": {
+          "type": "string",
+          "description": "Optional JSON-string overlay route for clients that cannot transmit free-form nested objects. Authoritative when present; may be accompanied only by overlay:{} as a placeholder."
+        },
+        "delete_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Optional RFC 6901-encoded object-field paths to delete after applying the overlay, e.g. [\"/preferred_role\", \"/constraints/model\"]. Array traversal is not supported. At least one overlay route or delete path is required."
+        },
+        "created_by": {
+          "type": "string",
+          "description": "Optional agent/principal for audit metadata."
+        }
+      },
+      "required": [
+        "source_ref"
+      ]
+    },
+    "annotations": {
+      "title": "mcp_payload_derive",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  {
+    "name": "mcp_payload_validate",
+    "description": "Validate that a payload ref exists, is well-formed, and is within size limits.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ref": {
+          "type": "string",
+          "description": "Payload ref, e.g. mcp_payload:<id>@v1."
+        }
+      },
+      "required": [
+        "ref"
+      ]
+    },
+    "annotations": {
+      "title": "mcp_payload_validate",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  {
+    "name": "mcp_output_show",
+    "description": "Read a materialized MCP output ref with offset/limit paging.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "ref": {
+          "type": "string",
+          "description": "Materialized output ref, e.g. mcp_output:<id>. Alias: output_ref."
+        },
+        "output_ref": {
+          "type": "string",
+          "description": "Alias for ref."
+        },
+        "offset": {
+          "type": "integer",
+          "default": 0,
+          "description": "Character offset into the materialized JSON output."
+        },
+        "limit": {
+          "type": "integer",
+          "default": 10000,
+          "minimum": 1,
+          "maximum": 20000,
+          "description": "Maximum output characters to return; the transport hard-caps this value."
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "default": 5000,
+          "minimum": 1,
+          "maximum": 15000,
+          "description": "Strict upper bound for reading and validating the materialized output file."
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "title": "mcp_output_show",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  }
+]

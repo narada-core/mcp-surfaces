@@ -1,0 +1,28 @@
+{
+  "name": "@narada-core/mcp-lifecycle-native",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "description": "Shared Rust authority and native MCP adapters for task and work lifecycle surfaces.",
+  "scripts": {
+    "build": "pnpm run build:native",
+    "build:native": "node scripts/build-native.mjs",
+    "build:postcompile": "pnpm run build:native",
+    "test:parity": "node --import tsx scripts/check-parity.mjs",
+    "test:smoke": "node scripts/smoke-native.mjs"
+  },
+  "naradaRuntimeArtifacts": {
+    "win32": [
+      "./dist/native/narada-task-lifecycle-mcp.exe",
+      "./dist/native/narada-work-lifecycle-mcp.exe"
+    ]
+  },
+  "files": [
+    "catalog/",
+    "native/Cargo.lock",
+    "native/Cargo.toml",
+    "native/src/",
+    "dist/native/"
+  ]
+}

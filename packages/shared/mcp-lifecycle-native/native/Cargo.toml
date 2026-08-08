@@ -1,0 +1,28 @@
+[package]
+name = "narada-mcp-lifecycle"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "narada-task-lifecycle-mcp"
+path = "src/task_main.rs"
+
+[[bin]]
+name = "narada-work-lifecycle-mcp"
+path = "src/work_main.rs"
+
+[dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+time = { version = "0.3", features = ["formatting", "macros", "parsing"] }
+uuid = { version = "1", features = ["v4"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "z"
+panic = "abort"
+strip = true

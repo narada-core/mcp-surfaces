@@ -59,8 +59,8 @@ effort; the existing implementation remains the authority.
 | `sop` | JavaScript-native | SOP templates, run state, handoffs, and action admission are domain semantics. |
 | `speech` | JavaScript-native | Host TTS, capture, and transcription are provider/host adapters. |
 | `surface-feedback` | JavaScript-native | Feedback authority, routing, and cross-site visibility are Narada control-plane semantics. |
-| `task-lifecycle` | JavaScript-native | Task records, evidence admission, reports, and closure gates are domain authority. |
-| `work-lifecycle` | JavaScript-native | Workboard and outbox semantics are domain authority. |
+| `task-lifecycle` | Rust-native candidate (experimental) | Shared Rust lifecycle authority and native MCP adapter exist; tools/list and schema fixtures are exact, while full semantic parity and benchmark evidence remain promotion gates. |
+| `work-lifecycle` | Rust-native candidate (experimental) | Work lifecycle delegates task state to the same Rust authority and owns ticket/outbox state; full semantic parity and benchmark evidence remain promotion gates. |
 | `worker-delegation` | JavaScript-native | Worker runtime admission, affinity, evidence, and handoff policy are domain behavior. |
 
 The Rust proxy itself is shared infrastructure rather than a catalog surface;
