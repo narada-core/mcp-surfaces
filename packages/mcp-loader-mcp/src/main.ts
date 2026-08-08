@@ -2,7 +2,8 @@
 import { randomUUID } from 'node:crypto';
 import { spawn, ChildProcess } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
-import { basename, dirname, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { homedir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   MCP_FABRIC_SCHEMA_VERSION,
@@ -514,6 +515,7 @@ type ChildConnection = {
   runtimeRequirements: McpRuntimeKind[];
   entrypoint: string;
   args: string[];
+  runtimeCommand: string;
   requestedEntrypoint: string | null;
   extraArgs: string[];
   process: ChildProcess;
@@ -963,7 +965,8 @@ async function attachSurface(args: JsonRecord, state: LoaderState): Promise<Json
 
   const explicitEntrypoint = optionalString(args.entrypoint);
   const extraArgs = stringArray(args.args);
-  const { entrypoint, resolvedArgs } = await resolveSurfaceEntrypoint(siteRoot, surfaceId, explicitEntrypoint, extraArgs);
+  const launch = await resolveSurfaceEntrypoint(siteRoot, surfaceId, explicitEntrypoint, extraArgs);
+  const { entrypoint, resolvedArgs } = launch;
   ensureEntrypointAllowed(siteRoot, entrypoint, state.policy);
 
   if (!existsSync(entrypoint)) {
@@ -976,6 +979,7 @@ async function attachSurface(args: JsonRecord, state: LoaderState): Promise<Json
     surfaceId,
     runtimeKind,
     runtimeRequirements,
+    runtimeCommand: launch.runtimeCommand,
     entrypoint,
     resolvedArgs,
     requestedEntrypoint: explicitEntrypoint,
@@ -1060,6 +1064,7 @@ async function openConnection(input: {
   surfaceId: string;
   runtimeKind: McpRuntimeKind | null;
   runtimeRequirements: McpRuntimeKind[];
+  runtimeCommand: string;
   entrypoint: string;
   resolvedArgs: string[];
   requestedEntrypoint: string | null;
@@ -1067,12 +1072,12 @@ async function openConnection(input: {
   logicalConnectionId?: string;
   metadata: RuntimeSurfaceMetadata;
 }): Promise<ChildConnection> {
-  const { state, siteRoot, surfaceId, runtimeKind, runtimeRequirements, entrypoint, resolvedArgs, requestedEntrypoint, extraArgs, logicalConnectionId, metadata } = input;
+  const { state, siteRoot, surfaceId, runtimeKind, runtimeRequirements, runtimeCommand, entrypoint, resolvedArgs, requestedEntrypoint, extraArgs, logicalConnectionId, metadata } = input;
   const connectionId = randomUUID();
   const stableLogicalConnectionId = logicalConnectionId ?? connectionId;
   const generationId = `generation-${randomUUID()}`;
   const attachedAt = new Date().toISOString();
-  const child = spawn(process.execPath, [entrypoint, ...resolvedArgs], {
+  const child = spawn(runtimeCommand, [entrypoint, ...resolvedArgs], {
     stdio: ['pipe', 'pipe', 'pipe'],
     env: buildChildEnv(siteRoot, state.policy, { connectionId, logicalConnectionId: stableLogicalConnectionId, generationId }),
     shell: false,
@@ -1101,6 +1106,7 @@ async function openConnection(input: {
     surfaceId,
     runtimeKind,
     runtimeRequirements,
+    runtimeCommand,
     entrypoint,
     args: resolvedArgs,
     requestedEntrypoint,
@@ -1154,9 +1160,9 @@ function attachedResponse(connection: ChildConnection): JsonRecord {
     logical_connection_id: connection.logicalConnectionId,
     generation_id: connection.generationId,
     site_root: connection.siteRoot,
-    surface_id: connection.surfaceId,
     runtime_kind: connection.runtimeKind,
     runtime_requirements: connection.runtimeRequirements,
+    runtime_command: connection.runtimeCommand,
     runtime_lifecycle: loaderRuntimeLifecycle(connection.connectionId, connection.lifecycle),
     runtime_freshness: loaderRuntimeFreshness(),
     entrypoint: connection.entrypoint,
@@ -1412,6 +1418,7 @@ async function restartConnection(args: JsonRecord, state: LoaderState): Promise<
     surfaceId: connection.surfaceId,
     runtimeKind: connection.runtimeKind,
     runtimeRequirements: connection.runtimeRequirements,
+    runtimeCommand: connection.runtimeCommand,
     entrypoint: connection.entrypoint,
     resolvedArgs: connection.args,
     requestedEntrypoint: connection.requestedEntrypoint,
@@ -1445,9 +1452,11 @@ async function restartConnection(args: JsonRecord, state: LoaderState): Promise<
   };
 }
 
-async function resolveSurfaceEntrypoint(siteRoot: string, surfaceId: string, explicitEntrypoint: string | null, extraArgs: string[] | null): Promise<{ entrypoint: string; resolvedArgs: string[] }> {
+type ResolvedSurfaceLaunch = { runtimeCommand: string; entrypoint: string; resolvedArgs: string[] };
+
+async function resolveSurfaceEntrypoint(siteRoot: string, surfaceId: string, explicitEntrypoint: string | null, extraArgs: string[] | null): Promise<ResolvedSurfaceLaunch> {
   if (explicitEntrypoint) {
-    return { entrypoint: normalizePath(explicitEntrypoint), resolvedArgs: extraArgs ?? [] };
+    return { runtimeCommand: resolveJavaScriptRuntime(), entrypoint: normalizePath(explicitEntrypoint), resolvedArgs: extraArgs ?? [] };
   }
   const fabric = readSiteFabric(siteRoot);
   const servers = asRecord(fabric.mcpServers);
@@ -1456,32 +1465,106 @@ async function resolveSurfaceEntrypoint(siteRoot: string, surfaceId: string, exp
     const rec = asRecord(server);
     const command = String(rec.command ?? '');
     const rawArgs = stringArray(rec.args) ?? [];
-    const declaredEntrypoint = extractRuntimeEntrypoint(command, rawArgs);
-    if (!declaredEntrypoint) {
-      throw diagnosticError('surface_command_unsupported', `surface_command_unsupported:${surfaceId}:${command}`);
-    }
-    const entrypoint = normalizePath(declaredEntrypoint);
-    const args = removeEntrypointArg(rawArgs, declaredEntrypoint);
-    return { entrypoint, resolvedArgs: [...args, ...extraArgs ?? []] };
+    const launch = resolveFabricLaunch(command, rawArgs);
+    return { ...launch, resolvedArgs: [...launch.resolvedArgs, ...extraArgs ?? []] };
   }
   const shared = SHARED_SURFACE_REGISTRY[surfaceId];
   if (shared) {
     const entrypoint = normalizePath(shared.entrypoint.replace(/{site_root}/g, siteRoot));
     const args = shared.args.map((a) => interpolateSiteArg(a, siteRoot));
-    return { entrypoint, resolvedArgs: [...args, ...extraArgs ?? []] };
+    return { runtimeCommand: resolveJavaScriptRuntime(), entrypoint, resolvedArgs: [...args, ...extraArgs ?? []] };
   }
   throw diagnosticError('surface_not_found', `surface_not_found:${surfaceId}`);
 }
 
+function argValue(args: string[], name: string): string | null {
+  const index = args.indexOf(name);
+  return index >= 0 && args[index + 1] ? args[index + 1]! : null;
+}
+
+function isRuntimeProxyLaunch(command: string, args: string[]): boolean {
+  const base = basename(normalizePath(command.trim())).toLowerCase();
+  return (base === 'narada-mcp-runtime.exe' || base === 'narada-mcp-runtime') && args[0] === 'proxy'
+    || (args[0] ?? '').replace(/\\/g, '/').endsWith('/mcp-runtime-proxy/dist/src/main.js');
+}
+
+function resolveFabricLaunch(command: string, args: string[]): ResolvedSurfaceLaunch {
+  if (isRuntimeProxyLaunch(command, args)) {
+    const childCommand = argValue(args, '--child-command');
+    const childEntrypoint = argValue(args, '--entrypoint');
+    const separatorIndex = args.indexOf('--');
+    if (!childCommand || !childEntrypoint || separatorIndex < 0) {
+      throw diagnosticError('surface_command_unsupported', `surface_command_unsupported:runtime-proxy:${command}`, { command, args, remediation: 'Regenerate the registrar-owned Site fragment so proxy child-command and entrypoint metadata are complete.' });
+    }
+    const childInvocationKind = argValue(args, '--child-invocation-kind');
+    if (childInvocationKind && childInvocationKind !== 'entrypoint') {
+      throw diagnosticError('surface_native_child_unsupported', `surface_native_child_unsupported:${childInvocationKind}`, { child_command: childCommand, child_entrypoint: childEntrypoint });
+    }
+    return { runtimeCommand: resolveDeclaredRuntime(childCommand), entrypoint: normalizePath(childEntrypoint), resolvedArgs: args.slice(separatorIndex + 1) };
+  }
+  const entrypoint = extractRuntimeEntrypoint(command, args);
+  if (!entrypoint) throw diagnosticError('surface_command_unsupported', `surface_command_unsupported:${command}`);
+  return { runtimeCommand: resolveDeclaredRuntime(command), entrypoint: normalizePath(entrypoint), resolvedArgs: removeEntrypointArg(args, entrypoint) };
+}
+
 function extractRuntimeEntrypoint(command: string, args: string[]): string | null {
+  if (isRuntimeProxyLaunch(command, args)) return argValue(args, '--entrypoint');
   const normalizedCommand = normalizePath(command.trim());
   const commandBaseName = normalizedCommand.slice(normalizedCommand.lastIndexOf('/') + 1).toLowerCase();
-  if (['node', 'node.exe', 'node.cmd', 'bun', 'bun.exe'].includes(commandBaseName)) {
+  if (['node', 'node.exe', 'bun', 'bun.exe'].includes(commandBaseName)) {
     return args.find((arg) => /\.m?js$/i.test(arg) || /\.cjs$/i.test(arg)) ?? null;
   }
   const commandEntrypoint = command.replace(/^node\s+--import\s+tsx\s+/i, '').replace(/^node\s+/i, '').trim();
   if (commandEntrypoint && commandEntrypoint !== 'node') return commandEntrypoint;
   return args.find((arg) => /\.m?js$/i.test(arg) || /\.cjs$/i.test(arg)) ?? null;
+}
+function resolveJavaScriptRuntime(): string {
+  const runtime = resolve(process.execPath);
+  if (existsSync(runtime)) return runtime;
+  throw diagnosticError('child_runtime_executable_unresolved', `child_runtime_executable_unresolved:${process.execPath}`, {
+    child_command: process.execPath,
+    remediation: 'Start mcp-loader with an absolute Node or Bun executable.',
+  });
+}
+
+function resolveDeclaredRuntime(command: string): string {
+  const normalized = command.trim();
+  const base = basename(normalized).toLowerCase();
+  if (/\.(cmd|bat)$/i.test(base)) {
+    throw diagnosticError('child_runtime_wrapper_unsupported', `child_runtime_wrapper_unsupported:${command}`, {
+      child_command: command,
+      remediation: 'Regenerate the registrar-owned Site fragment with an absolute bun.exe or node.exe executable; shell wrappers are not valid child runtimes.',
+    });
+  }
+  const engine = base === 'bun' || base === 'bun.exe' ? 'bun' : base === 'node' || base === 'node.exe' ? 'node' : null;
+  if (isAbsolute(normalized)) {
+    if (engine && existsSync(normalized)) return resolve(normalized);
+    throw diagnosticError('child_runtime_executable_unresolved', `child_runtime_executable_unresolved:${command}`, {
+      child_command: command,
+      runtime_engine: engine,
+      remediation: 'Regenerate the registrar-owned Site fragment with an existing absolute bun.exe or node.exe executable.',
+    });
+  }
+  if (!engine) return resolveJavaScriptRuntime();
+  const candidates: string[] = [];
+  const processBase = basename(process.execPath).toLowerCase();
+  if ((engine === 'bun' && (processBase === 'bun' || processBase === 'bun.exe')) || (engine === 'node' && (processBase === 'node' || processBase === 'node.exe'))) candidates.push(process.execPath);
+  if (engine === 'bun') candidates.push(resolve(homedir(), '.bun', 'bin', process.platform === 'win32' ? 'bun.exe' : 'bun'));
+  if (engine === 'node' && process.platform === 'win32') {
+    candidates.push(resolve(process.env.PROGRAMFILES ?? 'C:\\Program Files', 'nodejs', 'node.exe'));
+    candidates.push(resolve(process.env['PROGRAMFILES(X86)'] ?? 'C:\\Program Files (x86)', 'nodejs', 'node.exe'));
+  }
+  const separator = process.platform === 'win32' ? ';' : ':';
+  for (const rawDir of (process.env.PATH || process.env.Path || '').split(separator)) {
+    if (!rawDir.trim()) continue;
+    candidates.push(join(rawDir.trim(), process.platform === 'win32' ? `${engine}.exe` : engine));
+  }
+  const resolved = candidates.find((candidate) => isAbsolute(candidate) && existsSync(candidate));
+  if (resolved) return resolve(resolved);
+  if (processBase === 'bun' || processBase === 'bun.exe' || processBase === 'node' || processBase === 'node.exe') {
+    return resolve(process.execPath);
+  }
+  throw diagnosticError('child_runtime_executable_unresolved', `child_runtime_executable_unresolved:${command}`, { child_command: command, runtime_engine: engine, remediation: 'Regenerate the registrar-owned Site fragment with an absolute runtime executable or install the declared runtime.' });
 }
 
 function removeEntrypointArg(args: string[], entrypoint: string): string[] {
@@ -1905,6 +1988,7 @@ function connectionStatusFields(connection: ChildConnection): JsonRecord {
     execution: connection.execution,
     runtime_kind: connection.runtimeKind,
     runtime_requirements: connection.runtimeRequirements,
+    runtime_command: connection.runtimeCommand,
     lifecycle: connection.lifecycle,
     runtime_lifecycle: loaderRuntimeLifecycle(connection.connectionId, connection.lifecycle),
     runtime_freshness: loaderRuntimeFreshness(),
@@ -2068,11 +2152,11 @@ function enforceResponseSize(result: JsonRecord, maxBytes: number) {
   const size = Buffer.byteLength(JSON.stringify(result), 'utf8');
   if (size > maxBytes) throw diagnosticError('response_too_large', `response_too_large:${size}:${maxBytes}`);
 }
-
 function childRuntimeDiagnostic(connection: ChildConnection, extra: JsonRecord = {}): JsonRecord {
   return {
     connection_id: connection.connectionId,
     surface_id: connection.surfaceId,
+    runtime_command: connection.runtimeCommand,
     entrypoint: connection.entrypoint,
     args: connection.args,
     exit_code: connection.process.exitCode,

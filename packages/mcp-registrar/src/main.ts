@@ -201,6 +201,9 @@ const MCP_REGISTRAR_RUNTIME_ENTRYPOINT = `${MCP_SURFACES_ROOT}/mcp-registrar/dis
 const MCP_RUNTIME_IMPLEMENTATION_MATRIX_PATH = resolve(runtimeImplementationMatrixContractPath());
 const MCP_MCP_LOADER_PACKAGE_ROOT = resolve(MCP_SURFACES_ROOT, 'mcp-loader-mcp');
 const MCP_NATIVE_MCP_LOADER_ENTRYPOINT = portablePathLiteral(join(MCP_MCP_LOADER_PACKAGE_ROOT, 'dist', 'native', `narada-mcp-loader${process.platform === 'win32' ? '.exe' : ''}`));
+const MCP_LIFECYCLE_NATIVE_PACKAGE_ROOT = resolve(MCP_SURFACES_ROOT, 'shared', 'mcp-lifecycle-native');
+const MCP_NATIVE_TASK_LIFECYCLE_ENTRYPOINT = portablePathLiteral(join(MCP_LIFECYCLE_NATIVE_PACKAGE_ROOT, 'dist', 'native', 'narada-task-lifecycle-mcp' + (process.platform === 'win32' ? '.exe' : '')));
+const MCP_NATIVE_WORK_LIFECYCLE_ENTRYPOINT = portablePathLiteral(join(MCP_LIFECYCLE_NATIVE_PACKAGE_ROOT, 'dist', 'native', 'narada-work-lifecycle-mcp' + (process.platform === 'win32' ? '.exe' : '')));
 const PROCESS_REGISTRAR_ENTRYPOINT_FINGERPRINT = existsSync(MCP_REGISTRAR_RUNTIME_ENTRYPOINT)
   ? createHash('sha256').update(readFileSync(MCP_REGISTRAR_RUNTIME_ENTRYPOINT)).digest('hex')
   : null;
@@ -290,6 +293,8 @@ function componentKindForSurface(surfaceId: string): string {
   if (surfaceId === 'local-filesystem' || surfaceId === 'local-filesystem-mcp.local') return 'filesystem-mcp';
   if (surfaceId === 'agent-context' || surfaceId === 'agent-context-mcp.local') return 'agent-context-mcp';
   if (surfaceId === 'mcp-registrar' || surfaceId === 'mcp-registrar-mcp.local') return 'mcp-registrar';
+  if (surfaceId === 'task-lifecycle' || surfaceId === 'task-lifecycle-mcp.local') return 'task-lifecycle-mcp';
+  if (surfaceId === 'work-lifecycle' || surfaceId === 'work-lifecycle-mcp.local') return 'work-lifecycle-mcp';
   return 'mcp-javascript-surface';
 }
 
@@ -1871,6 +1876,15 @@ function carrierLaunchCommand(
   const useNativeFilesystemApplet = (selectedEngine === 'rust' && componentKind === 'filesystem-mcp')
     || (server.surface_implementation === 'native'
       && surfaceId === 'local-filesystem');
+  const useNativeLifecycle = selectedEngine === 'rust' && (componentKind === 'task-lifecycle-mcp' || componentKind === 'work-lifecycle-mcp');
+  const nativeLifecycleEntrypoint = componentKind === 'task-lifecycle-mcp' ? MCP_NATIVE_TASK_LIFECYCLE_ENTRYPOINT : MCP_NATIVE_WORK_LIFECYCLE_ENTRYPOINT;
+  if (useNativeLifecycle && !existsSync(nativeLifecycleEntrypoint)) {
+    throw diagnosticError(
+      'registrar_native_lifecycle_missing',
+      `Native lifecycle surface is unavailable: ${nativeLifecycleEntrypoint}`,
+      { entrypoint: nativeLifecycleEntrypoint, surface_id: surfaceId, component_kind: componentKind },
+    );
+  }
   if (useNativeLoader && !existsSync(MCP_NATIVE_MCP_LOADER_ENTRYPOINT)) {
     throw diagnosticError(
       'registrar_native_mcp_loader_missing',
@@ -1878,18 +1892,18 @@ function carrierLaunchCommand(
       { entrypoint: MCP_NATIVE_MCP_LOADER_ENTRYPOINT, surface_id: surfaceId, component_kind: componentKind },
     );
   }
-  if ((useNativeFilesystemApplet || useNativeLoader) && !nativeRuntimeProxyAvailable()) {
+  if ((useNativeFilesystemApplet || useNativeLoader || useNativeLifecycle) && !nativeRuntimeProxyAvailable()) {
     throw diagnosticError(
       'registrar_native_runtime_proxy_missing',
       `Native runtime proxy is unavailable: ${nativeRuntimeProxyEntrypoint()}`,
       { entrypoint: nativeRuntimeProxyEntrypoint(), surface_id: surfaceId, component_kind: componentKind },
     );
   }
-  const effectiveChildCommand = useNativeLoader ? MCP_NATIVE_MCP_LOADER_ENTRYPOINT : useNativeFilesystemApplet ? nativeRuntimeProxyEntrypoint() : runtimeCommand;
-  const effectiveChildEntrypoint = useNativeLoader ? MCP_NATIVE_MCP_LOADER_ENTRYPOINT : useNativeFilesystemApplet ? nativeRuntimeProxyEntrypoint() : childEntrypoint;
+  const effectiveChildCommand = useNativeLoader ? MCP_NATIVE_MCP_LOADER_ENTRYPOINT : useNativeFilesystemApplet ? nativeRuntimeProxyEntrypoint() : useNativeLifecycle ? nativeLifecycleEntrypoint : runtimeCommand;
+  const effectiveChildEntrypoint = useNativeLoader ? MCP_NATIVE_MCP_LOADER_ENTRYPOINT : useNativeFilesystemApplet ? nativeRuntimeProxyEntrypoint() : useNativeLifecycle ? nativeLifecycleEntrypoint : childEntrypoint;
   const sidecarPath = configPath ? materializationSidecarPath(configPath) : null;
-  const childInvocationKind = useNativeLoader ? 'native_entrypoint' : useNativeFilesystemApplet ? 'native_applet' : null;
-  if (server.kind === 'local' && !useNativeLoader && !useNativeFilesystemApplet) {
+  const childInvocationKind = useNativeLoader || useNativeLifecycle ? 'native_entrypoint' : useNativeFilesystemApplet ? 'native_applet' : null;
+  if (server.kind === 'local' && !useNativeLoader && !useNativeFilesystemApplet && !useNativeLifecycle) {
     return {
       command: runtimeCommand,
       args: [childEntrypoint, ...childArgs],

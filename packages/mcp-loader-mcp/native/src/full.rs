@@ -2301,14 +2301,28 @@ fn attach_surface(arguments: &JsonObject, state: &mut LoaderState) -> Result<Val
                     format!("surface_command_unsupported:{}:{}", surface_id, command),
                 )
             })?;
-            (
-                normalize_path(&declared),
-                remove_entrypoint_arg(&raw_args, &declared)
-                    .into_iter()
-                    .chain(extra_args.clone())
-                    .collect(),
-                command,
-            )
+            let is_proxy_wrapped = is_runtime_proxy_command(&command)
+                && raw_args.first().map(String::as_str) == Some("proxy");
+            if is_proxy_wrapped {
+                let child_command = extract_proxy_child_command(&raw_args)
+                    .map(|cmd| resolve_child_command(&cmd))
+                    .unwrap_or_else(resolve_javascript_runtime);
+                let child_args = extract_proxy_child_args(&raw_args);
+                (
+                    normalize_path(&declared),
+                    child_args.into_iter().chain(extra_args.clone()).collect(),
+                    child_command,
+                )
+            } else {
+                (
+                    normalize_path(&declared),
+                    remove_entrypoint_arg(&raw_args, &declared)
+                        .into_iter()
+                        .chain(extra_args.clone())
+                        .collect(),
+                    command,
+                )
+            }
         } else if let Some((entrypoint, args)) =
             shared_surface_registry(&surface_id, &state.surface_root)
         {
@@ -2363,10 +2377,123 @@ fn attach_surface(arguments: &JsonObject, state: &mut LoaderState) -> Result<Val
 }
 
 fn default_runtime_command() -> String {
+    resolve_javascript_runtime()
+}
+
+fn resolve_javascript_runtime() -> String {
+    let exec = env::current_exe().unwrap_or_default();
+    let exec_base = exec
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if [
+        "node.exe", "node", "bun.exe", "bun", "deno.exe", "deno",
+    ]
+    .contains(&exec_base.as_str())
+    {
+        return exec.to_string_lossy().to_string();
+    }
+    let home = env::var("USERPROFILE")
+        .or_else(|_| env::var("HOME"))
+        .unwrap_or_default();
+    let bun_candidates = if cfg!(windows) {
+        vec![
+            format!("{}\\.bun\\bin\\bun.exe", home),
+            format!("{}\\.bun\\bin\\bun", home),
+        ]
+    } else {
+        vec![format!("{}/.bun/bin/bun", home)]
+    };
+    for candidate in &bun_candidates {
+        if Path::new(candidate).is_file() {
+            return candidate.clone();
+        }
+    }
+    if cfg!(windows) {
+        let program_files = env::var("PROGRAMFILES").unwrap_or_else(|_| "C:\\Program Files".to_string());
+        let program_files_x86 = env::var("PROGRAMFILES(X86)")
+            .unwrap_or_else(|_| "C:\\Program Files (x86)".to_string());
+        let node_candidates = [
+            format!("{}\\nodejs\\node.exe", program_files),
+            format!("{}\\nodejs\\node.exe", program_files_x86),
+        ];
+        for candidate in &node_candidates {
+            if Path::new(candidate).is_file() {
+                return candidate.clone();
+            }
+        }
+    }
+    let path_var = env::var("PATH")
+        .or_else(|_| env::var("Path"))
+        .or_else(|_| env::var("path"))
+        .unwrap_or_default();
+    let separator = if cfg!(windows) { ';' } else { ':' };
+    let names = if cfg!(windows) {
+        vec!["bun.exe", "bun", "node.exe", "node"]
+    } else {
+        vec!["bun", "node"]
+    };
+    for dir in path_var.split(separator) {
+        let dir = dir.trim();
+        if dir.is_empty() {
+            continue;
+        }
+        for name in &names {
+            let candidate = Path::new(dir).join(name);
+            if candidate.is_file() {
+                return candidate.to_string_lossy().to_string();
+            }
+        }
+    }
     if cfg!(windows) {
         "node.exe".to_string()
     } else {
         "node".to_string()
+    }
+}
+
+fn is_runtime_proxy_command(command: &str) -> bool {
+    let base = command
+        .replace('\\', "/")
+        .rsplit('/')
+        .next()
+        .unwrap_or(command)
+        .to_ascii_lowercase();
+    base.contains("narada-mcp-runtime") || base.contains("mcp-runtime-proxy")
+}
+
+fn extract_proxy_child_command(args: &[String]) -> Option<String> {
+    args.iter()
+        .position(|arg| arg == "--child-command")
+        .and_then(|idx| args.get(idx + 1))
+        .cloned()
+}
+
+fn extract_proxy_child_args(args: &[String]) -> Vec<String> {
+    let mut child_args = Vec::new();
+    let mut found_separator = false;
+    for arg in args {
+        if found_separator {
+            child_args.push(arg.clone());
+        } else if arg == "--" {
+            found_separator = true;
+        }
+    }
+    child_args
+}
+
+fn resolve_child_command(command: &str) -> String {
+    let base = command
+        .replace('\\', "/")
+        .rsplit('/')
+        .next()
+        .unwrap_or(command)
+        .to_ascii_lowercase();
+    if ["bun", "bun.exe", "node", "node.exe"].contains(&base.as_str()) && !Path::new(command).is_absolute() {
+        resolve_javascript_runtime()
+    } else {
+        command.to_string()
     }
 }
 
