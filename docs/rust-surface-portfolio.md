@@ -59,8 +59,8 @@ effort; the existing implementation remains the authority.
 | `sop` | JavaScript-native | SOP templates, run state, handoffs, and action admission are domain semantics. |
 | `speech` | JavaScript-native | Host TTS, capture, and transcription are provider/host adapters. |
 | `surface-feedback` | JavaScript-native | Feedback authority, routing, and cross-site visibility are Narada control-plane semantics. |
-| `task-lifecycle` | Rust-native candidate (experimental) | Shared Rust lifecycle authority and native MCP adapter exist; tools/list and schema fixtures are exact, while full semantic parity and benchmark evidence remain promotion gates. |
-| `work-lifecycle` | Rust-native candidate (experimental) | Work lifecycle delegates task state to the same Rust authority and owns ticket/outbox state; full semantic parity and benchmark evidence remain promotion gates. |
+| `task-lifecycle` | Rust-native target | The shared Rust authority and native adapter implement the 69-tool contract, SQLite preparation/migration, payload revisions, evidence/review dependency gates, output resources, and Markdown compatibility. Catalog parity, smoke, refusal, migration, Node/Rust cross-runtime parity, and 12-sample native benchmark evidence admit Rust for the native profile; the TypeScript implementation remains an explicit rollback. |
+| `work-lifecycle` | Rust-native target | The same Rust authority and native adapter implement the 80-tool ticket/outbox contract, dynamic task revision triggers, SQLite transactions, and task/work cross-surface parity. Catalog parity, smoke, refusal, migration, Node/Rust cross-runtime parity, and 12-sample native benchmark evidence admit Rust for the native profile; the TypeScript implementation remains an explicit rollback. |
 | `worker-delegation` | JavaScript-native | Worker runtime admission, affinity, evidence, and handoff policy are domain behavior. |
 
 The Rust proxy itself is shared infrastructure rather than a catalog surface;
@@ -69,14 +69,13 @@ implementations.
 
 ## Default and rollback controls
 
-The native proxy default is selected only when the Windows native artifact is
-available; `--runtime-proxy-implementation bun` is the documented carrier-wide
-rollback. The local-filesystem read applet is the only native child selected by
-default; `surface_implementation=js` is its explicit rollback/override. The
-structured-command and Git native children are benchmark canaries, not hidden
-defaults: their JavaScript children remain the authority until the retained
-semantics have native parity. JavaScript-native surfaces have no native
-promotion or rollback path because no Rust authority is selected for them.
+The native proxy default retains `--runtime-proxy-implementation bun` as its carrier-wide rollback.
+The native profile selects Rust for the runtime proxy, task lifecycle, and work
+lifecycle when their native artifacts are available; materialization refuses a
+missing artifact. `surface_implementation=js` is the explicit lifecycle rollback,
+while the `bun` and `node-compat` profiles retain their JavaScript engines.
+Structured-command and Git remain benchmark canaries, and JavaScript-native
+surfaces remain their existing domain authorities.
 
 ## Evidence ledger
 
@@ -87,6 +86,7 @@ promotion or rollback path because no Rust authority is selected for them.
 | Structured command | JavaScript contract tests and realistic command workload; Rust policy/guidance/synchronous slice, direct protocol/timeout test, native-child integrated benchmark lane, and 60-sample order-reversed statistical comparison | Background durability and confirmed UAC remain JavaScript authority; native default remains unjustified until those semantics have parity |
 | Git | JavaScript contract tests and bounded Git policy; Rust read canary, direct protocol test, `real-git` workload, and 60-sample order-reversed statistical comparison cover policy, status, sync state, branches, dirty summary, diff, log, show, and refusal behavior | Mutation/recovery/publication remain JavaScript authority; native default remains unjustified until those semantics have parity |
 | mcp-loader | Native Rust contract/parity suite, exact tools/list comparison, focused lifecycle test, and bounded 20-sample loader benchmark cover the complete loader surface and child lifecycle | None for the admitted native profile; retain the TypeScript implementation as the explicit rollback path |
+| Lifecycle surfaces | Native Rust authority/adapters; 69/80-tool catalog parity; smoke, refusal, migration, Node/Rust cross-runtime parity, review/dependency/resource checks, and 12-sample task/work benchmarks | None for the admitted native profile; retain TypeScript as the explicit rollback and keep compatibility tests running |
 | Dual infrastructure | The shared Rust proxy is already native; structured-command and Git are the only current dual surface canaries | Reopen another infrastructure port only when a concrete Rust-owned boundary and workload hypothesis exists |
 | JavaScript-native surfaces | Package contract tests and domain-specific e2e tests | No Rust comparison is required unless the fit decision changes |
 
@@ -106,6 +106,6 @@ promotion or rollback path because no Rust authority is selected for them.
 5. Treat the remaining infrastructure surfaces as JavaScript-native unless a
    concrete workload hypothesis identifies a separable Rust-owned boundary.
 
-Each Rust candidate must pass contract equivalence before a registrar default
+Each Rust promotion must pass contract equivalence before a registrar default
 changes. Benchmarks are measurements, not predeclared latency thresholds; the
 decision is based on correctness plus total operational simplicity.

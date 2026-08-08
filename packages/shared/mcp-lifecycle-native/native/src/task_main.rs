@@ -10,12 +10,14 @@ fn main() {
             eprintln!("{error}");
             std::process::exit(2);
         }
-        Ok(options) => match LifecycleServer::new(options).and_then(|mut server| server.run_stdio()) {
-            Ok(()) => {}
-            Err(error) => {
-                eprintln!("{error}");
-                std::process::exit(1);
+        Ok(options) => {
+            match LifecycleServer::new(options).and_then(|mut server| server.run_stdio()) {
+                Ok(()) => {}
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(1);
+                }
             }
-        },
+        }
     }
 }

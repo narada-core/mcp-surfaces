@@ -10,7 +10,11 @@
     "build:native": "node scripts/build-native.mjs",
     "build:postcompile": "pnpm run build:native",
     "test:parity": "node --import tsx scripts/check-parity.mjs",
-    "test:smoke": "node scripts/smoke-native.mjs"
+    "test:cross-runtime": "node scripts/cross-runtime-parity.mjs",
+    "test:smoke": "node scripts/smoke-native.mjs",
+    "test:migration": "node scripts/migration-native.mjs",
+    "test:refusal": "node scripts/refusal-native.mjs",
+    "benchmark:native": "node scripts/benchmark-native.mjs"
   },
   "naradaRuntimeArtifacts": {
     "win32": [

@@ -1920,7 +1920,7 @@ function carrierLaunchCommand(
   const nativeProxy = proxyImplementation === 'native';
   const registrarEngine = selectedSurfaceRuntimeEngine('mcp-registrar', undefined, plan);
   return {
-    command: nativeProxy ? proxyEntrypoint : runtimeCommand,
+    command: nativeProxy ? proxyEntrypoint : javascriptRuntimeCommand(proxyImplementation),
     args: [
       ...(nativeProxy ? ['proxy'] : [proxyEntrypoint]),
       '--surface-id',
