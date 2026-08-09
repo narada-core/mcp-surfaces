@@ -188,22 +188,36 @@ mod tests {
 
     #[test]
     fn modern_discovery_is_self_describing_and_cacheable() {
-        let response = preflight_response(&modern_request("server/discover"), "test-surface").expect("discovery response");
+        let response = preflight_response(&modern_request("server/discover"), "test-surface")
+            .expect("discovery response");
         assert_eq!(response["result"]["resultType"], "complete");
-        assert_eq!(response["result"]["supportedVersions"][0], MODERN_PROTOCOL_VERSION);
+        assert_eq!(
+            response["result"]["supportedVersions"][0],
+            MODERN_PROTOCOL_VERSION
+        );
         assert_eq!(response["result"]["ttlMs"], 3_600_000);
         assert_eq!(response["result"]["cacheScope"], "public");
-        assert_eq!(response["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"], "test-surface");
+        assert_eq!(
+            response["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+            "test-surface"
+        );
     }
 
     #[test]
     fn modern_results_require_metadata_and_get_result_metadata() {
         let missing = preflight_response(&json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":MODERN_PROTOCOL_VERSION}}}), "test-surface").expect("metadata refusal");
         assert_eq!(missing["error"]["data"]["code"], "modern_metadata_required");
-        let response = modernize_response(&modern_request("tools/list"), json!({"jsonrpc":"2.0","id":1,"result":{"tools":[]}}), "test-surface");
+        let response = modernize_response(
+            &modern_request("tools/list"),
+            json!({"jsonrpc":"2.0","id":1,"result":{"tools":[]}}),
+            "test-surface",
+        );
         assert_eq!(response["result"]["resultType"], "complete");
         assert_eq!(response["result"]["ttlMs"], 300_000);
         assert_eq!(response["result"]["cacheScope"], "public");
-        assert_eq!(response["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"], "test-surface");
+        assert_eq!(
+            response["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+            "test-surface"
+        );
     }
 }
