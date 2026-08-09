@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 const TASK_PROTOCOL_VERSION: &str = "2026-04-18";
 const WORK_PROTOCOL_VERSION: &str = "2024-11-05";
+const MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
 const SERVER_VERSION: &str = "0.1.0";
 const TASK_SCHEMA_VERSION: i64 = 1;
 const WORK_SCHEMA_VERSION: i64 = 2;
@@ -446,6 +447,73 @@ fn read_payload_revision_payload(root: &Path, reference: &str) -> Result<Value, 
     }
     Ok(payload)
 }
+fn is_modern_request(params: &Value) -> bool {
+    params
+        .get("_meta")
+        .and_then(Value::as_object)
+        .and_then(|meta| meta.get("io.modelcontextprotocol/protocolVersion"))
+        .and_then(Value::as_str)
+        == Some(MODERN_PROTOCOL_VERSION)
+}
+
+fn validate_modern_request(params: &Value) -> Result<(), String> {
+    let meta = params
+        .get("_meta")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "modern_metadata_required:Modern MCP requests require _meta.".to_string())?;
+    if meta
+        .get("io.modelcontextprotocol/clientInfo")
+        .and_then(Value::as_object)
+        .is_none()
+    {
+        return Err("modern_metadata_required:Modern MCP requests require clientInfo metadata.".to_string());
+    }
+    if meta
+        .get("io.modelcontextprotocol/clientCapabilities")
+        .and_then(Value::as_object)
+        .is_none()
+    {
+        return Err("modern_metadata_required:Modern MCP requests require clientCapabilities metadata.".to_string());
+    }
+    Ok(())
+}
+
+fn server_discover(surface: Surface) -> Value {
+    let legacy = match surface {
+        Surface::Task => TASK_PROTOCOL_VERSION,
+        Surface::Work => WORK_PROTOCOL_VERSION,
+    };
+    let capabilities = if surface == Surface::Task {
+        json!({"tools":{},"resources":{},"prompts":{},"completions":{},"logging":{}})
+    } else {
+        json!({"tools":{}})
+    };
+    json!({
+        "supportedVersions": [MODERN_PROTOCOL_VERSION, legacy],
+        "capabilities": capabilities,
+        "ttlMs": 3_600_000,
+        "cacheScope": "public"
+    })
+}
+
+fn modernize_result(value: Value, method: &str, surface: Surface) -> Value {
+    let mut result = value.as_object().cloned().unwrap_or_default();
+    result.insert("resultType".to_string(), json!("complete"));
+    if matches!(method, "tools/list" | "resources/list" | "resources/read") {
+        result.entry("ttlMs".to_string()).or_insert(json!(300_000));
+        result.entry("cacheScope".to_string()).or_insert(json!("public"));
+    }
+    let mut meta = result
+        .remove("_meta")
+        .and_then(|entry| entry.as_object().cloned())
+        .unwrap_or_default();
+    meta.insert(
+        "io.modelcontextprotocol/serverInfo".to_string(),
+        json!({"name": surface.server_name(), "version": SERVER_VERSION}),
+    );
+    result.insert("_meta".to_string(), Value::Object(meta));
+    Value::Object(result)
+}
 impl LifecycleServer {
     pub fn new(options: Options) -> Result<Self, String> {
         let booted_at = now();
@@ -619,10 +687,19 @@ impl LifecycleServer {
         if object.get("id").is_none() && method.starts_with("notifications/") {
             return None;
         }
-        match self.dispatch(
-            method,
-            object.get("params").unwrap_or(&Value::Object(Map::new())),
-        ) {
+        let default_params = Value::Object(Map::new());
+        let params = object.get("params").unwrap_or(&default_params);
+        let modern = is_modern_request(params);
+        let result = if modern {
+            validate_modern_request(params).and_then(|_| match method {
+                "server/discover" => Ok(modernize_result(server_discover(self.options.surface), method, self.options.surface)),
+                "initialize" => Err("initialize_removed:The 2026-07-28 protocol has no initialize handshake.".to_string()),
+                _ => self.dispatch(method, params).map(|value| modernize_result(value, method, self.options.surface)),
+            })
+        } else {
+            self.dispatch(method, params)
+        };
+        match result {
             Ok(result) => Some(json!({"jsonrpc":"2.0", "id": id, "result": result})),
             Err(error) => Some(json!({
                 "jsonrpc": "2.0",
@@ -631,7 +708,6 @@ impl LifecycleServer {
             })),
         }
     }
-
     fn dispatch(&mut self, method: &str, params: &Value) -> Result<Value, String> {
         match method {
             "initialize" => Ok(json!({
@@ -4184,3 +4260,59 @@ fn write_wire<W: Write>(writer: &mut W, value: &Value, framed: bool) -> io::Resu
 include!("executability_impl.rs");
 
 include!("work_impl.rs");
+
+#[cfg(test)]
+mod modern_protocol_tests {
+    use super::*;
+
+    fn server(surface: Surface) -> LifecycleServer {
+        LifecycleServer {
+            options: Options {
+                surface,
+                site_root: PathBuf::from("."),
+                site_root_source: "test".to_string(),
+                prepare: false,
+                migrate_legacy: false,
+                source_database_path: None,
+            },
+            connection: None,
+            booted_at: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    fn modern_params() -> Value {
+        json!({
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": MODERN_PROTOCOL_VERSION,
+                "io.modelcontextprotocol/clientInfo": {"name": "test", "version": "1"},
+                "io.modelcontextprotocol/clientCapabilities": {}
+            }
+        })
+    }
+
+    #[test]
+    fn modern_discovery_and_tools_list_are_self_describing() {
+        let mut server = server(Surface::Task);
+        let discover = server.handle_request(json!({"jsonrpc":"2.0","id":1,"method":"server/discover","params":modern_params()})).expect("discover response");
+        assert_eq!(discover["result"]["resultType"], "complete");
+        assert_eq!(discover["result"]["supportedVersions"][0], MODERN_PROTOCOL_VERSION);
+        assert_eq!(discover["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"], "narada-task-lifecycle-mcp");
+
+        let list = server.handle_request(json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":modern_params()})).expect("list response");
+        assert_eq!(list["result"]["resultType"], "complete");
+        assert_eq!(list["result"]["cacheScope"], "public");
+        assert!(list["result"]["ttlMs"].as_u64().unwrap_or_default() > 0);
+    }
+
+    #[test]
+    fn modern_requests_require_metadata_and_remove_initialize() {
+        let mut server = server(Surface::Work);
+        let missing = server.handle_request(json!({"jsonrpc":"2.0","id":3,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":MODERN_PROTOCOL_VERSION}}})).expect("error response");
+        assert_eq!(missing["error"]["data"]["code"], "modern_metadata_required");
+
+        let mut params = modern_params();
+        params["protocolVersion"] = json!(MODERN_PROTOCOL_VERSION);
+        let initialize = server.handle_request(json!({"jsonrpc":"2.0","id":4,"method":"initialize","params":params})).expect("error response");
+        assert_eq!(initialize["error"]["data"]["code"], "initialize_removed");
+    }
+}
