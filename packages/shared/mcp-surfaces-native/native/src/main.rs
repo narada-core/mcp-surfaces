@@ -1,0 +1,475 @@
+use serde_json::{json, Map, Value};
+use std::env;
+use std::fs::{create_dir_all, OpenOptions};
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::path::PathBuf;
+use time::OffsetDateTime;
+use uuid::Uuid;
+
+const LEGACY_PROTOCOL_VERSION: &str = "2024-11-05";
+const MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
+
+#[derive(Clone, Debug)]
+struct Options {
+    surface_id: String,
+    site_root: PathBuf,
+    log_root: Option<PathBuf>,
+}
+
+fn main() {
+    if let Err(error) = run() {
+        let _ = writeln!(io::stderr(), "{error}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<(), String> {
+    let options = parse_options(env::args().skip(1).collect())?;
+    let stdin = io::stdin();
+    let mut reader = BufReader::new(stdin.lock());
+    let mut stdout = io::stdout().lock();
+    loop {
+        let mut first = String::new();
+        let read = reader
+            .read_line(&mut first)
+            .map_err(|error| format!("native_surface_stdin_read_failed:{error}"))?;
+        if read == 0 {
+            break;
+        }
+        if first.trim().is_empty() {
+            continue;
+        }
+        let (body, framed) = if first.to_ascii_lowercase().starts_with("content-length:") {
+            let mut header = first;
+            while !header.contains("\r\n\r\n") && !header.contains("\n\n") {
+                let mut line = String::new();
+                let read = reader
+                    .read_line(&mut line)
+                    .map_err(|error| format!("native_surface_header_read_failed:{error}"))?;
+                if read == 0 {
+                    return Err("native_surface_incomplete_content_length_header".to_string());
+                }
+                header.push_str(&line);
+            }
+            let length = header
+                .lines()
+                .find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length:").map(|value| value.trim().to_string()))
+                .ok_or("native_surface_content_length_missing")?
+                .parse::<usize>()
+                .map_err(|_| "native_surface_content_length_invalid".to_string())?;
+            let mut body = vec![0_u8; length];
+            reader
+                .read_exact(&mut body)
+                .map_err(|error| format!("native_surface_content_length_read_failed:{error}"))?;
+            (body, true)
+        } else {
+            (first.into_bytes(), false)
+        };
+        let request: Value = serde_json::from_slice(&body)
+            .map_err(|error| format!("native_surface_invalid_json:{error}"))?;
+        if let Some(response) = handle_request(&request, &options) {
+            let encoded = serde_json::to_string(&response)
+                .map_err(|error| format!("native_surface_response_encode_failed:{error}"))?;
+            if framed {
+                write!(stdout, "Content-Length: {}\r\n\r\n{encoded}", encoded.as_bytes().len())
+                    .map_err(|error| format!("native_surface_stdout_write_failed:{error}"))?;
+            } else {
+                writeln!(stdout, "{encoded}")
+                    .map_err(|error| format!("native_surface_stdout_write_failed:{error}"))?;
+            }
+            stdout
+                .flush()
+                .map_err(|error| format!("native_surface_stdout_flush_failed:{error}"))?;
+        }
+    }
+    Ok(())
+}
+fn parse_options(args: Vec<String>) -> Result<Options, String> {
+    let mut surface_id = None;
+    let mut site_root = None;
+    let mut log_root = None;
+    let mut index = 0;
+    while index < args.len() {
+        let key = args[index].as_str();
+        let value = args.get(index + 1).ok_or_else(|| format!("native_surface_argument_value_required:{key}"))?;
+        match key {
+            "--surface-id" => surface_id = Some(value.clone()),
+            "--site-root" => site_root = Some(PathBuf::from(value)),
+            "--log-root" => log_root = Some(PathBuf::from(value)),
+            _ => return Err(format!("native_surface_unknown_argument:{key}")),
+        }
+        index += 2;
+    }
+    let surface_id = surface_id.ok_or("native_surface_missing_surface_id")?;
+    let site_root = site_root.unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    Ok(Options { surface_id, site_root, log_root })
+}
+
+fn handle_request(request: &Value, options: &Options) -> Option<Value> {
+    let object = request.as_object()?;
+    let method = object.get("method").and_then(Value::as_str).unwrap_or_default();
+    if method.starts_with("notifications/") {
+        return None;
+    }
+    let id = object.get("id").cloned().unwrap_or(Value::Null);
+    let params = object.get("params").and_then(Value::as_object).cloned().unwrap_or_default();
+    let modern = is_modern_request(&params);
+    let result = if modern {
+        validate_modern_request(&params).and_then(|_| match method {
+            "server/discover" => Ok(server_discover_result(options)),
+            "tools/list" => Ok(modern_result(json!({
+                "tools": list_tools(&options.surface_id),
+                "ttlMs": 300_000,
+                "cacheScope": "public"
+            }), options)),
+            "tools/call" => call_tool(&options.surface_id, &params, options)
+                .map(|value| modern_result(value, options)),
+            "initialize" => Err(diagnostic(
+                "initialize_removed",
+                "The 2026-07-28 protocol has no initialize handshake.",
+                json!({ "protocolVersion": MODERN_PROTOCOL_VERSION }),
+            )),
+            _ => Err(diagnostic(
+                "unsupported_mcp_method",
+                &format!("unsupported_mcp_method:{method}"),
+                json!({ "method": method }),
+            )),
+        })
+    } else {
+        match method {
+            "initialize" => Ok(initialize_result(options)),
+            "tools/list" => Ok(json!({ "tools": list_tools(&options.surface_id) })),
+            "tools/call" => call_tool(&options.surface_id, &params, options),
+            "server/discover" => Err(diagnostic(
+                "modern_metadata_required",
+                "server/discover requires 2026-07-28 request metadata.",
+                json!({ "protocolVersion": MODERN_PROTOCOL_VERSION }),
+            )),
+            _ => Err(diagnostic(
+                "unsupported_mcp_method",
+                &format!("unsupported_mcp_method:{method}"),
+                json!({ "method": method }),
+            )),
+        }
+    };
+    Some(match result {
+        Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+        Err(error) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32000, "message": error["message"], "data": error } }),
+    })
+}
+
+fn is_modern_request(params: &Map<String, Value>) -> bool {
+    params
+        .get("_meta")
+        .and_then(Value::as_object)
+        .and_then(|meta| meta.get("io.modelcontextprotocol/protocolVersion"))
+        .and_then(Value::as_str)
+        == Some(MODERN_PROTOCOL_VERSION)
+}
+
+fn validate_modern_request(params: &Map<String, Value>) -> Result<(), Value> {
+    let meta = params
+        .get("_meta")
+        .and_then(Value::as_object)
+        .ok_or_else(|| diagnostic("modern_metadata_required", "Modern MCP requests require _meta.", Value::Null))?;
+    if meta.get("io.modelcontextprotocol/clientInfo").and_then(Value::as_object).is_none() {
+        return Err(diagnostic(
+            "modern_metadata_required",
+            "Modern MCP requests require clientInfo metadata.",
+            json!({ "key": "io.modelcontextprotocol/clientInfo" }),
+        ));
+    }
+    if meta.get("io.modelcontextprotocol/clientCapabilities").and_then(Value::as_object).is_none() {
+        return Err(diagnostic(
+            "modern_metadata_required",
+            "Modern MCP requests require clientCapabilities metadata.",
+            json!({ "key": "io.modelcontextprotocol/clientCapabilities" }),
+        ));
+    }
+    Ok(())
+}
+
+fn initialize_result(options: &Options) -> Value {
+    json!({
+        "protocolVersion": LEGACY_PROTOCOL_VERSION,
+        "capabilities": { "tools": {} },
+        "serverInfo": { "name": format!("{}-mcp", options.surface_id), "version": "0.1.0" }
+    })
+}
+
+fn server_discover_result(options: &Options) -> Value {
+    modern_result(json!({
+        "supportedVersions": [MODERN_PROTOCOL_VERSION, LEGACY_PROTOCOL_VERSION],
+        "capabilities": { "tools": {} },
+        "ttlMs": 3_600_000,
+        "cacheScope": "public"
+    }), options)
+}
+
+fn modern_result(value: Value, options: &Options) -> Value {
+    let mut result = value.as_object().cloned().unwrap_or_default();
+    result.insert("resultType".to_string(), json!("complete"));
+    let mut meta = result
+        .remove("_meta")
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    meta.insert(
+        "io.modelcontextprotocol/serverInfo".to_string(),
+        json!({ "name": format!("{}-mcp", options.surface_id), "version": "0.1.0" }),
+    );
+    result.insert("_meta".to_string(), Value::Object(meta));
+    Value::Object(result)
+}
+fn list_tools(surface_id: &str) -> Vec<Value> {
+    match surface_id {
+        "catalog-observation" => vec![
+            guidance_tool("catalog-observation"),
+            tool("catalog_observation_observe", "Observe a provider model catalog through the Narada-owned observation port.", json!({
+                "type": "object",
+                "properties": {
+                    "provider_id": { "type": "string", "description": "Canonical inference-provider resource id." },
+                    "observed_at": { "type": "string", "description": "Explicit observation instant in ISO format." },
+                    "access_mode": { "type": "string", "enum": ["public", "credentialed", "operator_attested"], "default": "public" }
+                },
+                "required": ["provider_id", "observed_at"],
+                "additionalProperties": false
+            }), true),
+        ],
+        "operator-routing" => vec![
+            guidance_tool("operator-routing"),
+            tool("operator_route_doctor", "Report operator routing posture, fallback policy, and the suggested spoken acknowledgement shape.", json!({ "type": "object", "properties": {}, "additionalProperties": false }), true),
+            tool("operator_route_request", "Compile a transcript into a routing decision and a site-inbox-compatible fallback envelope.", json!({
+                "type": "object",
+                "properties": {
+                    "transcript": { "type": "string", "description": "Transcript text to route." },
+                    "target_runtime": { "type": "string", "description": "Target runtime or runtime family to receive the command." },
+                    "target_identity": { "type": "string", "default": Value::Null, "description": "Optional target agent identity." },
+                    "intent_kind": { "type": "string", "default": Value::Null, "description": "Optional intent classification." },
+                    "speaker_agent_id": { "type": "string", "default": Value::Null, "description": "Optional speaker identity to preserve in the route record." },
+                    "allow_inbox_fallback": { "type": "boolean", "default": true, "description": "Allow a site-inbox fallback envelope when direct delivery is unavailable." },
+                    "request_id": { "type": "string", "default": Value::Null, "description": "Optional stable request identifier." }
+                },
+                "required": ["transcript", "target_runtime"],
+                "additionalProperties": false
+            }), false),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+fn guidance_tool(surface_id: &str) -> Value {
+    tool(&format!("{surface_id}_guidance"), &format!("Show model-facing operating guidance for {surface_id} MCP workflows."), json!({
+        "type": "object",
+        "properties": {
+            "workflow": { "type": "string", "description": "Optional workflow name or area to focus guidance on." },
+            "tool": { "type": "string", "description": "Optional tool name for tool-specific guidance." }
+        },
+        "additionalProperties": false
+    }), true)
+}
+
+fn tool(name: &str, description: &str, input_schema: Value, read_only: bool) -> Value {
+    json!({
+        "name": name,
+        "description": description,
+        "inputSchema": input_schema,
+        "annotations": { "title": name, "readOnlyHint": read_only, "destructiveHint": !read_only, "idempotentHint": true, "openWorldHint": false },
+        "outputSchema": { "type": "object", "additionalProperties": true }
+    })
+}
+
+fn call_tool(surface_id: &str, params: &Map<String, Value>, options: &Options) -> Result<Value, Value> {
+    let name = params.get("name").and_then(Value::as_str).ok_or_else(|| diagnostic("invalid_request", "tools/call requires a tool name.", Value::Null))?;
+    let args = params.get("arguments").and_then(Value::as_object).cloned().unwrap_or_default();
+    let result = match (surface_id, name) {
+        ("catalog-observation", "catalog-observation_guidance") => catalog_guidance(&args),
+        ("catalog-observation", "catalog_observation_observe") => catalog_observation(&args),
+        ("operator-routing", "operator-routing_guidance") => operator_guidance(&args),
+        ("operator-routing", "operator_route_doctor") => operator_route_doctor(options),
+        ("operator-routing", "operator_route_request") => operator_route_request(&args, options),
+        (_, unknown) => return Err(diagnostic("unknown_tool", &format!("unknown_tool:{unknown}"), json!({ "tool_name": unknown }))),
+    }?;
+    Ok(json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string()) }], "structuredContent": result }))
+}
+
+fn catalog_guidance(_args: &Map<String, Value>) -> Result<Value, Value> {
+    Ok(json!({
+        "schema": "narada.catalog-observation.guidance.v1",
+        "authority": "Narada management owns catalog observation and credential resolution.",
+        "boundary": "This MCP surface is read-only and forwards typed observation requests only.",
+        "credentials": "Credential values never cross this MCP boundary and never appear in observations.",
+        "unavailable": "Without an injected Narada observation port, the surface returns an unavailable observation."
+    }))
+}
+
+fn catalog_observation(args: &Map<String, Value>) -> Result<Value, Value> {
+    let provider_id = required_string(args, "provider_id")?;
+    let observed_at = required_string(args, "observed_at")?;
+    let access_mode = args.get("access_mode").and_then(Value::as_str).unwrap_or("public");
+    if !matches!(access_mode, "public" | "credentialed" | "operator_attested") {
+        return Err(diagnostic("invalid_request", "access_mode must be public, credentialed, or operator_attested.", Value::Null));
+    }
+    Ok(json!({
+        "schema": "narada.invokable-intelligence.catalog-observation.v1",
+        "id": format!("catalog-observation:unavailable-{provider_id}"),
+        "observed_at": observed_at,
+        "inference_provider": { "kind": "inference-provider", "id": provider_id },
+        "access_mode": "unavailable",
+        "authority": { "kind": "unavailable", "authority_ref": "narada-observation-port:not-injected" },
+        "source": { "kind": "unavailable", "reference": "narada-observation-port:not-injected" },
+        "status": "unavailable",
+        "models": [],
+        "diagnostics": [{ "code": "provider-authority-unavailable", "message": "No Narada catalog observation port was injected into this surface process.", "retryable": false }],
+        "digest": format!("sha256:{}", "0".repeat(64))
+    }))
+}
+
+fn operator_guidance(args: &Map<String, Value>) -> Result<Value, Value> {
+    let workflow = args.get("workflow").and_then(Value::as_str).filter(|v| !v.trim().is_empty());
+    let tool = args.get("tool").and_then(Value::as_str).filter(|v| !v.trim().is_empty());
+    Ok(json!({
+        "schema": "narada.mcp_surface.guidance.v0",
+        "status": "ok",
+        "surface_id": "operator-routing",
+        "guidance_tool": "operator-routing_guidance",
+        "purpose": "User Site operator transcript-to-target routing and inbox fallback packaging.",
+        "requested": { "workflow": workflow, "tool": tool },
+        "first_use": ["Call this guidance command when the surface is unfamiliar, when a refusal/error is unclear, or before composing a multi-step workflow.", "Inspect policy/doctor/status tools before mutation or open-world operations.", "Use bounded list/search/query tools for discovery, then show/read/detail tools before acting on a specific object.", "Preserve structuredContent as authoritative evidence; text content is for assistant readability."],
+        "boundaries": ["Guidance is read-only model-facing operating advice.", "Guidance does not weaken policy, authorize mutation, or replace tool schemas.", "The owning MCP surface remains authoritative for state and enforcement."]
+    }))
+}
+
+fn operator_route_doctor(options: &Options) -> Result<Value, Value> {
+    Ok(json!({
+        "schema": "narada.operator_routing.doctor.v1",
+        "status": "ok",
+        "server_name": "operator-routing-mcp",
+        "site_root": options.site_root.to_string_lossy(),
+        "direct_delivery_supported": false,
+        "fallback_channel": "site-inbox",
+        "suggested_speech": { "provider": "openai_api", "model": "tts-1", "voice": "nova", "text": "Request recorded. Direct delivery to that runtime is not available from this surface. I can route it through the admitted inbox path." }
+    }))
+}
+
+fn operator_route_request(args: &Map<String, Value>, options: &Options) -> Result<Value, Value> {
+    let transcript = required_string(args, "transcript")?;
+    let target_runtime = required_string(args, "target_runtime")?;
+    let target_identity = optional_string(args, "target_identity");
+    let intent_kind = optional_string(args, "intent_kind");
+    let speaker_agent_id = optional_string(args, "speaker_agent_id");
+    let allow_inbox_fallback = args.get("allow_inbox_fallback").and_then(Value::as_bool).unwrap_or(true);
+    let request_id = optional_string(args, "request_id").unwrap_or_else(|| format!("route_{}_{}", compact_timestamp(), &Uuid::new_v4().to_string()[..8]));
+    let recorded_at = now_iso();
+    let spoken_text = if allow_inbox_fallback { "Request recorded. Direct delivery to that runtime is not available from this surface. I can route it through the admitted inbox path." } else { "Request recorded. Direct delivery to that runtime is not available from this surface, and no fallback path was enabled." };
+    let route_kind = if allow_inbox_fallback { "inbox_fallback_draft" } else { "unroutable" };
+    let inbox_envelope = if allow_inbox_fallback { Some(json!({
+        "kind": "command_request",
+        "title": target_identity.as_ref().map(|id| format!("Route request for {id}")).unwrap_or_else(|| format!("Route request for {target_runtime}")),
+        "summary": transcript.chars().take(240).collect::<String>(),
+        "principal": speaker_agent_id,
+        "target_role": Value::Null,
+        "severity": 35,
+        "authority_level": "operator_confirmed",
+        "payload": { "request_id": request_id, "recorded_at": recorded_at, "transcript": transcript, "target_runtime": target_runtime, "target_identity": target_identity, "intent_kind": intent_kind, "speaker_agent_id": speaker_agent_id, "spoken_acknowledgement": spoken_text, "suggested_delivery_channel": "site-inbox" }
+    })) } else { None };
+    let route_record = json!({
+        "schema": "narada.operator_routing.route_request.v1",
+        "status": if allow_inbox_fallback { "drafted_for_site_inbox" } else { "unroutable" },
+        "request_id": request_id,
+        "recorded_at": recorded_at,
+        "direct_delivery_supported": false,
+        "direct_delivery_attempted": false,
+        "direct_delivery_reason": "no_runtime_ingress_available",
+        "target_runtime": target_runtime,
+        "target_identity": target_identity,
+        "intent_kind": intent_kind,
+        "speaker_agent_id": speaker_agent_id,
+        "transcript": transcript,
+        "routing": { "target_runtime": target_runtime, "target_identity": target_identity, "route_kind": route_kind, "fallback_channel": if allow_inbox_fallback { json!("site-inbox") } else { Value::Null }, "next_step": if allow_inbox_fallback { "submit_to_site_inbox" } else { "none" } },
+        "spoken_acknowledgement": { "provider": "openai_api", "model": "tts-1", "voice": "nova", "text": spoken_text },
+        "inbox_envelope": inbox_envelope
+    });
+    let log_path = append_route_record(&route_record, options)?;
+    let mut result = route_record.as_object().cloned().unwrap_or_default();
+    result.insert("log_path".to_string(), Value::String(log_path.to_string_lossy().to_string()));
+    Ok(Value::Object(result))
+}
+
+fn append_route_record(record: &Value, options: &Options) -> Result<PathBuf, Value> {
+    let root = options.log_root.clone().unwrap_or_else(|| options.site_root.join(".narada").join("runtime").join("operator-routing"));
+    create_dir_all(&root).map_err(|error| diagnostic("operator_route_log_create_failed", &error.to_string(), Value::Null))?;
+    let path = root.join("operator-routing-log.jsonl");
+    let mut file = OpenOptions::new().create(true).append(true).open(&path).map_err(|error| diagnostic("operator_route_log_open_failed", &error.to_string(), Value::Null))?;
+    let line = serde_json::to_string(record).map_err(|error| diagnostic("operator_route_log_encode_failed", &error.to_string(), Value::Null))?;
+    writeln!(file, "{line}").map_err(|error| diagnostic("operator_route_log_write_failed", &error.to_string(), Value::Null))?;
+    Ok(path)
+}
+
+fn required_string(args: &Map<String, Value>, key: &str) -> Result<String, Value> {
+    optional_string(args, key).ok_or_else(|| diagnostic("required_argument_missing", &format!("required_argument_missing:{key}"), json!({ "key": key })))
+}
+
+fn optional_string(args: &Map<String, Value>, key: &str) -> Option<String> {
+    args.get(key).and_then(Value::as_str).map(str::trim).filter(|value| !value.is_empty()).map(ToString::to_string)
+}
+
+fn diagnostic(code: &str, message: &str, details: Value) -> Value {
+    let mut object = Map::new();
+    object.insert("code".to_string(), Value::String(code.to_string()));
+    object.insert("message".to_string(), Value::String(message.to_string()));
+    if !details.is_null() { object.insert("details".to_string(), details); }
+    Value::Object(object)
+}
+
+fn now_iso() -> String {
+    OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339).unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
+}
+
+fn compact_timestamp() -> String {
+    now_iso().replace(['-', ':', '.'], "").chars().take(15).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_options() -> Options {
+        Options {
+            surface_id: "catalog-observation".to_string(),
+            site_root: PathBuf::from("."),
+            log_root: None,
+        }
+    }
+
+    #[test]
+    fn legacy_initialize_remains_available() {
+        let response = handle_request(
+            &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}),
+            &test_options(),
+        ).expect("response");
+        assert_eq!(response["result"]["protocolVersion"], LEGACY_PROTOCOL_VERSION);
+        assert!(response["result"]["resultType"].is_null());
+    }
+
+    #[test]
+    fn modern_discover_is_self_describing_and_cacheable() {
+        let response = handle_request(
+            &json!({"jsonrpc":"2.0","id":2,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":MODERN_PROTOCOL_VERSION,"io.modelcontextprotocol/clientInfo":{"name":"test","version":"1"},"io.modelcontextprotocol/clientCapabilities":{}}}}),
+            &test_options(),
+        ).expect("response");
+        assert_eq!(response["result"]["resultType"], "complete");
+        assert_eq!(response["result"]["cacheScope"], "public");
+        assert_eq!(response["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"], "catalog-observation-mcp");
+    }
+
+    #[test]
+    fn modern_tools_list_requires_metadata_and_has_cache_metadata() {
+        let response = handle_request(
+            &json!({"jsonrpc":"2.0","id":3,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":MODERN_PROTOCOL_VERSION,"io.modelcontextprotocol/clientInfo":{"name":"test","version":"1"},"io.modelcontextprotocol/clientCapabilities":{}}}}),
+            &test_options(),
+        ).expect("response");
+        assert_eq!(response["result"]["resultType"], "complete");
+        assert_eq!(response["result"]["cacheScope"], "public");
+        assert!(response["result"]["ttlMs"].as_u64().unwrap_or(0) > 0);
+    }
+}

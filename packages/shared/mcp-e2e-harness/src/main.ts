@@ -1,3 +1,10 @@
+import {
+  DEFAULT_LEGACY_PROTOCOL_VERSION,
+  MODERN_PROTOCOL_META_KEYS,
+  MODERN_PROTOCOL_VERSION,
+  withModernRequestMeta,
+  type McpProtocolClientOptions,
+} from '@narada-core/mcp-protocol';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
@@ -120,15 +127,20 @@ export function runBoundedProcess(
 }
 
 export type McpProtocolSmokeOptions = {
+  protocolMode?: 'legacy' | 'modern';
+  clientInfo?: McpProtocolClientOptions['clientInfo'];
+  clientCapabilities?: JsonRecord;
   initializeParams?: JsonRecord;
   expectedServerName?: string;
   requiredTools?: readonly string[];
   initializeId?: number | string;
+  discoverId?: number | string;
   toolsListId?: number | string;
 };
 
 export type McpProtocolSmokeResult = {
   initialize: JsonRecord;
+  discover?: JsonRecord;
   tools: JsonRecord;
   toolNames: string[];
 };
@@ -137,24 +149,49 @@ export async function runMcpProtocolSmoke(
   client: JsonlMcpClient,
   options: McpProtocolSmokeOptions = {},
 ): Promise<McpProtocolSmokeResult> {
+  const protocolMode = options.protocolMode ?? 'legacy';
   const initializeId = options.initializeId ?? 1;
+  const discoverId = options.discoverId ?? 1;
   const toolsListId = options.toolsListId ?? 2;
-  const initialize = rpcResult(
-    await client.request(initializeId, 'initialize', options.initializeParams ?? { protocolVersion: '2024-11-05' }),
-    'initialize',
-  );
-  const serverInfo = asRecord(initialize.serverInfo);
-  if (options.expectedServerName !== undefined && serverInfo.name !== options.expectedServerName) {
-    throw new Error(`MCP initialize server name mismatch: expected ${options.expectedServerName}, got ${String(serverInfo.name)}`);
+  const clientProtocolOptions: McpProtocolClientOptions = {
+    clientInfo: options.clientInfo ?? { name: 'narada-mcp-e2e-harness', version: '0.1.0' },
+    clientCapabilities: options.clientCapabilities ?? {},
+  };
+  let initialize: JsonRecord;
+  let discover: JsonRecord | undefined;
+  if (protocolMode === 'modern') {
+    discover = rpcResult(
+      await client.request(discoverId, 'server/discover', withModernRequestMeta({}, clientProtocolOptions)),
+      'server/discover',
+    );
+    assertModernResult(discover, 'server/discover', true);
+    const supportedVersions = Array.isArray(discover.supportedVersions) ? discover.supportedVersions.map(String) : [];
+    if (!supportedVersions.includes(MODERN_PROTOCOL_VERSION)) {
+      throw new Error('MCP server/discover does not advertise ' + MODERN_PROTOCOL_VERSION);
+    }
+    initialize = discover;
+  } else {
+    initialize = rpcResult(
+      await client.request(initializeId, 'initialize', options.initializeParams ?? { protocolVersion: DEFAULT_LEGACY_PROTOCOL_VERSION }),
+      'initialize',
+    );
   }
-  const tools = rpcResult(await client.request(toolsListId, 'tools/list', {}), 'tools/list');
+  const serverInfo = protocolMode === 'modern'
+    ? asRecord(asRecord(initialize._meta)[MODERN_PROTOCOL_META_KEYS.serverInfo])
+    : asRecord(initialize.serverInfo);
+  if (options.expectedServerName !== undefined && serverInfo.name !== options.expectedServerName) {
+    throw new Error('MCP initialize server name mismatch: expected ' + options.expectedServerName + ', got ' + String(serverInfo.name));
+  }
+  const toolsParams = protocolMode === 'modern' ? withModernRequestMeta({}, clientProtocolOptions) : {};
+  const tools = rpcResult(await client.request(toolsListId, 'tools/list', toolsParams), 'tools/list');
+  if (protocolMode === 'modern') assertModernResult(tools, 'tools/list', true);
   if (!Array.isArray(tools.tools)) throw new Error('MCP tools/list returned no tools array');
   const toolEntries = tools.tools;
   const toolNames = toolEntries.map((tool) => String(asRecord(tool).name));
   for (const requiredTool of options.requiredTools ?? []) {
-    if (!toolNames.includes(requiredTool)) throw new Error(`MCP tools/list is missing required tool: ${requiredTool}`);
+    if (!toolNames.includes(requiredTool)) throw new Error('MCP tools/list is missing required tool: ' + requiredTool);
   }
-  return { initialize, tools, toolNames };
+  return { initialize, discover, tools, toolNames };
 }
 
 export type OutputPageReader = (request: {
@@ -212,6 +249,9 @@ export type JsonlMcpClientOptions = {
   timeoutMs?: number;
   closeTimeoutMs?: number;
   label?: string;
+  protocolMode?: 'legacy' | 'modern';
+  clientInfo?: McpProtocolClientOptions['clientInfo'];
+  clientCapabilities?: JsonRecord;
 };
 
 export type SpawnJsonlMcpServerOptions = JsonlMcpClientOptions & {
@@ -228,6 +268,14 @@ export type SpawnedJsonlMcpServer = {
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_CLOSE_TIMEOUT_MS = 3_000;
+
+function wireParams(params: JsonRecord, options: JsonlMcpClientOptions): JsonRecord {
+  if (options.protocolMode !== 'modern') return params;
+  return withModernRequestMeta(params, {
+    clientInfo: options.clientInfo ?? { name: options.label ?? 'narada-mcp-e2e-harness', version: '0.1.0' },
+    clientCapabilities: options.clientCapabilities ?? {},
+  });
+}
 
 export function createJsonlClient(
   child: ChildProcessWithoutNullStreams,
@@ -292,7 +340,7 @@ export function createJsonlClient(
         }, timeoutMs);
         pending.set(key, { resolve, reject, timer });
         try {
-          child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
+          child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params: wireParams(params, options) }) + '\n');
         } catch (error) {
           clearTimeout(timer);
           pending.delete(key);
@@ -445,7 +493,7 @@ export function createContentLengthClient(
         }, timeoutMs);
         pending.set(key, { resolve, reject, timer });
         try {
-          const body = JSON.stringify({ jsonrpc: '2.0', id, method, params });
+          const body = JSON.stringify({ jsonrpc: '2.0', id, method, params: wireParams(params, options) });
           child.stdin.write('Content-Length: ' + Buffer.byteLength(body, 'utf8') + '\r\n\r\n' + body);
         } catch (error) {
           clearTimeout(timer);
@@ -691,6 +739,15 @@ function boundedPositiveInteger(value: number | undefined, fallback: number, max
   return typeof value === 'number' && Number.isInteger(value) && value > 0
     ? Math.min(value, maximum)
     : fallback;
+}
+
+function assertModernResult(result: JsonRecord, operation: string, requireCacheMetadata: boolean): void {
+  if (result.resultType !== 'complete' && result.resultType !== 'input_required') {
+    throw new Error('MCP ' + operation + ' omitted a valid resultType');
+  }
+  if (requireCacheMetadata && (typeof result.ttlMs !== 'number' || !Number.isFinite(result.ttlMs) || typeof result.cacheScope !== 'string')) {
+    throw new Error('MCP ' + operation + ' omitted required cache metadata');
+  }
 }
 
 function rpcResult(response: JsonRpcResponse, operation: string): JsonRecord {

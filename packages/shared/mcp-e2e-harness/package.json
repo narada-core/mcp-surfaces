@@ -23,6 +23,7 @@
     "README.md"
   ],
   "devDependencies": {
+    "@narada-core/mcp-protocol": "workspace:*",
     "@types/node": "^22.15.3",
     "typescript": "^5.8.3"
   }

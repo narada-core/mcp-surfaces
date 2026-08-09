@@ -81,6 +81,22 @@ const protocol = await runMcpProtocolSmoke(protocolFixture.client, {
 assert.deepEqual(protocol.toolNames, ['fixture_tool']);
 await protocolFixture.close();
 
+const modernFixture = spawnJsonlMcpServer(process.execPath, [
+  '-e',
+  [
+    "process.stdin.setEncoding('utf8');",
+    "process.stdin.on('data', (chunk) => { for (const line of chunk.split(/\\r?\\n/).filter(Boolean)) { const request = JSON.parse(line); if (request.method === 'server/discover') process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { resultType: 'complete', supportedVersions: ['2026-07-28'], capabilities: { tools: {} }, _meta: { 'io.modelcontextprotocol/serverInfo': { name: 'modern-fixture', version: '1.0.0' } }, ttlMs: 3600000, cacheScope: 'public' } }) + '\\n'); if (request.method === 'tools/list') process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { resultType: 'complete', tools: [{ name: 'modern_fixture_tool' }], ttlMs: 300000, cacheScope: 'public' } }) + '\\n'); } });",
+  ].join('\n'),
+], { label: 'mcp-e2e-harness-modern-fixture', timeoutMs: 2_000, scope: processScope, protocolMode: 'modern' });
+const modernProtocol = await runMcpProtocolSmoke(modernFixture.client, {
+  protocolMode: 'modern',
+  expectedServerName: 'modern-fixture',
+  requiredTools: ['modern_fixture_tool'],
+});
+assert.deepEqual(modernProtocol.toolNames, ['modern_fixture_tool']);
+assert.equal(modernProtocol.discover?.resultType, 'complete');
+await modernFixture.close();
+
 const output = await readMcpOutputText(
   { output_text: '{"status":"', next_offset: 4 },
   async ({ offset }) => offset === 4

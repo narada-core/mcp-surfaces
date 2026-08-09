@@ -1,3 +1,10 @@
+import {
+  DEFAULT_LEGACY_PROTOCOL_VERSION,
+  MODERN_PROTOCOL_VERSION,
+  withModernRequestMeta,
+  type McpProtocolEra,
+  type McpProtocolClientOptions,
+} from '@narada-core/mcp-protocol';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 
 export type JsonRecord = Record<string, unknown>;
@@ -5,6 +12,8 @@ export type JsonRecord = Record<string, unknown>;
 export interface McpProcessClientOptions {
   executable: string;
   args?: readonly string[];
+  clientCapabilities?: JsonRecord;
+  protocolMode?: 'auto' | 'modern' | 'legacy';
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   requestTimeoutMs?: number;
@@ -21,7 +30,6 @@ interface PendingRequest {
   timeout: NodeJS.Timeout;
 }
 
-const PROTOCOL_VERSION = '2024-11-05';
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_CLOSE_TIMEOUT_MS = 5_000;
 const DEFAULT_MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
@@ -41,12 +49,20 @@ export class McpProcessClient {
   #stderrTail = '';
   #closed = false;
   #failure: Error | null = null;
+  #protocolEra: McpProtocolEra = 'legacy';
+  #protocolMode: 'auto' | 'modern' | 'legacy' = 'auto';
+  #clientProtocolOptions: McpProtocolClientOptions;
 
   private constructor(options: McpProcessClientOptions) {
     this.requestTimeoutMs = positiveInteger(options.requestTimeoutMs, DEFAULT_REQUEST_TIMEOUT_MS, 'requestTimeoutMs');
     this.closeTimeoutMs = positiveInteger(options.closeTimeoutMs, DEFAULT_CLOSE_TIMEOUT_MS, 'closeTimeoutMs');
     this.maxResponseBytes = positiveInteger(options.maxResponseBytes, DEFAULT_MAX_RESPONSE_BYTES, 'maxResponseBytes');
     this.stderrTailBytes = positiveInteger(options.stderrTailBytes, DEFAULT_STDERR_TAIL_BYTES, 'stderrTailBytes');
+    this.#protocolMode = options.protocolMode ?? 'auto';
+    this.#clientProtocolOptions = {
+      clientInfo: { name: options.clientName ?? 'narada-mcp-runtime-client', version: '0.1.0' },
+      clientCapabilities: options.clientCapabilities ?? {},
+    };
 
     this.process = spawn(options.executable, [...(options.args ?? [])], {
       cwd: options.cwd,
@@ -71,10 +87,23 @@ export class McpProcessClient {
   static async start(options: McpProcessClientOptions): Promise<McpProcessClient> {
     const client = new McpProcessClient(options);
     try {
+      if (client.#protocolMode !== 'legacy') {
+        try {
+          const discovery = await client.request('server/discover', withModernRequestMeta({}, client.#clientProtocolOptions), Math.min(client.requestTimeoutMs, 1_500));
+          const supportedVersions = Array.isArray(discovery.supportedVersions) ? discovery.supportedVersions.map(String) : [];
+          if (supportedVersions.includes(MODERN_PROTOCOL_VERSION)) {
+            client.#protocolEra = 'modern';
+            return client;
+          }
+          if (client.#protocolMode === 'modern') throw new Error('mcp_modern_protocol_not_advertised');
+        } catch (error) {
+          if (client.#protocolMode === 'modern') throw error;
+        }
+      }
       await client.request('initialize', {
-        protocolVersion: PROTOCOL_VERSION,
+        protocolVersion: DEFAULT_LEGACY_PROTOCOL_VERSION,
         capabilities: {},
-        clientInfo: { name: options.clientName ?? 'narada-mcp-runtime-client', version: '0.1.0' },
+        clientInfo: client.#clientProtocolOptions.clientInfo,
       });
       client.notify('notifications/initialized', {});
       return client;
@@ -88,11 +117,22 @@ export class McpProcessClient {
     return this.#stderrTail;
   }
 
+  get protocolEra(): McpProtocolEra {
+    return this.#protocolEra;
+  }
+
+  get protocolVersion(): string {
+    return this.#protocolEra === 'modern' ? MODERN_PROTOCOL_VERSION : DEFAULT_LEGACY_PROTOCOL_VERSION;
+  }
+
   async request(method: string, params: JsonRecord = {}, timeoutMs = this.requestTimeoutMs): Promise<JsonRecord> {
     this.#assertOpen();
     const boundedTimeoutMs = positiveInteger(timeoutMs, this.requestTimeoutMs, 'timeoutMs');
     const id = this.#nextId++;
-    const message = { jsonrpc: '2.0', id, method, params };
+    const wireParams = this.#protocolEra === 'modern' && method !== 'initialize'
+      ? withModernRequestMeta(params, this.#clientProtocolOptions)
+      : params;
+    const message = { jsonrpc: '2.0', id, method, params: wireParams };
     return new Promise<JsonRecord>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.#pending.delete(id);
@@ -111,6 +151,7 @@ export class McpProcessClient {
 
   notify(method: string, params: JsonRecord = {}): void {
     this.#assertOpen();
+    if (this.#protocolEra === 'modern') return;
     this.#write({ jsonrpc: '2.0', method, params });
   }
 
@@ -218,7 +259,12 @@ export class McpProcessClient {
       pending.reject(new Error(`mcp_request_failed:${pending.method}:${String(error.code ?? 'unknown')}:${String(error.message ?? 'unknown')}${this.#diagnosticSuffix()}`));
       return;
     }
-    pending.resolve(asRecord(message.result));
+    const result = asRecord(message.result);
+    if (this.#protocolEra === 'modern' && typeof result.resultType !== 'string') {
+      pending.reject(new Error(`mcp_modern_result_type_missing:${pending.method}`));
+      return;
+    }
+    pending.resolve(result);
   }
 
   #assertOpen(): void {

@@ -666,6 +666,9 @@ importers:
 
   packages/shared/mcp-e2e-harness:
     devDependencies:
+      '@narada-core/mcp-protocol':
+        specifier: workspace:*
+        version: link:../mcp-protocol
       '@types/node':
         specifier: ^22.15.3
         version: 22.19.19
@@ -699,7 +702,20 @@ importers:
         specifier: ^5.8.3
         version: 5.9.3
 
+  packages/shared/mcp-protocol:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.15.3
+        version: 22.19.19
+      typescript:
+        specifier: ^5.8.3
+        version: 5.9.3
+
   packages/shared/mcp-runtime-client:
+    dependencies:
+      '@narada-core/mcp-protocol':
+        specifier: workspace:*
+        version: link:../mcp-protocol
     devDependencies:
       '@types/node':
         specifier: ^22.15.3
@@ -768,6 +784,8 @@ importers:
         specifier: ^5.8.3
         version: 5.9.3
 
+  packages/shared/mcp-surfaces-native: {}
+
   packages/shared/mcp-telemetry:
     devDependencies:
       '@types/node':
@@ -779,6 +797,9 @@ importers:
 
   packages/shared/mcp-transport:
     dependencies:
+      '@narada-core/mcp-protocol':
+        specifier: workspace:*
+        version: link:../mcp-protocol
       zod:
         specifier: ^4.4.3
         version: 4.4.3

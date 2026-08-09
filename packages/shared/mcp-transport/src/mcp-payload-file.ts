@@ -654,17 +654,17 @@ export function buildOutputRefToolContent({
   if (isOutputLocator(value)) {
     const text = JSON.stringify(value);
     if (!fitsToolResponse(text, value)) throw new Error('output_locator_response_exceeds_transport_budget');
-    return { content: [assistantTextContent(text)], structuredContent: value, ...(isError ? { isError: true } : {}) };
+    return { resultType: 'complete', content: [assistantTextContent(text)], structuredContent: value, ...(isError ? { isError: true } : {}) };
   }
   if (isOutputShowResult(value)) {
     const text = JSON.stringify(value, null, 2);
     if (!fitsToolResponse(text, value)) throw new Error('output_page_response_exceeds_transport_budget');
-    return { content: [assistantTextContent(text)], structuredContent: value, ...(isError ? { isError: true } : {}) };
+    return { resultType: 'complete', content: [assistantTextContent(text)], structuredContent: value, ...(isError ? { isError: true } : {}) };
   }
 
   const fullText = presentationJson(value);
   if (fullText.length <= inlineLimit && fitsToolResponse(fullText, value)) {
-    return { content: [assistantTextContent(fullText)], structuredContent: value, ...(isError ? { isError: true } : {}) };
+    return { resultType: 'complete', content: [assistantTextContent(fullText)], structuredContent: value, ...(isError ? { isError: true } : {}) };
   }
 
   const payloadRef = typeof valueRecord.ref === 'string' && valueRecord.ref.startsWith('mcp_payload:') ? valueRecord.ref : null;
@@ -683,7 +683,7 @@ export function buildOutputRefToolContent({
     isError,
   });
   const contentText = fitInlineJson(envelope, inlineLimit);
-  return { content: [assistantTextContent(contentText)], structuredContent: envelope, ...(isError ? { isError: true } : {}) };
+  return { resultType: 'complete', content: [assistantTextContent(contentText)], structuredContent: envelope, ...(isError ? { isError: true } : {}) };
 }
 
 export function buildBoundedToolResult({
@@ -701,10 +701,10 @@ export function buildBoundedToolResult({
   const inlineLimit = normalizeBoundedOutputLimit(limit);
   const pageLimit = typeof outputPageLimit === 'number' ? outputPageLimit : DEFAULT_OUTPUT_SHOW_CHAR_LIMIT;
   if (isOutputShowResult(value) && fitsToolResponse(fullText, value)) {
-    return { content: [assistantTextContent(fullText)], structuredContent: value, ...(isError ? { isError: true } : {}) };
+    return { resultType: 'complete', content: [assistantTextContent(fullText)], structuredContent: value, ...(isError ? { isError: true } : {}) };
   }
   if (fullText.length <= inlineLimit && fitsToolResponse(fullText, value)) {
-    return { content: [assistantTextContent(fullText)], structuredContent: value, ...(isError ? { isError: true } : {}) };
+    return { resultType: 'complete', content: [assistantTextContent(fullText)], structuredContent: value, ...(isError ? { isError: true } : {}) };
   }
   return buildOutputRefToolContent({
     scope: transportScope,
