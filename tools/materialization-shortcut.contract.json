@@ -1,0 +1,14 @@
+{
+  "schema": "narada.materialization_shortcut_contract.v1",
+  "shortcut_file_name": "Narada - Materialize all carriers.lnk",
+  "script_relative_path": "tools/materialize-all-carriers.ps1",
+  "target": {
+    "preferred_relative_path": "{system_root}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    "fallback_command": "pwsh.exe"
+  },
+  "arguments_template": "-NoLogo -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"{script_path}\"",
+  "working_directory": "{repo_root}",
+  "window_style": 1,
+  "description": "Build mcp-surfaces and materialize all Narada carriers.",
+  "icon_template": "{system_root}\\System32\\shell32.dll,167"
+}
