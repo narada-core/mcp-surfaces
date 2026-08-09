@@ -1,5 +1,5 @@
 import { defineNativeSurface, type DefinedSurface, type McpToolDefinition } from '@narada-core/mcp-fabric-contracts';
-import { listTools } from './main.js';
+import { listAgentContextTools } from './tool-catalog.js';
 
 const READ_ONLY_TOOLS = [
   'agent_context_guidance', 'agent_context_doctor', 'agent_context_whoami',
@@ -9,8 +9,8 @@ const READ_ONLY_TOOLS = [
   'mcp_output_show',
 ] as const;
 
-const OCCUPANT_TOOLS = listTools('occupant') as McpToolDefinition[];
-const ADMIN_TOOLS = listTools('admin') as McpToolDefinition[];
+const OCCUPANT_TOOLS = listAgentContextTools('occupant') as McpToolDefinition[];
+const ADMIN_TOOLS = listAgentContextTools('admin') as McpToolDefinition[];
 const FORWARDED_ENV = [
   'NARADA_AGENT_CONTEXT_DB',
   'NARADA_AGENT_ID',

@@ -1,12 +1,22 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { assertLiveToolsConform } from '@narada-core/mcp-fabric-contracts';
 import { nativeSurfaceDescriptor, SURFACES } from '../src/main.js';
 
-const REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
+function findRepositoryRoot(start: string): string {
+  let current = resolve(start);
+  while (true) {
+    if (existsSync(resolve(current, 'pnpm-workspace.yaml'))) return current;
+    const parent = dirname(current);
+    if (parent === current) throw new Error('mcp_fabric_test_repository_root_not_found');
+    current = parent;
+  }
+}
+
+const REPOSITORY_ROOT = findRepositoryRoot(dirname(fileURLToPath(import.meta.url)));
 const MCP_SURFACES_ROOT = resolve(REPOSITORY_ROOT, 'packages').replace(/\\/g, '/');
 
 test('every registered surface is backed by a package-owned native descriptor', () => {
@@ -16,10 +26,12 @@ test('every registered surface is backed by a package-owned native descriptor', 
     assert.equal(descriptor.source, 'native', surface.id);
     assert.equal(descriptor.surface_id, surface.id);
     assert.equal(descriptor.package, '@narada-core/' + surface.package);
+    const defaultProjection = descriptor.projections.find((projection) => projection.id === 'default')
+      ?? descriptor.projections[0];
     assert.deepEqual(
-      descriptor.tools.map((tool) => tool.name),
+      defaultProjection?.exposed_tools ?? descriptor.tools.map((tool) => tool.name),
       surface.tools,
-      'native tool registry changed for ' + surface.id,
+      'native default projection changed for ' + surface.id,
     );
     assertLiveToolsConform(descriptor, descriptor.tools.map((tool) => ({
       name: tool.name,

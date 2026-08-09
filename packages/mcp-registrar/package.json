@@ -30,7 +30,7 @@
     "test:kimi-contract": "pnpm -w build && pnpm run test:kimi-contract:run",
     "test:kimi-contract:node": "pnpm -w build && pnpm run test:kimi-contract:run:node",
     "test:kimi-live": "pnpm -w build && node dist/test/kimi-carrier-live-e2e.test.js",
-    "test:default-lifecycle": "pnpm build && node scripts/assert-native-lifecycle-default.mjs"
+    "test:default-lifecycle": "pnpm build && node --import tsx scripts/assert-native-lifecycle-default.ts"
   },
   "dependencies": {
     "@narada-core/sqlite": "workspace:*",

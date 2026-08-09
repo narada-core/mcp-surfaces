@@ -44,5 +44,5 @@
     { "path": "../shared/mcp-transport" },
     { "path": "../shared/mcp-e2e-harness" }
   ],
-  "include": ["src/**/*.ts", "test/**/*.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts"]
 }

@@ -1,0 +1,25 @@
+{
+  "name": "@narada-core/mcp-protocol",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Shared dual-era Model Context Protocol negotiation and result helpers.",
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty false",
+    "test": "pnpm run test:node",
+    "test:node": "pnpm build && node --test dist/test/mcp-protocol.test.js"
+  },
+  "types": "./dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "default": "./dist/src/index.js"
+    }
+  },
+  "files": ["dist/", "README.md"],
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "typescript": "^5.8.3"
+  }
+}

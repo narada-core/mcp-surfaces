@@ -478,6 +478,24 @@ function loaderRuntimeFreshness(): JsonRecord {
   });
 }
 
+export function assertLoaderRuntimeFreshnessCurrent(freshness: JsonRecord, operation: string): JsonRecord {
+  const status = freshness.status;
+  if (status === 'current') return freshness;
+  throw diagnosticError('loader_runtime_not_current', `loader_runtime_not_current:${String(status ?? 'unknown')}`, {
+    operation,
+    spawn_permitted: false,
+    child_spawned: false,
+    failure_class: status === 'stale' ? 'stale_runtime_evidence' : 'runtime_freshness_unknown',
+    runtime_freshness: freshness,
+    remediation: 'Regenerate/build the loader runtime and restart the loader process through its carrier or runtime supervisor before retrying.',
+    recovery_action: freshness.reload_action ?? null,
+  });
+}
+
+function assertLoaderRuntimeCurrentForSpawn(operation: string): JsonRecord {
+  return assertLoaderRuntimeFreshnessCurrent(loaderRuntimeFreshness(), operation);
+}
+
 type LoaderPolicy = {
   allowedSiteRoots: string[];
   allowedEntrypointPrefixes: string[];
@@ -628,6 +646,7 @@ export function listTools() {
     tool('mcp_loader_policy_inspect', 'Inspect the policy governing runtime MCP surface loading.', {}, [], { readOnly: true }),
     tool('mcp_loader_connection_inventory', 'List attached loader connections, including liveness, age, explicit loader-managed restartability, capacity, and bounded recovery actions for stale children.', {}, [], { readOnly: true }),
     tool('mcp_loader_process_ownership', 'Inspect process ownership for children spawned by this loader run. This is a read-only reconciliation view: it reports loader-owned direct children and safe cleanup actions, but never enumerates or terminates unrelated host processes or conhost descendants.', {}, [], { readOnly: true }),
+    tool('mcp_loader_topology_diagnostics', 'Explain the MCP tool/surface/proxy/loader/session-instance topology and aggregate bounded counts, memory evidence, duplicate detection, and shared-mode admission posture for this loader run.', {}, [], { readOnly: true }),
     tool('mcp_loader_runtime_observation', 'Return the normalized V2 runtime observation for one attached surface, including stable logical identity, generation state, lifecycle eligibility, contract digests, and bounded actuator guidance.', {
       connection_id: { type: 'string', description: 'Connection id returned by mcp_loader_attach_surface.' },
       carrier_kind: { type: 'string', description: 'Carrier kind producing the observation, such as codex, kimi, or opencode.' },
@@ -713,6 +732,8 @@ async function callTool(params: JsonRecord, state: LoaderState): Promise<JsonRec
       return connectionInventory(state);
     case 'mcp_loader_process_ownership':
       return processOwnership(state);
+    case 'mcp_loader_topology_diagnostics':
+      return mcpLoaderTopologyDiagnostics(state);
     case 'mcp_loader_runtime_observation':
       return runtimeObservation(args, state);
     case 'mcp_loader_list_site_surfaces':
@@ -840,6 +861,92 @@ function processOwnership(state: LoaderState): JsonRecord {
   };
 }
 
+function mcpLoaderTopologyDiagnostics(state: LoaderState): JsonRecord {
+  const connections = [...state.connections.values()];
+  const sessionId = optionalString(process.env.NARADA_CARRIER_SESSION_ID) ?? 'session:unknown';
+  const countBy = (values: string[]): JsonRecord => values.reduce<JsonRecord>((counts, value) => {
+    counts[value] = Number(counts[value] ?? 0) + 1;
+    return counts;
+  }, {});
+  const liveConnections = connections.filter((connection) => isConnectionLive(connection));
+  const instanceKeys = connections.map((connection) => `${normalizePath(connection.siteRoot)}|${connection.surfaceId}|${sessionId}`);
+  const duplicateInstanceKeys = duplicateStrings(instanceKeys);
+  const orphanedConnectionIds = connections
+    .filter((connection) => !isConnectionLive(connection) && !connection.detached)
+    .map((connection) => connection.connectionId);
+  const memory = process.memoryUsage();
+  const bySurface = countBy(connections.map((connection) => connection.surfaceId));
+  const bySession = countBy(connections.map(() => sessionId));
+  const byOwner = countBy(connections.map((connection) => `mcp-loader/${connection.ownerRunId}`));
+  const byProxy = countBy(connections.map(() => 'mcp-loader'));
+  const childMemory = connections.map((connection) => ({
+    connection_id: connection.connectionId,
+    surface_id: connection.surfaceId,
+    owner_id: `loader-child-${connection.connectionId}`,
+    memory_status: 'not_available_from_loader',
+    rss_bytes: null,
+    heap_used_bytes: null,
+  }));
+  return {
+    schema: 'narada.mcp_loader.topology_diagnostics.v1',
+    status: duplicateInstanceKeys.length > 0 || orphanedConnectionIds.length > 0 ? 'attention' : 'ok',
+    generated_at: new Date().toISOString(),
+    vocabulary: {
+      tool: 'A named MCP operation exposed by one surface.',
+      surface: 'A server boundary exposing one or more MCP tools.',
+      runtime_proxy: 'A carrier-owned process boundary that may host or supervise a loader; it is not a tool.',
+      loader: 'The policy-gated process that attaches and proxies child surfaces.',
+      session_instance: 'One loader-owned surface child for a Site/session projection.',
+    },
+    topology: {
+      transport: 'stdio',
+      instance_scope: 'per_loader_session_surface',
+      loader_run_id: LOADER_RUN_ID,
+      loader_pid: LOADER_OWNER_PID,
+      carrier_session_id: sessionId === 'session:unknown' ? null : sessionId,
+      counts: {
+        loader_processes: 1,
+        child_processes: connections.length,
+        live_child_processes: liveConnections.length,
+        closed_child_processes: connections.length - liveConnections.length,
+      },
+      by_surface: bySurface,
+      by_proxy: byProxy,
+      by_session: bySession,
+      by_owner: byOwner,
+    },
+    diagnostics: {
+      duplicate_instance_keys: duplicateInstanceKeys,
+      orphaned_connection_ids: orphanedConnectionIds,
+      known_connection_ids: connections.map((connection) => connection.connectionId),
+      host_process_reconciliation: {
+        status: 'not_available',
+        reason: 'Loader authority is limited to its own direct children; host-wide proxy and conhost inspection belongs to the runtime supervisor.',
+        next_tool: 'runtime_introspection_memory_owners',
+      },
+    },
+    memory: {
+      measurement_status: 'loader_process_only',
+      loader_process: {
+        owner_id: `mcp-loader-${LOADER_OWNER_PID}`,
+        rss_bytes: memory.rss,
+        heap_used_bytes: memory.heapUsed,
+        external_bytes: memory.external,
+        array_buffers_bytes: memory.arrayBuffers,
+      },
+      children: childMemory,
+    },
+    consolidation: {
+      shared_mode: {
+        status: 'not_implemented',
+        default: false,
+        admission_requirements: ['authority and tenant isolation equivalence', 'session lifecycle ownership', 'failure containment', 'conformance tests before opt-in'],
+      },
+      recommendation: 'Keep per-session stdio isolation as the default until an independently tested shared mode proves equivalent authority and failure boundaries.',
+    },
+  };
+}
+
 function listSiteSurfaces(args: JsonRecord, state: LoaderState): JsonRecord {
   const siteRoot = normalizePath(requiredString(args.site_root, 'missing_site_root'));
   ensureSiteRootAllowed(siteRoot, state.policy);
@@ -932,6 +1039,7 @@ function siteFabricDiagnostics(args: JsonRecord, state: LoaderState): JsonRecord
 
 async function attachSurface(args: JsonRecord, state: LoaderState): Promise<JsonRecord> {
   const siteRoot = normalizePath(requiredString(args.site_root, 'missing_site_root'));
+  assertLoaderRuntimeCurrentForSpawn('mcp_loader_attach_surface');
   const surfaceId = requiredString(args.surface_id, 'missing_surface_id');
   const runtimeKind = optionalRuntimeKind(args.runtime_kind);
   ensureSiteRootAllowed(siteRoot, state.policy);
@@ -969,6 +1077,7 @@ async function attachSurface(args: JsonRecord, state: LoaderState): Promise<Json
   const launch = await resolveSurfaceEntrypoint(siteRoot, surfaceId, explicitEntrypoint, extraArgs);
   const { entrypoint, resolvedArgs } = launch;
   ensureEntrypointAllowed(siteRoot, entrypoint, state.policy);
+  assertSurfaceLaunchMetadata(launch.childInvocationKind, entrypoint, launch.runtimeCommand);
 
   if (!existsSync(entrypoint)) {
     throw diagnosticError('entrypoint_not_found', `entrypoint_not_found:${entrypoint}`);
@@ -1077,6 +1186,7 @@ async function openConnection(input: {
 }): Promise<ChildConnection> {
   const { state, siteRoot, surfaceId, runtimeKind, runtimeRequirements, runtimeCommand, entrypoint, resolvedArgs, childInvocationKind, requestedEntrypoint, extraArgs, logicalConnectionId, metadata } = input;
   const connectionId = randomUUID();
+  assertLoaderRuntimeCurrentForSpawn('mcp_loader_child_spawn');
   const stableLogicalConnectionId = logicalConnectionId ?? connectionId;
   const generationId = `generation-${randomUUID()}`;
   const attachedAt = new Date().toISOString();
@@ -1401,6 +1511,7 @@ async function detachConnection(args: JsonRecord, state: LoaderState): Promise<J
 
 async function restartConnection(args: JsonRecord, state: LoaderState): Promise<JsonRecord> {
   const connection = getConnection(args, state);
+  assertLoaderRuntimeCurrentForSpawn('mcp_loader_surface_restart');
   if (connection.lifecycle.mode !== 'replayable') {
     throw diagnosticError(
       'surface_restart_not_loader_replayable',
@@ -1459,8 +1570,20 @@ async function restartConnection(args: JsonRecord, state: LoaderState): Promise<
   };
 }
 
-type ChildInvocationKind = 'entrypoint' | 'native_entrypoint' | 'native_applet';
+export type ChildInvocationKind = 'entrypoint' | 'native_entrypoint' | 'native_applet';
 type ResolvedSurfaceLaunch = { runtimeCommand: string; entrypoint: string; resolvedArgs: string[]; childInvocationKind: ChildInvocationKind };
+
+export function assertSurfaceLaunchMetadata(childInvocationKind: ChildInvocationKind, entrypoint: string, runtimeCommand: string): void {
+  if (childInvocationKind !== 'entrypoint' || !/\.(?:exe|com|cmd|bat)$/i.test(entrypoint)) return;
+  throw diagnosticError('surface_native_invocation_metadata_missing', 'surface_native_invocation_metadata_missing', {
+    entrypoint,
+    runtime_command: runtimeCommand,
+    child_invocation_kind: childInvocationKind,
+    expected_invocation_kinds: ['native_entrypoint', 'native_applet'],
+    spawn_permitted: false,
+    remediation: 'Regenerate the registrar-owned Site fragment with --child-invocation-kind native_entrypoint or native_applet. A native executable must never be passed to a JavaScript runtime as an entrypoint.',
+  });
+}
 
 async function resolveSurfaceEntrypoint(siteRoot: string, surfaceId: string, explicitEntrypoint: string | null, extraArgs: string[] | null): Promise<ResolvedSurfaceLaunch> {
   if (explicitEntrypoint) {

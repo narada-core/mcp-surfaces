@@ -6,17 +6,18 @@
   "type": "module",
   "description": "Shared Rust authority and native MCP adapters for task and work lifecycle surfaces.",
   "scripts": {
-    "build": "pnpm run build:native",
-    "build:native": "node scripts/build-native.mjs",
+    "build": "tsc -b && pnpm run build:native",
+    "build:native": "node --import tsx scripts/build-native.ts",
     "build:postcompile": "pnpm run build:native",
-    "test:parity": "node --import tsx scripts/check-parity.mjs",
-    "test:cross-runtime": "node scripts/cross-runtime-parity.mjs",
-    "test:smoke": "node scripts/smoke-native.mjs",
-    "test:migration": "node scripts/migration-native.mjs",
-    "test:refusal": "node scripts/refusal-native.mjs",
-    "test:restart": "node scripts/restart-native.mjs",
-    "test:not-ready": "node scripts/not-ready-native.mjs",
-    "benchmark:native": "node scripts/benchmark-native.mjs"
+    "typecheck": "tsc -b --pretty false",
+    "test:parity": "node --import tsx scripts/check-parity.ts",
+    "test:cross-runtime": "node --import tsx scripts/cross-runtime-parity.ts",
+    "test:smoke": "node --import tsx scripts/smoke-native.ts",
+    "test:migration": "node --import tsx scripts/migration-native.ts",
+    "test:refusal": "node --import tsx scripts/refusal-native.ts",
+    "test:restart": "node --import tsx scripts/restart-native.ts",
+    "test:not-ready": "node --import tsx scripts/not-ready-native.ts",
+    "benchmark:native": "node --import tsx scripts/benchmark-native.ts"
   },
   "naradaRuntimeArtifacts": {
     "win32": [

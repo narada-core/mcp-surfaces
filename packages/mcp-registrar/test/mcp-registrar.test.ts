@@ -2,15 +2,25 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from '@narada-core/sqlite';
 import { resolveNativeArtifact } from '@narada-core/mcp-runtime-proxy/native-artifact';
 import { payloadCreate } from '@narada-core/mcp-transport';
 import { buildGuidanceResult } from '../src/guidance.js';
-import { appendLoaderAllowedSiteRoots, buildSiteBindConfig, buildSiteSurfaceRegistry, checkOutputReaderClosureForRegistry, checkSiteRegistryConformance, checkSiteRegistryConformanceFromObservation, compareCarrierProjection, createServerState, defaultRuntimeProxyImplementation, defaultSurfaceImplementation, handleRequest, parseArgs, readCodexPluginOverrides, readSiteSurfaceOverrides, sharedSurfaceIdsForBinding, siteBindSidecarRefusal, siteSurfaceServerKey, validateSiteMcpFabric, validateSiteToolInventoryObservation } from '../src/main.js';
+import { appendLoaderAllowedSiteRoots, buildSiteBindConfig, buildSiteSurfaceRegistry, checkOutputReaderClosureForRegistry, checkSiteRegistryConformance, checkSiteRegistryConformanceFromObservation, compareCarrierProjection, createServerState, defaultRuntimeProxyImplementation, defaultSurfaceImplementation, handleRequest, parseArgs, readCodexPluginOverrides, readSiteSurfaceOverrides, refreshRegistrarOwnedSiteFabric, sharedSurfaceIdsForBinding, siteBindSidecarRefusal, siteSurfaceServerKey, transactionalWriteFiles, validateSiteMcpFabric, validateSiteToolInventoryObservation } from '../src/main.js';
 
-const workspaceRoot = fileURLToPath(new URL('../../../../', import.meta.url));
+function findWorkspaceRoot(start: string): string {
+  let current = resolve(start);
+  while (true) {
+    if (existsSync(resolve(current, 'pnpm-workspace.yaml'))) return current;
+    const parent = resolve(current, '..');
+    if (parent === current) throw new Error('mcp_registrar_test_workspace_root_not_found');
+    current = parent;
+  }
+}
+
+const workspaceRoot = findWorkspaceRoot(fileURLToPath(new URL('.', import.meta.url)));
 const portableWorkspaceRoot = workspaceRoot.replace(/\\/g, '/').replace(/\/$/, '');
 const workspacePath = (...segments: string[]): string => join(workspaceRoot, ...segments).replace(/\\/g, '/');
 const expectedUserSiteRoot = resolve(
@@ -50,6 +60,20 @@ assert.equal(defaultSurfaceImplementation('local-filesystem', ['--mode', 'write'
 assert.equal(defaultSurfaceImplementation('local-filesystem', ['--mode', 'read'], false), 'js');
 assert.equal(defaultSurfaceImplementation('mcp-loader', ['--mode', 'read'], true), undefined);
 const root: any = mkdtempSync(join(tmpdir(), 'mcp-registrar-behavior-'));
+const transactionalRoot = join(root, 'transactional-write');
+const transactionalExisting = join(transactionalRoot, 'existing.txt');
+const transactionalBlockingPath = join(transactionalRoot, 'blocking');
+mkdirSync(transactionalRoot, { recursive: true });
+writeFileSync(transactionalExisting, 'before', 'utf8');
+mkdirSync(transactionalBlockingPath, { recursive: true });
+assert.throws(
+  () => transactionalWriteFiles([
+    { path: transactionalExisting, content: 'after' },
+    { path: transactionalBlockingPath, content: 'must-not-commit' },
+  ]),
+  (error: any) => error?.codeName === 'registrar_materialization_transaction_rolled_back',
+);
+assert.equal(readFileSync(transactionalExisting, 'utf8'), 'before');
 const siteOverrideConfig = join(root, 'site-overrides.json');
 writeFileSync(siteOverrideConfig, JSON.stringify({ surface_overrides: { 'task-lifecycle': { enabled: false } } }), 'utf8');
 assert.deepEqual(readSiteSurfaceOverrides(siteOverrideConfig), { 'task-lifecycle': { enabled: false } });
@@ -164,14 +188,24 @@ try {
   }
   function assertRuntimeProxy(server: Record<string, any>, childEntrypoint: string, runtime = 'bun', proxyImplementation = nativeRuntimeArtifactAvailable ? 'native' : 'bun'): void {
     const args: any = server.args as string[];
+    const assertRuntimeExecutable = (value: string, expectedRuntime: string): void => {
+      assert.equal(isAbsolute(value), true, `expected absolute ${expectedRuntime} executable, received ${value}`);
+      assert.equal(
+        basename(value).replace(/\.exe$/i, ''),
+        expectedRuntime,
+        `expected ${expectedRuntime} runtime executable, received ${value}`,
+      );
+    };
     if (proxyImplementation === 'native') {
       assert.match(String(server.command).replace(/\\/g, '/'), /packages\/shared\/mcp-runtime-proxy\/dist\/native\/(?:versions\/[^/]+\/)?narada-mcp-runtime\.exe$/i);
       assert.equal(args[0], 'proxy');
-      assert.equal(args[args.indexOf('--child-command') + 1], runtime);
+      assertRuntimeExecutable(args[args.indexOf('--child-command') + 1], runtime);
     } else {
-      assert.equal(server.command, proxyImplementation);
+      assertRuntimeExecutable(String(server.command), proxyImplementation);
       assert.match(args[0].replace(/\\/g, '/'), /packages\/shared\/mcp-runtime-proxy\/dist\/src\/main\.js$/);
     }
+    const registrarCommandIndex = args.indexOf('--registrar-command');
+    if (registrarCommandIndex >= 0) assert.equal(isAbsolute(args[registrarCommandIndex + 1]), true);
     assert.equal(args[args.indexOf('--entrypoint') + 1].replace(/\\/g, '/'), childEntrypoint.replace(/\\/g, '/'));
     assert.ok(args.includes('--'));
   }
@@ -287,11 +321,26 @@ try {
     'NARADA_CARRIER_SESSION_ACTIVATION_RECEIPT',
     'NARADA_CARRIER_SESSION_ADMISSION_RECEIPT',
     'NARADA_CARRIER_SESSION_ID',
+    'NARADA_ORIENTATION_BRIEF',
+    'NARADA_ORIENTATION_DELIVERY_RECEIPT',
+    'NARADA_ORIENTATION_ENTRY_FILE',
     'NARADA_ORIENTATION_MANIFEST_ID',
     'NARADA_SITE_ID',
     'NARADA_SITE_ROOT',
   ];
-  assert.deepEqual(agentContextSurface.env_vars, agentContextEnvironment);
+  assert.equal(agentContextSurface.env_vars, undefined);
+  const agentContextProjections: any[] = agentContextSurface.projections;
+  assert.deepEqual(
+    agentContextProjections.map((projection) => projection.id),
+    ['default', 'admin'],
+  );
+  assert.deepEqual(agentContextProjections[0].env_vars, agentContextEnvironment);
+  assert.deepEqual(agentContextProjections[1].env_vars, agentContextEnvironment);
+  assert.deepEqual(agentContextProjections[0].exposed_tools, [
+    'agent_orientation_read',
+    'mcp_output_show',
+  ]);
+  assert.ok(agentContextProjections[1].exposed_tools.includes('agent_context_checkpoint'));
   const narsSession: any = (surfaceData.items as Array<Record<string, any>>).find((s) => s.id === 'nars-session');
   assert.ok(narsSession);
   assert.equal(narsSession.injection_scope, undefined);
@@ -320,10 +369,46 @@ try {
     config_path: join(root, 'config.json'),
     surfaces: [],
   };
-  const agentContextBindConfig: any = buildSiteBindConfig(fixtureSite, agentContextSurface as any);
+  assert.throws(
+    () => buildSiteBindConfig(fixtureSite, agentContextSurface as any),
+    /registrar_surface_projection_required:agent-context/,
+  );
+  const agentContextBindConfig: any = buildSiteBindConfig(
+    fixtureSite,
+    agentContextSurface as any,
+    'default',
+  );
   const agentContextBoundServer: any = (agentContextBindConfig.config.mcpServers as Record<string, any>)[agentContextBindConfig.serverKey];
   assertRuntimeProxy(agentContextBoundServer, agentContextSurface.entrypoint, 'bun');
   assert.deepEqual(agentContextBoundServer.env_vars, agentContextEnvironment);
+  assert.deepEqual(agentContextBoundServer.tools, [
+    'agent_orientation_read',
+    'mcp_output_show',
+  ]);
+  const refreshSiteRoot = join(root, 'registrar-owned-refresh-site');
+  const refreshSite: any = { site_id: 'fixture-site', root: refreshSiteRoot, config_path: join(refreshSiteRoot, 'site.json'), surfaces: [] };
+  const staleBindConfig: any = buildSiteBindConfig(
+    refreshSite,
+    agentContextSurface as any,
+    'default',
+  );
+  const staleServer: any = staleBindConfig.config.mcpServers[staleBindConfig.serverKey];
+  const staleChildCommandIndex = staleServer.args.indexOf('--child-command');
+  staleBindConfig.config.custom_metadata = { preserved: 'top-level' };
+  staleServer.custom_metadata = { preserved: 'server-level' };
+  staleServer.args[staleChildCommandIndex + 1] = 'bun';
+  if (/bun(?:\.exe)?$/i.test(String(staleServer.command))) staleServer.command = 'bun';
+  mkdirSync(join(refreshSiteRoot, '.ai', 'mcp'), { recursive: true });
+  writeFileSync(join(refreshSiteRoot, '.ai', 'mcp', staleBindConfig.fileName), JSON.stringify(staleBindConfig.config, null, 2) + '\n', 'utf8');
+  const refreshResult: any = refreshRegistrarOwnedSiteFabric(refreshSite);
+  assert.equal(refreshResult.status, 'refreshed');
+  assert.equal(refreshResult.refreshed_count, 1);
+  const refreshedConfig: any = JSON.parse(readFileSync(join(refreshSiteRoot, '.ai', 'mcp', staleBindConfig.fileName), 'utf8'));
+  assert.deepEqual(refreshedConfig.custom_metadata, { preserved: 'top-level' });
+  assert.deepEqual(refreshedConfig.mcpServers[staleBindConfig.serverKey].custom_metadata, { preserved: 'server-level' });
+  const idempotentRefresh: any = refreshRegistrarOwnedSiteFabric(refreshSite);
+  assert.equal(idempotentRefresh.refreshed_count, 0);
+  assert.equal(idempotentRefresh.unchanged_count, 1);
   assert.throws(
     () => buildSiteBindConfig(fixtureSite, narsSession as any),
     /registrar_surface_projection_required:nars-session/,
@@ -413,12 +498,12 @@ try {
   assert.ok((bySurface.get('worker-delegation')?.tools as string[]).includes('worker_cognition_defaults_update'));
   assert.equal((bySurface.get('worker-delegation')?.tools as string[]).includes('worker_output_show'), true);
   assert.ok((bySurface.get('delegated-task')?.tools as string[]).includes('delegated_task_result'));
-  assert.ok((bySurface.get('agent-context')?.tools as string[]).includes('agent_context_list_sessions'));
+  assert.equal((bySurface.get('agent-context')?.tools as string[]).includes('agent_context_list_sessions'), false);
+  assert.ok((bySurface.get('agent-context')?.tools as string[]).includes('agent_orientation_read'));
   assert.ok((bySurface.get('agent-context')?.tools as string[]).includes('mcp_output_show'));
   assert.equal((bySurface.get('agent-context')?.tools as string[]).includes('agent_context_output_show'), false);
   assert.deepEqual(bySurface.get('agent-context')?.output_reader_closure, {
-    agent_context_hydrate_current: 'mcp_output_show',
-    agent_context_startup_sequence: 'mcp_output_show',
+    agent_orientation_read: 'mcp_output_show',
   });
   assert.ok((bySurface.get('sop')?.tools as string[]).includes('sop_doctor'));
   assert.ok((bySurface.get('mcp-loader')?.tools as string[]).includes('mcp_loader_site_fabric_diagnostics'));
@@ -441,13 +526,13 @@ try {
   assert.ok(surfaceFeedback?.env_vars?.includes('NARADA_SURFACE_FEEDBACK_ROOT'));
   assert.equal(surfaceFeedback?.args.some((arg: any) => /D:\/code|C:\/Users\/Andrey/i.test(arg)), false);
 
-  const localFilesystemEntrypoint: any = fileURLToPath(new URL('../../../local-filesystem-mcp/dist/src/main.js', import.meta.url));
+  const localFilesystemEntrypoint: any = workspacePath('packages', 'local-filesystem-mcp', 'dist', 'src', 'main.js');
   const observedLocalFilesystemTools: any = await observeToolsList(localFilesystemEntrypoint, [
     '--mode', 'write',
     '--allowed-root', root,
     '--output-root', root,
   ]);
-  const mailboxEntrypoint: any = fileURLToPath(new URL('../../../mailbox-mcp/dist/src/main.js', import.meta.url));
+  const mailboxEntrypoint: any = workspacePath('packages', 'mailbox-mcp', 'dist', 'src', 'main.js');
   const observedMailboxTools: any = await observeToolsList(mailboxEntrypoint, ['--site-root', root]);
   const liveInventoryCheck: any = view(await call('registrar_surface_tool_inventory_check', {
     observed_tools: {
@@ -1389,7 +1474,8 @@ try {
   assert.equal(inboxRegistry.surface_type, 'mcp_surface');
   assert.equal(inboxRegistry.runtime_binding.runtime_kind, 'node-stdio');
   assert.equal(inboxRegistry.runtime_binding.owner_site_id, 'narada-sonar');
-  assert.equal(inboxRegistry.runtime_binding.transport.command, 'node');
+  assert.equal(isAbsolute(inboxRegistry.runtime_binding.transport.command), true);
+  assert.equal(basename(inboxRegistry.runtime_binding.transport.command).toLowerCase(), process.platform === 'win32' ? 'node.exe' : 'node');
   assert.deepEqual(inboxRegistry.runtime_binding.transport.args, [
     'C:/workspace/mcp-surfaces/packages/site-inbox-mcp/dist/src/main.js',
     '--site-root',

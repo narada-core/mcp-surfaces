@@ -546,11 +546,12 @@ const parseCheck = await rpc({
     arguments: { path: ps1Path, working_directory: root },
   },
 }, state);
-if (parseCheck.error?.data?.message && String(parseCheck.error.data.message).includes('spawn pwsh ENOENT')) {
-  assert.match(String(parseCheck.error.data.message), /spawn pwsh ENOENT/);
+const parsePayload = parseCheck.result.structuredContent;
+if (parsePayload.resolution_error_code === 'powershell_host_not_found') {
+  assert.equal(parsePayload.command_resolution.code, 'powershell_host_not_found');
 } else {
-  assert.equal(parseCheck.result.structuredContent.status, 'ok');
-  assert.equal(parseCheck.result.structuredContent.arbitrary_command_execution_admitted, false);
+  assert.equal(parsePayload.status, 'ok');
+  assert.equal(parsePayload.arbitrary_command_execution_admitted, false);
 }
 
 const longInlineScript = `${' '.repeat(318)}process.stdout.write('long-inline-ok')`;

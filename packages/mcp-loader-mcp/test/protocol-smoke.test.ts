@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { classifyLoaderRuntimeFreshness, createServerState } from '../src/main.js';
+import { assertLoaderRuntimeFreshnessCurrent, assertSurfaceLaunchMetadata, classifyLoaderRuntimeFreshness, createServerState } from '../src/main.js';
 import { runMcpProtocolSmoke, spawnJsonlMcpServer } from '@narada-core/mcp-e2e-harness';
 
 const root = mkdtempSync(join(tmpdir(), 'mcp-loader-mcp-protocol-'));
@@ -64,6 +64,16 @@ try {
   assert.ok((syntheticFreshness.reasons as string[]).includes('source_file_newer_than_runtime_file:mcp_transport'));
   assert.ok((syntheticFreshness.reasons as string[]).includes('config_file_newer_than_runtime_files:workspace_lockfile'));
   assert.equal((syntheticFreshness.reload_action as Record<string, unknown>).schema, 'narada.mcp_loader.supervisor_restart_action.v1');
+  assert.equal((assertLoaderRuntimeFreshnessCurrent({ status: 'current' }, 'test_current').status), 'current');
+  assert.throws(
+    () => assertLoaderRuntimeFreshnessCurrent(syntheticFreshness, 'test_stale'),
+    /loader_runtime_not_current:stale/,
+  );
+  assert.throws(
+    () => assertSurfaceLaunchMetadata('entrypoint', 'C:/native/narada-mcp-runtime.exe', 'node'),
+    /surface_native_invocation_metadata_missing/,
+  );
+  assert.doesNotThrow(() => assertSurfaceLaunchMetadata('native_entrypoint', 'C:/native/narada-mcp-runtime.exe', 'C:/native/narada-mcp-runtime.exe'));
   const protocol = await runMcpProtocolSmoke(server.client, { expectedServerName: 'mcp-loader-mcp' });
   const tools = protocol.tools.tools as { name: string; description: string; annotations: Record<string, unknown>; inputSchema: Record<string, any>; outputSchema: Record<string, any> }[];
   assert.deepEqual(tools.map((t) => t.name), [
@@ -72,6 +82,7 @@ try {
     'mcp_loader_policy_inspect',
     'mcp_loader_connection_inventory',
     'mcp_loader_process_ownership',
+    'mcp_loader_topology_diagnostics',
     'mcp_loader_runtime_observation',
     'mcp_loader_list_site_surfaces',
     'mcp_loader_site_fabric_diagnostics',
@@ -107,6 +118,9 @@ try {
 
   const processOwnershipTool = tools.find((t) => t.name === 'mcp_loader_process_ownership');
   assert.equal(processOwnershipTool?.annotations.readOnlyHint, true);
+
+  const topologyDiagnosticsTool = tools.find((t) => t.name === 'mcp_loader_topology_diagnostics');
+  assert.equal(topologyDiagnosticsTool?.annotations.readOnlyHint, true);
 
   const runtimeStatusTool = tools.find((t) => t.name === 'mcp_loader_runtime_status');
   assert.equal(runtimeStatusTool?.annotations.readOnlyHint, true);

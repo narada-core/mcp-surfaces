@@ -22,8 +22,8 @@
     "build": "tsc -b",
     "typecheck": "tsc -b --pretty false",
     "test": "pnpm run test:bun",
-    "test:bun": "pnpm build && bun dist/test/structured-command-mcp.test.js && bun dist/test/protocol-smoke.test.js && bun dist/test/site-fabric-command-e2e.test.js && bun dist/test/proxy-timeout-e2e.test.js",
-    "test:node": "pnpm build && node dist/test/structured-command-mcp.test.js && node dist/test/protocol-smoke.test.js && node dist/test/site-fabric-command-e2e.test.js && node dist/test/proxy-timeout-e2e.test.js"
+    "test:bun": "pnpm build && bun dist/test/command-resolution.test.js && bun dist/test/structured-command-mcp.test.js && bun dist/test/protocol-smoke.test.js && bun dist/test/site-fabric-command-e2e.test.js && bun dist/test/proxy-timeout-e2e.test.js",
+    "test:node": "pnpm build && node dist/test/command-resolution.test.js && node dist/test/structured-command-mcp.test.js && node dist/test/protocol-smoke.test.js && node dist/test/site-fabric-command-e2e.test.js && node dist/test/proxy-timeout-e2e.test.js"
   },
   "dependencies": {
     "@narada-core/mcp-fabric-contracts": "workspace:*",

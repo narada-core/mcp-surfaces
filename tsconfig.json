@@ -8,6 +8,12 @@
       "path": "./packages/shared/mcp-e2e-harness"
     },
     {
+      "path": "./packages/shared/mcp-protocol"
+    },
+    {
+      "path": "./packages/shared/mcp-lifecycle-native"
+    },
+    {
       "path": "./packages/shared/mcp-fabric-contracts"
     },
     {

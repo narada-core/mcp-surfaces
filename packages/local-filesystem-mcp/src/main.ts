@@ -517,12 +517,15 @@ export function listTools(mode: any) {
     },
     {
       name: 'fs_grep_search',
-      description: 'Search file contents under an allowed root using ripgrep. Use output_mode content for line-numbered matches; empty matches return ok with count 0.',
+      description: 'Search file contents under an allowed root using ripgrep. directory is canonical scope; path remains a compatibility alias. Use glob to constrain included files and ignore/exclude to constrain omitted files. Use output_mode content for line-numbered matches; empty matches return ok with count 0.',
       inputSchema: objectSchema({
-        pattern: { type: 'string' },
-        path: { type: 'string', default: '.', description: DIRECTORY_ARGUMENT_DESCRIPTION },
+        pattern: { type: 'string', description: 'Regular-expression search pattern.' },
+        directory: { type: 'string', description: DIRECTORY_ARGUMENT_DESCRIPTION },
+        path: { type: 'string', description: `Compatibility alias for directory; ${DIRECTORY_ARGUMENT_DESCRIPTION}` },
+        glob: { type: 'string', description: 'Optional ripgrep include glob applied within directory/path.' },
         output_mode: { type: 'string', enum: ['files_with_matches', 'count_matches', 'content'], default: 'files_with_matches' },
         ignore: { type: 'array', items: { type: 'string' }, description: 'Additional glob patterns to exclude. Defaults also exclude generated dependency/build/runtime directories.' },
+        exclude: { type: 'array', items: { type: 'string' }, description: 'Alias for additional glob patterns to exclude.' },
         offset: { type: 'integer', default: 0 },
         limit: { type: 'integer', default: 80 },
         timeout_ms: { type: 'integer', description: 'Optional search timeout in milliseconds.' },
@@ -1815,10 +1818,43 @@ function readSummary(value: any) {
   };
 }
 
+function resolveGrepSearchScope(args: any, state: any) {
+  const directory = stringOrNull(stringField(args, 'directory'));
+  const pathArgument = stringOrNull(stringField(args, 'path'));
+  if (directory && pathArgument) {
+    throw diagnosticError('grep_scope_ambiguous', 'grep_scope_ambiguous', {
+      operation: 'fs_grep_search',
+      directory,
+      path: pathArgument,
+      remediation: 'Pass exactly one of directory or path. directory is canonical; path remains a compatibility alias.',
+    });
+  }
+  const requestedPath = directory ?? pathArgument ?? '.';
+  const resolved = resolveAllowedToolPath(requestedPath, state.allowedRoots, { operation: 'fs_grep_search' });
+  const includeGlob = stringOrNull(stringField(args, 'glob'));
+  const excludedGlobs = [
+    ...DEFAULT_GREP_IGNORE_PATTERNS,
+    ...stringList(args.ignore),
+    ...stringList(args.exclude),
+  ];
+  return {
+    path: resolved.path,
+    root: resolved.root,
+    requested_path: requestedPath,
+    argument: directory ? 'directory' : pathArgument ? 'path' : 'default_allowed_root',
+    include_glob: includeGlob,
+    excluded_globs: excludedGlobs,
+    ripgrep_glob_args: [
+      ...(includeGlob ? ['-g', includeGlob] : []),
+      ...excludedGlobs.flatMap((ignore: any) => ['-g', negateGlob(ignore)]),
+    ],
+  };
+}
+
 function grepSearchTool(args: any, state: any) {
   const pattern = stringField(args, 'pattern');
   if (!pattern) throw diagnosticError('grep_requires_pattern', 'grep_requires_pattern');
-  const { path } = resolveAllowedToolPath(stringField(args, 'path') ?? '.', state.allowedRoots, { operation: 'fs_grep_search' });
+  const scope = resolveGrepSearchScope(args, state);
   const mode = stringField(args, 'output_mode') ?? 'files_with_matches';
   if (!['files_with_matches', 'count_matches', 'content'].includes(mode)) throw diagnosticError('grep_output_mode_unsupported', `grep_output_mode_unsupported: ${mode}`, { output_mode: mode });
   const offset = Math.max(0, integerField(args, 'offset') ?? 0);
@@ -1827,15 +1863,14 @@ function grepSearchTool(args: any, state: any) {
   const cachePolicy = searchCachePolicy(args);
   const snapshotId = stringField(args, 'snapshot_id');
   const modeArgs = mode === 'content' ? ['-n'] : mode === 'count_matches' ? ['-c'] : ['-l'];
-  const ignorePatterns = [...DEFAULT_GREP_IGNORE_PATTERNS, ...stringList(args.ignore)];
-  const freshness = searchFreshness(path);
-  return cappedSearchResult({ state, kind: 'grep', args: { ...args, output_mode: mode }, page: runRipgrepPage(['--field-match-separator', RIPGREP_FIELD_SEPARATOR, '--with-filename', ...modeArgs, ...ignorePatterns.flatMap((ignore: any) => ['-g', negateGlob(ignore)]), '--', pattern, path], { operation: 'fs_grep_search', noMatchStatus: 1, offset, limit, timeoutMs, freshness, cachePolicy, snapshotId, diagnosticError, env: state.env }), offset, limit, freshness, cachePolicy });
+  const freshness = searchFreshness(scope.path);
+  return cappedSearchResult({ state, kind: 'grep', args: { ...args, output_mode: mode, grep_scope: scope }, page: runRipgrepPage(['--field-match-separator', RIPGREP_FIELD_SEPARATOR, '--with-filename', ...modeArgs, ...scope.ripgrep_glob_args, '--', pattern, scope.path], { operation: 'fs_grep_search', noMatchStatus: 1, offset, limit, timeoutMs, freshness, cachePolicy, snapshotId, diagnosticError, env: state.env }), offset, limit, freshness, cachePolicy });
 }
 
 async function grepSearchToolAsync(args: any, state: any, context: any) {
   const pattern = stringField(args, 'pattern');
   if (!pattern) throw diagnosticError('grep_requires_pattern', 'grep_requires_pattern');
-  const { path } = resolveAllowedToolPath(stringField(args, 'path') ?? '.', state.allowedRoots, { operation: 'fs_grep_search' });
+  const scope = resolveGrepSearchScope(args, state);
   const mode = stringField(args, 'output_mode') ?? 'files_with_matches';
   if (!['files_with_matches', 'count_matches', 'content'].includes(mode)) throw diagnosticError('grep_output_mode_unsupported', `grep_output_mode_unsupported: ${mode}`, { output_mode: mode });
   const offset = Math.max(0, integerField(args, 'offset') ?? 0);
@@ -1844,10 +1879,9 @@ async function grepSearchToolAsync(args: any, state: any, context: any) {
   const cachePolicy = searchCachePolicy(args);
   const snapshotId = stringField(args, 'snapshot_id');
   const modeArgs = mode === 'content' ? ['-n'] : mode === 'count_matches' ? ['-c'] : ['-l'];
-  const ignorePatterns = [...DEFAULT_GREP_IGNORE_PATTERNS, ...stringList(args.ignore)];
-  const freshness = searchFreshness(path);
-  const page = await runRipgrepPageAsync(['--field-match-separator', RIPGREP_FIELD_SEPARATOR, '--with-filename', ...modeArgs, ...ignorePatterns.flatMap((ignore: any) => ['-g', negateGlob(ignore)]), '--', pattern, path], { operation: 'fs_grep_search', noMatchStatus: 1, offset, limit, timeoutMs, freshness, cachePolicy, snapshotId, diagnosticError, abortSignal: context.abortSignal, env: state.env });
-  return cappedSearchResult({ state, kind: 'grep', args: { ...args, output_mode: mode }, page, offset, limit, freshness, cachePolicy });
+  const freshness = searchFreshness(scope.path);
+  const page = await runRipgrepPageAsync(['--field-match-separator', RIPGREP_FIELD_SEPARATOR, '--with-filename', ...modeArgs, ...scope.ripgrep_glob_args, '--', pattern, scope.path], { operation: 'fs_grep_search', noMatchStatus: 1, offset, limit, timeoutMs, freshness, cachePolicy, snapshotId, diagnosticError, abortSignal: context.abortSignal, env: state.env });
+  return cappedSearchResult({ state, kind: 'grep', args: { ...args, output_mode: mode, grep_scope: scope }, page, offset, limit, freshness, cachePolicy });
 }
 
 function cappedSearchResult({ state, kind, args, page, offset, limit, freshness, cachePolicy }: any) {
@@ -1867,6 +1901,7 @@ function cappedSearchResult({ state, kind, args, page, offset, limit, freshness,
     schema: `local.filesystem.${kind}.v1`,
     status: 'ok',
     ...(kind === 'grep' ? { output_mode: stringField(args, 'output_mode') ?? 'files_with_matches' } : {}),
+    ...(kind === 'grep' ? { scope: args.grep_scope ?? null } : {}),
     offset,
     limit,
     count: page.count,

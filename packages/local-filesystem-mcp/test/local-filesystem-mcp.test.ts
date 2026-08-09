@@ -633,6 +633,26 @@ trust_level = "untrusted"
   assert.equal(grepContent.result.structuredContent.matches.some((match) => match.includes('needle one')), true);
   assert.equal(grepContent.result.structuredContent.match_objects.some((match) => Number(match.line) === 2 && String(match.text) === 'needle one'), true);
   assert.equal(grepContent.result.content[0].text.includes('needle one'), true);
+  const scopedGrep = call(readState, 213, 'fs_grep_search', {
+    directory: sourcePath,
+    glob: '*.ts',
+    pattern: 'classifierFalsePositive',
+    output_mode: 'content',
+    cache_policy: 'bypass',
+    limit: 10,
+  });
+  assert.ifError(scopedGrep.error);
+  assert.equal(scopedGrep.result.structuredContent.scope.argument, 'directory');
+  assert.equal(scopedGrep.result.structuredContent.scope.requested_path, sourcePath);
+  assert.equal(scopedGrep.result.structuredContent.scope.include_glob, '*.ts');
+  assert.equal(scopedGrep.result.structuredContent.returned, 1);
+  assert.match(scopedGrep.result.structuredContent.matches[0], /mcp-freshness-service\.ts/);
+  const ambiguousGrep = call(readState, 214, 'fs_grep_search', {
+    directory: trusted,
+    path: trusted,
+    pattern: 'needle',
+  });
+  assert.equal(ambiguousGrep.error.data.code, 'grep_scope_ambiguous');
   const defaultIgnoredGrep = call(readState, 211, 'fs_grep_search', { path: ignoredRoot, pattern: 'skip|keep|custom', output_mode: 'content', limit: 20 });
   assert.equal(defaultIgnoredGrep.result.structuredContent.returned, 2);
   assert.match(defaultIgnoredGrep.result.structuredContent.matches.join('\n'), /keep\.txt/);

@@ -14,6 +14,12 @@ import {
   decideStructuredCommandExecution,
   publicExecutionPolicy,
 } from './policy.js';
+import {
+  commandResolutionNotAttempted,
+  CommandResolutionError,
+  resolveCommandInvocation,
+  type CommandResolutionEvidence,
+} from './command-resolution.js';
 
 const PROTOCOL_VERSION = '2024-11-05';
 const TOOL_RESULT_CHAR_LIMIT = 4000;
@@ -63,6 +69,8 @@ type SpawnStructuredResult = {
   stderr: string;
   stdout_truncated: boolean;
   stderr_truncated: boolean;
+  command_resolution: CommandResolutionEvidence;
+  resolution_error_code: string | null;
 };
 
 type RequestContext = {
@@ -570,6 +578,8 @@ export async function executeStructuredCommand(args: unknown, state: StructuredC
       stderr_truncated: false,
       timed_out: false,
       cancelled: false,
+      command_resolution: commandResolutionNotAttempted(decision.command, 'background_runner_pending'),
+      resolution_error_code: null,
       input_ref: argsRecord.input_ref ?? null,
     };
     const executionRef = createStructuredCommandExecution(pendingPayload, state);
@@ -636,6 +646,8 @@ function startDetachedBackgroundRunner(request: BackgroundExecutionRequest, stat
         stderr_truncated: false,
         timed_out: false,
         cancelled: false,
+        command_resolution: commandResolutionNotAttempted(request.command, 'background_runner_spawn_failed'),
+        resolution_error_code: 'background_runner_spawn_failed',
       },
       startedAt: request.started_at,
       timeoutMs: request.timeout_ms,
@@ -676,6 +688,8 @@ export function buildStructuredCommandExecutionPayload({ decision, result, start
     stderr_truncated: result.stderr_truncated,
     timed_out: result.timed_out,
     cancelled: result.cancelled,
+    command_resolution: result.command_resolution,
+    resolution_error_code: result.resolution_error_code,
     input_ref: inputRef,
   };
 }
@@ -747,9 +761,10 @@ async function powershellParseCheck(args: Record<string, unknown>, state: Struct
     stdout: result.stdout,
     stderr: result.stderr,
     stdout_truncated: result.stdout_truncated,
-    stderr_truncated: result.stderr_truncated,
-    timed_out: result.timed_out,
     cancelled: result.cancelled,
+    command_resolution: result.command_resolution,
+    resolution_error_code: result.resolution_error_code,
+    timed_out: result.timed_out,
     arbitrary_command_execution_admitted: false,
     parser_api: 'System.Management.Automation.Language.Parser.ParseFile',
   };
@@ -758,20 +773,40 @@ async function powershellParseCheck(args: Record<string, unknown>, state: Struct
 }
 
 export function spawnStructured(command: string, args: string[], { cwd, timeoutMs, maxOutputBytes, env, abortSignal }: SpawnStructuredOptions): Promise<SpawnStructuredResult> {
-  return new Promise((resolvePromise: any) => {
-    if (abortSignal?.aborted) {
-      resolvePromise({
-        exit_code: null,
-        stdout: '',
-        stderr: '',
-        stdout_truncated: false,
-        stderr_truncated: false,
-        timed_out: false,
-        cancelled: true,
-      });
-      return;
-    }
-    const child = spawn(command, args, {
+  if (abortSignal?.aborted) {
+    return Promise.resolve({
+      exit_code: null,
+      stdout: '',
+      stderr: '',
+      stdout_truncated: false,
+      stderr_truncated: false,
+      timed_out: false,
+      cancelled: true,
+      command_resolution: commandResolutionNotAttempted(command, 'request_cancelled_before_spawn'),
+      resolution_error_code: null,
+    });
+  }
+
+  let invocation: ReturnType<typeof resolveCommandInvocation>;
+  try {
+    invocation = resolveCommandInvocation(command, args, { cwd, env });
+  } catch (error) {
+    if (!(error instanceof CommandResolutionError)) return Promise.reject(error);
+    return Promise.resolve({
+      exit_code: null,
+      stdout: '',
+      stderr: `${error.codeName}:${error.message}`,
+      stdout_truncated: false,
+      stderr_truncated: false,
+      timed_out: false,
+      cancelled: false,
+      command_resolution: error.evidence,
+      resolution_error_code: error.codeName,
+    });
+  }
+
+  return new Promise<SpawnStructuredResult>((resolvePromise) => {
+    const child = spawn(invocation.command, invocation.args, {
       cwd,
       shell: false,
       windowsHide: true,
@@ -820,14 +855,16 @@ export function spawnStructured(command: string, args: string[], { cwd, timeoutM
       settled = true;
       clearTimeout(timer);
       abortSignal?.removeEventListener('abort', abortHandler);
-      const result = {
+      const result: SpawnStructuredResult = {
         exit_code: null,
         stdout,
-        stderr: `${stderr}${stderr ? '\n' : ''}${error.message}`,
+        stderr: `${stderr}${stderr ? '\\n' : ''}${error.message}`,
         stdout_truncated: stdoutTruncated,
         stderr_truncated: stderrTruncated,
         timed_out: timedOut,
         cancelled,
+        command_resolution: invocation.evidence,
+        resolution_error_code: 'spawn_error',
       };
       void (terminationPromise ?? Promise.resolve()).then(() => resolvePromise(result));
     });
@@ -836,7 +873,7 @@ export function spawnStructured(command: string, args: string[], { cwd, timeoutM
       settled = true;
       clearTimeout(timer);
       abortSignal?.removeEventListener('abort', abortHandler);
-      const result = {
+      const result: SpawnStructuredResult = {
         exit_code: code,
         stdout,
         stderr,
@@ -844,12 +881,13 @@ export function spawnStructured(command: string, args: string[], { cwd, timeoutM
         stderr_truncated: stderrTruncated,
         timed_out: timedOut,
         cancelled,
+        command_resolution: invocation.evidence,
+        resolution_error_code: null,
       };
       void (terminationPromise ?? Promise.resolve()).then(() => resolvePromise(result));
     });
   });
 }
-
 // Bounded grace between process-group SIGTERM and the SIGKILL escalation for
 // descendants that ignore SIGTERM (POSIX only; Windows uses taskkill /T /F).
 const POSIX_KILL_GRACE_MS = 1_000;
@@ -1007,6 +1045,8 @@ export async function executeStructuredCommandElevatedWindow(args: any, state: a
     broker_exit_code: result.exit_code,
     broker_stdout: result.stdout,
     broker_stderr: result.stderr,
+    command_resolution: result.command_resolution,
+    resolution_error_code: result.resolution_error_code,
     command: decision.command,
     args: decision.args,
     working_directory: decision.working_directory,
