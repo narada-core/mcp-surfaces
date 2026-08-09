@@ -1,5 +1,6 @@
 #[allow(dead_code)]
 mod filesystem;
+mod protocol;
 mod rhai_filesystem;
 
 use std::env;

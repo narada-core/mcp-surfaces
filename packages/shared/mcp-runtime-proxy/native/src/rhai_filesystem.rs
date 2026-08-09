@@ -1,4 +1,5 @@
 use crate::filesystem;
+use crate::protocol;
 use rhai::{Engine, Scope};
 use serde_json::{json, Value};
 use std::io::{self, BufReader, Write};
@@ -21,6 +22,7 @@ fn route(method, tool, args_json) {
 pub fn run(args: &[String]) -> Result<(), String> {
     let state = filesystem::parse_state_for_rhai(args)?;
     let mode = filesystem::mode_for_rhai(&state).to_string();
+    let server_name = format!("local-filesystem-{mode}-rhai");
     let shared_state = Arc::new(Mutex::new(state));
     let mut engine = Engine::new();
     let host_state = Arc::clone(&shared_state);
@@ -60,7 +62,14 @@ pub fn run(args: &[String]) -> Result<(), String> {
         if request.get("id").is_none() {
             continue;
         }
+        if let Some(response) = protocol::preflight_response(&request, &server_name) {
+            filesystem::write_message(&mut writer, &response, framed)
+                .map_err(|error| error.to_string())?;
+            writer.flush().map_err(|error| error.to_string())?;
+            continue;
+        }
         let response = dispatch(&engine, &mut scope, &ast, &request, &mode)?;
+        let response = protocol::modernize_response(&request, response, &server_name);
         filesystem::write_message(&mut writer, &response, framed)
             .map_err(|error| error.to_string())?;
         writer.flush().map_err(|error| error.to_string())?;

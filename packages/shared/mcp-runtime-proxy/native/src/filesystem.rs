@@ -1,3 +1,4 @@
+use crate::protocol;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -89,6 +90,7 @@ impl FsError {
 
 pub fn run(args: &[String]) -> Result<(), String> {
     let mut state = parse_state(args)?;
+    let server_name = format!("local-filesystem-{}-native", state.mode);
     let stdin = io::stdin();
     let mut reader = BufReader::new(stdin.lock());
     let stdout = io::stdout();
@@ -97,7 +99,16 @@ pub fn run(args: &[String]) -> Result<(), String> {
         let Some((request, framed)) = read_message(&mut reader).map_err(|e| e.to_string())? else {
             break;
         };
+        if request.get("id").is_none() {
+            continue;
+        }
+        if let Some(response) = protocol::preflight_response(&request, &server_name) {
+            write_message(&mut writer, &response, framed).map_err(|e| e.to_string())?;
+            writer.flush().map_err(|e| e.to_string())?;
+            continue;
+        }
         if let Some(response) = handle_request(&mut state, &request) {
+            let response = protocol::modernize_response(&request, response, &server_name);
             write_message(&mut writer, &response, framed).map_err(|e| e.to_string())?;
             writer.flush().map_err(|e| e.to_string())?;
         }
