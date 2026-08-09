@@ -27,6 +27,7 @@ macro_rules! json_object {
 }
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
+const MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
 const SERVER_NAME: &str = "mcp-loader-mcp";
 const SERVER_VERSION: &str = "0.1.0";
 const DEFAULT_MAX_CONNECTIONS: usize = 8;
@@ -831,15 +832,116 @@ fn build_policy(options: &Options, surface_root: &str, workspace_root: &str) -> 
     }
 }
 
+fn is_modern_request(params: &Value) -> bool {
+    params
+        .get("_meta")
+        .and_then(Value::as_object)
+        .and_then(|meta| meta.get("io.modelcontextprotocol/protocolVersion"))
+        .and_then(Value::as_str)
+        == Some(MODERN_PROTOCOL_VERSION)
+}
+
+fn validate_modern_request(params: &Value) -> Result<(), Diagnostic> {
+    let meta = params
+        .get("_meta")
+        .and_then(Value::as_object)
+        .ok_or_else(|| Diagnostic::new("modern_metadata_required", "modern_metadata_required"))?;
+    if meta
+        .get("io.modelcontextprotocol/clientInfo")
+        .and_then(Value::as_object)
+        .is_none()
+    {
+        return Err(Diagnostic::new(
+            "modern_metadata_required",
+            "modern_metadata_required:clientInfo",
+        ));
+    }
+    if meta
+        .get("io.modelcontextprotocol/clientCapabilities")
+        .and_then(Value::as_object)
+        .is_none()
+    {
+        return Err(Diagnostic::new(
+            "modern_metadata_required",
+            "modern_metadata_required:clientCapabilities",
+        ));
+    }
+    Ok(())
+}
+
+fn modern_request_params() -> Value {
+    json!({
+        "_meta": {
+            "io.modelcontextprotocol/protocolVersion": MODERN_PROTOCOL_VERSION,
+            "io.modelcontextprotocol/clientInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
+            "io.modelcontextprotocol/clientCapabilities": {}
+        }
+    })
+}
+
+fn modernize_result(value: Value, method: &str) -> Value {
+    let mut result = value.as_object().cloned().unwrap_or_default();
+    result.insert("resultType".to_string(), json!("complete"));
+    if matches!(method, "tools/list" | "resources/list" | "resources/read") {
+        result.entry("ttlMs".to_string()).or_insert(json!(300_000));
+        result.entry("cacheScope".to_string()).or_insert(json!("public"));
+    }
+    let mut meta = result
+        .remove("_meta")
+        .and_then(|entry| entry.as_object().cloned())
+        .unwrap_or_default();
+    meta.insert(
+        "io.modelcontextprotocol/serverInfo".to_string(),
+        json!({"name": SERVER_NAME, "version": SERVER_VERSION}),
+    );
+    result.insert("_meta".to_string(), Value::Object(meta));
+    Value::Object(result)
+}
+
+fn modern_discover_result() -> Value {
+    json!({
+        "supportedVersions": [MODERN_PROTOCOL_VERSION, PROTOCOL_VERSION],
+        "capabilities": {"tools": {}},
+        "ttlMs": 3_600_000,
+        "cacheScope": "public"
+    })
+}
+
+fn modern_discovery_is_valid(value: &Value) -> bool {
+    value.get("resultType").and_then(Value::as_str) == Some("complete")
+        && value
+            .get("supportedVersions")
+            .and_then(Value::as_array)
+            .is_some_and(|versions| {
+                versions
+                    .iter()
+                    .any(|version| version.as_str() == Some(MODERN_PROTOCOL_VERSION))
+            })
+}
 fn dispatch(request: &Value, state: &mut LoaderState) -> Result<Value, Diagnostic> {
     let method = request
         .get("method")
         .and_then(Value::as_str)
         .unwrap_or_default();
     let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
+    if is_modern_request(&params) {
+        validate_modern_request(&params)?;
+        return match method {
+            "server/discover" => Ok(modernize_result(modern_discover_result(), method)),
+            "initialize" => Err(Diagnostic::new(
+                "initialize_removed",
+                "The 2026-07-28 protocol has no initialize handshake.",
+            )),
+            _ => dispatch_legacy(method, &params, state).map(|value| modernize_result(value, method)),
+        };
+    }
+    dispatch_legacy(method, &params, state)
+}
+
+fn dispatch_legacy(method: &str, params: &Value, state: &mut LoaderState) -> Result<Value, Diagnostic> {
     match method {
         "initialize" => Ok(json!({
-            "protocolVersion": params.get("protocolVersion").and_then(Value::as_str).unwrap_or(PROTOCOL_VERSION),
+            "protocolVersion": PROTOCOL_VERSION,
             "capabilities": {"tools": {}},
             "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION}
         })),
@@ -864,7 +966,6 @@ fn dispatch(request: &Value, state: &mut LoaderState) -> Result<Value, Diagnosti
         )),
     }
 }
-
 fn call_tool_result(result: Value) -> Value {
     let text = render_result(&result);
     json!({"content":[{"type":"text","text":text,"annotations":{"audience":["assistant"]}}],"structuredContent":result})
@@ -2645,41 +2746,82 @@ fn open_connection(
         Ok(session) => session,
         Err(error) => return Err(error),
     };
-    let init = match session.request("initialize", json!({"protocolVersion":PROTOCOL_VERSION,"capabilities":{},"clientInfo":{"name":SERVER_NAME,"version":SERVER_VERSION}}), state.policy.attach_timeout_ms) {
-        Ok(value) => value,
-        Err(error) => {
-            session.terminate();
-            return Err(error.with_details(json!({
-                "connection_id":connection_id,
-                "surface_id":surface_id,
-                "entrypoint":entrypoint,
-                "args":resolved_args,
-                "exit_code":session.exit_code(),
-                "signal_code":session.signal_code(),
-                "stderr_tail":session.stderr_tail(),
-                "runtime_lifecycle":runtime_lifecycle(Some(&connection_id),Some(&lifecycle))
-            })));
-        }
-    };
-    if let Err(error) = session.notify("notifications/initialized", json!({})) {
-        session.terminate();
-        return Err(error);
-    }
-    let tools_result =
-        match session.request("tools/list", json!({}), state.policy.attach_timeout_ms) {
-            Ok(value) => value,
-            Err(error) => {
-                session.terminate();
-                return Err(error.with_details(json!({
-                    "connection_id":connection_id,
-                    "surface_id":surface_id,
-                    "entrypoint":entrypoint,
-                    "args":resolved_args,
-                    "exit_code":session.exit_code(),
-                    "signal_code":session.signal_code(),
-                    "stderr_tail":session.stderr_tail(),
-                    "runtime_lifecycle":runtime_lifecycle(Some(&connection_id),Some(&lifecycle))
-                })));
+    let (server_info, tools_result) =
+        match session.request("server/discover", modern_request_params(), state.policy.attach_timeout_ms) {
+            Ok(discovery) if modern_discovery_is_valid(&discovery) => {
+                let server_info = discovery
+                    .get("_meta")
+                    .and_then(|meta| meta.get("io.modelcontextprotocol/serverInfo"))
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
+                let tools_result = match session.request(
+                    "tools/list",
+                    modern_request_params(),
+                    state.policy.attach_timeout_ms,
+                ) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        session.terminate();
+                        return Err(error.with_details(json!({
+                            "connection_id":connection_id,
+                            "surface_id":surface_id,
+                            "entrypoint":entrypoint,
+                            "args":resolved_args,
+                            "exit_code":session.exit_code(),
+                            "signal_code":session.signal_code(),
+                            "stderr_tail":session.stderr_tail(),
+                            "runtime_lifecycle":runtime_lifecycle(Some(&connection_id),Some(&lifecycle))
+                        })));
+                    }
+                };
+                (server_info, tools_result)
+            }
+            Ok(_) | Err(_) => {
+                let init = match session.request(
+                    "initialize",
+                    json!({"protocolVersion":PROTOCOL_VERSION,"capabilities":{},"clientInfo":{"name":SERVER_NAME,"version":SERVER_VERSION}}),
+                    state.policy.attach_timeout_ms,
+                ) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        session.terminate();
+                        return Err(error.with_details(json!({
+                            "connection_id":connection_id,
+                            "surface_id":surface_id,
+                            "entrypoint":entrypoint,
+                            "args":resolved_args,
+                            "exit_code":session.exit_code(),
+                            "signal_code":session.signal_code(),
+                            "stderr_tail":session.stderr_tail(),
+                            "runtime_lifecycle":runtime_lifecycle(Some(&connection_id),Some(&lifecycle))
+                        })));
+                    }
+                };
+                if let Err(error) = session.notify("notifications/initialized", json!({})) {
+                    session.terminate();
+                    return Err(error);
+                }
+                let tools_result =
+                    match session.request("tools/list", json!({}), state.policy.attach_timeout_ms) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            session.terminate();
+                            return Err(error.with_details(json!({
+                                "connection_id":connection_id,
+                                "surface_id":surface_id,
+                                "entrypoint":entrypoint,
+                                "args":resolved_args,
+                                "exit_code":session.exit_code(),
+                                "signal_code":session.signal_code(),
+                                "stderr_tail":session.stderr_tail(),
+                                "runtime_lifecycle":runtime_lifecycle(Some(&connection_id),Some(&lifecycle))
+                            })));
+                        }
+                    };
+                (
+                    init.get("serverInfo").cloned().unwrap_or_else(|| json!({})),
+                    tools_result,
+                )
             }
         };
     let tools = tools_result
@@ -2718,7 +2860,7 @@ fn open_connection(
         requested_entrypoint,
         extra_args,
         initialized: true,
-        server_info: init.get("serverInfo").cloned().unwrap_or_else(|| json!({})),
+        server_info,
         tools,
         detached: false,
         attached_ms,
@@ -4324,5 +4466,32 @@ mod tests {
             extract_proxy_child_args(&["proxy".to_string(), "--".to_string(), "--site-root".to_string()]),
             Some(vec!["--site-root".to_string()]),
         );
+    }
+}
+
+#[cfg(test)]
+mod modern_protocol_tests {
+    use super::*;
+
+    #[test]
+    fn modern_loader_results_are_self_describing() {
+        let params = modern_request_params();
+        assert!(is_modern_request(&params));
+        assert!(validate_modern_request(&params).is_ok());
+        let result = modernize_result(json!({"tools": []}), "tools/list");
+        assert_eq!(result["resultType"], "complete");
+        assert_eq!(result["cacheScope"], "public");
+        assert!(result["ttlMs"].as_u64().unwrap_or_default() > 0);
+        assert_eq!(result["_meta"]["io.modelcontextprotocol/serverInfo"]["name"], SERVER_NAME);
+        let discovery = modernize_result(modern_discover_result(), "server/discover");
+        assert_eq!(discovery["supportedVersions"][0], MODERN_PROTOCOL_VERSION);
+        assert!(modern_discovery_is_valid(&discovery));
+    }
+
+    #[test]
+    fn modern_loader_requests_require_client_metadata() {
+        let missing = json!({"_meta": {"io.modelcontextprotocol/protocolVersion": MODERN_PROTOCOL_VERSION}});
+        let error = validate_modern_request(&missing).expect_err("missing metadata must refuse");
+        assert_eq!(error.code, "modern_metadata_required");
     }
 }
