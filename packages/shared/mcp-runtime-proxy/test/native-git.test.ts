@@ -50,6 +50,11 @@ try {
   writeFileSync(join(root, 'src', 'main.txt'), 'one\ntwo\n', 'utf8');
   writeFileSync(join(root, 'untracked.txt'), 'untracked\n', 'utf8');
 
+  const modernMeta = {
+    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+    "io.modelcontextprotocol/clientInfo": { name: "native-test", version: "1" },
+    "io.modelcontextprotocol/clientCapabilities": {}
+  };
   const responses = await run(root, [
     { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05' } },
     { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} },
@@ -62,8 +67,19 @@ try {
     { jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'git_repositories_summary', arguments: { working_directories: [root] } } },
     { jsonrpc: '2.0', id: 10, method: 'tools/call', params: { name: 'git_diff', arguments: { working_directory: root, scope: 'working', limit: 4000 } } },
     { jsonrpc: '2.0', id: 11, method: 'tools/call', params: { name: 'git_log', arguments: { working_directory: root, limit: 2 } } },
+    { jsonrpc: "2.0", id: 20, method: "server/discover", params: { _meta: modernMeta } },
+    { jsonrpc: "2.0", id: 21, method: "tools/list", params: { _meta: modernMeta } },
+    { jsonrpc: "2.0", id: 22, method: "tools/call", params: { _meta: modernMeta, name: "git_policy_inspect", arguments: {} } },
+    { jsonrpc: "2.0", id: 23, method: "initialize", params: { _meta: modernMeta } },
   ]);
   const byId = new Map(responses.map((response) => [response.id, response]));
+  assert.equal(byId.get(20)?.result?.resultType, 'complete');
+  assert.equal(byId.get(20)?.result?.supportedVersions?.includes('2026-07-28'), true);
+  assert.equal(byId.get(21)?.result?.resultType, 'complete');
+  assert.equal(byId.get(21)?.result?.cacheScope, 'public');
+  assert.equal(byId.get(22)?.result?.resultType, 'complete');
+  assert.equal(byId.get(22)?.result?._meta?.['io.modelcontextprotocol/serverInfo']?.name, 'git-mcp');
+  assert.equal(byId.get(23)?.error?.data?.code, 'initialize_removed');
   assert.equal(byId.get(1)?.result?.serverInfo?.name, 'git-mcp');
   assert.deepEqual(byId.get(2)?.result?.tools?.map((tool: JsonRecord) => tool.name), [
     'git_guidance',

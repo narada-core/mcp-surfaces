@@ -16,6 +16,7 @@ use time::OffsetDateTime;
 mod filesystem;
 #[allow(dead_code)]
 mod git;
+mod protocol;
 #[allow(dead_code)]
 mod structured_command;
 

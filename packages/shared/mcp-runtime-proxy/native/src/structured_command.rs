@@ -1,4 +1,5 @@
 use crate::filesystem::{read_message, write_message};
+use crate::protocol;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::env;
@@ -117,6 +118,14 @@ pub fn run(args: &[String]) -> Result<(), String> {
                 if request.get("id").is_none() {
                     continue;
                 }
+                if let Some(response) =
+                    protocol::preflight_response(&request, "structured-command-native")
+                {
+                    write_message(&mut writer, &response, framed)
+                        .map_err(|error| error.to_string())?;
+                    writer.flush().map_err(|error| error.to_string())?;
+                    continue;
+                }
                 if method == "tools/call" {
                     let id = request.get("id").cloned().unwrap_or(Value::Null);
                     let key = value_key(&id);
@@ -126,9 +135,22 @@ pub fn run(args: &[String]) -> Result<(), String> {
                     let response_tx = events_tx.clone();
                     thread::spawn(move || {
                         let response = handle_request(&state_clone, &request, Some(token)).unwrap_or_else(|| json!({"jsonrpc": "2.0", "id": request.get("id").cloned().unwrap_or(Value::Null), "result": {}}));
+                        let response = protocol::modernize_response(
+                            &request,
+                            response,
+                            "structured-command-native",
+                        );
                         let _ = response_tx.send(Event::Response(response, framed, key));
                     });
-                } else if let Some(response) = handle_request(&state, &request, None) {
+                } else if let Some(response) =
+                    handle_request(&state, &request, None).map(|response| {
+                        protocol::modernize_response(
+                            &request,
+                            response,
+                            "structured-command-native",
+                        )
+                    })
+                {
                     write_message(&mut writer, &response, framed)
                         .map_err(|error| error.to_string())?;
                     writer.flush().map_err(|error| error.to_string())?;

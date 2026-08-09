@@ -291,6 +291,7 @@ function matrixPlanEntry(componentKind: string, plan: RuntimeMaterializationPlan
 function componentKindForSurface(surfaceId: string): string {
   if (surfaceId === 'mcp-loader' || surfaceId === 'mcp-loader-mcp.local') return 'mcp-loader-mcp';
   if (surfaceId === 'local-filesystem' || surfaceId === 'local-filesystem-mcp.local') return 'filesystem-mcp';
+  if (surfaceId === 'structured-command' || surfaceId === 'structured-command-mcp.local') return 'structured-command-mcp';
   if (surfaceId === 'agent-context' || surfaceId === 'agent-context-mcp.local') return 'agent-context-mcp';
   if (surfaceId === 'mcp-registrar' || surfaceId === 'mcp-registrar-mcp.local') return 'mcp-registrar';
   if (surfaceId === 'task-lifecycle' || surfaceId === 'task-lifecycle-mcp.local') return 'task-lifecycle-mcp';
@@ -1876,7 +1877,9 @@ function carrierLaunchCommand(
   const useNativeFilesystemApplet = (selectedEngine === 'rust' && componentKind === 'filesystem-mcp')
     || (server.surface_implementation === 'native'
       && surfaceId === 'local-filesystem');
+  const useNativeStructuredCommandApplet = selectedEngine === 'rust' && componentKind === 'structured-command-mcp';
   const useNativeLifecycle = selectedEngine === 'rust' && (componentKind === 'task-lifecycle-mcp' || componentKind === 'work-lifecycle-mcp');
+  const nativeApplet = useNativeFilesystemApplet ? 'filesystem' : useNativeStructuredCommandApplet ? 'structured-command' : null;
   const nativeLifecycleEntrypoint = componentKind === 'task-lifecycle-mcp' ? MCP_NATIVE_TASK_LIFECYCLE_ENTRYPOINT : MCP_NATIVE_WORK_LIFECYCLE_ENTRYPOINT;
   if (useNativeLifecycle && !existsSync(nativeLifecycleEntrypoint)) {
     throw diagnosticError(
@@ -1892,18 +1895,18 @@ function carrierLaunchCommand(
       { entrypoint: MCP_NATIVE_MCP_LOADER_ENTRYPOINT, surface_id: surfaceId, component_kind: componentKind },
     );
   }
-  if ((useNativeFilesystemApplet || useNativeLoader || useNativeLifecycle) && !nativeRuntimeProxyAvailable()) {
+  if ((nativeApplet || useNativeLoader || useNativeLifecycle) && !nativeRuntimeProxyAvailable()) {
     throw diagnosticError(
       'registrar_native_runtime_proxy_missing',
       `Native runtime proxy is unavailable: ${nativeRuntimeProxyEntrypoint()}`,
       { entrypoint: nativeRuntimeProxyEntrypoint(), surface_id: surfaceId, component_kind: componentKind },
     );
   }
-  const effectiveChildCommand = useNativeLoader ? MCP_NATIVE_MCP_LOADER_ENTRYPOINT : useNativeFilesystemApplet ? nativeRuntimeProxyEntrypoint() : useNativeLifecycle ? nativeLifecycleEntrypoint : runtimeCommand;
-  const effectiveChildEntrypoint = useNativeLoader ? MCP_NATIVE_MCP_LOADER_ENTRYPOINT : useNativeFilesystemApplet ? nativeRuntimeProxyEntrypoint() : useNativeLifecycle ? nativeLifecycleEntrypoint : childEntrypoint;
+  const effectiveChildCommand = useNativeLoader ? MCP_NATIVE_MCP_LOADER_ENTRYPOINT : nativeApplet ? nativeRuntimeProxyEntrypoint() : useNativeLifecycle ? nativeLifecycleEntrypoint : runtimeCommand;
+  const effectiveChildEntrypoint = useNativeLoader ? MCP_NATIVE_MCP_LOADER_ENTRYPOINT : nativeApplet ? nativeRuntimeProxyEntrypoint() : useNativeLifecycle ? nativeLifecycleEntrypoint : childEntrypoint;
   const sidecarPath = configPath ? materializationSidecarPath(configPath) : null;
-  const childInvocationKind = useNativeLoader || useNativeLifecycle ? 'native_entrypoint' : useNativeFilesystemApplet ? 'native_applet' : null;
-  if (server.kind === 'local' && !useNativeLoader && !useNativeFilesystemApplet && !useNativeLifecycle) {
+  const childInvocationKind = useNativeLoader || useNativeLifecycle ? 'native_entrypoint' : nativeApplet ? 'native_applet' : null;
+  if (server.kind === 'local' && !useNativeLoader && !nativeApplet && !useNativeLifecycle) {
     return {
       command: runtimeCommand,
       args: [childEntrypoint, ...childArgs],
@@ -1944,7 +1947,7 @@ function carrierLaunchCommand(
       ...(sidecarPath ? ['--materialization-sidecar', sidecarPath] : []),
       '--entrypoint',
       effectiveChildEntrypoint,
-      ...(childInvocationKind === 'native_applet' ? ['--child-invocation-kind', 'native_applet', '--child-applet', 'filesystem'] : childInvocationKind === 'native_entrypoint' ? ['--child-invocation-kind', 'native_entrypoint'] : []),
+      ...(childInvocationKind === 'native_applet' ? ['--child-invocation-kind', 'native_applet', '--child-applet', nativeApplet ?? 'filesystem'] : childInvocationKind === 'native_entrypoint' ? ['--child-invocation-kind', 'native_entrypoint'] : []),
       '--',
       ...childArgs,
     ],
@@ -1957,7 +1960,7 @@ function carrierLaunchCommand(
     artifact_manifest_path: MCP_WORKSPACE_ARTIFACT_MANIFEST,
     runtime_contract_version: MCP_RUNTIME_CONTRACT_VERSION,
     ...(sidecarPath ? { materialization_sidecar_path: sidecarPath } : {}),
-    ...(childInvocationKind === 'native_applet' ? { child_invocation_kind: 'native_applet' as const, child_applet: 'filesystem' } : childInvocationKind === 'native_entrypoint' ? { child_invocation_kind: 'native_entrypoint' as const } : {}),
+    ...(childInvocationKind === 'native_applet' ? { child_invocation_kind: 'native_applet' as const, child_applet: nativeApplet ?? 'filesystem' } : childInvocationKind === 'native_entrypoint' ? { child_invocation_kind: 'native_entrypoint' as const } : {}),
     child_entrypoint: effectiveChildEntrypoint,
     child_args: childArgs,
   };

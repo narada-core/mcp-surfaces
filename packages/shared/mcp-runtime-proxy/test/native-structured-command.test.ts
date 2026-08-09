@@ -36,6 +36,11 @@ function run(root: string, requests: JsonRecord[], auditLogDir: string): Promise
 const root = mkdtempSync(join(tmpdir(), 'narada-native-structured-command-'));
 const auditLogDir = join(root, 'audit');
 try {
+  const modernMeta = {
+    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+    "io.modelcontextprotocol/clientInfo": { name: "native-test", version: "1" },
+    "io.modelcontextprotocol/clientCapabilities": {}
+  };
   const responses = await run(root, [
     { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05' } },
     { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} },
@@ -43,6 +48,10 @@ try {
     { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'structured_command_execute', arguments: { command: 'node', args: ['-e', 'process.stdout.write("native-structured")'], working_directory: root, timeout_ms: 5000 } } },
     { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'structured_command_execute', arguments: { command: 'cmd.exe', args: ['/c', 'echo refused'], working_directory: root } } },
     { jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'structured_command_execute', arguments: { command: 'node', args: ['-e', 'setTimeout(() => {}, 1000)'], working_directory: root, timeout_ms: 100 } } },
+    { jsonrpc: "2.0", id: 20, method: "server/discover", params: { _meta: modernMeta } },
+    { jsonrpc: "2.0", id: 21, method: "tools/list", params: { _meta: modernMeta } },
+    { jsonrpc: "2.0", id: 22, method: "tools/call", params: { _meta: modernMeta, name: "structured_command_execution_policy_inspect", arguments: {} } },
+    { jsonrpc: "2.0", id: 23, method: "initialize", params: { _meta: modernMeta } },
   ], auditLogDir);
   const byId = new Map(responses.map((response) => [response.id, response]));
   assert.equal(byId.get(1)?.result?.serverInfo?.name, 'structured-command-native');
@@ -65,6 +74,13 @@ try {
   assert.equal(byId.get(5)?.result?.structuredContent?.status, 'refused');
   assert.equal(byId.get(5)?.result?.structuredContent?.decision?.reasons?.some((reason: string) => reason.startsWith('blocked_command:')), true);
   assert.equal(byId.get(6)?.result?.structuredContent?.status, 'timed_out');
+  assert.equal(byId.get(20)?.result?.resultType, 'complete');
+  assert.equal(byId.get(20)?.result?.supportedVersions?.includes('2026-07-28'), true);
+  assert.equal(byId.get(21)?.result?.resultType, 'complete');
+  assert.equal(byId.get(21)?.result?.cacheScope, 'public');
+  assert.equal(byId.get(22)?.result?.resultType, 'complete');
+  assert.equal(byId.get(22)?.result?._meta?.['io.modelcontextprotocol/serverInfo']?.name, 'structured-command-native');
+  assert.equal(byId.get(23)?.error?.data?.code, 'initialize_removed');
   assert.match(readFileSync(join(auditLogDir, 'structured-command.jsonl'), 'utf8'), /narada\.structured_command\.execution_result\.v0/);
 
   const inputResponses = await run(root, [

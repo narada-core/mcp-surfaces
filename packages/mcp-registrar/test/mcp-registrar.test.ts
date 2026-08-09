@@ -1129,6 +1129,24 @@ try {
   assert.equal(schedServer.injection_scope, 'local_site');
   assert.deepEqual(schedServer.authority_locus, { kind: 'local_site', site_root: root });
   assert.equal(schedServer.narada_scope.scope_source, 'registrar_surface_catalog');
+  if (nativeRuntimeArtifactAvailable) {
+    const structuredBindConfig: any = buildSiteBindConfig(
+      { site_id: 'structured-site', root, config_path: join(root, 'site.json'), surfaces: [] },
+      {
+        id: 'structured-command',
+        package: 'structured-command-mcp',
+        entrypoint: 'C:/workspace/mcp-surfaces/packages/structured-command-mcp/dist/src/main.js',
+        kind: 'mcp_surface',
+        args: ['--allowed-root', '{workspace_root}', '--allow-command', 'node'],
+        tools: ['structured_command_guidance'],
+      },
+    );
+    const structuredServer: any = (structuredBindConfig.config.mcpServers as Record<string, any>)['narada-structured-site-structured-command'];
+    assert.equal(structuredServer.surface_id, 'structured-command');
+    assert.equal(structuredServer.args[structuredServer.args.indexOf('--child-invocation-kind') + 1], 'native_applet');
+    assert.equal(structuredServer.args[structuredServer.args.indexOf('--child-applet') + 1], 'structured-command');
+    assert.match(structuredServer.command, /narada-mcp-runtime\.exe$/i);
+  }
   assert.equal(schedServer.narada_scope.bound_into_site, 'narada-sonar');
 
   const smartSchedulingBindConfig: any = buildSiteBindConfig(
