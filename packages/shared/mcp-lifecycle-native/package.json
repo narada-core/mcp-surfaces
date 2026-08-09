@@ -14,6 +14,7 @@
     "test:smoke": "node scripts/smoke-native.mjs",
     "test:migration": "node scripts/migration-native.mjs",
     "test:refusal": "node scripts/refusal-native.mjs",
+    "test:restart": "node scripts/restart-native.mjs",
     "benchmark:native": "node scripts/benchmark-native.mjs"
   },
   "naradaRuntimeArtifacts": {

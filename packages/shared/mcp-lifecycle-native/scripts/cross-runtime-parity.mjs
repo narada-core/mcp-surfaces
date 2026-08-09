@@ -62,6 +62,16 @@ function taskInput() {
     call(12, 'task_lifecycle_close', { task_number: 1, agent_id: 'cross-runtime', mode: 'operator_direct' }),
     call(13, 'task_lifecycle_show', { task_number: 1 }),
     rpc(14, 'resources/list'),
+    rpc(15, 'prompts/list'),
+    rpc(16, 'prompts/get', { name: 'task_lifecycle_workflow' }),
+    rpc(17, 'completion/complete', { argument: { name: 'name' } }),
+    rpc(18, 'completion/complete', { argument: { name: 'description' } }),
+    call(19, '__missing_task_tool__'),
+    rpc(20, 'resources/list'),
+    rpc(21, 'resources/read', { uri: 'mcp-output:mcp_output%3Amissing' }),
+    rpc(22, 'experimental/method'),
+    call(23, 'task_lifecycle_doctor', { detail: 'summary' }),
+    call(24, 'task_mcp_list'),
   ].join('\n') + '\n';
 }
 
@@ -75,6 +85,12 @@ function workInput() {
     call(6, 'work_outbox_consumer_register', { topic: 'work.ticket-work-due.v1', consumer_id: 'cross-runtime' }),
     call(7, 'work_outbox_list', { consumer_id: 'cross-runtime', limit: 10 }),
     call(8, 'work_lifecycle_storage_inspect'),
+    call(9, '__missing_work_tool__'),
+    rpc(10, 'resources/list'),
+    rpc(11, 'prompts/list'),
+    rpc(12, 'completion/complete', { argument: { name: 'name' } }),
+    rpc(13, 'experimental/method'),
+    call(14, 'work_lifecycle_doctor'),
   ].join('\n') + '\n';
 }
 
@@ -89,6 +105,33 @@ function protocol(lines, surface) {
   return { init: { protocolVersion: init.protocolVersion, capabilities: init.capabilities, serverInfo: init.serverInfo }, tools: list.tools };
 }
 
+function errorSignature(line) {
+  return {
+    code: line?.error?.data?.code ?? null,
+    message: line?.error?.message ?? null,
+  };
+}
+
+function compareTaskProtocolExtras(node, rust) {
+  const nodeById = byId(node);
+  const rustById = byId(rust);
+  assert.deepEqual(rustById.get('15')?.result?.prompts, nodeById.get('15')?.result?.prompts, 'task prompts/list drifted');
+  assert.deepEqual(rustById.get('16')?.result, nodeById.get('16')?.result, 'task prompts/get drifted');
+  assert.deepEqual(rustById.get('17')?.result, nodeById.get('17')?.result, 'task completion/name drifted');
+  assert.deepEqual(rustById.get('18')?.result, nodeById.get('18')?.result, 'task completion/other drifted');
+  assert.deepEqual(errorSignature(rustById.get('19')), errorSignature(nodeById.get('19')), 'task unknown-tool error drifted');
+  const normalizeResources = (line) => {
+    const result = line?.result ?? {};
+    return { ...result, resources: (result.resources ?? []).map(({ description, mimeType }) => ({ description, mimeType })) };
+  };
+  assert.deepEqual(normalizeResources(rustById.get('20')), normalizeResources(nodeById.get('20')), 'task resources/list drifted');
+  assert.deepEqual(errorSignature(rustById.get('21')), errorSignature(nodeById.get('21')), 'task resources/read error drifted');
+  assert.deepEqual(errorSignature(rustById.get('22')), errorSignature(nodeById.get('22')), 'task unsupported-method error drifted');
+  const taskDoctor = structured(rustById.get('23'));
+  const nodeTaskDoctor = structured(nodeById.get('23'));
+  const stableDoctor = (value) => ({ schema: value.schema, status: value.status, detail: value.detail, site_root_source: value.site_root_source, authority_posture: value.authority_posture, surface_type: value.surface_type, tool_posture: value.tool_posture, site_policy: value.site_policy, target_locus_guard: value.target_locus_guard });
+  assert.deepEqual(stableDoctor(taskDoctor), stableDoctor(nodeTaskDoctor), 'task doctor parity drifted');
+}
 function compareTask(node, rust) {
   assert.deepEqual(protocol(rust, 'task'), protocol(node, 'task'), 'task initialize/tools parity drifted');
   const nodeById = byId(node);
@@ -106,11 +149,33 @@ function compareTask(node, rust) {
     structured(lines.get('12')).new_status ?? structured(lines.get('12')).status,
     structured(lines.get('13')).lifecycle?.status ?? structured(lines.get('13')).status,
     lines.get('14')?.result?.resources?.length,
+    structured(lines.get('24')).status,
   ];
   assert.deepEqual(select(rustById), select(nodeById), 'task lifecycle status parity drifted');
+  compareTaskProtocolExtras(node, rust);
   return { tool_count: protocol(rust, 'task').tools.length, statuses: select(rustById) };
 }
 
+function compareWorkProtocolExtras(node, rust) {
+  const nodeById = byId(node);
+  const rustById = byId(rust);
+  assert.deepEqual(errorSignature(rustById.get('9')), errorSignature(nodeById.get('9')), 'work unknown-tool error drifted');
+  assert.deepEqual(errorSignature(rustById.get('10')), errorSignature(nodeById.get('10')), 'work resources/list error drifted');
+  assert.deepEqual(errorSignature(rustById.get('11')), errorSignature(nodeById.get('11')), 'work prompts/list error drifted');
+  assert.deepEqual(errorSignature(rustById.get('12')), errorSignature(nodeById.get('12')), 'work completion/complete error drifted');
+  assert.deepEqual(errorSignature(rustById.get('13')), errorSignature(nodeById.get('13')), 'work unsupported-method error drifted');
+  const stableWorkDoctor = (value) => ({
+    schema: value.schema,
+    status: value.status,
+    site_root: '<site-root>',
+    concurrency: {
+      database_path: '<site-root>/.ai/work-lifecycle.db',
+      posture: value.concurrency?.posture,
+      conflict_guards: value.concurrency?.conflict_guards,
+    },
+  });
+  assert.deepEqual(stableWorkDoctor(structured(rustById.get('14'))), stableWorkDoctor(structured(nodeById.get('14'))), 'work doctor parity drifted');
+}
 function compareWork(node, rust) {
   assert.deepEqual(protocol(rust, 'work'), protocol(node, 'work'), 'work initialize/tools parity drifted');
   const nodeById = byId(node);
@@ -124,6 +189,7 @@ function compareWork(node, rust) {
     structured(lines.get('8')).status,
   ];
   assert.deepEqual(select(rustById), select(nodeById), 'work lifecycle status parity drifted');
+  compareWorkProtocolExtras(node, rust);
   return { tool_count: protocol(rust, 'work').tools.length, statuses: select(rustById) };
 }
 

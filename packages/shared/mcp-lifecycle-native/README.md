@@ -10,8 +10,9 @@ task semantics. The checked-in `catalog/` files are generated from the current
 TypeScript `tools/list` contracts and are verified with `pnpm test:parity`.
 
 Build the Windows artifacts with `pnpm build:native`. They are published under
-`dist/native/` and are selected by the registrar only after the runtime matrix
-promotes both Rust rows from `experimental` to `admitted`.
+`dist/native/` and are selected by the registrar for the `native` profile because
+both lifecycle Rust rows are admitted in the runtime matrix.
 
-Node and Bun remain the explicit compatibility profiles while parity,
-migration, lifecycle-refusal, and benchmark suites complete.
+Node and Bun remain explicit compatibility/reference profiles. The bounded
+parity, migration, lifecycle-refusal, cross-runtime, and benchmark suites run
+against the native adapters and the Node reference.

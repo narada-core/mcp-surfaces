@@ -9,7 +9,7 @@ const root = fileURLToPath(new URL('..', import.meta.url));
 const extension = process.platform === 'win32' ? '.exe' : '';
 const executable = (name) => join(root, 'dist', 'native', `${name}${extension}`);
 const rpc = (id, name, argumentsValue = {}) => JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: argumentsValue } });
-const run = (name, args, input = '') => spawnSync(executable(name), args, { input, encoding: 'utf8', windowsHide: true });
+const run = (name, args, input = '', env = process.env) => spawnSync(executable(name), args, { input, encoding: 'utf8', windowsHide: true, env });
 const missingRoot = mkdtempSync(join(tmpdir(), 'narada-native-missing-'));
 const rootTask = mkdtempSync(join(tmpdir(), 'narada-native-refusal-task-'));
 const rootWork = mkdtempSync(join(tmpdir(), 'narada-native-refusal-work-'));
@@ -18,7 +18,15 @@ try {
   assert.notEqual(missing.status, 0);
   assert.match(String(missing.stderr), /task_lifecycle_store_not_prepared/);
   assert.equal(run('narada-task-lifecycle-mcp', ['--prepare', '--site-root', rootTask]).status, 0);
-  const task = run('narada-task-lifecycle-mcp', ['--site-root', rootTask], [
+  const mismatch = run('narada-task-lifecycle-mcp', ['--site-root', rootTask], rpc(0, 'task_lifecycle_create', { payload_ref: 'mcp_payload:refused@v1' }) + '\n', {
+    ...process.env,
+    NARADA_TARGET_SITE_ROOT: join(tmpdir(), 'narada-native-wrong-locus'),
+  });
+  const mismatchLine = JSON.parse(String(mismatch.stdout).trim());
+  assert.equal(mismatch.status, 0);
+  assert.equal(mismatchLine.result.structuredContent.status, 'refused');
+  assert.equal(mismatchLine.result.structuredContent.refusal_code, 'target_locus_preflight_required');
+  assert.equal(mismatchLine.result.isError, true);  const task = run('narada-task-lifecycle-mcp', ['--site-root', rootTask], [
     rpc(1, 'mcp_payload_create', { payload_id: 'refusalpayload', payload: { title: 'Refusal task', goal: 'Check refusal', required_work: ['none'], acceptance_criteria: ['none'], idempotency_key: 'refusal-task' } }),
     rpc(2, 'task_lifecycle_create', { payload_ref: 'mcp_payload:refusalpayload@v1' }),
     rpc(3, 'task_lifecycle_claim', { task_number: 1, agent_id: 'native.refusal' }),
@@ -38,7 +46,7 @@ try {
   ].join('\n') + '\n');
   const workLine = JSON.parse(String(work.stdout).trim());
   assert.equal(workLine.error.data.code, 'unsupported_mcp_method');
-  process.stdout.write(JSON.stringify({ schema: 'narada.mcp_lifecycle_native.refusal.v1', status: 'passed', checks: 6 }) + '\n');
+  process.stdout.write(JSON.stringify({ schema: 'narada.mcp_lifecycle_native.refusal.v1', status: 'passed', checks: 9 }) + '\n');
 } finally {
   rmSync(missingRoot, { recursive: true, force: true });
   rmSync(rootTask, { recursive: true, force: true });

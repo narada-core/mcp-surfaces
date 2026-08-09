@@ -59,7 +59,7 @@ try {
   assert.equal(taskLines[6].result.structuredContent.status, 'admitted');
   assert.equal(taskLines[7].result.structuredContent.new_status, 'closed');
   assert.equal(taskLines[8].result.structuredContent.lifecycle.status, 'closed');
-  assert.equal(taskLines[9].result.resources.length, 1);
+  assert.equal(taskLines[9].result.resources.length, 2);
   assert.match(taskLines[10].result.contents[0].text, /narada\.mcp_output_page\.v1/);
   assert.equal(taskLines[11].result.structuredContent.status, 'created');
   assert.equal(taskLines[12].result.structuredContent.status, 'derived');
@@ -90,7 +90,7 @@ try {
   ].join('\n') + '\n');
   assert.equal(ackLines[0].result.structuredContent.status, 'acknowledged');
   assert.ok(Number.isInteger(ackLines[1].result.structuredContent.compacted));
-  process.stdout.write(JSON.stringify({ schema: 'narada.mcp_lifecycle_native.smoke.v1', status: 'passed', task_tools: 69, work_tools: 80, resources: 1, payload_revisions: 2, work_transaction_checks: 3 }) + '\n');
+  process.stdout.write(JSON.stringify({ schema: 'narada.mcp_lifecycle_native.smoke.v1', status: 'passed', task_tools: 69, work_tools: 80, resources: 2, payload_revisions: 2, work_transaction_checks: 3 }) + '\n');
 } finally {
   rmSync(rootTask, { recursive: true, force: true });
   rmSync(rootWork, { recursive: true, force: true });
