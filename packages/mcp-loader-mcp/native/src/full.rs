@@ -127,6 +127,7 @@ struct Connection {
     runtime_requirements: Vec<String>,
     entrypoint: String,
     args: Vec<String>,
+    child_invocation_kind: String,
     requested_entrypoint: Option<String>,
     extra_args: Vec<String>,
     initialized: bool,
@@ -1355,6 +1356,9 @@ fn shared_surface_registry(surface_id: &str, surface_root: &str) -> Option<(Stri
 }
 
 fn extract_runtime_entrypoint(command: &str, args: &[String]) -> Option<String> {
+    if is_runtime_proxy_command(command) && args.first().map(String::as_str) == Some("proxy") {
+        return extract_proxy_child_entrypoint(args);
+    }
     let normalized = command.trim().replace('\\', "/");
     let base = normalized
         .rsplit('/')
@@ -2133,7 +2137,7 @@ fn connection_status(connection: &Connection, state: &LoaderState) -> Value {
         "runtime_kind":connection.runtime_kind,"runtime_requirements":connection.runtime_requirements,
         "lifecycle":connection.lifecycle,
         "runtime_lifecycle":runtime_lifecycle(Some(&connection.connection_id),Some(&connection.lifecycle)),
-        "runtime_freshness":runtime_freshness(state),"entrypoint":connection.entrypoint,"args":connection.args,
+        "runtime_freshness":runtime_freshness(state),"entrypoint":connection.entrypoint,"args":connection.args,"child_invocation_kind":connection.child_invocation_kind,
         "status":if live {"live"} else {"closed"},"detached":connection.detached,"initialized":connection.initialized,
         "pid":connection.session.pid,"exit_code":connection.session.exit_code(),"signal_code":Value::Null,
         "killed":connection.session.killed(),"pending_count":connection.session.pending.lock().map(|pending| pending.len()).unwrap_or(0),
@@ -2263,13 +2267,14 @@ fn attach_surface(arguments: &JsonObject, state: &mut LoaderState) -> Result<Val
             .with_details(json!({"max_connections":inventory["max_connections"],"connection_count":inventory["connection_count"],"available_slots":inventory["available_slots"],"closed_connection_ids":inventory["closed_connection_ids"],"recovery":inventory["recovery"]})));
     }
     let extra_args = string_array(arguments.get("args"))?.unwrap_or_default();
-    let (entrypoint, resolved_args, command) = if let Some(explicit) = explicit_entrypoint.clone() {
+    let (entrypoint, resolved_args, command, child_invocation_kind) = if let Some(explicit) = explicit_entrypoint.clone() {
         (
             normalize_path(&explicit),
             extra_args.clone(),
             value_string(arguments.get("child_command"))
                 .or_else(|| state.options.child_command.clone())
                 .unwrap_or_else(|| default_runtime_command()),
+            "entrypoint".to_string(),
         )
     } else {
         let bundle = read_site_fabric(&site_root)?;
@@ -2295,25 +2300,73 @@ fn attach_surface(arguments: &JsonObject, state: &mut LoaderState) -> Result<Val
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            let declared = extract_runtime_entrypoint(&command, &raw_args).ok_or_else(|| {
-                Diagnostic::new(
-                    "surface_command_unsupported",
-                    format!("surface_command_unsupported:{}:{}", surface_id, command),
-                )
-            })?;
             let is_proxy_wrapped = is_runtime_proxy_command(&command)
                 && raw_args.first().map(String::as_str) == Some("proxy");
             if is_proxy_wrapped {
                 let child_command = extract_proxy_child_command(&raw_args)
                     .map(|cmd| resolve_child_command(&cmd))
-                    .unwrap_or_else(resolve_javascript_runtime);
+                    .ok_or_else(|| {
+                        Diagnostic::new(
+                            "surface_command_unsupported",
+                            format!("surface_command_unsupported:runtime-proxy:{}", command),
+                        )
+                    })?;
+                let child_entrypoint = extract_proxy_child_entrypoint(&raw_args).ok_or_else(|| {
+                    Diagnostic::new(
+                        "surface_command_unsupported",
+                        format!("surface_command_unsupported:runtime-proxy:{}", command),
+                    )
+                })?;
+                let child_invocation_kind = extract_proxy_child_invocation_kind(&raw_args);
                 let child_args = extract_proxy_child_args(&raw_args);
-                (
-                    normalize_path(&declared),
-                    child_args.into_iter().chain(extra_args.clone()).collect(),
-                    child_command,
-                )
+                match child_invocation_kind.as_str() {
+                    "entrypoint" => (
+                        normalize_path(&child_entrypoint),
+                        child_args.into_iter().chain(extra_args.clone()).collect(),
+                        child_command,
+                        child_invocation_kind,
+                    ),
+                    "native_entrypoint" => {
+                        let native_entrypoint = normalize_path(&child_command);
+                        (
+                            native_entrypoint,
+                            child_args.into_iter().chain(extra_args.clone()).collect(),
+                            child_command,
+                            child_invocation_kind,
+                        )
+                    }
+                    "native_applet" => {
+                        let child_applet = extract_proxy_child_applet(&raw_args).ok_or_else(|| {
+                            Diagnostic::new(
+                                "surface_native_child_unsupported",
+                                format!("surface_native_child_unsupported:{}", child_invocation_kind),
+                            )
+                        })?;
+                        let native_entrypoint = normalize_path(&child_command);
+                        let mut native_args = vec![child_applet];
+                        native_args.extend(child_args);
+                        native_args.extend(extra_args.clone());
+                        (native_entrypoint, native_args, child_command, child_invocation_kind)
+                    }
+                    _ => {
+                        return Err(Diagnostic::new(
+                            "surface_native_child_unsupported",
+                            format!("surface_native_child_unsupported:{}", child_invocation_kind),
+                        )
+                        .with_details(json!({
+                            "surface_id": surface_id,
+                            "child_command": child_command,
+                            "child_entrypoint": child_entrypoint,
+                        })));
+                    }
+                }
             } else {
+                let declared = extract_runtime_entrypoint(&command, &raw_args).ok_or_else(|| {
+                    Diagnostic::new(
+                        "surface_command_unsupported",
+                        format!("surface_command_unsupported:{}:{}", surface_id, command),
+                    )
+                })?;
                 (
                     normalize_path(&declared),
                     remove_entrypoint_arg(&raw_args, &declared)
@@ -2321,6 +2374,7 @@ fn attach_surface(arguments: &JsonObject, state: &mut LoaderState) -> Result<Val
                         .chain(extra_args.clone())
                         .collect(),
                     command,
+                    "entrypoint".to_string(),
                 )
             }
         } else if let Some((entrypoint, args)) =
@@ -2334,6 +2388,7 @@ fn attach_surface(arguments: &JsonObject, state: &mut LoaderState) -> Result<Val
                 normalize_path(&entrypoint),
                 args.into_iter().chain(extra_args.clone()).collect(),
                 default_runtime_command(),
+                "entrypoint".to_string(),
             )
         } else {
             return Err(Diagnostic::new(
@@ -2360,6 +2415,7 @@ fn attach_surface(arguments: &JsonObject, state: &mut LoaderState) -> Result<Val
         entrypoint,
         resolved_args,
         command,
+        child_invocation_kind,
         explicit_entrypoint,
         extra_args,
         server_name,
@@ -2470,6 +2526,28 @@ fn extract_proxy_child_command(args: &[String]) -> Option<String> {
         .cloned()
 }
 
+fn extract_proxy_child_entrypoint(args: &[String]) -> Option<String> {
+    args.iter()
+        .position(|arg| arg == "--entrypoint")
+        .and_then(|idx| args.get(idx + 1))
+        .cloned()
+}
+
+fn extract_proxy_child_invocation_kind(args: &[String]) -> String {
+    args.iter()
+        .position(|arg| arg == "--child-invocation-kind")
+        .and_then(|idx| args.get(idx + 1))
+        .cloned()
+        .unwrap_or_else(|| "entrypoint".to_string())
+}
+
+fn extract_proxy_child_applet(args: &[String]) -> Option<String> {
+    args.iter()
+        .position(|arg| arg == "--child-applet")
+        .and_then(|idx| args.get(idx + 1))
+        .cloned()
+}
+
 fn extract_proxy_child_args(args: &[String]) -> Vec<String> {
     let mut child_args = Vec::new();
     let mut found_separator = false;
@@ -2506,6 +2584,7 @@ fn open_connection(
     entrypoint: String,
     resolved_args: Vec<String>,
     command: String,
+    child_invocation_kind: String,
     requested_entrypoint: Option<String>,
     extra_args: Vec<String>,
     server_name: String,
@@ -2522,7 +2601,7 @@ fn open_connection(
     let owner_run_id = state.run_id.clone();
     let owner_pid = state.owner_pid;
     let ownership_marker = state.ownership_marker.clone();
-    let child_spec = build_child_spec(&command, &entrypoint, &resolved_args);
+    let child_spec = build_child_spec(&command, &entrypoint, &resolved_args, &child_invocation_kind);
     let env_map = build_child_env(
         &site_root,
         &state.policy,
@@ -2603,6 +2682,7 @@ fn open_connection(
         runtime_requirements,
         entrypoint,
         args: resolved_args,
+        child_invocation_kind,
         requested_entrypoint,
         extra_args,
         initialized: true,
@@ -2616,7 +2696,7 @@ fn open_connection(
     Ok(connection)
 }
 
-fn build_child_spec(command: &str, entrypoint: &str, args: &[String]) -> ChildSpec {
+fn build_child_spec(command: &str, entrypoint: &str, args: &[String], child_invocation_kind: &str) -> ChildSpec {
     let base = command
         .replace('\\', "/")
         .rsplit('/')
@@ -2624,7 +2704,9 @@ fn build_child_spec(command: &str, entrypoint: &str, args: &[String]) -> ChildSp
         .unwrap_or(command)
         .to_ascii_lowercase();
     let mut child_args = Vec::new();
-    if [
+    if child_invocation_kind == "native_entrypoint" || child_invocation_kind == "native_applet" {
+        child_args.extend(args.iter().cloned());
+    } else if [
         "node", "node.exe", "node.cmd", "bun", "bun.exe", "deno", "deno.exe",
     ]
     .contains(&base.as_str())
@@ -2699,7 +2781,7 @@ fn attached_response(connection: &Connection, state: &LoaderState) -> Value {
         "generation_id":connection.generation_id,"site_root":connection.site_root,"surface_id":connection.surface_id,
         "runtime_kind":connection.runtime_kind,"runtime_requirements":connection.runtime_requirements,
         "runtime_lifecycle":runtime_lifecycle(Some(&connection.connection_id),Some(&connection.lifecycle)),
-        "runtime_freshness":runtime_freshness(state),"entrypoint":connection.entrypoint,"args":connection.args,
+        "runtime_freshness":runtime_freshness(state),"entrypoint":connection.entrypoint,"args":connection.args,"child_invocation_kind":connection.child_invocation_kind,
         "server_info":connection.server_info,"tools":connection.tools,"descriptor_digest":connection.descriptor_digest,
         "tool_contract_digest":connection.tool_contract_digest,"declared_tool_contract_digest":connection.declared_tool_contract_digest,
         "lifecycle":connection.lifecycle,"ownership":connection_ownership(connection)
@@ -3416,6 +3498,7 @@ fn restart_connection(
         previous.entrypoint.clone(),
         previous.args.clone(),
         previous.session.spec.command.clone(),
+        previous.child_invocation_kind.clone(),
         previous.requested_entrypoint.clone(),
         previous.extra_args.clone(),
         previous.server_name.clone(),

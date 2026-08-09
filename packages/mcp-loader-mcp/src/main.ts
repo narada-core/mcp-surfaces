@@ -515,6 +515,7 @@ type ChildConnection = {
   runtimeRequirements: McpRuntimeKind[];
   entrypoint: string;
   args: string[];
+  childInvocationKind: ChildInvocationKind;
   runtimeCommand: string;
   requestedEntrypoint: string | null;
   extraArgs: string[];
@@ -982,6 +983,7 @@ async function attachSurface(args: JsonRecord, state: LoaderState): Promise<Json
     runtimeCommand: launch.runtimeCommand,
     entrypoint,
     resolvedArgs,
+    childInvocationKind: launch.childInvocationKind,
     requestedEntrypoint: explicitEntrypoint,
     extraArgs: extraArgs ?? [],
     metadata: runtimeMetadata,
@@ -1067,17 +1069,19 @@ async function openConnection(input: {
   runtimeCommand: string;
   entrypoint: string;
   resolvedArgs: string[];
+  childInvocationKind: ChildInvocationKind;
   requestedEntrypoint: string | null;
   extraArgs: string[];
   logicalConnectionId?: string;
   metadata: RuntimeSurfaceMetadata;
 }): Promise<ChildConnection> {
-  const { state, siteRoot, surfaceId, runtimeKind, runtimeRequirements, runtimeCommand, entrypoint, resolvedArgs, requestedEntrypoint, extraArgs, logicalConnectionId, metadata } = input;
+  const { state, siteRoot, surfaceId, runtimeKind, runtimeRequirements, runtimeCommand, entrypoint, resolvedArgs, childInvocationKind, requestedEntrypoint, extraArgs, logicalConnectionId, metadata } = input;
   const connectionId = randomUUID();
   const stableLogicalConnectionId = logicalConnectionId ?? connectionId;
   const generationId = `generation-${randomUUID()}`;
   const attachedAt = new Date().toISOString();
-  const child = spawn(runtimeCommand, [entrypoint, ...resolvedArgs], {
+  const childArgs = childInvocationKind === 'entrypoint' ? [entrypoint, ...resolvedArgs] : resolvedArgs;
+  const child = spawn(runtimeCommand, childArgs, {
     stdio: ['pipe', 'pipe', 'pipe'],
     env: buildChildEnv(siteRoot, state.policy, { connectionId, logicalConnectionId: stableLogicalConnectionId, generationId }),
     shell: false,
@@ -1109,6 +1113,7 @@ async function openConnection(input: {
     runtimeCommand,
     entrypoint,
     args: resolvedArgs,
+    childInvocationKind,
     requestedEntrypoint,
     extraArgs,
     process: child,
@@ -1167,6 +1172,7 @@ function attachedResponse(connection: ChildConnection): JsonRecord {
     runtime_freshness: loaderRuntimeFreshness(),
     entrypoint: connection.entrypoint,
     args: connection.args,
+    child_invocation_kind: connection.childInvocationKind,
     server_info: connection.serverInfo,
     tools: connection.toolSnapshot,
     descriptor_digest: connection.descriptorDigest,
@@ -1421,6 +1427,7 @@ async function restartConnection(args: JsonRecord, state: LoaderState): Promise<
     runtimeCommand: connection.runtimeCommand,
     entrypoint: connection.entrypoint,
     resolvedArgs: connection.args,
+    childInvocationKind: connection.childInvocationKind,
     requestedEntrypoint: connection.requestedEntrypoint,
     extraArgs: connection.extraArgs,
     logicalConnectionId: connection.logicalConnectionId,
@@ -1452,11 +1459,12 @@ async function restartConnection(args: JsonRecord, state: LoaderState): Promise<
   };
 }
 
-type ResolvedSurfaceLaunch = { runtimeCommand: string; entrypoint: string; resolvedArgs: string[] };
+type ChildInvocationKind = 'entrypoint' | 'native_entrypoint' | 'native_applet';
+type ResolvedSurfaceLaunch = { runtimeCommand: string; entrypoint: string; resolvedArgs: string[]; childInvocationKind: ChildInvocationKind };
 
 async function resolveSurfaceEntrypoint(siteRoot: string, surfaceId: string, explicitEntrypoint: string | null, extraArgs: string[] | null): Promise<ResolvedSurfaceLaunch> {
   if (explicitEntrypoint) {
-    return { runtimeCommand: resolveJavaScriptRuntime(), entrypoint: normalizePath(explicitEntrypoint), resolvedArgs: extraArgs ?? [] };
+    return { runtimeCommand: resolveJavaScriptRuntime(), entrypoint: normalizePath(explicitEntrypoint), resolvedArgs: extraArgs ?? [], childInvocationKind: 'entrypoint' };
   }
   const fabric = readSiteFabric(siteRoot);
   const servers = asRecord(fabric.mcpServers);
@@ -1472,7 +1480,7 @@ async function resolveSurfaceEntrypoint(siteRoot: string, surfaceId: string, exp
   if (shared) {
     const entrypoint = normalizePath(shared.entrypoint.replace(/{site_root}/g, siteRoot));
     const args = shared.args.map((a) => interpolateSiteArg(a, siteRoot));
-    return { runtimeCommand: resolveJavaScriptRuntime(), entrypoint, resolvedArgs: [...args, ...extraArgs ?? []] };
+    return { runtimeCommand: resolveJavaScriptRuntime(), entrypoint, resolvedArgs: [...args, ...extraArgs ?? []], childInvocationKind: 'entrypoint' };
   }
   throw diagnosticError('surface_not_found', `surface_not_found:${surfaceId}`);
 }
@@ -1497,14 +1505,38 @@ function resolveFabricLaunch(command: string, args: string[]): ResolvedSurfaceLa
       throw diagnosticError('surface_command_unsupported', `surface_command_unsupported:runtime-proxy:${command}`, { command, args, remediation: 'Regenerate the registrar-owned Site fragment so proxy child-command and entrypoint metadata are complete.' });
     }
     const childInvocationKind = argValue(args, '--child-invocation-kind');
-    if (childInvocationKind && childInvocationKind !== 'entrypoint') {
-      throw diagnosticError('surface_native_child_unsupported', `surface_native_child_unsupported:${childInvocationKind}`, { child_command: childCommand, child_entrypoint: childEntrypoint });
+    const invocationKind = (childInvocationKind ?? 'entrypoint') as ChildInvocationKind;
+    if (!['entrypoint', 'native_entrypoint', 'native_applet'].includes(invocationKind)) {
+      throw diagnosticError('surface_native_child_unsupported', `surface_native_child_unsupported:${invocationKind}`, { child_command: childCommand, child_entrypoint: childEntrypoint });
     }
-    return { runtimeCommand: resolveDeclaredRuntime(childCommand), entrypoint: normalizePath(childEntrypoint), resolvedArgs: args.slice(separatorIndex + 1) };
+    if (invocationKind === 'entrypoint') {
+      return { runtimeCommand: resolveDeclaredRuntime(childCommand), entrypoint: normalizePath(childEntrypoint), resolvedArgs: args.slice(separatorIndex + 1), childInvocationKind: invocationKind };
+    }
+    const nativeCommand = resolveNativeChildCommand(childCommand);
+    const nativeArgs = args.slice(separatorIndex + 1);
+    if (invocationKind === 'native_applet') {
+      const childApplet = argValue(args, '--child-applet');
+      if (!childApplet) {
+        throw diagnosticError('surface_native_child_unsupported', `surface_native_child_unsupported:${invocationKind}`, { child_command: childCommand, child_entrypoint: childEntrypoint });
+      }
+      nativeArgs.unshift(childApplet);
+    }
+    return { runtimeCommand: nativeCommand, entrypoint: nativeCommand, resolvedArgs: nativeArgs, childInvocationKind: invocationKind };
   }
   const entrypoint = extractRuntimeEntrypoint(command, args);
   if (!entrypoint) throw diagnosticError('surface_command_unsupported', `surface_command_unsupported:${command}`);
-  return { runtimeCommand: resolveDeclaredRuntime(command), entrypoint: normalizePath(entrypoint), resolvedArgs: removeEntrypointArg(args, entrypoint) };
+  return { runtimeCommand: resolveDeclaredRuntime(command), entrypoint: normalizePath(entrypoint), resolvedArgs: removeEntrypointArg(args, entrypoint), childInvocationKind: 'entrypoint' };
+}
+
+function resolveNativeChildCommand(command: string): string {
+  const normalized = normalizePath(command.trim());
+  if (!isAbsolute(normalized) || !existsSync(normalized)) {
+    throw diagnosticError('child_runtime_executable_unresolved', `child_runtime_executable_unresolved:${command}`, {
+      child_command: command,
+      remediation: 'Regenerate the registrar-owned Site fragment with an existing absolute native child executable.',
+    });
+  }
+  return resolve(normalized);
 }
 
 function extractRuntimeEntrypoint(command: string, args: string[]): string | null {
@@ -1994,6 +2026,7 @@ function connectionStatusFields(connection: ChildConnection): JsonRecord {
     runtime_freshness: loaderRuntimeFreshness(),
     entrypoint: connection.entrypoint,
     args: connection.args,
+    child_invocation_kind: connection.childInvocationKind,
     status: live ? 'live' : 'closed',
     detached: connection.detached,
     initialized: connection.initialized,

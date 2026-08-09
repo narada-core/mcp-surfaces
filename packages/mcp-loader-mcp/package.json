@@ -25,7 +25,7 @@
     "test": "pnpm run test:bun",
     "test:bun": "pnpm --filter @narada-core/mcp-e2e-harness build && pnpm build && bun dist/test/protocol-smoke.test.js && bun dist/test/mcp-loader-mcp.test.js",
     "test:node": "pnpm --filter @narada-core/mcp-e2e-harness build && pnpm build && node dist/test/protocol-smoke.test.js && node dist/test/mcp-loader-mcp.test.js",
-    "test:native": "pnpm run build:native && node --import tsx test/native-slice.test.ts && node --import tsx test/native-stateful-proxy.test.ts",
+    "test:native": "pnpm run build:native && node --import tsx test/native-slice.test.ts && node --import tsx test/native-stateful-proxy.test.ts && node --import tsx test/native-native-children.test.ts",
     "benchmark:loader": "tsx scripts/benchmark-loader.ts"
   },
   "dependencies": {
