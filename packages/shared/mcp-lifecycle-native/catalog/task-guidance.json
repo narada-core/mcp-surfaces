@@ -1,0 +1,601 @@
+{
+  "status": "ok",
+  "schema": "narada.task_lifecycle.guidance.v0",
+  "common_guidance_contract_schema": "narada.mcp_surface.guidance.v0",
+  "surface_id": "task-lifecycle",
+  "guidance_tool": "task_lifecycle_guidance",
+  "purpose": "Task lifecycle MCP surface for claiming, executing, evidencing, reviewing, blocking, and truthfully finishing task work.",
+  "requested": {
+    "workflow": "all",
+    "tool": null
+  },
+  "workflow": "all",
+  "tool": null,
+  "first_use": [
+    "Call task_lifecycle_guidance when you first see a lifecycle task, when a refusal is unclear, or before recovering from incomplete task evidence.",
+    "Inspect the task before mutation; claim only when authorized; submit execution notes, verification, changed-file evidence, and closeout through lifecycle tools.",
+    "Use payload_ref for long companion fields and preserve structuredContent as authoritative lifecycle evidence.",
+    "Use task_lifecycle_tags_update for audited site-local labels; tags are descriptive and never replace routing, authorization, priority, dependency, review, or closure state.",
+    "The carrier-facing runtime never prepares SQLite: run task-lifecycle-mcp --prepare --site-root <site-root> once before stateful calls. If a stateful call returns task_lifecycle_store_not_prepared, inspect task_lifecycle_doctor.preparation and perform explicit preparation instead of retrying.",
+    "Call mcp_runtime_proxy_status when this carrier-bound surface may be running an old build; inspect runtime_freshness.status and execute only the machine-readable carrier/supervisor reload_action."
+  ],
+  "sections": {
+    "ordinary_task": {
+      "intent": "Do task work through explicit lifecycle records instead of conversational claims.",
+      "canonical_sequence": [
+        "task_lifecycle_show or task_lifecycle_next",
+        "task_lifecycle_claim when unclaimed",
+        "do the implementation or investigation work",
+        "task_lifecycle_submit_work for normal completion",
+        "read the returned lifecycle status before reporting done"
+      ],
+      "required_evidence": [
+        "execution_notes",
+        "verification",
+        "changed_files or no_files_changed",
+        "acceptance criteria proof"
+      ],
+      "state_semantics": {
+        "submitted": "A report/evidence packet was recorded.",
+        "in_review": "Work is submitted but closure is gated by review or dependency policy.",
+        "closed": "Closure authority has been recorded."
+      }
+    },
+    "blocked_task": {
+      "intent": "Record exact blockers without pretending the task is complete.",
+      "canonical_sequence": [
+        "task_lifecycle_report_blocked",
+        "include blocker facts and next_action",
+        "do not use finish for unresolved blockers"
+      ],
+      "required_evidence": [
+        "reason",
+        "blockers when specific facts exist",
+        "next_action when an external action is required"
+      ]
+    },
+    "payloads": {
+      "intent": "Use immutable payload refs for long companion fields while keeping task_number and agent_id top-level.",
+      "canonical_sequence": [
+        "mcp_payload_create",
+        "call lifecycle tool with payload_ref plus required top-level identity/routing fields"
+      ],
+      "inline_limit_guidance": "Inline companion strings over 20000 characters should move to payload_ref when the target tool supports it.",
+      "top_level_authority_fields": [
+        "task_number",
+        "agent_id",
+        "authority_basis when required"
+      ],
+      "companion_fields": [
+        "summary",
+        "execution_notes",
+        "verification",
+        "changed_files",
+        "findings",
+        "recovery_truthfulness",
+        "self_certification"
+      ],
+      "examples": [
+        {
+          "purpose": "Submit ordinary work with long notes.",
+          "create_payload": {
+            "payload_id": "task-123-submit-work-notes",
+            "payload": {
+              "summary": "Implemented the requested behavior.",
+              "execution_notes": "<long execution notes>",
+              "verification": "<long verification notes>",
+              "changed_files": [
+                "packages/example/src/main.ts"
+              ]
+            },
+            "created_by": "<agent id>"
+          },
+          "consume_payload_ref": {
+            "tool": "task_lifecycle_submit_work",
+            "arguments": {
+              "task_number": 123,
+              "agent_id": "<agent id>",
+              "payload_ref": "mcp_payload:task-123-submit-work-notes@v1"
+            }
+          }
+        },
+        {
+          "purpose": "Finish an outcome-contract task with structured findings.",
+          "create_payload": {
+            "payload_id": "task-456-review-outcome",
+            "payload": {
+              "outcome": "accepted_with_notes",
+              "summary": "The implementation satisfies the contract.",
+              "findings": [
+                {
+                  "severity": "note",
+                  "description": "Minor follow-up remains non-blocking."
+                }
+              ]
+            },
+            "created_by": "<agent id>"
+          },
+          "consume_payload_ref": {
+            "tool": "task_lifecycle_finish",
+            "arguments": {
+              "task_number": 456,
+              "agent_id": "<agent id>",
+              "payload_ref": "mcp_payload:task-456-review-outcome@v1"
+            }
+          }
+        },
+        {
+          "purpose": "Report a blocked task with detailed blocker evidence.",
+          "create_payload": {
+            "payload_id": "task-789-blocked-report",
+            "payload": {
+              "reason": "External credential is missing.",
+              "blockers": [
+                {
+                  "kind": "operator_input_required",
+                  "detail": "<long concrete evidence>"
+                }
+              ],
+              "next_action": "<long exact action needed to unblock continuation>"
+            },
+            "created_by": "<agent id>"
+          },
+          "consume_payload_ref": {
+            "tool": "task_lifecycle_report_blocked",
+            "arguments": {
+              "task_number": 789,
+              "agent_id": "<agent id>",
+              "payload_ref": "mcp_payload:task-789-blocked-report@v1"
+            }
+          }
+        }
+      ]
+    },
+    "review_and_dependencies": {
+      "intent": "Review is dependency/outcome work, not a magic final state.",
+      "canonical_sequence": [
+        "submit_work with reviewer when ordinary work needs review",
+        "reviewer claims dependency task",
+        "reviewer finishes with accepted/accepted_with_notes/rejected outcome"
+      ],
+      "state_semantics": {
+        "completed_outcome": "An outcome was admitted for the task.",
+        "dependency_satisfied": "Parent gating dependency has an admitted satisfying outcome.",
+        "rejected_outcome": "Blocks parent closure until disposition is recorded."
+      }
+    },
+    "closeout_truthfulness": {
+      "intent": "Report the strongest true lifecycle state, not the desired state.",
+      "required_checks": [
+        "latest tool result status",
+        "final_lifecycle_status or task show status",
+        "closure evidence",
+        "review/dependency obligations",
+        "working tree and verification evidence"
+      ],
+      "common_mistakes": [
+        "Calling submitted or in_review closed.",
+        "Omitting changed_files or no_files_changed.",
+        "Using finish when blocked facts remain unresolved.",
+        "Treating generated reports as self-authorizing closure."
+      ]
+    }
+  },
+  "first_use_decision_tree": [
+    {
+      "condition": "You have a task number.",
+      "sequence": [
+        "task_lifecycle_show",
+        "task_lifecycle_reopen or task_lifecycle_continue if terminal",
+        "task_lifecycle_claim if unclaimed and claimable",
+        "do the work",
+        "task_lifecycle_submit_work"
+      ]
+    },
+    {
+      "condition": "You do not have a task number.",
+      "sequence": [
+        "task_lifecycle_next",
+        "claim the recommended task when appropriate",
+        "do the work",
+        "task_lifecycle_submit_work"
+      ]
+    },
+    {
+      "condition": "You are blocked by missing input, authority, credentials, failing infrastructure, or unclear external state.",
+      "sequence": [
+        "task_lifecycle_report_blocked with exact blocker facts and next_action"
+      ]
+    },
+    {
+      "condition": "You are completing review/dependency work.",
+      "sequence": [
+        "task_lifecycle_show to read outcome contract and terminal state",
+        "task_lifecycle_reopen or task_lifecycle_continue if terminal",
+        "task_lifecycle_finish with outcome and findings"
+      ]
+    },
+    {
+      "condition": "The carrier-bound server is stale or wedged.",
+      "sequence": [
+        "mcp_runtime_proxy_status",
+        "task_lifecycle_test_mcp_tool with an admitted server_path for one-shot recovery evidence",
+        "route runtime_freshness.reload_action to the carrier/runtime supervisor"
+      ]
+    },
+    {
+      "condition": "Your summary, verification, findings, or blocker details are too long for inline fields.",
+      "sequence": [
+        "mcp_payload_create with companion fields under payload",
+        "retry lifecycle tool with payload_ref plus top-level task_number and agent_id"
+      ]
+    }
+  ],
+  "state_truth_table": {
+    "opened": "Task exists and is available or waiting; no current agent responsibility is implied.",
+    "claimed": "An agent has accepted responsibility; no completion is implied. A closed or confirmed task must not enter this state without an explicit reopen/continue trace.",
+    "submitted": "A report or evidence packet was recorded by a tool call; closure is not implied.",
+    "completed_outcome": "A task_outcome was admitted as completed; closure may still be gated by review or dependencies.",
+    "in_review": "Submitted work awaits review or dependency satisfaction; do not report this as closed.",
+    "awaiting_dependencies": "Parent work is not closed because one or more dependencies must satisfy outcomes first.",
+    "closed": "Closure authority has been recorded; this is the normal terminal claim for task completion. Claiming or submitting a new outcome requires task_lifecycle_reopen or task_lifecycle_continue first.",
+    "confirmed": "A stronger finalization state when supported by local policy; treat as at least closed and require an explicit reopen/continue trace before new work or outcomes.",
+    "deferred": "Work is intentionally paused; do not treat as completed.",
+    "blocked": "Known blocker prevents truthful completion until resolved or explicitly dispositioned."
+  },
+  "tool_preference_table": [
+    {
+      "tool": "task_lifecycle_next",
+      "prefer_when": "Finding actionable work without a task number.",
+      "avoid_when": "You already have a specific task to inspect or finish."
+    },
+    {
+      "tool": "task_lifecycle_show",
+      "prefer_when": "Reading the authoritative task state, assignment, criteria, dependencies, and latest outcome.",
+      "avoid_when": "You need a compact multi-task overview."
+    },
+    {
+      "tool": "task_lifecycle_claim",
+      "prefer_when": "Taking responsibility for unclaimed work.",
+      "avoid_when": "The task is already claimed by you or you lack real authority to cross routing gates."
+    },
+    {
+      "tool": "task_lifecycle_submit_work",
+      "prefer_when": "Ordinary implementation or investigation closeout with notes, verification, evidence, and finish.",
+      "avoid_when": "You are blocked or completing a specialized outcome-contract task."
+    },
+    {
+      "tool": "task_lifecycle_finish",
+      "prefer_when": "Lower-level finish, no-edit report, or dependency/review outcome admission.",
+      "avoid_when": "You still need to write execution/verification notes and prove criteria for ordinary work."
+    },
+    {
+      "tool": "task_lifecycle_report_blocked",
+      "prefer_when": "A known unresolved blocker prevents truthful completion.",
+      "avoid_when": "Work is complete and only needs a normal report."
+    },
+    {
+      "tool": "task_lifecycle_payload_schema",
+      "prefer_when": "You need exact payload_ref shapes for a lifecycle tool.",
+      "avoid_when": "You only need workflow guidance."
+    },
+    {
+      "tool": "mcp_payload_create",
+      "prefer_when": "Companion fields are long or structurally rich.",
+      "avoid_when": "Short ordinary fields fit the lifecycle tool schema."
+    }
+  ],
+  "tool_preference": [
+    {
+      "tool": "task_lifecycle_next",
+      "prefer_when": "Finding actionable work without a task number.",
+      "avoid_when": "You already have a specific task to inspect or finish."
+    },
+    {
+      "tool": "task_lifecycle_show",
+      "prefer_when": "Reading the authoritative task state, assignment, criteria, dependencies, and latest outcome.",
+      "avoid_when": "You need a compact multi-task overview."
+    },
+    {
+      "tool": "task_lifecycle_claim",
+      "prefer_when": "Taking responsibility for unclaimed work.",
+      "avoid_when": "The task is already claimed by you or you lack real authority to cross routing gates."
+    },
+    {
+      "tool": "task_lifecycle_submit_work",
+      "prefer_when": "Ordinary implementation or investigation closeout with notes, verification, evidence, and finish.",
+      "avoid_when": "You are blocked or completing a specialized outcome-contract task."
+    },
+    {
+      "tool": "task_lifecycle_finish",
+      "prefer_when": "Lower-level finish, no-edit report, or dependency/review outcome admission.",
+      "avoid_when": "You still need to write execution/verification notes and prove criteria for ordinary work."
+    },
+    {
+      "tool": "task_lifecycle_report_blocked",
+      "prefer_when": "A known unresolved blocker prevents truthful completion.",
+      "avoid_when": "Work is complete and only needs a normal report."
+    },
+    {
+      "tool": "task_lifecycle_payload_schema",
+      "prefer_when": "You need exact payload_ref shapes for a lifecycle tool.",
+      "avoid_when": "You only need workflow guidance."
+    },
+    {
+      "tool": "mcp_payload_create",
+      "prefer_when": "Companion fields are long or structurally rich.",
+      "avoid_when": "Short ordinary fields fit the lifecycle tool schema."
+    }
+  ],
+  "happy_path_examples": {
+    "ordinary_submit_work_inline": {
+      "tool": "task_lifecycle_submit_work",
+      "arguments": {
+        "task_number": 123,
+        "agent_id": "<agent id>",
+        "summary": "Implemented the requested behavior.",
+        "execution_notes": "Changed the focused implementation path and preserved existing gates.",
+        "verification": "Ran the focused package test and inspected the task readback.",
+        "changed_files": [
+          "packages/example/src/main.ts"
+        ]
+      }
+    },
+    "tags": {
+      "intent": "Maintain small, site-local descriptive labels for discovery and related-task suggestions.",
+      "canonical_sequence": [
+        "task_lifecycle_show or task_lifecycle_list",
+        "task_lifecycle_tags_update with the complete desired tag set and a reason",
+        "re-read task_lifecycle_show to inspect the audited update"
+      ],
+      "semantics": {
+        "normalization": "Tags are trimmed, lowercased, converted to kebab-case, deduplicated, and bounded to 20 tags of at most 64 characters each.",
+        "scope": "Tags belong to this Site only.",
+        "authority": "The active task owner or an architect/operator may update them.",
+        "boundaries": "Tags never affect authorization, routing, priority, dependencies, review, or closure.",
+        "relatedness": "Explicit overlap is preferred; derived title/goal/context terms are only a fallback for untagged or legacy tasks."
+      }
+    },
+    "ordinary_submit_work_auto_materialized": {
+      "tool": "task_lifecycle_submit_work",
+      "use_when": "execution_notes, verification, summary, or changed_files are too long for inline transport and you want one governed call instead of a separate mcp_payload_create call",
+      "arguments": {
+        "task_number": 123,
+        "agent_id": "<agent id>",
+        "summary": "<long summary>",
+        "execution_notes": "<long execution notes>",
+        "verification": "<long verification notes>",
+        "changed_files": [
+          "packages/example/src/main.ts"
+        ],
+        "auto_materialize_payload": true
+      },
+      "result_contract": "payload_source.kind=auto_materialized_payload and long_field_transport=auto_materialized_payload"
+    },
+    "resume_existing_submit_work": {
+      "tool": "task_lifecycle_submit_work",
+      "use_when": "A prior submit_work already recorded substantive task notes and admitted a report, but a later lifecycle gate or restart requires continuing the same closeout.",
+      "arguments": {
+        "task_number": 123,
+        "agent_id": "<same submitting agent id>",
+        "resume_existing_work": true
+      },
+      "result_contract": "Existing Execution Notes and Verification are validated and reused; latest same-agent report summary and changed-file evidence are reused; proof and admission are skipped unless explicitly requested."
+    },
+    "no_files_changed_finish": {
+      "tool": "task_lifecycle_finish",
+      "arguments": {
+        "task_number": 124,
+        "agent_id": "<agent id>",
+        "summary": "Inspection-only task completed; no repository files changed.",
+        "no_files_changed": true
+      }
+    },
+    "blocked_report": {
+      "tool": "task_lifecycle_report_blocked",
+      "arguments": {
+        "task_number": 125,
+        "agent_id": "<agent id>",
+        "reason": "Required credential is missing.",
+        "blockers": [
+          {
+            "kind": "credential_missing",
+            "detail": "The configured token is absent from the runtime environment."
+          }
+        ],
+        "next_action": "Operator must add the credential and restart the carrier."
+      }
+    }
+  },
+  "examples": {
+    "ordinary_submit_work_inline": {
+      "tool": "task_lifecycle_submit_work",
+      "arguments": {
+        "task_number": 123,
+        "agent_id": "<agent id>",
+        "summary": "Implemented the requested behavior.",
+        "execution_notes": "Changed the focused implementation path and preserved existing gates.",
+        "verification": "Ran the focused package test and inspected the task readback.",
+        "changed_files": [
+          "packages/example/src/main.ts"
+        ]
+      }
+    },
+    "tags": {
+      "intent": "Maintain small, site-local descriptive labels for discovery and related-task suggestions.",
+      "canonical_sequence": [
+        "task_lifecycle_show or task_lifecycle_list",
+        "task_lifecycle_tags_update with the complete desired tag set and a reason",
+        "re-read task_lifecycle_show to inspect the audited update"
+      ],
+      "semantics": {
+        "normalization": "Tags are trimmed, lowercased, converted to kebab-case, deduplicated, and bounded to 20 tags of at most 64 characters each.",
+        "scope": "Tags belong to this Site only.",
+        "authority": "The active task owner or an architect/operator may update them.",
+        "boundaries": "Tags never affect authorization, routing, priority, dependencies, review, or closure.",
+        "relatedness": "Explicit overlap is preferred; derived title/goal/context terms are only a fallback for untagged or legacy tasks."
+      }
+    },
+    "ordinary_submit_work_auto_materialized": {
+      "tool": "task_lifecycle_submit_work",
+      "use_when": "execution_notes, verification, summary, or changed_files are too long for inline transport and you want one governed call instead of a separate mcp_payload_create call",
+      "arguments": {
+        "task_number": 123,
+        "agent_id": "<agent id>",
+        "summary": "<long summary>",
+        "execution_notes": "<long execution notes>",
+        "verification": "<long verification notes>",
+        "changed_files": [
+          "packages/example/src/main.ts"
+        ],
+        "auto_materialize_payload": true
+      },
+      "result_contract": "payload_source.kind=auto_materialized_payload and long_field_transport=auto_materialized_payload"
+    },
+    "resume_existing_submit_work": {
+      "tool": "task_lifecycle_submit_work",
+      "use_when": "A prior submit_work already recorded substantive task notes and admitted a report, but a later lifecycle gate or restart requires continuing the same closeout.",
+      "arguments": {
+        "task_number": 123,
+        "agent_id": "<same submitting agent id>",
+        "resume_existing_work": true
+      },
+      "result_contract": "Existing Execution Notes and Verification are validated and reused; latest same-agent report summary and changed-file evidence are reused; proof and admission are skipped unless explicitly requested."
+    },
+    "no_files_changed_finish": {
+      "tool": "task_lifecycle_finish",
+      "arguments": {
+        "task_number": 124,
+        "agent_id": "<agent id>",
+        "summary": "Inspection-only task completed; no repository files changed.",
+        "no_files_changed": true
+      }
+    },
+    "blocked_report": {
+      "tool": "task_lifecycle_report_blocked",
+      "arguments": {
+        "task_number": 125,
+        "agent_id": "<agent id>",
+        "reason": "Required credential is missing.",
+        "blockers": [
+          {
+            "kind": "credential_missing",
+            "detail": "The configured token is absent from the runtime environment."
+          }
+        ],
+        "next_action": "Operator must add the credential and restart the carrier."
+      }
+    }
+  },
+  "anti_patterns": [
+    {
+      "mistake": "Saying a task is closed when the lifecycle status is submitted, in_review, awaiting_dependencies, blocked, or deferred.",
+      "correction": "Report the exact lifecycle status and whether closure authority exists."
+    },
+    {
+      "mistake": "Putting task_number or agent_id only inside a payload.",
+      "correction": "Keep authority/routing fields top-level; payload carries companion fields."
+    },
+    {
+      "mistake": "Calling finish or submit_work when blocker facts remain unresolved.",
+      "correction": "Use task_lifecycle_report_blocked with blockers and next_action."
+    },
+    {
+      "mistake": "Omitting changed_files and no_files_changed.",
+      "correction": "Provide changed-file evidence or explicitly declare no_files_changed."
+    },
+    {
+      "mistake": "Treating generated reports, review artifacts, or model narration as self-authorizing closure.",
+      "correction": "Use lifecycle readback: outcome, evidence verdict, dependencies, and closure status."
+    },
+    {
+      "mistake": "Forcing authority_basis to bypass routing without real operator/task-owner authority.",
+      "correction": "Only use authority_basis when the authority exists and can be summarized truthfully."
+    },
+    {
+      "mistake": "Using tags to imply ownership, urgency, dependency, review, or closure.",
+      "correction": "Treat tags as descriptive site-local labels and use the authoritative lifecycle/routing fields for state and authority."
+    }
+  ],
+  "recovery_guidance": [
+    {
+      "failure": "Inline field too long or structurally awkward.",
+      "action": "Call task_lifecycle_payload_schema for the target tool, create mcp_payload_create with companion fields under payload, then retry with payload_ref."
+    },
+    {
+      "failure": "Authorization or routing refusal.",
+      "action": "Read task_lifecycle_show and roster/routing state; claim only if eligible or provide a truthful authority_basis when explicitly authorized."
+    },
+    {
+      "failure": "Evidence rejected or acceptance criteria unchecked.",
+      "action": "Fix task notes, verification, changed-file/no-files evidence, and criteria proof before retrying finish."
+    },
+    {
+      "failure": "Review or dependency is blocking closure.",
+      "action": "Find the dependency task or review obligation, finish it with the required outcome, then re-check parent dependency satisfaction."
+    },
+    {
+      "failure": "Tool result is ambiguous or live MCP seems stale after source edits.",
+      "action": "Record the observed result exactly, verify source with focused tests, and request/rely on carrier restart before claiming live behavior changed."
+    },
+    {
+      "failure": "Tag update is refused.",
+      "action": "Re-read the task, use the active task owner or an architect/operator identity, pass the complete normalized tag set, and include a concise reason."
+    }
+  ],
+  "recovery": [
+    {
+      "failure": "Inline field too long or structurally awkward.",
+      "action": "Call task_lifecycle_payload_schema for the target tool, create mcp_payload_create with companion fields under payload, then retry with payload_ref."
+    },
+    {
+      "failure": "Authorization or routing refusal.",
+      "action": "Read task_lifecycle_show and roster/routing state; claim only if eligible or provide a truthful authority_basis when explicitly authorized."
+    },
+    {
+      "failure": "Evidence rejected or acceptance criteria unchecked.",
+      "action": "Fix task notes, verification, changed-file/no-files evidence, and criteria proof before retrying finish."
+    },
+    {
+      "failure": "Review or dependency is blocking closure.",
+      "action": "Find the dependency task or review obligation, finish it with the required outcome, then re-check parent dependency satisfaction."
+    },
+    {
+      "failure": "Tool result is ambiguous or live MCP seems stale after source edits.",
+      "action": "Record the observed result exactly, verify source with focused tests, and request/rely on carrier restart before claiming live behavior changed."
+    },
+    {
+      "failure": "Tag update is refused.",
+      "action": "Re-read the task, use the active task owner or an architect/operator identity, pass the complete normalized tag set, and include a concise reason."
+    }
+  ],
+  "site_policy": {
+    "roster": {
+      "roles_are_obligation_targets": false
+    },
+    "source": "default",
+    "path": "<site-root>/.narada/task-lifecycle.toml"
+  },
+  "role_obligation_targeting": {
+    "default": false,
+    "config_file": "<site-root>/.narada/task-lifecycle.toml",
+    "config_key": "roster.roles_are_obligation_targets",
+    "guidance": "Roster roles are descriptive unless roles_are_obligation_targets is true; diagnostics may mention affected roles without creating role-targeted obligations."
+  },
+  "feedback": {
+    "surface_id": "task-lifecycle",
+    "tool": "surface_feedback_submit",
+    "when": [
+      "guidance is missing, stale, or contradicted by live lifecycle behavior",
+      "payload_ref shape or evidence gates are unclear",
+      "task state, review state, or closeout requirements are hard to recover from"
+    ]
+  },
+  "boundaries": [
+    "Guidance is read-only model-facing operating advice.",
+    "Guidance does not weaken task lifecycle policy, authorize mutation, or replace tool schemas.",
+    "Lifecycle state and completion gates remain authoritative in task lifecycle records."
+  ],
+  "recommended_first_call": "task_lifecycle_guidance({ workflow: \"ordinary_task\" })",
+  "tool_specific_note": null
+}

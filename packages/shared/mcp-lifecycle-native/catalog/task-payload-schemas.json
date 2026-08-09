@@ -1,0 +1,230 @@
+{
+  "status": "ok",
+  "schema": "narada.task_lifecycle.payload_schema.v0",
+  "tool": null,
+  "schemas": {
+    "task_lifecycle_submit_work": {
+      "payload_ref_shape": {
+        "summary": "<finish summary>",
+        "execution_notes": "<Execution Notes replacement>",
+        "verification": "<Verification replacement>",
+        "changed_files": [
+          "path/to/file"
+        ],
+        "no_files_changed": false,
+        "resume_existing_work": false,
+        "self_certification": {},
+        "recovery_truthfulness": {}
+      },
+      "inline_payload_limit": {
+        "threshold_chars": 20000,
+        "long_fields": [
+          "summary",
+          "execution_notes",
+          "verification",
+          "changed_files"
+        ],
+        "remediation": "Inline fields are accepted up to the governed threshold. Larger inline fields are refused with mcp_payload_create plus payload_ref remediation. For one governed submit_work call, pass auto_materialize_payload:true; the result must include payload_source.kind=auto_materialized_payload."
+      },
+      "one_call_fallback": {
+        "field": "auto_materialize_payload",
+        "value": true,
+        "audit_contract": "Creates an immutable transient payload artifact and reports it in payload_source."
+      },
+      "top_level_fields_remain_required": [
+        "task_number",
+        "agent_id"
+      ]
+    },
+    "task_lifecycle_test_mcp_tool": {
+      "payload_ref_shape": {
+        "summary": "<long child-tool field>",
+        "findings": [],
+        "changed_files": [
+          "path/to/file"
+        ]
+      },
+      "payload_route": "payload_ref is resolved by the parent and merged into arguments before spawning the fresh child.",
+      "top_level_wins": "Fields in arguments override payload fields, including task_number and agent_id.",
+      "control_fields_remain_top_level": [
+        "server_path",
+        "tool_name",
+        "timeout_seconds"
+      ]
+    },
+    "task_lifecycle_review": {
+      "compatibility_only": true,
+      "authority_model": "Migrates legacy review calls into review-contract dependency work and task_outcomes authority. New review work should finish the dependency task with task_lifecycle_finish.",
+      "payload_ref_shape": {
+        "findings": [
+          {
+            "severity": "note|blocking",
+            "description": "<finding text>",
+            "location": "<optional location>"
+          }
+        ]
+      },
+      "top_level_fields_remain_required": [
+        "task_number",
+        "agent_id",
+        "verdict"
+      ],
+      "invalid_shapes": [
+        "{ findings: { \"0\": {...} } }",
+        "{ findings: [\"text\"] }"
+      ],
+      "preferred_tool_for_new_review_work": "task_lifecycle_finish"
+    },
+    "task_lifecycle_finish": {
+      "payload_ref_shape": {
+        "summary": "<finish summary>",
+        "outcome": "<contract outcome when applicable>",
+        "findings": [],
+        "evidence_refs": [
+          "structured_command_execution:<execution_ref>"
+        ],
+        "changed_files": [
+          "path/to/file"
+        ],
+        "no_files_changed": false,
+        "self_certification": {},
+        "recovery_truthfulness": {}
+      },
+      "inline_payload_limit": {
+        "threshold_chars": 20000,
+        "remediation": "Inline recovery_truthfulness and other companion fields are accepted up to the governed threshold. Put larger summary, findings, outcome evidence, or guard packets in mcp_payload_create, then call task_lifecycle_finish with payload_ref plus top-level task_number and agent_id."
+      },
+      "top_level_fields_remain_required": [
+        "task_number",
+        "agent_id"
+      ]
+    },
+    "task_lifecycle_disposition_closeout": {
+      "canonical_tool": "task_lifecycle_disposition_closeout",
+      "accepted_legacy_alias": "task_lifecycle_closeout",
+      "payload_ref_shape": {
+        "summary": "<closeout summary>",
+        "changed_files": [
+          "path/to/file"
+        ],
+        "no_files_changed": false,
+        "reviewer": "<optional admitted reviewer agent id or unique reviewer role alias>"
+      },
+      "inline_payload_limit": {
+        "threshold_chars": 20000,
+        "long_fields": [
+          "summary"
+        ],
+        "remediation": "Put closeout summaries above the governed inline threshold and optional changed_files/no_files_changed/reviewer in mcp_payload_create, then call task_lifecycle_disposition_closeout with payload_ref plus top-level task_number and agent_id."
+      },
+      "top_level_fields_remain_required": [
+        "task_number",
+        "agent_id"
+      ],
+      "review_routing": "The optional reviewer is routed through a review-contract dependency; when omitted, the first reviewer-capable roster agent is selected."
+    },
+    "task_lifecycle_report_blocked": {
+      "payload_ref_shape": {
+        "reason": "<concise blocker summary>",
+        "blockers": [
+          {
+            "kind": "<blocker kind>",
+            "detail": "<details>"
+          }
+        ],
+        "next_action": "<long concrete unblock action>",
+        "defer": true
+      },
+      "inline_payload_limit": {
+        "threshold_chars": 20000,
+        "long_fields": [
+          "next_action",
+          "blockers"
+        ],
+        "remediation": "Put next_action and blocker details above the governed inline threshold in mcp_payload_create, then call task_lifecycle_report_blocked with payload_ref plus top-level task_number and agent_id. Keep reason concise inline or in the payload."
+      },
+      "top_level_fields_remain_required": [
+        "task_number",
+        "agent_id"
+      ]
+    },
+    "task_lifecycle_create": {
+      "payload_ref_shape": {
+        "title": "<required task title>",
+        "goal": "<optional goal; defaults to title>",
+        "context": "<optional context>",
+        "required_work": "<markdown string or string[] normalized to newline markdown>",
+        "non_goals": "<markdown string or string[] normalized to newline markdown>",
+        "acceptance_criteria": [
+          "string criteria item"
+        ],
+        "tags": [
+          "incident",
+          "mcp-surface"
+        ],
+        "preferred_role": "<optional role>",
+        "target_role": "<optional role>",
+        "recovery_truthfulness_required": false,
+        "idempotency_key": "<stable retry key; omitted values derive from payload_ref>",
+        "execution_binding": {
+          "workspace_root": "<absolute workspace root; defaults to this Site root>",
+          "repository_root": "<absolute repository root when the task executes repository work>",
+          "site_root": "<absolute destination Site root; defaults to this task-lifecycle surface Site>",
+          "executor_kind": "manual | operator | worker_delegation | delegated_task | site_loop",
+          "correlation_key": "<stable result correlation key; defaults to idempotency_key>"
+        }
+      },
+      "examples": [
+        {
+          "payload": {
+            "title": "Fix thing",
+            "required_work": [
+              "Inspect failure.",
+              "Patch narrowly."
+            ],
+            "non_goals": [
+              "No unrelated refactor."
+            ],
+            "acceptance_criteria": [
+              "Focused test passes."
+            ]
+          }
+        }
+      ],
+      "payload_ref_required": true,
+      "inline_definition_fields_refused": [
+        "title",
+        "goal",
+        "context",
+        "required_work",
+        "non_goals",
+        "acceptance_criteria",
+        "tags",
+        "preferred_role",
+        "target_role",
+        "recovery_truthfulness_required",
+        "idempotency_key",
+        "execution_binding"
+      ],
+      "normalized_fields": {
+        "required_work": "string[] joins with newline after trimming empty entries",
+        "non_goals": "string[] joins with newline after trimming empty entries"
+      }
+    },
+    "task_lifecycle_admit_evidence": {
+      "payload_ref_shape": {
+        "self_certification": {
+          "actor_principal": "<agent id>",
+          "findings": [],
+          "justification": "<why this evidence may be admitted>"
+        }
+      },
+      "top_level_fields_remain_required": [
+        "task_number",
+        "agent_id"
+      ],
+      "note": "Evidence content is read from the task lifecycle store; payload_ref is only for long self_certification guard metadata."
+    }
+  },
+  "remediation": "Use mcp_payload_create with one of these payload shapes, then retry the lifecycle tool with payload_ref plus required top-level identity/routing fields."
+}

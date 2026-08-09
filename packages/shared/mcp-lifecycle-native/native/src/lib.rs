@@ -18,6 +18,8 @@ const TASK_SCHEMA: &str = include_str!("../../catalog/task-schema.sql");
 const WORK_SCHEMA: &str = include_str!("../../catalog/work-schema.sql");
 const TASK_TOOLS: &str = include_str!("../../catalog/task-tools.json");
 const WORK_TOOLS: &str = include_str!("../../catalog/work-tools.json");
+const TASK_GUIDANCE: &str = include_str!("../../catalog/task-guidance.json");
+const TASK_PAYLOAD_SCHEMAS: &str = include_str!("../../catalog/task-payload-schemas.json");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Surface {
@@ -411,7 +413,7 @@ fn enforce_task_create_payload_contract(args: &Value) -> Result<(), String> {
 fn read_payload_revision_payload(root: &Path, reference: &str) -> Result<Value, String> {
     let (id, revision) = parse_payload_reference(reference)?;
     let path = payload_revision_path(root, &id, revision);
-    let metadata = fs::metadata(&path).map_err(|_| format!("payload_ref_not_found:{reference}"))?;
+    let metadata = fs::metadata(&path).map_err(|_| format!("payload_ref_not_found: {reference}"))?;
     let max_bytes = 256 * 1024usize;
     if metadata.len() > max_bytes as u64 {
         return Err(format!(
@@ -464,15 +466,28 @@ impl LifecycleServer {
         }
         let path = options.database_path();
         if !path.exists() {
+            if options.surface == Surface::Task {
+                return Ok(Self {
+                    options,
+                    connection: None,
+                    booted_at,
+                });
+            }
             return Err(format!(
                 "{}_store_not_prepared:database_missing",
                 options.surface.prefix()
             ));
         }
-        let connection = Self::open_runtime(&options)?;
+        let connection = match Self::open_runtime(&options) {
+            Ok(connection) => Some(connection),
+            Err(error)
+                if options.surface == Surface::Task
+                    && error.starts_with("task_lifecycle_store_not_prepared:") => None,
+            Err(error) => return Err(error),
+        };
         Ok(Self {
             options,
-            connection: Some(connection),
+            connection,
             booted_at,
         })
     }
@@ -654,7 +669,8 @@ impl LifecycleServer {
                     self.options.surface.tools().iter().filter_map(|v| v.get("name").and_then(Value::as_str)).take(100).map(ToString::to_string).collect::<Vec<_>>()
                 } else { Vec::new() };
                 Ok(json!({"completion":{"values":values,"total":values.len(),"hasMore":false}}))
-            },`n            "logging/setLevel" => Ok(json!({})),
+            },
+            "logging/setLevel" => Ok(json!({})),
             "tools/call" => {
                 let name = params
                     .get("name")
@@ -793,9 +809,35 @@ impl LifecycleServer {
     fn call_tool(&mut self, name: &str, args: Value) -> Result<Value, String> {
         let name = normalize_task_tool_name(name);
 
+        if self.options.surface == Surface::Task
+            && self.connection.is_none()
+            && !matches!(
+                name,
+                "task_lifecycle_doctor"
+                    | "task_lifecycle_guidance"
+                    | "task_lifecycle_payload_schema"
+                    | "task_lifecycle_restart"
+                    | "task_lifecycle_chapter_show"
+                    | "mcp_payload_create"
+                    | "mcp_payload_show"
+                    | "mcp_payload_derive"
+                    | "mcp_payload_validate"
+                    | "mcp_output_show"
+            )
+        {
+            let reason = inspect_database(&self.options)
+                .ok()
+                .and_then(|value| value.get("reason").and_then(Value::as_str).map(ToString::to_string))
+                .unwrap_or_else(|| "database_missing".to_string());
+            return Err(format!(
+                "{}_store_not_prepared:{reason}",
+                self.options.surface.prefix()
+            ));
+        }
         if let Some(refusal) = self.target_locus_guard(name, &args) {
             return Ok(refusal);
-        }`n        if name == "task_lifecycle_doctor" || name == "work_lifecycle_doctor" {
+        }
+        if name == "task_lifecycle_doctor" || name == "work_lifecycle_doctor" {
             return self.doctor(&args);
         }
         if name == "task_lifecycle_restart" {
@@ -1011,10 +1053,8 @@ impl LifecycleServer {
             "task_lifecycle_self_certification_preflight" => {
                 self.task_self_certification_preflight(args)
             }
-            "task_lifecycle_guidance" => Ok(guidance_payload(args)),
-            "task_lifecycle_payload_schema" => Ok(
-                json!({"status":"ok","schema":"narada.task_lifecycle.payload_schema.v0","tool":args.get("tool").cloned().unwrap_or(Value::Null)}),
-            ),
+            "task_lifecycle_guidance" => Ok(guidance_payload(&self.options.site_root, args)),
+            "task_lifecycle_payload_schema" => payload_schema_payload(args),
             "mcp_payload_create" => self.payload_create(args),
             "mcp_payload_show" | "mcp_payload_validate" => self.payload_read(name, args),
             "mcp_payload_derive" => self.payload_derive(args),
@@ -1570,7 +1610,11 @@ impl LifecycleServer {
 
     fn task_chapter_show(&self, args: Value) -> Result<Value, String> {
         let chapter = required_string(&args, "chapter_id")?;
-        let memberships = self.query_objects("select chapter_id,task_number,order_index,note,actor_agent_id,updated_at from task_chapter_memberships where chapter_id=?1 order by order_index,task_number",params![chapter])?;
+        let memberships = if self.connection.is_some() {
+            self.query_objects("select chapter_id,task_number,order_index,note,actor_agent_id,updated_at from task_chapter_memberships where chapter_id=?1 order by order_index,task_number",params![chapter])?
+        } else {
+            Vec::new()
+        };
         Ok(
             json!({"schema":"narada.task.chapter.v1","status":"ok","chapter_id":chapter,"membership_count":memberships.len(),"memberships":memberships}),
         )
@@ -2697,7 +2741,7 @@ impl LifecycleServer {
         let path = candidates
             .iter()
             .find(|p| p.exists())
-            .ok_or_else(|| format!("output_not_found:{reference}"))?;
+            .ok_or_else(|| format!("output_ref_not_found: {reference}"))?;
         let text = fs::read_to_string(path).map_err(|e| format!("output_read_failed:{e}"))?;
         let chars: Vec<char> = text.chars().take(4_000_000).collect();
         let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
@@ -3034,6 +3078,7 @@ impl LifecycleServer {
                 }
                 return Ok(result);
             }
+            return Err(format!("payload_ref_not_found: {reference}"));
         }
         let id = safe_reference_id(&reference, "mcp_payload:")?;
         let path = self
@@ -3043,7 +3088,7 @@ impl LifecycleServer {
             .join("mcp-payloads")
             .join(format!("{id}.json"));
         let text =
-            fs::read_to_string(&path).map_err(|_| format!("payload_not_found:{reference}"))?;
+            fs::read_to_string(&path).map_err(|_| format!("payload_ref_not_found: {reference}"))?;
         let payload: Value =
             serde_json::from_str(&text).map_err(|e| format!("payload_invalid:{e}"))?;
         let mut result = json!({
@@ -3715,7 +3760,7 @@ fn resolve_payload_args(root: &Path, args: &Value) -> Result<Value, String> {
             .join("mcp-payloads")
             .join(format!("{id}.json"));
         let text =
-            fs::read_to_string(path).map_err(|_| format!("payload_not_found:{reference}"))?;
+            fs::read_to_string(path).map_err(|_| format!("payload_ref_not_found: {reference}"))?;
         let payload: Value =
             serde_json::from_str(&text).map_err(|e| format!("payload_invalid:{e}"))?;
         if !payload.is_object() {
@@ -3964,8 +4009,89 @@ fn is_task_read_only(name: &str) -> bool {
             | "mcp_output_show"
     )
 }
-fn guidance_payload(args: Value) -> Value {
-    json!({"status":"ok","workflow":args.get("workflow").cloned().unwrap_or(json!("all")),"first_use_decision_tree":[{"sequence":["task_lifecycle_show","task_lifecycle_claim","task_lifecycle_submit_work"]}]})
+fn task_lifecycle_tool_guidance(tool: &str) -> Value {
+    match tool {
+        "task_lifecycle_submit_work" => json!({
+            "preferred_for": "Ordinary task completion with execution notes, verification, evidence admission, and finish/report in one call.",
+            "caveat": "A successful submit_work can still return in_review or awaiting_dependencies rather than closed. Use resume_existing_work:true only to continue prior same-agent admitted work without rewriting notes or duplicating proof/admission. Inline companion fields are accepted up to the governed threshold; use payload_ref or opt in with auto_materialize_payload:true for larger artifacts."
+        }),
+        "task_lifecycle_finish" => json!({
+            "preferred_for": "Finishing a claimed task or admitting an outcome for an outcome-contract dependency task.",
+            "caveat": "Use inline recovery_truthfulness for ordinary recovery packets under the governed threshold; use payload_ref for larger summary/findings/guard packets and include changed_files or no_files_changed for implementation work. When evidence_refs are supplied, use a successful structured_command_execution:<execution_ref> or test_mcp_artifact:<artifact_id>; the finish gate dereferences and verifies those refs. mcp_output refs are diagnostic only, and copied logs, exit files, wrappers, transient paths, and untyped narrative refs are refused."
+        }),
+        "task_lifecycle_report_blocked" => json!({
+            "preferred_for": "Recording unresolved blockers with exact next action.",
+            "caveat": "Do not use completion tools when the blocker prevents truthful finish."
+        }),
+        "task_lifecycle_claim" => json!({
+            "preferred_for": "Taking responsibility for unassigned work.",
+            "caveat": "Use authority_basis when crossing role, preferred-agent, or operator gates."
+        }),
+        "task_lifecycle_tags_update" => json!({
+            "preferred_for": "Replacing a task's complete site-local tag set with an auditable before/after record.",
+            "caveat": "Pass the complete desired set, including [] to clear tags. Tags do not route, prioritize, authorize, review, or close work."
+        }),
+        _ => json!({
+            "preferred_for": Value::Null,
+            "caveat": "No tool-specific guidance is registered; use the workflow sections and tool schema together."
+        }),
+    }
+}
+fn guidance_payload(site_root: &Path, args: Value) -> Value {
+    let mut result: Value =
+        serde_json::from_str(TASK_GUIDANCE).expect("checked-in task guidance must be valid JSON");
+    let requested_workflow = string_arg(&args, "workflow").unwrap_or_else(|| "all".to_string());
+    let tool = string_arg(&args, "tool");
+    let normalized_workflow = result
+        .get("sections")
+        .and_then(Value::as_object)
+        .filter(|sections| sections.contains_key(&requested_workflow))
+        .map(|_| requested_workflow.clone())
+        .unwrap_or_else(|| "all".to_string());
+    result["requested"] = json!({"workflow": requested_workflow, "tool": tool});
+    result["workflow"] = json!(normalized_workflow);
+    result["tool"] = json!(string_arg(&args, "tool"));
+    if normalized_workflow != "all" {
+        let selected = result
+            .get("sections")
+            .and_then(Value::as_object)
+            .and_then(|sections| sections.get(&normalized_workflow))
+            .cloned()
+            .unwrap_or(Value::Null);
+        result["sections"] = json!({normalized_workflow: selected});
+    }
+    result["site_policy"] = json!({
+        "roster": {"roles_are_obligation_targets": false},
+        "source": "default",
+        "path": site_root.join(".narada").join("task-lifecycle.toml").to_string_lossy()
+    });
+    result["recommended_first_call"] = if tool.is_some() {
+        Value::Null
+    } else {
+        json!("task_lifecycle_guidance({ workflow: \"ordinary_task\" })")
+    };
+    result["tool_specific_note"] = match tool.as_deref() {
+        Some(tool_name) => task_lifecycle_tool_guidance(tool_name),
+        None => Value::Null,
+    };
+    result
+}
+
+fn payload_schema_payload(args: Value) -> Result<Value, String> {
+    let mut result: Value = serde_json::from_str(TASK_PAYLOAD_SCHEMAS)
+        .map_err(|error| format!("task_payload_schema_catalog_invalid:{error}"))?;
+    let tool = string_arg(&args, "tool");
+    result["tool"] = json!(tool);
+    if let Some(tool_name) = tool {
+        let selected = result
+            .get("schemas")
+            .and_then(Value::as_object)
+            .and_then(|schemas| schemas.get(&tool_name))
+            .cloned()
+            .unwrap_or(Value::Null);
+        result["schemas"] = json!({tool_name: selected});
+    }
+    Ok(result)
 }
 
 pub struct WireReader<R> {

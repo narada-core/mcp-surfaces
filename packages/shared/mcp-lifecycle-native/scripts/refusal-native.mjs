@@ -14,9 +14,11 @@ const missingRoot = mkdtempSync(join(tmpdir(), 'narada-native-missing-'));
 const rootTask = mkdtempSync(join(tmpdir(), 'narada-native-refusal-task-'));
 const rootWork = mkdtempSync(join(tmpdir(), 'narada-native-refusal-work-'));
 try {
-  const missing = run('narada-task-lifecycle-mcp', ['--site-root', missingRoot]);
-  assert.notEqual(missing.status, 0);
-  assert.match(String(missing.stderr), /task_lifecycle_store_not_prepared/);
+  const missing = run('narada-task-lifecycle-mcp', ['--site-root', missingRoot], rpc(99, 'task_lifecycle_create', { payload_ref: 'mcp_payload:missing@v1' }) + '\n');
+  assert.equal(missing.status, 0);
+  const missingLine = JSON.parse(String(missing.stdout).trim());
+  assert.equal(missingLine.error.code, -32000);
+  assert.match(String(missingLine.error.message), /task_lifecycle_store_not_prepared/);
   assert.equal(run('narada-task-lifecycle-mcp', ['--prepare', '--site-root', rootTask]).status, 0);
   const mismatch = run('narada-task-lifecycle-mcp', ['--site-root', rootTask], rpc(0, 'task_lifecycle_create', { payload_ref: 'mcp_payload:refused@v1' }) + '\n', {
     ...process.env,
