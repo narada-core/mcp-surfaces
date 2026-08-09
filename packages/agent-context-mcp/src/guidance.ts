@@ -3,7 +3,7 @@ export type GuidanceToolDefinition = GuidanceRecord & { name: string; descriptio
 
 const SURFACE_ID = "agent-context";
 const GUIDANCE_TOOL = "agent_context_guidance";
-const PURPOSE = "Agent identity, session, checkpoint, and startup context hydration.";
+const PURPOSE = "Exact admitted Orientation Manifest delivery, diagnostic context compilation, and bounded checkpoint continuity.";
 
 export function buildGuidanceResult(args: GuidanceRecord = {}): GuidanceRecord {
   const workflow = typeof args.workflow === 'string' && args.workflow.trim() ? args.workflow.trim() : null;
@@ -27,7 +27,9 @@ export function buildGuidanceResult(args: GuidanceRecord = {}): GuidanceRecord {
       { step: 'inspect', guidance: 'Use show/read/detail commands for exact targets before mutation.' },
       { step: 'checkpoint', guidance: 'Keep operational checkpoint state authoritative; when fresh-session handoff is needed, add one bounded narada.continuation.v1 object and optionally link its Markdown projection with continuation_ref.' },
       { step: 'export', guidance: 'After checkpointing canonical continuation state, use agent_context_continuation_export to create a Site-local Markdown projection under .ai/continuations and attach its verified reference.' },
-      { step: 'consume', guidance: 'Omit checkpoint_id to use the latest checkpoint, or pass an exact checkpoint_id to agent_context_rehydrate, agent_context_continuation_read, or agent_context_hydrate_current to select current or archived state. An explicit missing ID returns checkpoint_not_found without falling back; stale artifacts are resume warnings, not replacements for live checkpoint state.' },
+      { step: 'admitted_startup', guidance: 'Use agent_context_startup_sequence with the exact admission receipt and Orientation Manifest id projected by Agent Start. It reads one immutable stored generation and never recompiles or selects latest.' },
+      { step: 'diagnose', guidance: 'Use agent_context_hydrate_current only to compile a read-only diagnostic candidate. Omit checkpoint_id to omit continuity, or supply one exact id; the candidate never replaces the admitted generation.' },
+      { step: 'consume_continuity', guidance: 'For agent_context_rehydrate and agent_context_continuation_read, omission may inspect the latest checkpoint; an exact checkpoint_id searches current and archived state without fallback. This checkpoint convenience never establishes Agent identity or startup authority.' },
       { step: 'mutate', guidance: 'Only call mutation tools after policy allows it and intent, target, and expected result are explicit.' },
       { step: 'verify', guidance: 'Read back state with the owning surface after any mutation.' }
     ],
@@ -35,12 +37,16 @@ export function buildGuidanceResult(args: GuidanceRecord = {}): GuidanceRecord {
       { intent: 'First use', call: 'agent_context_guidance({})' },
       { intent: 'Tool-specific help', call: "agent_context_guidance({ tool: \"<tool_name>\" })" },
       { intent: 'Workflow-specific help', call: "agent_context_guidance({ workflow: \"<workflow_name>\" })" },
+      { intent: 'Admitted startup', call: 'agent_context_startup_sequence({}) // consumes exact receipt and manifest id from the admitted Carrier environment' },
       { intent: 'Portable continuation', call: "agent_context_checkpoint({ continuation: { schema: 'narada.continuation.v1', objective: '<objective>', current_state: '<bounded state summary>', next_action: '<next action>' } }); agent_context_continuation_export({ agent_id: '<agent_id>' }); agent_context_continuation_read({ agent_id: '<agent_id>' })" }
     ],
     anti_patterns: [
       'Do not guess hidden state from a tool name; use doctor/status/list/show tools for evidence.',
       'Do not treat assistant text as the durable record when structuredContent is present.',
       'Do not bypass the owning surface with shell scripts when a governed MCP tool exists.',
+      'Do not use latest checkpoints, latest start events, names, or hints as Agent/Carrier Session identity evidence.',
+      'Do not use agent_context_hydrate_current as admitted startup; it produces a separately identified diagnostic candidate.',
+      'Do not treat manifest readback as an owner-issued delivery receipt or as admission for a later action.',
       'Do not store raw transcripts, unbounded history, or diff-only state in continuation.',
       'Do not treat a Markdown projection as authoritative when its reference or canonical content hash is stale.',
       'Do not continue after malformed payloads, empty refs, or ambiguous target identifiers; stop and repair the input.'
@@ -63,7 +69,8 @@ export function buildGuidanceResult(args: GuidanceRecord = {}): GuidanceRecord {
     boundaries: [
       'Guidance is read-only model-facing operating advice.',
       'Guidance does not weaken policy, authorize mutation, or replace tool schemas.',
-      'The owning MCP surface remains authoritative for state and enforcement.'
+      'Carrier Session Authority owns admission; the Orientation Manifest package owns shared contracts and pure compilation.',
+      'This surface owns only its bounded adapter, persistence/readback, diagnostics, and checkpoint operations.'
     ]
   };
 }

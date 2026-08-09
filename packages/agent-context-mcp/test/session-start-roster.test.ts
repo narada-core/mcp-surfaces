@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from '@narada-core/sqlite';
+import { CARRIER_SESSION_ADMISSION_RECEIPT_SCHEMA } from '@narada-core/orientation-manifest';
 import {
   materializeAgentSessionStart,
   validateIdentityAgainstRoster,
@@ -12,6 +13,41 @@ import {
 const INFERRED_SOURCE = 'identity_inference_non_authoritative';
 const INFERRED_SEMANTICS = 'Role was inferred from identity shape because the Site has not opted into session roster enforcement; this is a read-model hint, not activation authority or a capability grant.';
 const ROSTER_SEMANTICS = 'Roster role binding is used for identity read models, routing, and eligibility; it is not activation authority or a capability grant.';
+const UNAVAILABLE_SEMANTICS = 'No authoritative role binding was available. This residual projection cannot create identity, block an owner-issued admission, or grant capability.';
+const GENERATED_AT = '2026-08-08T12:00:00.000Z';
+
+function admissionReceipt(siteId: string, identity: string, carrierKind: string) {
+  return {
+    schema: CARRIER_SESSION_ADMISSION_RECEIPT_SCHEMA,
+    receipt_id: 'receipt:' + siteId + ':' + identity,
+    decision: 'admitted',
+    state: 'starting',
+    coordinate: {
+      authority_scope: 'test',
+      site_ref: 'site:' + siteId,
+      carrier_session_id: 'carrier:' + identity,
+      authority_epoch: 1,
+    },
+    agent_identity: {
+      source_authority_ref: 'agent-identity:' + siteId,
+      artifact_ref: 'agent:' + identity,
+      revision: 'fixture-1',
+      local_agent_id: identity,
+      canonical_agent_id: identity,
+    },
+    carrier_kind: carrierKind,
+    admission_policy: {
+      source_authority_ref: 'site-policy:' + siteId,
+      artifact_ref: 'carrier-admission:test',
+      revision: '1',
+    },
+    issued_at: GENERATED_AT,
+    valid_until: null,
+    authority_readback_ref: 'carrier-session-authority:' + identity,
+    evidence_refs: ['test:admission'],
+    reason_codes: [],
+  };
+}
 
 function makeSite(label: any) {
   const siteRoot = mkdtempSync(join(tmpdir(), `agent-context-roster-${label}-`));
@@ -72,11 +108,33 @@ function seedAgentContextDb(siteRoot: any) {
   assert.equal(check.role_binding.binding_authority, INFERRED_SOURCE);
   assert.equal(check.role_binding.semantics, INFERRED_SEMANTICS);
 
-  const started: any = materializeAgentSessionStart({ siteRoot, identity: 'fixture.resident', runtime: 'kimi' });
+  assert.throws(
+    () => materializeAgentSessionStart({
+      siteRoot,
+      siteId: 'fixture',
+      identity: 'fixture.resident',
+      runtime: 'kimi',
+    }),
+    /agent_context_exact_admission_receipt_required/,
+  );
+  const started: any = materializeAgentSessionStart({
+    siteRoot,
+    siteId: 'fixture',
+    identity: 'fixture.resident',
+    runtime: 'kimi',
+    admissionReceipt: admissionReceipt('fixture', 'fixture.resident', 'kimi'),
+    generatedAt: GENERATED_AT,
+  });
   assert.equal(started.status, 'materialized');
   assert.equal(started.role, 'resident');
   assert.equal(started.role_binding.binding_authority, INFERRED_SOURCE);
-  assert.equal(started.resume_command, 'kimi -S fixture.resident');
+  assert.equal(started.orientation_manifest.delivery, 'deliverable');
+  assert.equal(started.orientation_manifest.readiness, 'degraded');
+  assert.equal('resume_command' in started, false);
+  assert.equal('capability_policy' in started, false);
+  assert.ok(started.orientation_manifest.residuals.some(
+    (item: any) => item.code === 'role_binding_rejected',
+  ));
 
   const db = new DatabaseSync(dbPath, { readOnly: true });
   const eventRow = db.prepare('SELECT event_id, identity_id, status FROM agent_start_events WHERE event_id = ?')
@@ -110,7 +168,7 @@ function seedAgentContextDb(siteRoot: any) {
   assert.equal(dryRun.role_binding.binding_authority, INFERRED_SOURCE);
 }
 
-// (c) roster.json with enforce_session_roster: true, identity absent -> identity_not_in_roster.
+// (c) A local roster refusal remains a residual; it cannot overrule an exact owner receipt.
 {
   const siteRoot = makeSite('enforced');
   writeRoster(siteRoot, {
@@ -122,10 +180,32 @@ function seedAgentContextDb(siteRoot: any) {
   assert.equal(check.valid, false);
   assert.equal(check.error, 'identity_not_in_roster: fixture.builder');
 
-  assert.throws(
-    () => materializeAgentSessionStart({ siteRoot, identity: 'fixture.builder', runtime: 'kimi', dryRun: true }),
-    /identity_not_in_roster: fixture\.builder/,
-  );
+  const dryRun: any = materializeAgentSessionStart({
+    siteRoot,
+    identity: 'fixture.builder',
+    runtime: 'kimi',
+    dryRun: true,
+  });
+  assert.equal(dryRun.status, 'dry_run');
+  assert.equal(dryRun.role, null);
+  assert.equal(dryRun.role_binding.binding_authority, 'unavailable');
+  assert.equal(dryRun.role_binding.semantics, UNAVAILABLE_SEMANTICS);
+
+  const started: any = materializeAgentSessionStart({
+    siteRoot,
+    siteId: 'fixture',
+    identity: 'fixture.builder',
+    runtime: 'kimi',
+    admissionReceipt: admissionReceipt('fixture', 'fixture.builder', 'kimi'),
+    generatedAt: GENERATED_AT,
+  });
+  assert.equal(started.status, 'materialized');
+  assert.equal(started.role, null);
+  assert.equal(started.role_binding.binding_authority, 'unavailable');
+  assert.equal(started.orientation_manifest.readiness, 'degraded');
+  assert.ok(started.orientation_manifest.residuals.some(
+    (item: any) => item.code === 'role_binding_rejected',
+  ));
 }
 
 // (d) identity present in roster.json -> static roster path unchanged.

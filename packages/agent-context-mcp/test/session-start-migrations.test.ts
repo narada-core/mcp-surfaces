@@ -4,11 +4,48 @@ import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from '@narada-core/sqlite';
+import { CARRIER_SESSION_ADMISSION_RECEIPT_SCHEMA } from '@narada-core/orientation-manifest';
 import {
   DEFAULT_BUSY_TIMEOUT_MS,
   materializeAgentSessionStart,
   openAgentContextDb,
+  readOrientationManifestGeneration,
 } from '../src/session-start.js';
+
+const GENERATED_AT = '2026-08-08T12:00:00.000Z';
+
+function admissionReceipt(identity: string) {
+  return {
+    schema: CARRIER_SESSION_ADMISSION_RECEIPT_SCHEMA,
+    receipt_id: 'receipt:fixture:' + identity,
+    decision: 'admitted',
+    state: 'starting',
+    coordinate: {
+      authority_scope: 'test',
+      site_ref: 'site:fixture',
+      carrier_session_id: 'carrier:' + identity,
+      authority_epoch: 1,
+    },
+    agent_identity: {
+      source_authority_ref: 'agent-identity:fixture',
+      artifact_ref: 'agent:' + identity,
+      revision: 'fixture-1',
+      local_agent_id: identity,
+      canonical_agent_id: identity,
+    },
+    carrier_kind: 'kimi',
+    admission_policy: {
+      source_authority_ref: 'site-policy:fixture',
+      artifact_ref: 'carrier-admission:test',
+      revision: '1',
+    },
+    issued_at: GENERATED_AT,
+    valid_until: null,
+    authority_readback_ref: 'carrier-session-authority:' + identity,
+    evidence_refs: ['test:admission'],
+    reason_codes: [],
+  };
+}
 
 function makeSite(label: any) {
   const siteRoot = mkdtempSync(join(tmpdir(), `agent-context-migrations-${label}-`));
@@ -35,8 +72,21 @@ function columnNames(dbPath: any, table: any) {
 // Fresh site without .ai/db/migrations: the package-bundled migrations provision the schema.
 {
   const siteRoot = makeSite('bundled');
-  const started: any = materializeAgentSessionStart({ siteRoot, identity: 'fixture.resident', runtime: 'kimi' });
+  const started: any = materializeAgentSessionStart({
+    siteRoot,
+    siteId: 'fixture',
+    identity: 'fixture.resident',
+    runtime: 'kimi',
+    admissionReceipt: admissionReceipt('fixture.resident'),
+    generatedAt: GENERATED_AT,
+  });
   assert.equal(started.status, 'materialized');
+  assert.equal(started.compatibility_facade.source_authority_mutation, false);
+  assert.equal(started.compatibility_facade.local_persistence, true);
+  assert.deepEqual(started.compatibility_facade.persisted_records, [
+    'orientation_manifest_generations',
+    'agent_start_events',
+  ]);
 
   const dbPath = join(siteRoot, '.ai', 'state', 'agent-context.sqlite');
   const tables = tableNames(dbPath);
@@ -49,6 +99,7 @@ function columnNames(dbPath: any, table: any) {
     'artifact_refs',
     'agent_events',
     'codex_session_admissions',
+    'orientation_manifest_generations',
   ]) {
     assert.equal(tables.has(table), true, `missing table: ${table}`);
   }
@@ -64,12 +115,51 @@ function columnNames(dbPath: any, table: any) {
     .get(started.agent_start_event);
   const proposalRow = db.prepare('SELECT proposal_id FROM proposal_records WHERE event_id = ?')
     .get(started.agent_start_event);
+  const manifestRow = db.prepare(
+    'SELECT manifest_id, admission_receipt_ref FROM orientation_manifest_generations WHERE manifest_id = ?',
+  ).get(started.orientation_manifest.manifest_id);
   db.close();
   assert.ok(eventRow);
-  assert.ok(proposalRow);
+  assert.equal(proposalRow, undefined);
+  assert.ok(manifestRow);
   assert.equal(eventRow.identity_id, 'fixture.resident');
   assert.equal(eventRow.status, 'materialized');
-  assert.equal(proposalRow.proposal_id, started.proposal_id);
+  assert.equal(manifestRow.admission_receipt_ref, started.admission_receipt_ref);
+  assert.equal('proposal_id' in started, false);
+
+  const readback: any = readOrientationManifestGeneration({
+    siteRoot,
+    dbPath,
+    manifestId: started.orientation_manifest.manifest_id,
+    admissionReceipt: admissionReceipt('fixture.resident'),
+  });
+  assert.equal(readback.status, 'ok');
+  assert.equal(readback.source_mutation, false);
+  assert.deepEqual(readback.manifest, started.orientation_manifest);
+  assert.throws(
+    () => readOrientationManifestGeneration({
+      siteRoot,
+      dbPath,
+      manifestId: 'orientation:missing',
+      admissionReceipt: admissionReceipt('fixture.resident'),
+    }),
+    /agent_context_orientation_manifest_generation_not_found/,
+  );
+
+  const writeDb = new DatabaseSync(dbPath);
+  assert.throws(
+    () => writeDb.prepare(
+      'UPDATE orientation_manifest_generations SET readiness = ? WHERE manifest_id = ?',
+    ).run('blocked', started.orientation_manifest.manifest_id),
+    /orientation_manifest_generations_append_only_no_update/,
+  );
+  assert.throws(
+    () => writeDb.prepare(
+      'DELETE FROM orientation_manifest_generations WHERE manifest_id = ?',
+    ).run(started.orientation_manifest.manifest_id),
+    /orientation_manifest_generations_append_only_no_delete/,
+  );
+  writeDb.close();
 }
 
 // A site-root migration file still wins over the bundled one; other files fall back per-migration.
@@ -89,7 +179,14 @@ CREATE TABLE IF NOT EXISTS agent_start_events (
 );
 `, 'utf8');
 
-  const started = materializeAgentSessionStart({ siteRoot, identity: 'fixture.resident', runtime: 'kimi' });
+  const started = materializeAgentSessionStart({
+    siteRoot,
+    siteId: 'fixture',
+    identity: 'fixture.resident',
+    runtime: 'kimi',
+    admissionReceipt: admissionReceipt('fixture.resident'),
+    generatedAt: GENERATED_AT,
+  });
   assert.equal(started.status, 'materialized');
 
   const dbPath = join(siteRoot, '.ai', 'state', 'agent-context.sqlite');

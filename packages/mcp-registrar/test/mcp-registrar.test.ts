@@ -280,7 +280,18 @@ try {
   assert.ok(artifacts.tools.includes('artifact_register_file'));
   const agentContextSurface: any = (surfaceData.items as Array<Record<string, any>>).find((s) => s.id === 'agent-context');
   assert.ok(agentContextSurface);
-  assert.deepEqual(agentContextSurface.env_vars, ['NARADA_AGENT_ID', 'NARADA_AGENT_START_EVENT_ID', 'NARADA_CARRIER_SESSION_ID', 'NARADA_SITE_ROOT']);
+  const agentContextEnvironment = [
+    'NARADA_AGENT_CONTEXT_DB',
+    'NARADA_AGENT_ID',
+    'NARADA_AGENT_START_EVENT_ID',
+    'NARADA_CARRIER_SESSION_ACTIVATION_RECEIPT',
+    'NARADA_CARRIER_SESSION_ADMISSION_RECEIPT',
+    'NARADA_CARRIER_SESSION_ID',
+    'NARADA_ORIENTATION_MANIFEST_ID',
+    'NARADA_SITE_ID',
+    'NARADA_SITE_ROOT',
+  ];
+  assert.deepEqual(agentContextSurface.env_vars, agentContextEnvironment);
   const narsSession: any = (surfaceData.items as Array<Record<string, any>>).find((s) => s.id === 'nars-session');
   assert.ok(narsSession);
   assert.equal(narsSession.injection_scope, undefined);
@@ -312,7 +323,7 @@ try {
   const agentContextBindConfig: any = buildSiteBindConfig(fixtureSite, agentContextSurface as any);
   const agentContextBoundServer: any = (agentContextBindConfig.config.mcpServers as Record<string, any>)[agentContextBindConfig.serverKey];
   assertRuntimeProxy(agentContextBoundServer, agentContextSurface.entrypoint, 'bun');
-  assert.deepEqual(agentContextBoundServer.env_vars, ['NARADA_AGENT_ID', 'NARADA_AGENT_START_EVENT_ID', 'NARADA_CARRIER_SESSION_ID', 'NARADA_SITE_ROOT']);
+  assert.deepEqual(agentContextBoundServer.env_vars, agentContextEnvironment);
   assert.throws(
     () => buildSiteBindConfig(fixtureSite, narsSession as any),
     /registrar_surface_projection_required:nars-session/,

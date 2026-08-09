@@ -3,8 +3,12 @@ import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import { synthesizeBootstrap } from './synthesize-bootstrap.js';
+import { assertManifestBoundToAdmission } from '@narada-core/orientation-manifest';
 import { isCodexSessionId } from './codex-session-evidence.js';
+import {
+  assertAdmissionMatchesAgentContext,
+  compileAgentContextOrientation,
+} from './orientation-manifest.js';
 
 // Package-bundled fallback migrations: dist/src/session-start.js -> package root -> migrations/.
 const PACKAGE_MIGRATIONS_DIR: any = fileURLToPath(new URL('../../migrations/', import.meta.url));
@@ -186,8 +190,27 @@ export function buildRoleBindingProjection({ agentId, role, source, bindingAutho
     binding_authority: bindingAuthority,
     semantics: bindingAuthority === 'agent_roster'
       ? 'Roster role binding is used for identity read models, routing, and eligibility; it is not activation authority or a capability grant.'
-      : 'Role was inferred from identity shape because the Site has not opted into session roster enforcement; this is a read-model hint, not activation authority or a capability grant.',
+      : bindingAuthority === 'identity_inference_non_authoritative'
+        ? 'Role was inferred from identity shape because the Site has not opted into session roster enforcement; this is a read-model hint, not activation authority or a capability grant.'
+        : 'No authoritative role binding was available. This residual projection cannot create identity, block an owner-issued admission, or grant capability.',
     capability_policy_ref: 'capability_policy',
+  };
+}
+
+function rosterProjectionForOrientation(rosterCheck: any, identity: string) {
+  if (rosterCheck?.valid) return rosterCheck;
+  return {
+    ...rosterCheck,
+    role: null,
+    role_binding: buildRoleBindingProjection({
+      agentId: identity,
+      role: null,
+      source: 'unavailable',
+      bindingAuthority: 'unavailable',
+    }),
+    capabilities: [],
+    capability_policy: null,
+    roster_projection_status: 'unavailable',
   };
 }
 
@@ -437,6 +460,7 @@ export function getCodexSessionAdmission({
 
 export function completeCodexSessionAdmission({
   siteRoot,
+  siteId,
   admissionId,
   identity,
   codexSessionId,
@@ -445,6 +469,10 @@ export function completeCodexSessionAdmission({
   dbPath = join(siteRoot, '.ai', 'state', 'agent-context.sqlite'),
   cwd = siteRoot,
   evidence = {},
+  carrierSessionId = null,
+  admissionReceipt = null,
+  activationReceipt = null,
+  generatedAt = null,
 } : any= {}) {
   if (!siteRoot) throw new Error('siteRoot is required');
   if (!admissionId) throw new Error('admissionId is required');
@@ -455,6 +483,24 @@ export function completeCodexSessionAdmission({
 
   const rosterCheck: any = validateIdentityAgainstRoster(siteRoot, identity);
   if (!rosterCheck.valid) throw new Error(rosterCheck.error);
+  if (!siteId) throw new Error('agent_context_exact_site_id_required');
+  if (!admissionReceipt) throw new Error('agent_context_exact_admission_receipt_required');
+  const completedAt: any = canonicalTimestamp(generatedAt ?? new Date(), 'generated_at');
+  const admitted: any = assertAdmissionMatchesAgentContext(admissionReceipt, {
+    siteId,
+    identity,
+    carrierSessionId,
+    observedAt: completedAt,
+  });
+  const compilation: any = compileAgentContextOrientation({
+    siteRoot,
+    siteId,
+    admissionReceipt: admitted,
+    activationReceipt,
+    observedAt: completedAt,
+    roleBinding: rosterCheck.role_binding,
+    mcpServers: deriveMcpServersFromFabric(siteRoot),
+  });
 
   const db: any = openAgentContextDb(siteRoot, dbPath);
   try {
@@ -464,14 +510,25 @@ export function completeCodexSessionAdmission({
     if (row.agent_id !== identity) throw new Error(`codex_session_admission_identity_mismatch: expected ${row.agent_id}, got ${identity}`);
     if (row.status !== 'creating') throw new Error(`codex_session_admission_not_creating: ${row.status}`);
 
-    const completedAt: any = new Date().toISOString();
     let startResult: any;
     runTransaction(db, () => {
-      startResult = writeSessionMaterialization(db, { siteRoot, identity, runtime, dbPath, cwd, rosterCheck });
+      startResult = writeSessionMaterialization(db, {
+        identity,
+        runtime,
+        dbPath,
+        cwd,
+        rosterCheck,
+        admissionReceipt: admitted,
+        compilation,
+        withinTransaction: true,
+      });
+      const completionStatus: any = startResult.status === 'materialized' ? 'admitted' : 'suspect';
       const mergedEvidence: any = {
         ...parseJsonObject(row.evidence_json),
         ...evidence,
-        start_event_status: 'materialized',
+        authority_claimed: false,
+        posture: 'codex_runtime_evidence_adapter',
+        start_event_status: startResult.status,
         agent_start_event_id: startResult.agent_start_event,
         codex_session_id: codexSessionId,
         codex_session_file: codexSessionFile,
@@ -480,7 +537,7 @@ export function completeCodexSessionAdmission({
       };
       db.prepare(`
         UPDATE codex_session_admissions
-        SET status = 'admitted',
+        SET status = ?,
             agent_start_event_id = ?,
             codex_session_id = ?,
             codex_session_file = ?,
@@ -488,6 +545,7 @@ export function completeCodexSessionAdmission({
             verified_at = ?
         WHERE admission_id = ?
       `).run(
+        completionStatus,
         startResult.agent_start_event,
         codexSessionId,
         codexSessionFile,
@@ -499,8 +557,9 @@ export function completeCodexSessionAdmission({
 
     const updated: any = db.prepare('SELECT * FROM codex_session_admissions WHERE admission_id = ?').get(admissionId);
     return {
-      schema: 'narada.codex.session_admission.completion.v0',
-      status: 'admitted',
+      schema: 'narada.codex.runtime_evidence.completion.v1',
+      status: startResult.status === 'materialized' ? 'recorded' : 'orientation_blocked',
+      authority_claimed: false,
       admission_id: admissionId,
       agent_id: identity,
       agent_start_event_id: startResult.agent_start_event,
@@ -508,8 +567,7 @@ export function completeCodexSessionAdmission({
       codex_session_file: codexSessionFile,
       verified_at: completedAt,
       start_session: startResult,
-      required_environment: {
-        ...startResult.required_environment,
+      compatibility_environment_addition: {
         NARADA_CODEX_ADMISSION_ID: admissionId,
       },
       admission: {
@@ -575,6 +633,10 @@ export function ensureAgentStartEventCompatibility(db: any) {
   addColumn('status', 'TEXT');
   addColumn('resume_command', 'TEXT');
   addColumn('bootstrap_artifact_uri', 'TEXT');
+  addColumn('carrier_session_id', 'TEXT');
+  addColumn('admission_receipt_ref', 'TEXT');
+  addColumn('authority_epoch', 'INTEGER');
+  addColumn('orientation_manifest_id', 'TEXT');
 
   if (columns.has('identity')) {
     db.prepare("UPDATE agent_start_events SET identity_id = identity WHERE identity_id IS NULL AND identity IS NOT NULL").run();
@@ -642,6 +704,29 @@ export function ensureAgentStartEventCompatibility(db: any) {
       byte_size INTEGER,
       created_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS orientation_manifest_generations (
+      manifest_id TEXT PRIMARY KEY,
+      admission_receipt_ref TEXT NOT NULL,
+      carrier_session_id TEXT NOT NULL,
+      authority_epoch INTEGER NOT NULL,
+      readiness TEXT NOT NULL,
+      delivery TEXT NOT NULL,
+      manifest_json TEXT NOT NULL,
+      generated_at TEXT NOT NULL
+    );
+
+    CREATE TRIGGER IF NOT EXISTS orientation_manifest_generations_no_update
+    BEFORE UPDATE ON orientation_manifest_generations
+    BEGIN
+      SELECT RAISE(ABORT, 'orientation_manifest_generations_append_only_no_update');
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS orientation_manifest_generations_no_delete
+    BEFORE DELETE ON orientation_manifest_generations
+    BEGIN
+      SELECT RAISE(ABORT, 'orientation_manifest_generations_append_only_no_delete');
+    END;
   `);
 }
 
@@ -657,11 +742,18 @@ function ensureCodexAdmissionColumns(db: any) {
 
 export function materializeAgentSessionStart({
   siteRoot,
+  siteId,
   identity,
   runtime = 'kimi',
   dbPath = join(siteRoot, '.ai', 'state', 'agent-context.sqlite'),
   cwd = siteRoot,
   dryRun = false,
+  carrierSessionId = null,
+  admissionReceipt = null,
+  activationReceipt = null,
+  generatedAt = null,
+  exactCheckpoint = null,
+  portableContinuation = null,
 } : any= {}) {
   if (!siteRoot) {
     throw new Error('siteRoot is required');
@@ -670,100 +762,213 @@ export function materializeAgentSessionStart({
     throw new Error('identity is required');
   }
 
-  const rosterCheck: any = validateIdentityAgainstRoster(siteRoot, identity);
-  if (!rosterCheck.valid) {
-    throw new Error(rosterCheck.error);
-  }
+  const rosterCheck: any = rosterProjectionForOrientation(
+    validateIdentityAgainstRoster(siteRoot, identity),
+    identity,
+  );
 
   if (dryRun) {
     return buildDryRunResult({ siteRoot, identity, runtime, dbPath, cwd, rosterCheck });
   }
 
+  if (!siteId) {
+    throw new Error('agent_context_exact_site_id_required');
+  }
+  if (!admissionReceipt) {
+    throw new Error('agent_context_exact_admission_receipt_required');
+  }
+  const observedAt: any = canonicalTimestamp(generatedAt ?? new Date(), 'generated_at');
+  const admitted: any = assertAdmissionMatchesAgentContext(admissionReceipt, {
+    siteId,
+    identity,
+    carrierSessionId,
+    observedAt,
+  });
+  const compilation: any = compileAgentContextOrientation({
+    siteRoot,
+    siteId,
+    admissionReceipt: admitted,
+    activationReceipt,
+    observedAt,
+    roleBinding: rosterCheck.role_binding,
+    exactCheckpoint,
+    portableContinuation,
+    mcpServers: deriveMcpServersFromFabric(siteRoot),
+  });
+
   const db: any = openAgentContextDb(siteRoot, dbPath);
   try {
-    return writeSessionMaterialization(db, { siteRoot, identity, runtime, dbPath, cwd, rosterCheck });
+    return writeSessionMaterialization(db, {
+      siteRoot,
+      identity,
+      runtime,
+      dbPath,
+      cwd,
+      rosterCheck,
+      admissionReceipt: admitted,
+      compilation,
+    });
   } finally {
     db.close();
   }
 }
 
-export function writeSessionMaterialization(db: any, { siteRoot, identity, runtime, dbPath, cwd, rosterCheck }: any) {
-  const now: any = new Date().toISOString();
-  const eventId: any = `evt-${now.replace(/[:.]/g, '-').replace('T', '_').slice(0, 19)}_${randomUUID().slice(0, 8)}`;
-  const materializationId: any = `mat-${randomUUID().slice(0, 8)}`;
-  const ecMaterializationId: any = `ec-${randomUUID().slice(0, 8)}`;
-  const proposalId: any = `prop-${randomUUID().slice(0, 8)}`;
-  const expiresAt: any = new Date(Date.now() + 60 * 60 * 1000).toISOString();
-  const resumeCommand: any = buildCarrierCommand(runtime, identity);
+export function writeSessionMaterialization(db: any, {
+  identity,
+  runtime,
+  dbPath,
+  cwd,
+  rosterCheck,
+  admissionReceipt,
+  compilation,
+  withinTransaction = false,
+}: any) {
+  assertManifestBoundToAdmission(compilation?.manifest, admissionReceipt);
+  const manifest: any = compilation.manifest;
+  const now: any = manifest.generated_at;
+  const eventId: any = 'evt-' + now.replace(/[:.]/g, '-').replace('T', '_').slice(0, 19)
+    + '_' + randomUUID().slice(0, 8);
+  const eventStatus: any = manifest.delivery === 'deliverable'
+    ? 'materialized'
+    : 'orientation_blocked';
+  const manifestJson: any = JSON.stringify(manifest);
 
-  const executionContextPayload: any = buildExecutionContextPayload({
-    siteRoot,
-    runtime,
-    cwd,
-    identity,
-    eventId,
-    roleBinding: rosterCheck.role_binding,
-    capabilityPolicy: rosterCheck.capability_policy,
-  });
-  const intelligenceContextPayload: any = buildIntelligenceContextPayload();
-  const proposalPayload: any = {
-    proposal_type: 'evaluation',
-    description: 'Agent session start materialized by agent-context MCP authority.',
+  const persist: any = () => {
+    const existing: any = db.prepare(
+      'SELECT manifest_json FROM orientation_manifest_generations WHERE manifest_id = ?',
+    ).get(manifest.manifest_id);
+    if (existing && existing.manifest_json !== manifestJson) {
+      throw new Error('agent_context_orientation_manifest_generation_conflict');
+    }
+    if (!existing) {
+      db.prepare(`
+        INSERT INTO orientation_manifest_generations (
+          manifest_id, admission_receipt_ref, carrier_session_id, authority_epoch,
+          readiness, delivery, manifest_json, generated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        manifest.manifest_id,
+        admissionReceipt.receipt_id,
+        admissionReceipt.coordinate.carrier_session_id,
+        admissionReceipt.coordinate.authority_epoch,
+        manifest.readiness,
+        manifest.delivery,
+        manifestJson,
+        now,
+      );
+    }
+
+    db.prepare(`
+      INSERT INTO agent_start_events (
+        event_id, identity_id, runtime, created_at, status, resume_command,
+        bootstrap_artifact_uri, carrier_session_id, admission_receipt_ref,
+        authority_epoch, orientation_manifest_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      eventId,
+      identity,
+      runtime,
+      now,
+      eventStatus,
+      null,
+      null,
+      admissionReceipt.coordinate.carrier_session_id,
+      admissionReceipt.receipt_id,
+      admissionReceipt.coordinate.authority_epoch,
+      manifest.manifest_id,
+    );
   };
 
-  const insertEvent: any = db.prepare(`
-    INSERT INTO agent_start_events (event_id, identity_id, runtime, created_at, status, resume_command, bootstrap_artifact_uri)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `);
-
-  const insertEC: any = db.prepare(`
-    INSERT INTO execution_context_materializations (materialization_id, event_id, runtime, cwd, payload_json, created_at, expires_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `);
-
-  const insertIC: any = db.prepare(`
-    INSERT INTO intelligence_context_materializations (materialization_id, event_id, schema_id, payload_json, created_at, expires_at)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `);
-
-  const insertProposal: any = db.prepare(`
-    INSERT INTO proposal_records (proposal_id, event_id, materialization_id, proposal_type, payload_json, verdict, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `);
-
-  runTransaction(db, () => {
-    insertEvent.run(eventId, identity, runtime, now, 'materialized', resumeCommand, null);
-    insertEC.run(ecMaterializationId, eventId, runtime, cwd, JSON.stringify(executionContextPayload), now, expiresAt);
-    insertIC.run(materializationId, eventId, 'narada.intelligence_context.v0', JSON.stringify(intelligenceContextPayload), now, expiresAt);
-    insertProposal.run(proposalId, eventId, materializationId, proposalPayload.proposal_type, JSON.stringify(proposalPayload), 'pending', now);
-  });
-
-  const l1Bootstrap: any = synthesizeBootstrap(db, identity, { limit: 10 });
+  if (withinTransaction) persist();
+  else runTransaction(db, persist);
 
   return {
-    schema: 'narada.agent_context.session_start.v0',
-    status: 'materialized',
+    schema: 'narada.agent_context.session_start.v1',
+    status: manifest.delivery === 'deliverable' ? 'materialized' : 'blocked',
+    compatibility_facade: {
+      authority: 'none',
+      event_posture: 'downstream_trace',
+      source_authority_mutation: false,
+      local_persistence: true,
+      persisted_records: [
+        'orientation_manifest_generations',
+        'agent_start_events',
+      ],
+    },
     agent_start_event: eventId,
     identity,
     role: rosterCheck.role,
     role_binding: rosterCheck.role_binding,
-    capabilities: rosterCheck.capabilities,
-    capability_policy: rosterCheck.capability_policy,
-    runtime,
-    cwd,
+    runtime_request: runtime,
+    cwd_request: cwd,
     db_path: dbPath,
-    resume_command: resumeCommand,
-    required_environment: {
-      NARADA_AGENT_ID: identity,
-      NARADA_AGENT_START_EVENT_ID: eventId,
-    },
-    startup_sequence: buildStartupSequence(identity, eventId),
-    execution_context_materialization: ecMaterializationId,
-    intelligence_context_materialization: materializationId,
-    proposal_id: proposalId,
-    expires_at: expiresAt,
-    l1_bootstrap_summary: l1Bootstrap.summary,
+    carrier_session: admissionReceipt.coordinate,
+    admission_receipt: admissionReceipt,
+    admission_receipt_ref: admissionReceipt.receipt_id,
+    orientation_manifest: manifest,
+    entry_procedure: manifest.entries.filter(
+      (entry: any) => entry.compartment === 'entry_procedure',
+    ),
   };
+}
+
+export function readOrientationManifestGeneration({
+  siteRoot,
+  dbPath = join(siteRoot, '.ai', 'state', 'agent-context.sqlite'),
+  manifestId,
+  admissionReceipt,
+}: any = {}) {
+  if (!siteRoot) throw new Error('siteRoot is required');
+  if (typeof manifestId !== 'string' || manifestId.trim() === '') {
+    throw new Error('agent_context_exact_orientation_manifest_id_required');
+  }
+  if (!admissionReceipt) throw new Error('agent_context_exact_admission_receipt_required');
+  if (!existsSync(dbPath)) {
+    throw new Error('agent_context_orientation_manifest_store_not_found:' + dbPath);
+  }
+
+  const db: any = new DatabaseSync(dbPath, { readOnly: true });
+  try {
+    const row: any = db.prepare(`
+      SELECT manifest_id, admission_receipt_ref, carrier_session_id,
+             authority_epoch, readiness, delivery, manifest_json, generated_at
+      FROM orientation_manifest_generations
+      WHERE manifest_id = ?
+      LIMIT 1
+    `).get(manifestId.trim());
+    if (!row) {
+      throw new Error('agent_context_orientation_manifest_generation_not_found:' + manifestId.trim());
+    }
+    let stored: any;
+    try {
+      stored = JSON.parse(row.manifest_json);
+    } catch {
+      throw new Error('agent_context_orientation_manifest_generation_json_invalid:' + manifestId.trim());
+    }
+    const manifest: any = assertManifestBoundToAdmission(stored, admissionReceipt);
+    if (
+      row.manifest_id !== manifest.manifest_id
+      || row.admission_receipt_ref !== manifest.admission_receipt_ref
+      || row.carrier_session_id !== manifest.coordinate.carrier_session_id
+      || Number(row.authority_epoch) !== manifest.coordinate.authority_epoch
+      || row.readiness !== manifest.readiness
+      || row.delivery !== manifest.delivery
+      || row.generated_at !== manifest.generated_at
+    ) {
+      throw new Error('agent_context_orientation_manifest_generation_index_mismatch:' + manifestId.trim());
+    }
+    return {
+      schema: 'narada.agent_context.orientation_manifest_readback.v1',
+      status: 'ok',
+      source_mutation: false,
+      storage_ref: 'agent-context:orientation_manifest_generations:' + manifest.manifest_id,
+      admission_receipt_ref: manifest.admission_receipt_ref,
+      carrier_session: manifest.coordinate,
+      manifest,
+    };
+  } finally {
+    db.close();
+  }
 }
 
 function runTransaction(db: any, fn: any) {
@@ -782,53 +987,39 @@ function runTransaction(db: any, fn: any) {
   }
 }
 
-export function buildCarrierCommand(runtime: any, identity: any) {
-  if (runtime === 'kimi') {
-    return `kimi -S ${identity}`;
-  }
-  return runtime;
-}
-
 function buildDryRunResult({ siteRoot, identity, runtime, dbPath, cwd, rosterCheck }: any) {
   return {
-    schema: 'narada.agent_context.session_start.v0',
+    schema: 'narada.agent_context.session_start.v1',
     status: 'dry_run',
+    authority_claimed: false,
     identity,
     role: rosterCheck.role,
     role_binding: rosterCheck.role_binding,
-    capabilities: rosterCheck.capabilities,
-    capability_policy: rosterCheck.capability_policy,
-    runtime,
+    runtime_request: runtime,
     root_dir: siteRoot,
-    cwd,
+    cwd_request: cwd,
     db_path: dbPath,
-    would_materialize_agent_context: true,
-    would_set_environment: {
-      NARADA_AGENT_ID: identity,
-      NARADA_AGENT_START_EVENT_ID: '<new event id>',
+    would_validate: {
+      roster_or_identity_projection: true,
+      exact_admission_receipt: true,
+      orientation_manifest: true,
     },
-    startup_sequence: buildStartupSequence(identity, '<new event id>'),
+    would_write: [
+      'orientation_manifest_generations',
+      'agent_start_events_downstream_trace',
+    ],
+    orientation_manifest: null,
+    required_for_materialization: [
+      'site_id',
+      'carrier_session_admission_receipt',
+    ],
   };
 }
 
-function buildStartupSequence(identity: any, eventId: any) {
-  return [
-    { tool: 'agent_context_startup_sequence', arguments: {} },
-  ];
-}
-
-function buildExecutionContextPayload({ siteRoot, runtime, cwd, identity, eventId, roleBinding, capabilityPolicy }: any) {
-  return {
-    runtime,
-    cwd,
-    identity,
-    agent_start_event: eventId,
-    role_binding: roleBinding,
-    mcp_servers: deriveMcpServersFromFabric(siteRoot),
-    identity_boundary: 'NARADA_AGENT_ID and NARADA_AGENT_START_EVENT_ID are launcher carrier environment inherited by MCP servers, not substrate memory or global config.',
-    hydration_boundary: 'Hydration is performed through MCP tools; substrate prompt injection is not authoritative.',
-    capability_policy: capabilityPolicy,
-  };
+function canonicalTimestamp(value: any, field: string) {
+  const date: any = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) throw new Error('agent_context_invalid_' + field);
+  return date.toISOString();
 }
 
 function deriveMcpServersFromFabric(siteRoot: any) {
@@ -861,71 +1052,4 @@ function deriveMcpServersFromFabric(siteRoot: any) {
 
   return servers;
 }
-
-function buildIntelligenceContextPayload() {
-  return {
-    $schema: 'narada/schemas/intelligence_context.v0.schema.json',
-    materialized_context: {
-      facts: [
-        {
-          claim: 'Agent session start was materialized by agent-context authority.',
-          source: 'agent_context_start_session',
-          authority: 'high',
-          volatility: 'low',
-          provenance: 'observed_present',
-        },
-      ],
-      observations: [],
-      session_residue: [],
-      source_provenance: [
-        { source: 'agent-context MCP', authority: 'high', volatility: 'low' },
-        { source: 'roster.json', authority: 'high', volatility: 'medium' },
-      ],
-    },
-    work_frame: {
-      principal_intent_as_understood: 'Start an agent session and materialize event-scoped context through MCP.',
-      active_question: null,
-      known_constraints: [
-        'Agent identity is durable and separate from substrate runtime.',
-        'Substrate prompt injection is not an authority boundary.',
-        'Session hydration must be reconstructible from MCP.',
-      ],
-      open_arbitrariness: [],
-      residuals_seen: [],
-    },
-    arbitrariness_partition: {
-      forced_structure: ['roster validation', 'event-scoped materialization', 'carrier environment', 'MCP hydration sequence'],
-      contingent_policy: ['runtime executable name', 'session title rendering'],
-      decision_inert: ['substrate branding'],
-      residual: [],
-    },
-    evaluation_state: {
-      candidate_distinctions: [],
-      candidate_hypotheses: [],
-      candidate_next_moves: [],
-      confidence_annotations: [],
-      collapse_risks: [],
-    },
-    coherence_diagnosis: {
-      semantic_resolution: 'Agent-context owns session materialization; launchers are carriers.',
-      invariant_preservation: 'Identity, session, and substrate remain mechanically separate.',
-      constructive_executability: 'The startup sequence is expressed as MCP calls.',
-      grounded_universalization: 'Works across Kimi, Codex, and future substrates that inherit environment and MCP config.',
-      authority_reviewability: 'SQLite start events and materializations are the reviewable record.',
-      teleological_pressure: 'Prevent prompt text from becoming hidden authority.',
-    },
-    proposal_output: {
-      recommended_evaluation: 'Agent session start materialized successfully.',
-      recommended_decision_request: null,
-      recommended_intent_request: null,
-      recommended_residuals: [],
-    },
-    residuals: {
-      unresolved: [],
-      deferred: [],
-      dropped: [],
-    },
-  };
-}
-
 

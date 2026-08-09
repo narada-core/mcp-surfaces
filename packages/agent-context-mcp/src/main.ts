@@ -21,11 +21,23 @@ import {
   readOutputResource,
 } from '@narada-core/mcp-transport';
 import {
+  CARRIER_SESSION_ACTIVATION_RECEIPT_JSON_SCHEMA,
+  CARRIER_SESSION_ADMISSION_RECEIPT_JSON_SCHEMA,
+  parseCarrierSessionActivationReceipt,
+  parseCarrierSessionAdmissionReceipt,
+} from '@narada-core/orientation-manifest';
+import {
   listAgentStartSessions,
   materializeAgentSessionStart,
   openAgentContextDb,
+  readOrientationManifestGeneration,
   validateIdentityAgainstRoster,
 } from './session-start.js';
+import {
+  assertAdmissionMatchesAgentContext,
+  compileAgentContextOrientation,
+  orientationEvidenceFromEnvironment,
+} from './orientation-manifest.js';
 import { continuationProjectionState } from './continuation-projection.js';
 
 const SERVER_VERSION = '0.1.0';
@@ -78,6 +90,12 @@ process.on('unhandledRejection', (error: any) => {
 
 traceStartup('process_start');
 
+const LOCAL_WRITE_TOOLS = new Set([
+  'agent_context_start_session',
+  'agent_context_checkpoint',
+  'agent_context_continuation_export',
+]);
+
 export const TOOLS = [
   guidanceToolDefinition(),
   {
@@ -87,17 +105,18 @@ export const TOOLS = [
   },
   {
     name: 'agent_context_whoami',
-    description: 'Resolve current site session identity from NARADA_AGENT_ID, latest checkpoint, or latest start event.',
+    description: 'Resolve the exact admitted Agent/Carrier Session binding from an owner-issued admission receipt. Historical recency is never identity evidence.',
     inputSchema: {
       type: 'object',
       properties: {
         hint: { type: 'string' },
+        admission_receipt: CARRIER_SESSION_ADMISSION_RECEIPT_JSON_SCHEMA,
       },
     },
   },
   {
     name: 'agent_context_start_session',
-    description: 'Validate a site roster identity and materialize a site-local agent start event.',
+    description: 'Compile and retain an Orientation Manifest against an exact owner-issued Carrier Session admission receipt; the start event is only a downstream trace.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -105,6 +124,9 @@ export const TOOLS = [
         runtime: { type: 'string' },
         cwd: { type: 'string' },
         dry_run: { type: 'boolean' },
+        admission_receipt: CARRIER_SESSION_ADMISSION_RECEIPT_JSON_SCHEMA,
+        activation_receipt: CARRIER_SESSION_ACTIVATION_RECEIPT_JSON_SCHEMA,
+        generated_at: { type: 'string' },
       },
       required: ['identity'],
     },
@@ -204,26 +226,30 @@ export const TOOLS = [
   },
   {
     name: 'agent_context_hydrate_current',
-    description: 'Hydrate the current site-bound session from local identity, the latest or explicitly selected checkpoint, and session evidence.',
+    description: 'Compile a read-only diagnostic Orientation Manifest candidate for the exact admitted Carrier Session, optionally including one explicitly selected checkpoint. It does not replace the admitted generation.',
     inputSchema: {
       type: 'object',
       properties: {
-        checkpoint_id: { type: 'string', description: 'Optional exact checkpoint ID. Searches current and archived checkpoints scoped to this agent.' },
-        checkpoint_startup: { type: 'boolean' },
+        checkpoint_id: { type: 'string', description: 'Optional exact checkpoint ID. Omission means continuity is omitted, never latest.' },
+        admission_receipt: CARRIER_SESSION_ADMISSION_RECEIPT_JSON_SCHEMA,
+        activation_receipt: CARRIER_SESSION_ACTIVATION_RECEIPT_JSON_SCHEMA,
+        generated_at: { type: 'string' },
         output: { type: 'string' },
       },
     },
   },
   {
     name: 'agent_context_startup_sequence',
-    description: 'Canonical alias for agent_context_hydrate_current, including optional exact checkpoint selection.',
+    description: 'Read and deliver the exact immutable Orientation Manifest generation selected by the Carrier entry procedure. It never recompiles, selects latest, or mutates a checkpoint.',
     inputSchema: {
       type: 'object',
       properties: {
-        checkpoint_id: { type: 'string', description: 'Optional exact checkpoint ID. Searches current and archived checkpoints scoped to this agent.' },
-        checkpoint_startup: { type: 'boolean' },
+        manifest_id: { type: 'string', description: 'Optional exact manifest ID; must match NARADA_ORIENTATION_MANIFEST_ID when both are present.' },
+        admission_receipt: CARRIER_SESSION_ADMISSION_RECEIPT_JSON_SCHEMA,
+        activation_receipt: CARRIER_SESSION_ACTIVATION_RECEIPT_JSON_SCHEMA,
         output: { type: 'string' },
       },
+      additionalProperties: false,
     },
   },
   {
@@ -253,7 +279,7 @@ export const TOOLS = [
 ].map((tool: any) => ({ ...tool, annotations: toolAnnotations(tool.name), outputSchema: genericToolOutputSchema() }));
 
 function toolAnnotations(name: string) {
-  const writes = /start_session|checkpoint/.test(name);
+  const writes = LOCAL_WRITE_TOOLS.has(name);
   return {
     title: name,
     readOnlyHint: !writes,
@@ -479,25 +505,6 @@ function writeContinuationArtifact(artifactPath: any, markdown: any, overwrite: 
   }
   writeFileSync(artifactPath, bytes, { flag: 'wx' });
   return { bytes: bytes.length, wrote: true };
-}
-
-function continuationInput(value: any) {
-  if (!value) return null;
-  return {
-    schema: value.schema,
-    continuation_id: value.continuation_id,
-    objective: value.objective,
-    current_state: value.current_state,
-    completed_work: value.completed_work,
-    decisions: value.decisions,
-    evidence_refs: value.evidence_refs,
-    open_blockers: value.open_blockers,
-    next_action: value.next_action,
-    canonical_sources: value.canonical_sources,
-    constraints: value.constraints,
-    resume_mode: value.resume_mode,
-    created_at: value.created_at,
-  };
 }
 
 function genericToolOutputSchema() {
@@ -781,15 +788,15 @@ async function handleMessage(message: any) {
 }
 
 function listPrompts() {
-  return [{ name: 'agent_context_startup', title: 'Agent Context Startup', description: 'Guidance for hydrating and checkpointing agent context.', arguments: [] }];
+  return [{ name: 'agent_context_startup', title: 'Agent Context Startup', description: 'Guidance for exact admitted Orientation Manifest delivery and bounded continuity.', arguments: [] }];
 }
 
 function promptGet(params: any) {
   const name = String(params.name ?? '');
   if (name !== 'agent_context_startup') throw new Error(`unknown_prompt: ${name}`);
   return {
-    description: 'Guidance for hydrating and checkpointing agent context.',
-    messages: [{ role: 'user', content: { type: 'text', text: 'Use agent_context_hydrate_current at startup, checkpoint meaningful state transitions, and rehydrate before resuming long-running work. For a fresh-session handoff, keep one bounded narada.continuation.v1 object in the checkpoint and, when a portable Markdown projection exists, include its site-relative path, SHA-256, creation time, and schema as continuation_ref.' } }],
+    description: 'Guidance for exact admitted Orientation Manifest delivery and bounded continuity.',
+    messages: [{ role: 'user', content: { type: 'text', text: 'At admitted startup, call agent_context_startup_sequence to read the exact immutable Orientation Manifest generation selected by Agent Start. Do not substitute agent_context_hydrate_current: it compiles a diagnostic candidate and omits continuity unless an exact checkpoint id is supplied. Checkpoint meaningful state transitions and use explicit checkpoint/continuation reads for resumption. Neither orientation nor checkpoint evidence is admission for a later action.' } }],
   };
 }
 
@@ -824,8 +831,9 @@ async function callTool(name: any, toolArgs: any) {
     case 'agent_context_continuation_read':
       return continuationRead(toolArgs);
     case 'agent_context_hydrate_current':
-    case 'agent_context_startup_sequence':
       return hydrateCurrent(toolArgs);
+    case 'agent_context_startup_sequence':
+      return startupSequence(toolArgs);
     case 'agent_context_list_sessions':
       return listSessions(toolArgs);
     default:
@@ -888,6 +896,7 @@ function doctor() {
       'agent_events',
       'agent_checkpoints',
       'agent_checkpoint_history',
+      'orientation_manifest_generations',
     ].map((table: any) => ({
       table,
       exists: !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table),
@@ -906,13 +915,19 @@ function doctor() {
 function startSession(toolArgs: any) {
   const identity = requiredString(toolArgs, 'identity');
   assertAgentContextIdentity(identity);
+  const evidence = resolveExactOrientationEvidence(toolArgs);
   return materializeAgentSessionStart({
     siteRoot,
+    siteId,
     identity,
     runtime: toolArgs.runtime ?? 'codex',
     dbPath,
     cwd: toolArgs.cwd ?? siteRoot,
     dryRun: toolArgs.dry_run === true,
+    carrierSessionId: process.env.NARADA_CARRIER_SESSION_ID ?? null,
+    admissionReceipt: evidence.admission_receipt,
+    activationReceipt: evidence.activation_receipt,
+    generatedAt: toolArgs.generated_at ?? null,
   });
 }
 
@@ -1180,97 +1195,244 @@ function continuationRead(toolArgs: any) {
   });
 }
 
+function resolveExactOrientationEvidence(toolArgs: any = {}) {
+  const inherited: any = orientationEvidenceFromEnvironment();
+  const suppliedAdmission: any = toolArgs.admission_receipt === undefined
+    || toolArgs.admission_receipt === null
+    ? null
+    : parseCarrierSessionAdmissionReceipt(toolArgs.admission_receipt);
+  const suppliedActivation: any = toolArgs.activation_receipt === undefined
+    || toolArgs.activation_receipt === null
+    ? null
+    : parseCarrierSessionActivationReceipt(toolArgs.activation_receipt);
+
+  if (
+    suppliedAdmission
+    && inherited.admission_receipt
+    && JSON.stringify(suppliedAdmission) !== JSON.stringify(inherited.admission_receipt)
+  ) {
+    throw new Error('agent_context_conflicting_admission_receipts');
+  }
+  if (
+    suppliedActivation
+    && inherited.activation_receipt
+    && JSON.stringify(suppliedActivation) !== JSON.stringify(inherited.activation_receipt)
+  ) {
+    throw new Error('agent_context_conflicting_activation_receipts');
+  }
+
+  return {
+    admission_receipt: suppliedAdmission ?? inherited.admission_receipt,
+    activation_receipt: suppliedActivation ?? inherited.activation_receipt,
+  };
+}
+
 function whoami(toolArgs: any = {}) {
-  return withDb((db: any) => {
-    const envAgent = process.env.NARADA_AGENT_ID;
-    if (envAgent) {
-      const roster = assertAgentContextIdentity(envAgent);
-      return {
-        status: 'ok',
-        identity: envAgent,
-        role: roster.role,
-        confidence: 'high',
-        source: 'NARADA_AGENT_ID',
-        hint_match: toolArgs.hint ? envAgent === toolArgs.hint : null,
-      };
-    }
+  const evidence: any = resolveExactOrientationEvidence(toolArgs);
+  if (!evidence.admission_receipt) {
+    return {
+      schema: 'narada.agent_context.identity_resolution.v1',
+      status: 'blocked',
+      reason: 'agent_context_exact_admission_receipt_required',
+      rejected_fallbacks: ['latest_checkpoint', 'latest_start_event', 'identity_name_inference'],
+    };
+  }
 
-    const checkpointRow = db.prepare('SELECT agent_id, checkpoint_at FROM agent_checkpoints ORDER BY checkpoint_at DESC LIMIT 1').get();
-    if (checkpointRow?.agent_id) {
-      const roster = assertAgentContextIdentity(checkpointRow.agent_id);
-      return {
-        status: 'ok',
-        identity: checkpointRow.agent_id,
-        role: roster.valid ? roster.role : null,
-        confidence: 'medium',
-        source: 'latest_checkpoint',
-        checkpoint_at: checkpointRow.checkpoint_at,
-        hint_match: toolArgs.hint ? checkpointRow.agent_id === toolArgs.hint : null,
-      };
-    }
-
-    const eventRow = db.prepare('SELECT identity_id, created_at FROM agent_start_events ORDER BY created_at DESC LIMIT 1').get();
-    if (eventRow?.identity_id) {
-      const roster = assertAgentContextIdentity(eventRow.identity_id);
-      return {
-        status: 'ok',
-        identity: eventRow.identity_id,
-        role: roster.valid ? roster.role : null,
-        confidence: 'medium',
-        source: 'latest_start_event',
-        start_event_at: eventRow.created_at,
-        hint_match: toolArgs.hint ? eventRow.identity_id === toolArgs.hint : null,
-      };
-    }
-
-    return { status: 'unknown', message: 'No site-local session identity evidence found.' };
+  const receipt: any = evidence.admission_receipt;
+  const identity: any = receipt.agent_identity.local_agent_id;
+  const admitted: any = assertAdmissionMatchesAgentContext(receipt, {
+    siteId,
+    identity: process.env.NARADA_AGENT_ID ?? identity,
+    carrierSessionId: process.env.NARADA_CARRIER_SESSION_ID ?? null,
+    observedAt: new Date().toISOString(),
   });
+  return {
+    schema: 'narada.agent_context.identity_resolution.v1',
+    status: 'ok',
+    identity: admitted.agent_identity.local_agent_id,
+    canonical_agent_id: admitted.agent_identity.canonical_agent_id,
+    confidence: 'exact',
+    source: 'carrier_session_admission_receipt',
+    admission_receipt_ref: admitted.receipt_id,
+    carrier_session: admitted.coordinate,
+    authority_readback_ref: admitted.authority_readback_ref,
+    hint_match: toolArgs.hint
+      ? admitted.agent_identity.local_agent_id === toolArgs.hint
+        || admitted.agent_identity.canonical_agent_id === toolArgs.hint
+      : null,
+  };
 }
 
 function hydrateCurrent(toolArgs: any = {}) {
-  const identity = process.env.NARADA_AGENT_ID ?? whoami({}).identity;
-  if (!identity) return { status: 'blocked', reason: 'agent_identity_unresolved' };
-  const checkpointId = optionalCheckpointId(toolArgs);
-  const checkpointSelection = checkpointId === null ? {} : { checkpoint_id: checkpointId };
-  const resolved = whoami({ hint: identity });
-  const checkpointResult = rehydrate({ agent_id: identity, ...checkpointSelection });
-  const portableContinuationBefore = continuationRead({ agent_id: identity, ...checkpointSelection });
-  const hydratedAt = new Date().toISOString();
-  let startupCheckpoint = null;
-  if (toolArgs.checkpoint_startup === true && checkpointResult.status !== 'checkpoint_not_found') {
-    const selectedCheckpointId = checkpointResult.status === 'ok'
-      ? checkpointResult.checkpoint_id
-      : checkpointId;
-    const selectedCheckpointLabel = selectedCheckpointId ? `checkpoint ${selectedCheckpointId}` : 'the latest checkpoint';
-    const startupArgs: Record<string, any> = {
-      agent_id: identity,
-      authority_basis: {
-        kind: 'startup_hydration',
-        summary: `Startup hydration checkpoint recorded at ${hydratedAt} from ${selectedCheckpointLabel}.`,
-      },
-      tactical_resume_notes: [`Hydrated from ${selectedCheckpointLabel} at ${hydratedAt}.`],
+  if (toolArgs.checkpoint_startup === true) {
+    return {
+      schema: 'narada.agent_context.orientation_hydration.v1',
+      status: 'blocked',
+      reason: 'orientation_assembly_read_only',
+      required_next_step: 'Use agent_context_checkpoint as a separate explicit mutation.',
     };
-    if (checkpointResult.status === 'ok' && checkpointResult.continuation) {
-      startupArgs.continuation = continuationInput(checkpointResult.continuation);
-    }
-    if (checkpointResult.status === 'ok' && checkpointResult.continuation_ref && portableContinuationBefore.status === 'ok') {
-      startupArgs.continuation_ref = checkpointResult.continuation_ref;
-    }
-    startupCheckpoint = checkpoint(startupArgs);
   }
-  const portableContinuation = continuationRead({ agent_id: identity, ...checkpointSelection });
+  const evidence: any = resolveExactOrientationEvidence(toolArgs);
+  if (!evidence.admission_receipt) {
+    return {
+      schema: 'narada.agent_context.orientation_hydration.v1',
+      status: 'blocked',
+      reason: 'agent_context_exact_admission_receipt_required',
+      rejected_fallbacks: ['latest_checkpoint', 'latest_start_event', 'identity_name_inference'],
+    };
+  }
+  const identity: any = evidence.admission_receipt.agent_identity.local_agent_id;
+  const admission: any = assertAdmissionMatchesAgentContext(evidence.admission_receipt, {
+    siteId,
+    identity: process.env.NARADA_AGENT_ID ?? identity,
+    carrierSessionId: process.env.NARADA_CARRIER_SESSION_ID ?? null,
+    observedAt: toolArgs.generated_at ?? new Date().toISOString(),
+  });
+  const checkpointId = optionalCheckpointId(toolArgs);
+  const checkpointResult: any = checkpointId === null
+    ? {
+      status: 'omitted',
+      reason: 'exact_checkpoint_not_selected',
+      checkpoint_id: null,
+    }
+    : rehydrate({ agent_id: identity, checkpoint_id: checkpointId });
+  const portableContinuation: any = checkpointId === null
+    ? {
+      status: 'omitted',
+      reason: 'exact_checkpoint_not_selected',
+      checkpoint_id: null,
+    }
+    : continuationRead({ agent_id: identity, checkpoint_id: checkpointId });
+  const hydratedAt = new Date().toISOString();
+  const roster: any = validateIdentityAgainstRoster(siteRoot, identity);
+  const roleBinding: any = roster.valid
+    ? roster.role_binding
+    : {
+      binding_authority: 'unavailable',
+      binding_source: 'unavailable',
+      reason: roster.error ?? 'role_binding_unavailable',
+    };
+  const compilation: any = compileAgentContextOrientation({
+    siteRoot,
+    siteId,
+    admissionReceipt: admission,
+    activationReceipt: evidence.activation_receipt,
+    observedAt: toolArgs.generated_at ?? hydratedAt,
+    roleBinding,
+    exactCheckpoint: checkpointId === null ? null : checkpointResult,
+    portableContinuation: checkpointId === null ? null : portableContinuation,
+    mcpServers: [],
+  });
+  const manifest: any = compilation.manifest;
   return {
-    status: checkpointResult.status === 'checkpoint_not_found' ? 'checkpoint_not_found' : 'ok',
+    schema: 'narada.agent_context.orientation_hydration.v1',
+    status: manifest.delivery === 'deliverable' ? 'ok' : 'blocked',
+    source_mutation: false,
     site_id: siteId,
     site_root: siteRoot,
-    hydrated_at: hydratedAt,
-    whoami: resolved,
+    hydrated_at: manifest.generated_at,
+    whoami: whoami({ admission_receipt: admission, hint: identity }),
+    admission_receipt_ref: admission.receipt_id,
+    orientation_manifest: manifest,
+    continuity_selection: checkpointId === null
+      ? { mode: 'omitted', checkpoint_id: null }
+      : { mode: 'exact', checkpoint_id: checkpointId },
     checkpoint: checkpointResult,
-    startup_checkpoint: startupCheckpoint,
     portable_continuation: portableContinuation,
-    next_required_action: checkpointResult.status === 'ok'
+    continuity_advisory_next_action: checkpointResult.status === 'ok'
       ? checkpointResult.next_intended_action ?? null
       : null,
+  };
+}
+
+function exactOrientationManifestId(toolArgs: any = {}) {
+  const supplied = typeof toolArgs.manifest_id === 'string' && toolArgs.manifest_id.trim()
+    ? toolArgs.manifest_id.trim()
+    : null;
+  const inherited = typeof process.env.NARADA_ORIENTATION_MANIFEST_ID === 'string'
+    && process.env.NARADA_ORIENTATION_MANIFEST_ID.trim()
+    ? process.env.NARADA_ORIENTATION_MANIFEST_ID.trim()
+    : null;
+  if (supplied && inherited && supplied !== inherited) {
+    throw new Error('agent_context_conflicting_orientation_manifest_ids');
+  }
+  return supplied ?? inherited;
+}
+
+function startupSequence(toolArgs: any = {}) {
+  for (const forbidden of ['checkpoint_id', 'checkpoint_startup', 'generated_at']) {
+    if (toolArgs[forbidden] !== undefined) {
+      return {
+        schema: 'narada.agent_context.orientation_delivery.v1',
+        status: 'blocked',
+        source_mutation: false,
+        reason: 'orientation_startup_exact_generation_only',
+        rejected_argument: forbidden,
+        required_next_step: 'Use agent_context_hydrate_current for a separately identified diagnostic candidate generation.',
+      };
+    }
+  }
+  const evidence: any = resolveExactOrientationEvidence(toolArgs);
+  if (!evidence.admission_receipt) {
+    return {
+      schema: 'narada.agent_context.orientation_delivery.v1',
+      status: 'blocked',
+      source_mutation: false,
+      reason: 'agent_context_exact_admission_receipt_required',
+      rejected_fallbacks: ['latest_checkpoint', 'latest_start_event', 'identity_name_inference'],
+    };
+  }
+  const manifestId = exactOrientationManifestId(toolArgs);
+  if (!manifestId) {
+    return {
+      schema: 'narada.agent_context.orientation_delivery.v1',
+      status: 'blocked',
+      source_mutation: false,
+      reason: 'agent_context_exact_orientation_manifest_id_required',
+      rejected_fallbacks: ['latest_manifest_generation', 'recompile_at_delivery'],
+    };
+  }
+  const identity = evidence.admission_receipt.agent_identity.local_agent_id;
+  const admission = assertAdmissionMatchesAgentContext(evidence.admission_receipt, {
+    siteId,
+    identity: process.env.NARADA_AGENT_ID ?? identity,
+    carrierSessionId: process.env.NARADA_CARRIER_SESSION_ID ?? null,
+    observedAt: new Date().toISOString(),
+  });
+  const readback: any = readOrientationManifestGeneration({
+    siteRoot,
+    dbPath,
+    manifestId,
+    admissionReceipt: admission,
+  });
+  const manifest: any = readback.manifest;
+  const continuityEntries = manifest.entries.filter(
+    (entry: any) => entry.compartment === 'continuity',
+  );
+  return {
+    schema: 'narada.agent_context.orientation_delivery.v1',
+    status: manifest.delivery === 'deliverable' ? 'ok' : 'blocked',
+    source_mutation: false,
+    delivery_authority_claimed: false,
+    delivery_receipt: null,
+    reason: manifest.delivery === 'deliverable' ? null : 'orientation_manifest_delivery_withheld',
+    site_id: siteId,
+    site_root: siteRoot,
+    whoami: whoami({ admission_receipt: admission, hint: identity }),
+    admission_receipt_ref: admission.receipt_id,
+    orientation_manifest: manifest,
+    manifest_readback: {
+      status: readback.status,
+      storage_ref: readback.storage_ref,
+      exact_generation: true,
+    },
+    continuity_selection: continuityEntries.length === 0
+      ? { mode: 'omitted', entry_ids: [] }
+      : { mode: 'manifest_bound', entry_ids: continuityEntries.map((entry: any) => entry.entry_id) },
+    entry_procedure: manifest.entries.filter(
+      (entry: any) => entry.compartment === 'entry_procedure',
+    ),
+    negative_claims: manifest.negative_claims,
   };
 }
 

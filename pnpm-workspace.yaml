@@ -7,3 +7,4 @@ packages:
   - "../narada/packages/site-paths"
   - "../narada/packages/nars-intelligence-kernel-contract"
   - "../narada/packages/operator-surface-runtime-contract"
+  - "../narada/packages/orientation-manifest"

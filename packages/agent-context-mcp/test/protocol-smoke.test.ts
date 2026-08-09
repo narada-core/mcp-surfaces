@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
+import { surfaceDefinition } from '../src/surface-definition.js';
 
 const siteRoot = mkdtempSync(join(tmpdir(), 'agent-context-mcp-protocol-'));
 mkdirSync(join(siteRoot, '.ai', 'agents'), { recursive: true });
@@ -76,6 +77,20 @@ try {
   assert.equal(names.includes('agent_context_hydrate_current'), true);
   assert.equal(names.includes('agent_context_startup_sequence'), true);
   assert.equal(names.includes('startup_sequence'), false);
+  const continuationExport = tools.result.tools.find((tool: any) => tool.name === 'agent_context_continuation_export');
+  assert.equal(continuationExport?.annotations?.readOnlyHint, false);
+  const descriptorTools = new Map(surfaceDefinition().descriptor.tools.map((tool) => [tool.name, tool]));
+  for (const tool of tools.result.tools) {
+    const descriptorTool = descriptorTools.get(tool.name);
+    assert.ok(descriptorTool, `surface descriptor is missing ${tool.name}`);
+    assert.equal(
+      tool.annotations?.readOnlyHint,
+      descriptorTool.effect.class === 'read',
+      `${tool.name} runtime and registrar effect metadata disagree`,
+    );
+  }
+  assert.equal(descriptorTools.get('agent_context_continuation_export')?.effect.class, 'local_write');
+  assert.equal(descriptorTools.get('agent_context_continuation_read')?.effect.class, 'read');
 
   console.log('agent-context-mcp protocol smoke ok');
 } finally {

@@ -7,8 +7,44 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { DatabaseSync } from '@narada-core/sqlite';
+import { CARRIER_SESSION_ADMISSION_RECEIPT_SCHEMA } from '@narada-core/orientation-manifest';
+import { materializeAgentSessionStart } from '../src/session-start.js';
 
 const siteRoot = mkdtempSync(join(tmpdir(), 'agent-context-mcp-'));
+const siteId = 'narada-revolution';
+const canonicalSiteId = 'narada.revolution';
+const agentId = 'narada-revolution.resident';
+const carrierSessionId = 'carrier_agent_context_fixture';
+const admissionReceipt = {
+  schema: CARRIER_SESSION_ADMISSION_RECEIPT_SCHEMA,
+  receipt_id: 'receipt:agent-context-fixture',
+  decision: 'admitted',
+  state: 'starting',
+  coordinate: {
+    authority_scope: 'test',
+    site_ref: 'site:' + canonicalSiteId,
+    carrier_session_id: carrierSessionId,
+    authority_epoch: 1,
+  },
+  agent_identity: {
+    source_authority_ref: 'agent-identity:' + canonicalSiteId,
+    artifact_ref: 'agent:' + agentId,
+    revision: 'fixture-1',
+    local_agent_id: agentId,
+    canonical_agent_id: agentId,
+  },
+  carrier_kind: 'codex',
+  admission_policy: {
+    source_authority_ref: 'site-policy:' + canonicalSiteId,
+    artifact_ref: 'carrier-admission:test',
+    revision: '1',
+  },
+  issued_at: '2026-08-08T12:00:00.000Z',
+  valid_until: null,
+  authority_readback_ref: 'carrier-session-authority:' + carrierSessionId,
+  evidence_refs: ['test:agent-context-admission'],
+  reason_codes: [],
+};
 writeFileSync(join(siteRoot, 'AGENTS.md'), '# Fixture Site\n', 'utf8');
 mkdirSync(join(siteRoot, '.ai', 'agents'), { recursive: true });
 writeFileSync(join(siteRoot, '.ai', 'agents', 'roster.json'), JSON.stringify({
@@ -40,13 +76,26 @@ db.exec(`
   );
 `);
 db.close();
+const admittedStart: any = materializeAgentSessionStart({
+  siteRoot,
+  siteId: canonicalSiteId,
+  identity: agentId,
+  runtime: 'codex',
+  dbPath,
+  admissionReceipt,
+  generatedAt: '2026-08-08T12:00:01.000Z',
+});
+assert.equal(admittedStart.status, 'materialized');
 
 const serverPath = fileURLToPath(new URL('../src/main.js', import.meta.url));
-const proc = spawn(process.execPath, [serverPath, '--site-root', siteRoot, '--site-id', 'narada-revolution'], {
+const proc = spawn(process.execPath, [serverPath, '--site-root', siteRoot, '--site-id', siteId], {
   cwd: siteRoot,
   env: {
     ...process.env,
-    NARADA_AGENT_ID: 'narada-revolution.resident',
+    NARADA_AGENT_ID: agentId,
+    NARADA_CARRIER_SESSION_ID: carrierSessionId,
+    NARADA_CARRIER_SESSION_ADMISSION_RECEIPT: JSON.stringify(admissionReceipt),
+    NARADA_ORIENTATION_MANIFEST_ID: admittedStart.orientation_manifest.manifest_id,
     NARADA_SITE_ROOT: siteRoot,
     NARADA_AGENT_CONTEXT_DB: dbPath,
   },
@@ -101,6 +150,22 @@ async function waitFor(id: any) {
   throw new Error(`timeout:${id}; stderr=${stderr}`);
 }
 
+async function readMaterializedJson(ref: string, idBase: number) {
+  let offset = 0;
+  let text = '';
+  for (let pageIndex = 0; pageIndex < 32; pageIndex += 1) {
+    const id = idBase + pageIndex;
+    writeMessage({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'mcp_output_show', arguments: { ref, offset, limit: 20000 } } });
+    const response = await waitFor(id);
+    assert.equal(response.error, undefined);
+    const body = JSON.parse(response.result.content[0].text);
+    text += String(body.output_text ?? '');
+    if (body.next_offset === null) return JSON.parse(text);
+    offset = Number(body.next_offset);
+  }
+  throw new Error('materialized_output_page_limit_exceeded');
+}
+
 try {
   writeMessage({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'agent-context-mcp-test', version: '0.1.0' } } });
   const init = await waitFor(1);
@@ -122,11 +187,17 @@ try {
     'agent_context_rehydrate',
     'agent_context_continuation_read',
     'agent_context_hydrate_current',
-    'agent_context_startup_sequence',
   ]) {
     const tool = tools.result.tools.find((candidate: any) => candidate.name === toolName);
     assert.equal(tool.inputSchema.properties.checkpoint_id.type, 'string');
   }
+  const whoamiTool = tools.result.tools.find((tool: any) => tool.name === 'agent_context_whoami');
+  assert.equal(whoamiTool.inputSchema.properties.admission_receipt.type, 'object');
+  const hydrateTool = tools.result.tools.find((tool: any) => tool.name === 'agent_context_hydrate_current');
+  assert.equal('checkpoint_startup' in hydrateTool.inputSchema.properties, false);
+  const startupTool = tools.result.tools.find((tool: any) => tool.name === 'agent_context_startup_sequence');
+  assert.equal(startupTool.inputSchema.properties.manifest_id.type, 'string');
+  assert.equal('checkpoint_id' in startupTool.inputSchema.properties, false);
   writeMessage({ jsonrpc: '2.0', id: 3, method: 'tools/list', params: {} }, '\n\n');
   const lfTools = await waitFor(3);
   assert.equal(lfTools.error, undefined);
@@ -137,8 +208,61 @@ try {
   const whoami = await waitFor(5);
   assert.equal(whoami.error, undefined);
   const identity = JSON.parse(whoami.result.content[0].text);
-  assert.equal(identity.identity, 'narada-revolution.resident');
-  assert.equal(identity.role, 'resident');
+  assert.equal(identity.identity, agentId);
+  assert.equal(identity.canonical_agent_id, agentId);
+  assert.equal(identity.confidence, 'exact');
+  assert.equal(identity.source, 'carrier_session_admission_receipt');
+  assert.equal(identity.carrier_session.carrier_session_id, carrierSessionId);
+  writeMessage({ jsonrpc: '2.0', id: 50, method: 'tools/call', params: { name: 'agent_context_startup_sequence', arguments: {} } });
+  const startup = await waitFor(50);
+  assert.equal(startup.error, undefined);
+  let startupBody = JSON.parse(startup.result.content[0].text);
+  if (startupBody.output_ref) {
+    startupBody = await readMaterializedJson(startupBody.output_ref, 5000);
+  }
+  assert.equal(startupBody.status, 'ok');
+  assert.equal(startupBody.source_mutation, false);
+  assert.equal(startupBody.delivery_authority_claimed, false);
+  assert.equal(startupBody.delivery_receipt, null);
+  assert.equal(startupBody.manifest_readback.exact_generation, true);
+  assert.equal(
+    startupBody.orientation_manifest.manifest_id,
+    admittedStart.orientation_manifest.manifest_id,
+  );
+  assert.deepEqual(startupBody.orientation_manifest, admittedStart.orientation_manifest);
+  writeMessage({
+    jsonrpc: '2.0',
+    id: 51,
+    method: 'tools/call',
+    params: {
+      name: 'agent_context_startup_sequence',
+      arguments: { checkpoint_id: 'chk_forbidden_at_delivery' },
+    },
+  });
+  const startupRecompileAttempt = await waitFor(51);
+  assert.equal(startupRecompileAttempt.error, undefined);
+  const startupRecompileAttemptBody = JSON.parse(startupRecompileAttempt.result.content[0].text);
+  assert.equal(startupRecompileAttemptBody.status, 'blocked');
+  assert.equal(startupRecompileAttemptBody.reason, 'orientation_startup_exact_generation_only');
+  writeMessage({
+    jsonrpc: '2.0',
+    id: 52,
+    method: 'tools/call',
+    params: {
+      name: 'agent_context_whoami',
+      arguments: {
+        admission_receipt: {
+          ...admissionReceipt,
+          carrier_kind: 'kimi',
+        },
+      },
+    },
+  });
+  const conflictingReceipt = await waitFor(52);
+  assert.match(
+    String(conflictingReceipt.error?.message ?? ''),
+    /agent_context_conflicting_admission_receipts/,
+  );
   const continuationContent = '# Agent-context continuation test\n';
   const continuationPath = join(siteRoot, '.ai', 'continuations', 'agent-context-test.md');
   mkdirSync(join(siteRoot, '.ai', 'continuations'), { recursive: true });
@@ -251,32 +375,36 @@ try {
   assert.equal(missingContinuationBody.status, 'checkpoint_not_found');
   assert.equal(missingContinuationBody.checkpoint_id, missingCheckpointId);
 
-  writeMessage({ jsonrpc: '2.0', id: 18, method: 'tools/call', params: { name: 'agent_context_hydrate_current', arguments: { checkpoint_id: missingCheckpointId, checkpoint_startup: true } } });
+  writeMessage({ jsonrpc: '2.0', id: 18, method: 'tools/call', params: { name: 'agent_context_hydrate_current', arguments: { checkpoint_id: missingCheckpointId } } });
   const missingHydrated = await waitFor(18);
   assert.equal(missingHydrated.error, undefined);
-  const missingHydratedBody = JSON.parse(missingHydrated.result.content[0].text);
-  assert.equal(missingHydratedBody.status, 'checkpoint_not_found');
+  let missingHydratedBody = JSON.parse(missingHydrated.result.content[0].text);
+  if (missingHydratedBody.output_ref) {
+    missingHydratedBody = await readMaterializedJson(missingHydratedBody.output_ref, 1800);
+  }
+  assert.equal(missingHydratedBody.status, 'ok');
   assert.equal(missingHydratedBody.checkpoint.checkpoint_id, missingCheckpointId);
-  assert.equal(missingHydratedBody.startup_checkpoint, null);
+  assert.equal(missingHydratedBody.checkpoint.status, 'checkpoint_not_found');
+  assert.equal(missingHydratedBody.orientation_manifest.readiness, 'degraded');
+  assert.ok(missingHydratedBody.orientation_manifest.residuals.some(
+    (item: any) => item.code === 'exact_continuity_unavailable',
+  ));
+  assert.equal('startup_checkpoint' in missingHydratedBody, false);
 
   writeMessage({ jsonrpc: '2.0', id: 19, method: 'tools/call', params: { name: 'agent_context_hydrate_current', arguments: { checkpoint_id: archivedCheckpointId } } });
   const exactHydrated = await waitFor(19);
   assert.equal(exactHydrated.error, undefined);
   let exactHydratedBody = JSON.parse(exactHydrated.result.content[0].text);
   if (exactHydratedBody.output_ref) {
-    writeMessage({ jsonrpc: '2.0', id: 20, method: 'tools/call', params: { name: 'mcp_output_show', arguments: { ref: exactHydratedBody.output_ref, offset: 0, limit: 12000 } } });
-    const exactHydratedPage = await waitFor(20);
-    assert.equal(exactHydratedPage.error, undefined);
-    const exactHydratedPageBody = JSON.parse(exactHydratedPage.result.content[0].text);
-    exactHydratedBody = typeof exactHydratedPageBody.output_text === 'string'
-      ? JSON.parse(exactHydratedPageBody.output_text)
-      : exactHydratedPageBody;
+    exactHydratedBody = await readMaterializedJson(exactHydratedBody.output_ref, 2000);
   }
   assert.equal(exactHydratedBody.status, 'ok');
   assert.equal(exactHydratedBody.checkpoint.status, 'ok');
   assert.equal(exactHydratedBody.checkpoint.checkpoint_id, archivedCheckpointId);
   assert.equal(exactHydratedBody.portable_continuation.status, 'ok');
   assert.equal(exactHydratedBody.portable_continuation.checkpoint_id, archivedCheckpointId);
+  assert.equal(exactHydratedBody.orientation_manifest.delivery, 'deliverable');
+  assert.equal(exactHydratedBody.continuity_selection.mode, 'exact');
 
   writeMessage({ jsonrpc: '2.0', id: 21, method: 'tools/call', params: { name: 'agent_context_continuation_export', arguments: { agent_id: 'narada-revolution.resident' } } });
   const exported = await waitFor(21);
@@ -306,15 +434,12 @@ try {
   assert.equal(hydrated.error, undefined);
   let hydratedBody = JSON.parse(hydrated.result.content[0].text);
   if (hydratedBody.output_ref) {
-    writeMessage({ jsonrpc: '2.0', id: 24, method: 'tools/call', params: { name: 'mcp_output_show', arguments: { ref: hydratedBody.output_ref, offset: 0, limit: 12000 } } });
-    const hydratedPage = await waitFor(24);
-    assert.equal(hydratedPage.error, undefined);
-    const hydratedPageBody = JSON.parse(hydratedPage.result.content[0].text);
-    hydratedBody = typeof hydratedPageBody.output_text === 'string'
-      ? JSON.parse(hydratedPageBody.output_text)
-      : hydratedPageBody;
+    hydratedBody = await readMaterializedJson(hydratedBody.output_ref, 2400);
   }
-  assert.equal(hydratedBody.portable_continuation.status, 'ok');
+  assert.equal(hydratedBody.checkpoint.status, 'omitted');
+  assert.equal(hydratedBody.portable_continuation.status, 'omitted');
+  assert.equal(hydratedBody.continuity_selection.mode, 'omitted');
+  assert.equal('next_required_action' in hydratedBody, false);
 
   writeFileSync(exportedPath, `${exportedMarkdown}\nmutated`, 'utf8');
   writeMessage({ jsonrpc: '2.0', id: 25, method: 'tools/call', params: { name: 'agent_context_continuation_read', arguments: { agent_id: 'narada-revolution.resident' } } });

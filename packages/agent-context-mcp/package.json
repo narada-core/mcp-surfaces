@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "license": "Apache-2.0",
   "type": "module",
-  "description": "Agent-context MCP surface for site-local startup hydration and checkpoints.",
+  "description": "Exact admitted Orientation Manifest readback, diagnostic context compilation, and bounded checkpoint continuity",
   "bin": {
     "agent-context-mcp": "./dist/src/main.js"
   },
@@ -31,12 +31,13 @@
     "build": "tsc -b",
     "typecheck": "tsc -b --pretty false",
     "test": "pnpm run test:bun",
-    "test:bun": "pnpm --filter @narada-core/sqlite build && pnpm build && bun dist/test/agent-context-mcp.test.js && bun test dist/test/continuation-projection.test.js && bun dist/test/protocol-smoke.test.js && bun dist/test/site-fabric-agent-context-e2e.test.js && bun dist/test/session-start-roster.test.js && bun dist/test/session-start-migrations.test.js",
-    "test:node": "pnpm --filter @narada-core/sqlite build && pnpm build && node --disable-warning=ExperimentalWarning dist/test/agent-context-mcp.test.js && node --disable-warning=ExperimentalWarning dist/test/continuation-projection.test.js && node --disable-warning=ExperimentalWarning dist/test/protocol-smoke.test.js && node --disable-warning=ExperimentalWarning dist/test/site-fabric-agent-context-e2e.test.js && node --disable-warning=ExperimentalWarning dist/test/session-start-roster.test.js && node --disable-warning=ExperimentalWarning dist/test/session-start-migrations.test.js"
+    "test:bun": "pnpm --filter @narada-core/sqlite build && pnpm build && bun dist/test/agent-context-mcp.test.js && bun test dist/test/continuation-projection.test.js && bun test dist/test/orientation-manifest.test.js && bun dist/test/protocol-smoke.test.js && bun dist/test/site-fabric-agent-context-e2e.test.js && bun dist/test/session-start-roster.test.js && bun dist/test/session-start-migrations.test.js",
+    "test:node": "pnpm --filter @narada-core/sqlite build && pnpm build && node --disable-warning=ExperimentalWarning dist/test/agent-context-mcp.test.js && node --disable-warning=ExperimentalWarning dist/test/continuation-projection.test.js && node --disable-warning=ExperimentalWarning --test dist/test/orientation-manifest.test.js && node --disable-warning=ExperimentalWarning dist/test/protocol-smoke.test.js && node --disable-warning=ExperimentalWarning dist/test/site-fabric-agent-context-e2e.test.js && node --disable-warning=ExperimentalWarning dist/test/session-start-roster.test.js && node --disable-warning=ExperimentalWarning dist/test/session-start-migrations.test.js"
   },
   "dependencies": {
     "@narada-core/mcp-fabric-contracts": "workspace:*",
     "@narada-core/mcp-transport": "workspace:*",
+    "@narada-core/orientation-manifest": "workspace:*",
     "@narada-core/sqlite": "workspace:*"
   },
   "files": [

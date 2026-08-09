@@ -2,6 +2,9 @@
   "files": [],
   "references": [
     {
+      "path": "../narada/packages/orientation-manifest/tsconfig.build.json"
+    },
+    {
       "path": "./packages/shared/mcp-e2e-harness"
     },
     {

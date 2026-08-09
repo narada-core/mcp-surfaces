@@ -10,6 +10,7 @@
     "test/**/*.ts"
   ],
   "references": [
+    { "path": "../../../narada/packages/orientation-manifest/tsconfig.build.json" },
     { "path": "../shared/mcp-e2e-harness" },
     { "path": "../shared/mcp-transport" }
   ]
