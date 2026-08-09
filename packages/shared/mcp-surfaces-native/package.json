@@ -4,8 +4,14 @@
   "private": true,
   "description": "Shared Rust MCP surface executable.",
   "scripts": {
-    "build:native": "cargo build --release --locked --manifest-path native/Cargo.toml",
+    "build:native": "node scripts/build-native.mjs",
+    "test:native": "pnpm run build:native",
     "build": "pnpm run build:native"
+  },
+  "naradaRuntimeArtifacts": {
+    "win32": ["./dist/native/narada-mcp-surfaces.exe"],
+    "linux": ["./dist/native/narada-mcp-surfaces"],
+    "darwin": ["./dist/native/narada-mcp-surfaces"]
   },
   "files": ["native/Cargo.toml", "native/Cargo.lock", "native/src/", "dist/native/"]
 }

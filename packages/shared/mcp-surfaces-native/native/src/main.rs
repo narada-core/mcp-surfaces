@@ -3,6 +3,7 @@ use std::env;
 use std::fs::{create_dir_all, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
+use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -258,7 +259,8 @@ fn list_tools(surface_id: &str) -> Vec<Value> {
 }
 
 fn guidance_tool(surface_id: &str) -> Value {
-    tool(&format!("{surface_id}_guidance"), &format!("Show model-facing operating guidance for {surface_id} MCP workflows."), json!({
+    let tool_name = surface_id.replace("-", "_") + "_guidance";
+    tool(&tool_name, &format!("Show model-facing operating guidance for {surface_id} MCP workflows."), json!({
         "type": "object",
         "properties": {
             "workflow": { "type": "string", "description": "Optional workflow name or area to focus guidance on." },
@@ -282,14 +284,19 @@ fn call_tool(surface_id: &str, params: &Map<String, Value>, options: &Options) -
     let name = params.get("name").and_then(Value::as_str).ok_or_else(|| diagnostic("invalid_request", "tools/call requires a tool name.", Value::Null))?;
     let args = params.get("arguments").and_then(Value::as_object).cloned().unwrap_or_default();
     let result = match (surface_id, name) {
-        ("catalog-observation", "catalog-observation_guidance") => catalog_guidance(&args),
+        ("catalog-observation", "catalog_observation_guidance") => catalog_guidance(&args),
         ("catalog-observation", "catalog_observation_observe") => catalog_observation(&args),
-        ("operator-routing", "operator-routing_guidance") => operator_guidance(&args),
+        ("operator-routing", "operator_routing_guidance") => operator_guidance(&args),
         ("operator-routing", "operator_route_doctor") => operator_route_doctor(options),
         ("operator-routing", "operator_route_request") => operator_route_request(&args, options),
         (_, unknown) => return Err(diagnostic("unknown_tool", &format!("unknown_tool:{unknown}"), json!({ "tool_name": unknown }))),
     }?;
-    Ok(json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string()) }], "structuredContent": result }))
+    let is_error = result.get("status").and_then(Value::as_str) == Some("unavailable");
+    let mut response = json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string()) }], "structuredContent": result });
+    if is_error {
+        response["isError"] = json!(true);
+    }
+    Ok(response)
 }
 
 fn catalog_guidance(_args: &Map<String, Value>) -> Result<Value, Value> {
@@ -308,6 +315,9 @@ fn catalog_observation(args: &Map<String, Value>) -> Result<Value, Value> {
     let access_mode = args.get("access_mode").and_then(Value::as_str).unwrap_or("public");
     if !matches!(access_mode, "public" | "credentialed" | "operator_attested") {
         return Err(diagnostic("invalid_request", "access_mode must be public, credentialed, or operator_attested.", Value::Null));
+    }
+    if OffsetDateTime::parse(&observed_at, &Rfc3339).is_err() {
+        return Err(diagnostic("invalid_request", "observed_at must be an explicit ISO instant.", Value::Null));
     }
     Ok(json!({
         "schema": "narada.invokable-intelligence.catalog-observation.v1",
@@ -331,7 +341,7 @@ fn operator_guidance(args: &Map<String, Value>) -> Result<Value, Value> {
         "schema": "narada.mcp_surface.guidance.v0",
         "status": "ok",
         "surface_id": "operator-routing",
-        "guidance_tool": "operator-routing_guidance",
+        "guidance_tool": "operator_routing_guidance",
         "purpose": "User Site operator transcript-to-target routing and inbox fallback packaging.",
         "requested": { "workflow": workflow, "tool": tool },
         "first_use": ["Call this guidance command when the surface is unfamiliar, when a refusal/error is unclear, or before composing a multi-step workflow.", "Inspect policy/doctor/status tools before mutation or open-world operations.", "Use bounded list/search/query tools for discovery, then show/read/detail tools before acting on a specific object.", "Preserve structuredContent as authoritative evidence; text content is for assistant readability."],
@@ -463,9 +473,50 @@ mod tests {
     }
 
     #[test]
-    fn modern_tools_list_requires_metadata_and_has_cache_metadata() {
+    fn shared_surface_tool_names_match_wire_contracts() {
+        let catalog_tools = list_tools("catalog-observation");
+        let catalog_names = catalog_tools
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        assert_eq!(catalog_names, vec!["catalog_observation_guidance", "catalog_observation_observe"]);
+        let routing_tools = list_tools("operator-routing");
+        let routing_names = routing_tools
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        assert_eq!(routing_names, vec!["operator_routing_guidance", "operator_route_doctor", "operator_route_request"]);
+    }
+
+    #[test]
+    fn catalog_observation_requires_an_explicit_iso_instant() {
         let response = handle_request(
-            &json!({"jsonrpc":"2.0","id":3,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":MODERN_PROTOCOL_VERSION,"io.modelcontextprotocol/clientInfo":{"name":"test","version":"1"},"io.modelcontextprotocol/clientCapabilities":{}}}}),
+            &json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"catalog_observation_observe","arguments":{"provider_id":"inference-provider:test","observed_at":"not-an-instant"}}}),
+            &test_options(),
+        ).expect("response");
+        assert_eq!(response["error"]["data"]["code"], "invalid_request");
+    }
+
+    #[test]
+    fn operator_routing_writes_a_durable_record() {
+        let root = std::env::temp_dir().join(format!("narada-operator-routing-{}", Uuid::new_v4()));
+        let options = Options {
+            surface_id: "operator-routing".to_string(),
+            site_root: root.clone(),
+            log_root: Some(root.join("log")),
+        };
+        let params = json!({"name":"operator_route_request","arguments":{"transcript":"route this","target_runtime":"codex","request_id":"route-test"}});
+        let result = call_tool("operator-routing", params.as_object().expect("params"), &options).expect("route");
+        assert_eq!(result["structuredContent"]["request_id"], "route-test");
+        let log = root.join("log").join("operator-routing-log.jsonl");
+        assert!(log.exists());
+        let content = std::fs::read_to_string(log).expect("log");
+        assert!(content.contains(r#""request_id":"route-test""#));
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+    #[test]
+    fn modern_tools_list_requires_metadata_and_has_cache_metadata() {
+        let response = handle_request(            &json!({"jsonrpc":"2.0","id":3,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":MODERN_PROTOCOL_VERSION,"io.modelcontextprotocol/clientInfo":{"name":"test","version":"1"},"io.modelcontextprotocol/clientCapabilities":{}}}}),
             &test_options(),
         ).expect("response");
         assert_eq!(response["result"]["resultType"], "complete");
