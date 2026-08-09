@@ -7,8 +7,14 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { DatabaseSync } from '@narada-core/sqlite';
-import { CARRIER_SESSION_ADMISSION_RECEIPT_SCHEMA } from '@narada-core/orientation-manifest';
-import { materializeAgentSessionStart } from '../src/session-start.js';
+import {
+  CARRIER_SESSION_ADMISSION_RECEIPT_SCHEMA,
+  issueCarrierSessionOrientationDeliveryReceipt,
+} from '@narada-core/orientation-manifest';
+import {
+  materializeAgentSessionStart,
+  recordOrientationDeliveryReceipt,
+} from '../src/session-start.js';
 
 const siteRoot = mkdtempSync(join(tmpdir(), 'agent-context-mcp-'));
 const siteId = 'narada-revolution';
@@ -86,9 +92,24 @@ const admittedStart: any = materializeAgentSessionStart({
   generatedAt: '2026-08-08T12:00:01.000Z',
 });
 assert.equal(admittedStart.status, 'materialized');
+const orientationDeliveryReceipt: any = issueCarrierSessionOrientationDeliveryReceipt({
+  admissionReceipt,
+  brief: admittedStart.orientation_brief,
+  deliveredAt: '2026-08-08T12:00:02.000Z',
+});
+recordOrientationDeliveryReceipt({
+  siteRoot,
+  dbPath,
+  admissionReceipt,
+  brief: admittedStart.orientation_brief,
+  deliveryReceipt: orientationDeliveryReceipt,
+});
 
 const serverPath = fileURLToPath(new URL('../src/main.js', import.meta.url));
-const proc = spawn(process.execPath, [serverPath, '--site-root', siteRoot, '--site-id', siteId], {
+const proc = spawn(process.execPath, [
+  serverPath, '--site-root', siteRoot, '--site-id', siteId,
+  '--tool-projection', 'admin',
+], {
   cwd: siteRoot,
   env: {
     ...process.env,
@@ -96,6 +117,7 @@ const proc = spawn(process.execPath, [serverPath, '--site-root', siteRoot, '--si
     NARADA_CARRIER_SESSION_ID: carrierSessionId,
     NARADA_CARRIER_SESSION_ADMISSION_RECEIPT: JSON.stringify(admissionReceipt),
     NARADA_ORIENTATION_MANIFEST_ID: admittedStart.orientation_manifest.manifest_id,
+    NARADA_ORIENTATION_DELIVERY_RECEIPT: JSON.stringify(orientationDeliveryReceipt),
     NARADA_SITE_ROOT: siteRoot,
     NARADA_AGENT_CONTEXT_DB: dbPath,
   },
@@ -140,8 +162,8 @@ function readOne() {
   return JSON.parse(body);
 }
 
-async function waitFor(id: any) {
-  const deadline = Date.now() + 5000;
+async function waitFor(id: any, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const message = readOne();
     if (message?.id === id) return message;
@@ -168,7 +190,9 @@ async function readMaterializedJson(ref: string, idBase: number) {
 
 try {
   writeMessage({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'agent-context-mcp-test', version: '0.1.0' } } });
-  const init = await waitFor(1);
+  // Bun/Windows cold process startup can exceed the steady-state response
+  // budget; keep the wider allowance scoped to initialize.
+  const init = await waitFor(1, 30_000);
   assert.equal(init.error, undefined);
   writeMessage({ jsonrpc: '2.0', method: 'notifications/initialized', params: {} });
   writeMessage({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
@@ -220,16 +244,20 @@ try {
   if (startupBody.output_ref) {
     startupBody = await readMaterializedJson(startupBody.output_ref, 5000);
   }
-  assert.equal(startupBody.status, 'ok');
+  assert.equal(startupBody.schema, 'narada.agent_context.orientation_entry_packet.v2');
+  assert.equal(startupBody.status, 'orientation_required');
   assert.equal(startupBody.source_mutation, false);
-  assert.equal(startupBody.delivery_authority_claimed, false);
-  assert.equal(startupBody.delivery_receipt, null);
-  assert.equal(startupBody.manifest_readback.exact_generation, true);
+  assert.equal(startupBody.compatibility_alias, 'agent_context_startup_sequence');
+  assert.equal(startupBody.canonical_tool, 'agent_orientation_read');
+  assert.equal(startupBody.delivery_receipt_ref, orientationDeliveryReceipt.receipt_id);
+  assert.deepEqual(startupBody.next_call, {
+    tool: 'agent_orientation_read',
+    arguments: { step_id: 'read:site-law', offset: 0 },
+  });
   assert.equal(
-    startupBody.orientation_manifest.manifest_id,
+    startupBody.manifest_ref.manifest_id,
     admittedStart.orientation_manifest.manifest_id,
   );
-  assert.deepEqual(startupBody.orientation_manifest, admittedStart.orientation_manifest);
   writeMessage({
     jsonrpc: '2.0',
     id: 51,
@@ -382,10 +410,14 @@ try {
   if (missingHydratedBody.output_ref) {
     missingHydratedBody = await readMaterializedJson(missingHydratedBody.output_ref, 1800);
   }
-  assert.equal(missingHydratedBody.status, 'ok');
+  assert.equal(missingHydratedBody.status, 'blocked', JSON.stringify(missingHydratedBody));
   assert.equal(missingHydratedBody.checkpoint.checkpoint_id, missingCheckpointId);
   assert.equal(missingHydratedBody.checkpoint.status, 'checkpoint_not_found');
-  assert.equal(missingHydratedBody.orientation_manifest.readiness, 'degraded');
+  assert.equal(missingHydratedBody.orientation_manifest.readiness, 'blocked');
+  assert.equal(missingHydratedBody.orientation_manifest.delivery, 'withheld');
+  assert.ok(missingHydratedBody.orientation_manifest.reason_codes.includes(
+    'required_projection_unavailable',
+  ));
   assert.ok(missingHydratedBody.orientation_manifest.residuals.some(
     (item: any) => item.code === 'exact_continuity_unavailable',
   ));
@@ -466,7 +498,10 @@ for (const root of [boundSiteRoot, foreignSiteRoot]) {
   }, null, 2), 'utf8');
 }
 
-const mismatchProc = spawn(process.execPath, [serverPath, '--site-root', boundSiteRoot, '--site-id', 'narada-bound'], {
+const mismatchProc = spawn(process.execPath, [
+  serverPath, '--site-root', boundSiteRoot, '--site-id', 'narada-bound',
+  '--tool-projection', 'admin',
+], {
   cwd: foreignSiteRoot,
   env: {
     ...process.env,
@@ -484,7 +519,10 @@ const mismatchExit = await waitForExit(mismatchProc) as { code: number | null; s
 assert.notEqual(mismatchExit.code, 0);
 assert.match(mismatchStderr, /agent_context_site_root_mismatch/);
 
-const foreignDbProc = spawn(process.execPath, [serverPath, '--site-root', boundSiteRoot, '--site-id', 'narada-bound'], {
+const foreignDbProc = spawn(process.execPath, [
+  serverPath, '--site-root', boundSiteRoot, '--site-id', 'narada-bound',
+  '--tool-projection', 'admin',
+], {
   cwd: boundSiteRoot,
   env: {
     ...process.env,

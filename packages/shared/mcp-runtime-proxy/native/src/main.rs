@@ -1,12 +1,12 @@
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use time::format_description::well_known::Rfc3339;
@@ -19,7 +19,7 @@ mod git;
 #[allow(dead_code)]
 mod structured_command;
 
-const CONTRACT_VERSION: u64 = 5;
+const CONTRACT_VERSION: u64 = 6;
 const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 240_000;
 const DEFAULT_TOOL_TIMEOUT_GRACE_MS: u64 = 15_000;
 const MAX_TRANSPORT_TIMEOUT_MS: u64 = 900_000;
@@ -49,6 +49,566 @@ struct Options {
     liveness_check_ms: u64,
     orphan_grace_ms: u64,
     runtime_contract_version: Option<u64>,
+}
+
+fn lexically_normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
+}
+
+const ORIENTATION_CONTRACT_SCHEMA: &str =
+    "narada.mcp_runtime_proxy.orientation_entry_enforcement_contract.v1";
+const ORIENTATION_CONTRACT_JSON: &str =
+    include_str!("../../src/orientation-entry-enforcement-contract.json");
+static ORIENTATION_CONTRACT: OnceLock<Value> = OnceLock::new();
+
+fn orientation_contract() -> &'static Value {
+    ORIENTATION_CONTRACT.get_or_init(|| {
+        let value: Value = serde_json::from_str(ORIENTATION_CONTRACT_JSON)
+            .expect("orientation_entry_enforcement_contract_json_invalid");
+        assert_eq!(
+            value.get("schema").and_then(Value::as_str),
+            Some(ORIENTATION_CONTRACT_SCHEMA),
+            "orientation_entry_enforcement_contract_schema_invalid"
+        );
+        value
+    })
+}
+
+fn contract_value(path: &str) -> &'static Value {
+    orientation_contract()
+        .pointer(path)
+        .unwrap_or_else(|| panic!("orientation_entry_enforcement_contract_path_missing:{path}"))
+}
+
+fn contract_string(path: &str) -> &'static str {
+    contract_value(path)
+        .as_str()
+        .unwrap_or_else(|| panic!("orientation_entry_enforcement_contract_string_invalid:{path}"))
+}
+
+fn contract_string_array(path: &str) -> Vec<&'static str> {
+    contract_value(path)
+        .as_array()
+        .unwrap_or_else(|| panic!("orientation_entry_enforcement_contract_array_invalid:{path}"))
+        .iter()
+        .map(|value| {
+            value.as_str().unwrap_or_else(|| {
+                panic!("orientation_entry_enforcement_contract_array_item_invalid:{path}")
+            })
+        })
+        .collect()
+}
+
+fn contract_reason(field: &str) -> &'static str {
+    contract_string(&format!("/state/reasons/{field}"))
+}
+
+fn has_duplicate_json_object_keys(source: &str) -> bool {
+    enum Frame {
+        Object(HashSet<String>),
+        Array,
+    }
+
+    let bytes = source.as_bytes();
+    let mut stack = Vec::<Frame>::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'{' => stack.push(Frame::Object(HashSet::new())),
+            b'[' => stack.push(Frame::Array),
+            b'}' | b']' => {
+                stack.pop();
+            }
+            b'"' => {
+                let start = index;
+                index += 1;
+                let mut escaped = false;
+                while index < bytes.len() {
+                    if escaped {
+                        escaped = false;
+                    } else if bytes[index] == b'\\' {
+                        escaped = true;
+                    } else if bytes[index] == b'"' {
+                        break;
+                    }
+                    index += 1;
+                }
+                if index >= bytes.len() {
+                    return false;
+                }
+                let mut lookahead = index + 1;
+                while lookahead < bytes.len() && bytes[lookahead].is_ascii_whitespace() {
+                    lookahead += 1;
+                }
+                if bytes.get(lookahead) == Some(&b':') {
+                    if let Some(Frame::Object(keys)) = stack.last_mut() {
+                        let Ok(key) = serde_json::from_str::<String>(&source[start..=index]) else {
+                            return false;
+                        };
+                        if !keys.insert(key) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    false
+}
+
+fn json_file(path: &Path) -> Option<Value> {
+    let source = fs::read_to_string(path).ok()?;
+    if contract_string("/raw_json/duplicate_keys") == "reject"
+        && has_duplicate_json_object_keys(&source)
+    {
+        return None;
+    }
+    serde_json::from_str(&source).ok()
+}
+
+fn non_empty_json_string(value: Option<&Value>) -> bool {
+    value
+        .and_then(Value::as_str)
+        .is_some_and(|text| !text.trim().is_empty())
+}
+
+fn json_equivalent(left: &Value, right: &Value) -> bool {
+    if left.is_number() && right.is_number() {
+        return left
+            .as_f64()
+            .zip(right.as_f64())
+            .is_some_and(|(left, right)| left == right);
+    }
+    left == right
+}
+
+fn safe_positive_integer(value: Option<&Value>, maximum: u64) -> bool {
+    value.is_some_and(|value| {
+        value
+            .as_u64()
+            .is_some_and(|number| number > 0 && number <= maximum)
+            || value.as_f64().is_some_and(|number| {
+                number.is_finite()
+                    && number.fract() == 0.0
+                    && number >= 1.0
+                    && number <= maximum as f64
+            })
+    })
+}
+
+fn valid_orientation_coordinate(value: Option<&Value>) -> bool {
+    let Some(coordinate) = value.and_then(Value::as_object) else {
+        return false;
+    };
+    let integer_field = contract_string("/coordinate/positive_safe_integer_field");
+    let integer_maximum = contract_value("/coordinate/positive_safe_integer_max")
+        .as_u64()
+        .expect("orientation_entry_enforcement_contract_integer_maximum_invalid");
+    contract_string_array("/coordinate/non_empty_string_fields")
+        .into_iter()
+        .all(|field| non_empty_json_string(coordinate.get(field)))
+        && safe_positive_integer(coordinate.get(integer_field), integer_maximum)
+}
+
+fn same_orientation_coordinate(left: Option<&Value>, right: Option<&Value>) -> bool {
+    let (Some(left), Some(right)) = (
+        left.and_then(Value::as_object),
+        right.and_then(Value::as_object),
+    ) else {
+        return false;
+    };
+    valid_orientation_coordinate(Some(&Value::Object(left.clone())))
+        && valid_orientation_coordinate(Some(&Value::Object(right.clone())))
+        && contract_string_array("/coordinate/identity_fields")
+            .into_iter()
+            .all(|field| {
+                left.get(field)
+                    .zip(right.get(field))
+                    .is_some_and(|(left, right)| json_equivalent(left, right))
+            })
+}
+
+fn rule_set(name: &str) -> &'static Value {
+    contract_value("/rule_sets")
+        .get(name)
+        .unwrap_or_else(|| panic!("orientation_entry_enforcement_contract_rule_set_missing:{name}"))
+}
+
+fn rule_pair<'a>(candidate: &'a Value, field: &str) -> (&'a str, &'a str) {
+    let pair = candidate.as_array().unwrap_or_else(|| {
+        panic!("orientation_entry_enforcement_contract_rule_pair_invalid:{field}")
+    });
+    assert_eq!(
+        pair.len(),
+        2,
+        "orientation_entry_enforcement_contract_rule_pair_invalid:{field}"
+    );
+    (
+        pair[0].as_str().unwrap_or_else(|| {
+            panic!("orientation_entry_enforcement_contract_rule_pair_invalid:{field}")
+        }),
+        pair[1].as_str().unwrap_or_else(|| {
+            panic!("orientation_entry_enforcement_contract_rule_pair_invalid:{field}")
+        }),
+    )
+}
+
+fn validate_rule_set(document: &Value, name: &str) -> bool {
+    let rules = rule_set(name);
+    let equals = rules
+        .get("equals")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("orientation_entry_enforcement_contract_equals_invalid:{name}"));
+    for candidate in equals {
+        let rule = candidate.as_object().unwrap_or_else(|| {
+            panic!("orientation_entry_enforcement_contract_equals_rule_invalid:{name}")
+        });
+        let path = rule.get("path").and_then(Value::as_str).unwrap_or_else(|| {
+            panic!("orientation_entry_enforcement_contract_equals_path_invalid:{name}")
+        });
+        let Some(actual) = document.pointer(path) else {
+            return false;
+        };
+        let expected = rule.get("value").unwrap_or_else(|| {
+            panic!("orientation_entry_enforcement_contract_equals_value_invalid:{name}")
+        });
+        if !json_equivalent(actual, expected) {
+            return false;
+        }
+    }
+    if let Some(paths) = rules.get("non_empty_strings") {
+        for path in paths.as_array().unwrap_or_else(|| {
+            panic!("orientation_entry_enforcement_contract_string_rules_invalid:{name}")
+        }) {
+            let path = path.as_str().unwrap_or_else(|| {
+                panic!("orientation_entry_enforcement_contract_string_path_invalid:{name}")
+            });
+            if !non_empty_json_string(document.pointer(path)) {
+                return false;
+            }
+        }
+    }
+    if let Some(paths) = rules.get("coordinate_paths") {
+        for path in paths.as_array().unwrap_or_else(|| {
+            panic!("orientation_entry_enforcement_contract_coordinate_rules_invalid:{name}")
+        }) {
+            let path = path.as_str().unwrap_or_else(|| {
+                panic!("orientation_entry_enforcement_contract_coordinate_path_invalid:{name}")
+            });
+            if !valid_orientation_coordinate(document.pointer(path)) {
+                return false;
+            }
+        }
+    }
+    if let Some(pairs) = rules.get("equal_paths") {
+        for candidate in pairs.as_array().unwrap_or_else(|| {
+            panic!("orientation_entry_enforcement_contract_equal_path_rules_invalid:{name}")
+        }) {
+            let (left_path, right_path) = rule_pair(candidate, "equal_paths");
+            let Some((left, right)) = document
+                .pointer(left_path)
+                .zip(document.pointer(right_path))
+            else {
+                return false;
+            };
+            if !json_equivalent(left, right) {
+                return false;
+            }
+        }
+    }
+    if let Some(pairs) = rules.get("equal_coordinates") {
+        for candidate in pairs.as_array().unwrap_or_else(|| {
+            panic!("orientation_entry_enforcement_contract_equal_coordinate_rules_invalid:{name}")
+        }) {
+            let (left_path, right_path) = rule_pair(candidate, "equal_coordinates");
+            if !same_orientation_coordinate(
+                document.pointer(left_path),
+                document.pointer(right_path),
+            ) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn blocked_orientation_state(
+    entry_file: Option<&Path>,
+    reason: &str,
+    delivery_receipt_ref: Option<&str>,
+) -> Value {
+    json!({
+        "schema": contract_string("/state/schema"),
+        "required": true,
+        "status": "blocked",
+        "ordinary_work_gate": "acknowledgement_required",
+        "reason": reason,
+        "delivery_receipt_ref": delivery_receipt_ref,
+        "acknowledgement_ref": Value::Null,
+        "entry_file": entry_file,
+        "next_call": contract_value("/state/next_call"),
+    })
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OrientationRequiredSignal {
+    Absent,
+    Required,
+    NotRequired,
+    Invalid,
+}
+
+fn orientation_required_signal() -> OrientationRequiredSignal {
+    let variable = contract_string("/environment/required_signal");
+    let value = match env::var(variable) {
+        Ok(value) => value.trim().to_ascii_lowercase(),
+        Err(env::VarError::NotPresent) => return OrientationRequiredSignal::Absent,
+        Err(env::VarError::NotUnicode(_)) => return OrientationRequiredSignal::Invalid,
+    };
+    if value.is_empty() {
+        return OrientationRequiredSignal::Absent;
+    }
+    if contract_string_array("/environment/required_values").contains(&value.as_str()) {
+        return OrientationRequiredSignal::Required;
+    }
+    if contract_string_array("/environment/not_required_values").contains(&value.as_str()) {
+        return OrientationRequiredSignal::NotRequired;
+    }
+    OrientationRequiredSignal::Invalid
+}
+
+fn orientation_entry_state() -> Value {
+    let entry_variable = contract_string("/environment/entry_file");
+    let configured = env::var(entry_variable)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let configured_path = configured.as_ref().map(PathBuf::from);
+    let entry_file = configured_path.as_ref().map(|path| {
+        lexically_normalize_path(&if path.is_absolute() {
+            path.clone()
+        } else {
+            env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(path)
+        })
+    });
+    let signal = orientation_required_signal();
+    if signal == OrientationRequiredSignal::Invalid {
+        return blocked_orientation_state(
+            entry_file.as_deref(),
+            contract_reason("required_signal_invalid"),
+            None,
+        );
+    }
+    if signal == OrientationRequiredSignal::NotRequired && configured.is_some() {
+        return blocked_orientation_state(
+            entry_file.as_deref(),
+            contract_reason("required_signal_conflict"),
+            None,
+        );
+    }
+    if signal == OrientationRequiredSignal::Required && configured.is_none() {
+        return blocked_orientation_state(None, contract_reason("required_packet_missing"), None);
+    }
+    let Some(configured_path) = configured_path else {
+        return json!({
+            "schema": contract_string("/state/schema"),
+            "required": false,
+            "status": "not_required",
+            "ordinary_work_gate": "open",
+            "reason": contract_reason("not_supplied"),
+            "delivery_receipt_ref": Value::Null,
+            "acknowledgement_ref": Value::Null,
+            "entry_file": Value::Null,
+            "next_call": Value::Null,
+        });
+    };
+    let entry_file = entry_file.expect("orientation_entry_file_resolution_missing");
+    if !configured_path.is_absolute() {
+        return blocked_orientation_state(
+            Some(&entry_file),
+            contract_reason("entry_path_invalid"),
+            None,
+        );
+    }
+    if !entry_file.exists() {
+        return blocked_orientation_state(
+            Some(&entry_file),
+            contract_reason("entry_unavailable"),
+            None,
+        );
+    }
+    let Some(packet) = json_file(&entry_file) else {
+        return blocked_orientation_state(
+            Some(&entry_file),
+            contract_reason("entry_invalid"),
+            None,
+        );
+    };
+    if !validate_rule_set(&packet, "packet_header") {
+        return blocked_orientation_state(
+            Some(&entry_file),
+            contract_reason("entry_invalid"),
+            None,
+        );
+    }
+    let delivery_ref = packet
+        .pointer(contract_string("/readback_paths/delivery_receipt_ref"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    if !validate_rule_set(&packet, "delivery_binding") {
+        return blocked_orientation_state(
+            Some(&entry_file),
+            contract_reason("delivery_binding_invalid"),
+            delivery_ref,
+        );
+    }
+    if !validate_rule_set(&packet, "acknowledgement_projection_ref") {
+        return blocked_orientation_state(
+            Some(&entry_file),
+            contract_reason("acknowledgement_ref_invalid"),
+            delivery_ref,
+        );
+    }
+    let Some(relative_path) = packet
+        .pointer(contract_string(
+            "/readback_paths/acknowledgement_projection_path",
+        ))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return blocked_orientation_state(
+            Some(&entry_file),
+            contract_reason("acknowledgement_ref_invalid"),
+            delivery_ref,
+        );
+    };
+    let Some(parent) = entry_file.parent() else {
+        return blocked_orientation_state(
+            Some(&entry_file),
+            contract_reason("acknowledgement_ref_invalid"),
+            delivery_ref,
+        );
+    };
+    let acknowledgement_path = lexically_normalize_path(&parent.join(relative_path));
+    if acknowledgement_path.parent() != Some(parent) {
+        return blocked_orientation_state(
+            Some(&entry_file),
+            contract_reason("acknowledgement_ref_invalid"),
+            delivery_ref,
+        );
+    }
+    if !acknowledgement_path.exists() {
+        return blocked_orientation_state(
+            Some(&entry_file),
+            contract_reason("acknowledgement_required"),
+            delivery_ref,
+        );
+    }
+    let Some(acknowledgement) = json_file(&acknowledgement_path) else {
+        return blocked_orientation_state(
+            Some(&entry_file),
+            contract_reason("acknowledgement_invalid"),
+            delivery_ref,
+        );
+    };
+    let combined = json!({
+        "packet": packet,
+        "acknowledgement": acknowledgement,
+    });
+    if !validate_rule_set(&combined, "acknowledgement_projection") {
+        return blocked_orientation_state(
+            Some(&entry_file),
+            contract_reason("acknowledgement_invalid"),
+            delivery_ref,
+        );
+    }
+    let acknowledgement_ref = combined
+        .pointer("/acknowledgement")
+        .and_then(|value| value.pointer(contract_string("/readback_paths/acknowledgement_ref")))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    let Some(acknowledgement_ref) = acknowledgement_ref else {
+        return blocked_orientation_state(
+            Some(&entry_file),
+            contract_reason("acknowledgement_invalid"),
+            delivery_ref,
+        );
+    };
+    json!({
+        "schema": contract_string("/state/schema"),
+        "required": true,
+        "status": "open",
+        "ordinary_work_gate": "open",
+        "reason": contract_reason("acknowledged"),
+        "delivery_receipt_ref": delivery_ref,
+        "acknowledgement_ref": acknowledgement_ref,
+        "entry_file": entry_file,
+        "next_call": Value::Null,
+    })
+}
+
+fn contract_method_admitted(field: &str, method: &str) -> bool {
+    contract_string_array(&format!("/request_admission/{field}")).contains(&method)
+}
+
+fn contract_tool_admitted(options: &Options, request: &Value) -> bool {
+    let Some(tool_name) = request.pointer("/params/name").and_then(Value::as_str) else {
+        return false;
+    };
+    if contract_string_array("/request_admission/proxy_tool_calls").contains(&tool_name) {
+        return true;
+    }
+    contract_value("/request_admission/allowed_tool_calls")
+        .as_array()
+        .expect("orientation_entry_enforcement_contract_allowed_tool_calls_invalid")
+        .iter()
+        .any(|candidate| {
+            candidate.get("surface_id").and_then(Value::as_str) == options.surface_id.as_deref()
+                && candidate
+                    .get("tool_names")
+                    .and_then(Value::as_array)
+                    .is_some_and(|names| {
+                        names
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .any(|name| name == tool_name)
+                    })
+        })
+}
+
+fn orientation_request_refusal(options: &Options, request: &Value) -> Option<Value> {
+    let state = orientation_entry_state();
+    if state.get("ordinary_work_gate").and_then(Value::as_str) == Some("open") {
+        return None;
+    }
+    let method = request.get("method").and_then(Value::as_str).unwrap_or("");
+    let is_request = request.get("id").is_some();
+    let admitted = if is_request {
+        contract_method_admitted("allowed_request_methods", method)
+            || (method == "tools/call" && contract_tool_admitted(options, request))
+    } else {
+        contract_method_admitted("allowed_notification_methods", method)
+    };
+    if admitted {
+        return None;
+    }
+    Some(state)
 }
 
 #[derive(Clone)]
@@ -146,7 +706,10 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         .get("--child-invocation-kind")
         .cloned()
         .unwrap_or_else(|| "entrypoint".to_string());
-    if child_invocation_kind != "entrypoint" && child_invocation_kind != "native_applet" && child_invocation_kind != "native_entrypoint" {
+    if child_invocation_kind != "entrypoint"
+        && child_invocation_kind != "native_applet"
+        && child_invocation_kind != "native_entrypoint"
+    {
         return Err("mcp_runtime_proxy_invalid_child_invocation_kind".to_string());
     }
     let child_applet = values.get("--child-applet").cloned();
@@ -155,7 +718,10 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
     }
     let child_prefix_args = values
         .get("--child-prefix-args")
-        .map(|value| serde_json::from_str::<Vec<String>>(value).map_err(|_| "mcp_runtime_proxy_invalid_child_prefix_args".to_string()))
+        .map(|value| {
+            serde_json::from_str::<Vec<String>>(value)
+                .map_err(|_| "mcp_runtime_proxy_invalid_child_prefix_args".to_string())
+        })
         .transpose()?
         .unwrap_or_default();
     let entrypoint = values
@@ -280,13 +846,22 @@ fn run_proxy(args: &[String]) -> Result<(), String> {
         events: Vec::new(),
         completed: false,
     };
-    record_startup_event(&mut startup_trace, &options, "preflight_ok", json!({
-        "runtime_contract_version": options.runtime_contract_version,
-        "artifact_manifest_fingerprint": manifest_fingerprint,
-    }), false);
-    let mut command = Command::new(&options.child_command);
+    record_startup_event(
+        &mut startup_trace,
+        &options,
+        "preflight_ok",
+        json!({
+            "runtime_contract_version": options.runtime_contract_version,
+            "artifact_manifest_fingerprint": manifest_fingerprint,
+        }),
+        false,
+    );
+    let resolved_child_command = resolve_child_command(&options.child_command);
+    let mut command = Command::new(&resolved_child_command);
     let child_entry = if options.child_invocation_kind == "native_applet" {
-        Some(Path::new(options.child_applet.as_deref().unwrap_or_default()))
+        Some(Path::new(
+            options.child_applet.as_deref().unwrap_or_default(),
+        ))
     } else if options.child_invocation_kind == "native_entrypoint" {
         None
     } else {
@@ -313,13 +888,19 @@ fn run_proxy(args: &[String]) -> Result<(), String> {
     let child = Arc::new(Mutex::new(child));
     let _job = assign_kill_job(&child)?;
     resume_main_thread(child_pid)?;
-    record_startup_event(&mut startup_trace, &options, "child_spawned", json!({
-        "child_pid": child_pid,
-        "child_command": options.child_command,
-        "child_prefix_args": options.child_prefix_args,
-        "child_invocation_kind": options.child_invocation_kind,
-        "child_applet": options.child_applet,
-    }), false);
+    record_startup_event(
+        &mut startup_trace,
+        &options,
+        "child_spawned",
+        json!({
+            "child_pid": child_pid,
+            "child_command": options.child_command,
+            "child_prefix_args": options.child_prefix_args,
+            "child_invocation_kind": options.child_invocation_kind,
+            "child_applet": options.child_applet,
+        }),
+        false,
+    );
     let child_stdin = Arc::new(Mutex::new(child.lock().map_err(lock_error)?.stdin.take()));
     let child_stdout = child
         .lock()
@@ -337,10 +918,20 @@ fn run_proxy(args: &[String]) -> Result<(), String> {
     let started_at = now_iso();
     let freshness = FreshnessTracker {
         started_at: started_at.clone(),
-        proxy_runtime: file_snapshot(&env::current_exe().unwrap_or_else(|_| PathBuf::from("narada-mcp-runtime"))),
+        proxy_runtime: file_snapshot(
+            &env::current_exe().unwrap_or_else(|_| PathBuf::from("narada-mcp-runtime")),
+        ),
         child_runtime: file_snapshot(&options.entrypoint),
     };
-    write_instance(&options, proxy_pid, child_pid, &started_at, "live", None, &freshness)?;
+    write_instance(
+        &options,
+        proxy_pid,
+        child_pid,
+        &started_at,
+        "live",
+        None,
+        &freshness,
+    )?;
     emit_runtime_start(&options, proxy_pid, child_pid);
 
     let (sender, receiver) = mpsc::channel::<Event>();
@@ -383,12 +974,55 @@ fn run_proxy(args: &[String]) -> Result<(), String> {
                     write_wire(&mut stdout, &response, message.framed)?;
                     continue;
                 }
+                if let Some(state) = orientation_request_refusal(&options, &message.value) {
+                    if let Some(id) = message
+                        .value
+                        .get("id")
+                        .filter(|id| id.is_string() || id.is_number())
+                        .cloned()
+                    {
+                        let reason = state
+                            .get("reason")
+                            .and_then(Value::as_str)
+                            .unwrap_or("orientation_acknowledgement_required");
+                        let response = json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "error": {
+                                "code": -32000,
+                                "message": format!("orientation_required:{reason}"),
+                                "data": state,
+                            },
+                        });
+                        write_wire(&mut stdout, &response, message.framed)?;
+                    }
+                    record_startup_event(
+                        &mut startup_trace,
+                        &options,
+                        "request_refused",
+                        json!({
+                            "method": message.value.get("method"),
+                            "request_id": message.value.get("id"),
+                            "reason": state.get("reason"),
+                            "ordinary_work_gate": state.get("ordinary_work_gate"),
+                            "delivery_receipt_ref": state.get("delivery_receipt_ref"),
+                        }),
+                        false,
+                    );
+                    continue;
+                }
                 if let Some((id, method)) = request_identity(&message.value) {
                     if method == "initialize" || method == "tools/list" {
-                        record_startup_event(&mut startup_trace, &options, "request_forwarded", json!({
-                            "method": method,
-                            "request_id": id,
-                        }), false);
+                        record_startup_event(
+                            &mut startup_trace,
+                            &options,
+                            "request_forwarded",
+                            json!({
+                                "method": method,
+                                "request_id": id,
+                            }),
+                            false,
+                        );
                     }
                     let requested = requested_transport_timeout(&message.value);
                     let effective = effective_timeout(
@@ -425,10 +1059,16 @@ fn run_proxy(args: &[String]) -> Result<(), String> {
                         inject_status_tool(&mut message.value);
                     }
                     if matches!(method.as_deref(), Some("initialize" | "tools/list")) {
-                        record_startup_event(&mut startup_trace, &options, "child_response", json!({
-                            "method": method,
-                            "request_id": id,
-                        }), method.as_deref() == Some("tools/list"));
+                        record_startup_event(
+                            &mut startup_trace,
+                            &options,
+                            "child_response",
+                            json!({
+                                "method": method,
+                                "request_id": id,
+                            }),
+                            method.as_deref() == Some("tools/list"),
+                        );
                     }
                     pending.remove(&id);
                 }
@@ -536,7 +1176,15 @@ fn run_proxy(args: &[String]) -> Result<(), String> {
                     &stderr_tail,
                 )?;
             }
-            write_instance(&options, proxy_pid, child_pid, &started_at, "closed", code, &freshness)?;
+            write_instance(
+                &options,
+                proxy_pid,
+                child_pid,
+                &started_at,
+                "closed",
+                code,
+                &freshness,
+            )?;
             emit_runtime_exit(
                 &options,
                 child_pid,
@@ -559,7 +1207,15 @@ fn run_proxy(args: &[String]) -> Result<(), String> {
         if carrier_closed_at.is_none()
             && last_heartbeat.elapsed() >= Duration::from_millis(options.liveness_check_ms)
         {
-            write_instance(&options, proxy_pid, child_pid, &started_at, "live", None, &freshness)?;
+            write_instance(
+                &options,
+                proxy_pid,
+                child_pid,
+                &started_at,
+                "live",
+                None,
+                &freshness,
+            )?;
             last_heartbeat = Instant::now();
         }
         let _ = child_output_closed;
@@ -698,6 +1354,9 @@ fn effective_timeout(proxy: u64, requested: Option<u64>, grace: u64) -> u64 {
 fn is_status_call(value: &Value) -> bool {
     value.get("method").and_then(Value::as_str) == Some("tools/call")
         && value.pointer("/params/name").and_then(Value::as_str) == Some(STATUS_TOOL)
+        && value
+            .get("id")
+            .is_some_and(|id| id.is_string() || id.is_number())
 }
 
 fn inject_status_tool(value: &mut Value) {
@@ -734,14 +1393,22 @@ fn status_response(
     freshness: &FreshnessTracker,
 ) -> Value {
     let id = request.get("id").cloned().unwrap_or(Value::Null);
-    let runtime_freshness = evaluate_freshness(options, proxy_pid, child_pid, manifest_fingerprint, freshness);
+    let runtime_freshness = evaluate_freshness(
+        options,
+        proxy_pid,
+        child_pid,
+        manifest_fingerprint,
+        freshness,
+    );
     let freshness_status = runtime_freshness
         .get("status")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
     let heartbeat_at = now_iso();
     let lease_expires_at = OffsetDateTime::now_utc()
-        .saturating_add(time::Duration::milliseconds((options.liveness_check_ms.saturating_mul(3)) as i64))
+        .saturating_add(time::Duration::milliseconds(
+            (options.liveness_check_ms.saturating_mul(3)) as i64,
+        ))
         .format(&Rfc3339)
         .unwrap_or_else(|_| heartbeat_at.clone());
     let payload = json!({
@@ -786,7 +1453,11 @@ fn file_snapshot(path: &Path) -> FileSnapshot {
         Ok(metadata) => FileSnapshot {
             path: absolute(path.to_path_buf()),
             exists: true,
-            modified_ms: metadata.modified().ok().and_then(|value| value.duration_since(UNIX_EPOCH).ok()).map(|value| value.as_millis()),
+            modified_ms: metadata
+                .modified()
+                .ok()
+                .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+                .map(|value| value.as_millis()),
             size: Some(metadata.len()),
             sha256: fs::read(path).ok().map(|bytes| sha256_bytes(&bytes)),
         },
@@ -840,8 +1511,16 @@ fn evaluate_freshness(
             }));
         }
     }
-    let stale = reasons.iter().any(|reason| reason.get("evidence").and_then(Value::as_str) != Some("unknown"));
-    let status = if stale { "stale" } else if evidence_unknown { "unknown" } else { "current" };
+    let stale = reasons
+        .iter()
+        .any(|reason| reason.get("evidence").and_then(Value::as_str) != Some("unknown"));
+    let status = if stale {
+        "stale"
+    } else if evidence_unknown {
+        "unknown"
+    } else {
+        "current"
+    };
     json!({
         "schema": "narada.mcp_runtime_proxy.runtime_freshness.v2",
         "status": status,
@@ -1265,7 +1944,13 @@ fn preflight_materialization(
     let plan_path = generation
         .get("runtime_materialization_plan_path")
         .and_then(Value::as_str)
-        .ok_or_else(|| refusal("materialization_generation_stale", "The materialization generation sidecar is structurally incomplete.", generation_context(&generation)))?;
+        .ok_or_else(|| {
+            refusal(
+                "materialization_generation_stale",
+                "The materialization generation sidecar is structurally incomplete.",
+                generation_context(&generation),
+            )
+        })?;
     let expected_plan = format!("{expected_config}.narada-runtime-plan.json");
     if !same_path(plan_path, &expected_plan) {
         return Err(refusal(
@@ -1284,10 +1969,19 @@ fn preflight_materialization(
     let expected_plan_fingerprint = generation
         .get("runtime_materialization_plan_fingerprint")
         .and_then(Value::as_str)
-        .ok_or_else(|| refusal("materialization_generation_stale", "The materialization generation sidecar is structurally incomplete.", generation_context(&generation)))?;
+        .ok_or_else(|| {
+            refusal(
+                "materialization_generation_stale",
+                "The materialization generation sidecar is structurally incomplete.",
+                generation_context(&generation),
+            )
+        })?;
     if plan.get("schema").and_then(Value::as_str) != Some("narada.runtime_materialization_plan.v1")
         || plan.get("status").and_then(Value::as_str) != Some("accepted")
-        || plan.get("runtime_profile_kind").and_then(Value::as_str) != generation.get("runtime_profile_kind").and_then(Value::as_str)
+        || plan.get("runtime_profile_kind").and_then(Value::as_str)
+            != generation
+                .get("runtime_profile_kind")
+                .and_then(Value::as_str)
         || plan.get("plan_fingerprint").and_then(Value::as_str) != Some(expected_plan_fingerprint)
         || runtime_plan_fingerprint(&plan).as_deref() != Some(expected_plan_fingerprint)
     {
@@ -1300,11 +1994,23 @@ fn preflight_materialization(
     let expected_matrix_fingerprint = generation
         .get("runtime_implementation_matrix_fingerprint")
         .and_then(Value::as_str)
-        .ok_or_else(|| refusal("materialization_generation_stale", "The materialization generation sidecar is structurally incomplete.", generation_context(&generation)))?;
+        .ok_or_else(|| {
+            refusal(
+                "materialization_generation_stale",
+                "The materialization generation sidecar is structurally incomplete.",
+                generation_context(&generation),
+            )
+        })?;
     let matrix_path = generation
         .get("runtime_implementation_matrix_path")
         .and_then(Value::as_str)
-        .ok_or_else(|| refusal("materialization_generation_stale", "The materialization generation sidecar is structurally incomplete.", generation_context(&generation)))?;
+        .ok_or_else(|| {
+            refusal(
+                "materialization_generation_stale",
+                "The materialization generation sidecar is structurally incomplete.",
+                generation_context(&generation),
+            )
+        })?;
     let plan_matrix_fingerprint = plan
         .get("source")
         .and_then(|source| source.get("matrix_fingerprint"))
@@ -1420,13 +2126,30 @@ fn recovery(options: &Options, refusal: &Refusal) -> Value {
         }
         _ => Value::Null,
     };
-    let materialization = refusal.code.starts_with("materialization_") || refusal.code.starts_with("runtime_contract_");
-    let prefix = if materialization { "materialization" } else { "workspace-materialization" };
-    let group_id = format!("{prefix}-{}", &sha256_bytes(format!("{}:{:?}:{:?}", refusal.code, options.artifact_manifest, options.materialization_sidecar).as_bytes())[..20]);
+    let materialization = refusal.code.starts_with("materialization_")
+        || refusal.code.starts_with("runtime_contract_");
+    let prefix = if materialization {
+        "materialization"
+    } else {
+        "workspace-materialization"
+    };
+    let group_id = format!(
+        "{prefix}-{}",
+        &sha256_bytes(
+            format!(
+                "{}:{:?}:{:?}",
+                refusal.code, options.artifact_manifest, options.materialization_sidecar
+            )
+            .as_bytes()
+        )[..20]
+    );
     if materialization {
         let config_path = options.materialization_sidecar.as_ref().map(|path| {
             let text = path.to_string_lossy();
-            PathBuf::from(text.strip_suffix(".narada-generation.json").unwrap_or(&text))
+            PathBuf::from(
+                text.strip_suffix(".narada-generation.json")
+                    .unwrap_or(&text),
+            )
         });
         return json!({
             "schema": "narada.mcp_runtime_proxy.materialization_recovery.v1",
@@ -1438,7 +2161,12 @@ fn recovery(options: &Options, refusal: &Refusal) -> Value {
             "restart": { "owner": options.carrier_kind.as_deref().unwrap_or("carrier"), "automatic": false, "instruction": carrier_restart(options.carrier_kind.as_deref()) }
         });
     }
-    let workspace_root = options.artifact_manifest.as_ref().and_then(|path| path.parent()).and_then(Path::parent).and_then(Path::parent);
+    let workspace_root = options
+        .artifact_manifest
+        .as_ref()
+        .and_then(|path| path.parent())
+        .and_then(Path::parent)
+        .and_then(Path::parent);
     json!({
         "schema": "narada.mcp_runtime_proxy.workspace_recovery.v1",
         "recovery_group_id": group_id,
@@ -1526,7 +2254,12 @@ fn list_instances(args: &[String]) -> Result<(), String> {
             }
         }
     }
-    let count = |state: &str| instances.iter().filter(|value| value.get("observed_state").and_then(Value::as_str) == Some(state)).count();
+    let count = |state: &str| {
+        instances
+            .iter()
+            .filter(|value| value.get("observed_state").and_then(Value::as_str) == Some(state))
+            .count()
+    };
     let output = json!({
         "schema": "narada.mcp_runtime_proxy.instance_list.v1",
         "status": "ok",
@@ -1543,7 +2276,11 @@ fn list_instances(args: &[String]) -> Result<(), String> {
 }
 
 fn classify_instance(mut value: Value) -> Value {
-    let state = value.get("state").and_then(Value::as_str).unwrap_or("stale").to_string();
+    let state = value
+        .get("state")
+        .and_then(Value::as_str)
+        .unwrap_or("stale")
+        .to_string();
     let mut reasons = Vec::<Value>::new();
     let observed = if state == "reclaimed" || state == "closed" {
         state
@@ -1567,7 +2304,11 @@ fn classify_instance(mut value: Value) -> Value {
         if lease_expired {
             reasons.push(Value::String("heartbeat_lease_expired".to_string()));
         }
-        if reasons.is_empty() && state == "live" { "live".to_string() } else { "stale".to_string() }
+        if reasons.is_empty() && state == "live" {
+            "live".to_string()
+        } else {
+            "stale".to_string()
+        }
     };
     if let Some(object) = value.as_object_mut() {
         object.insert("observed_state".to_string(), Value::String(observed));
@@ -1870,6 +2611,132 @@ fn absolute(path: PathBuf) -> PathBuf {
         env::current_dir().unwrap_or_default().join(path)
     }
 }
+
+fn resolve_child_command(child_command: &str) -> PathBuf {
+    let path = PathBuf::from(child_command);
+    if path.is_absolute() {
+        return path;
+    }
+    if path.exists() {
+        return absolute(path);
+    }
+
+    let base = path
+        .file_name()
+        .map(|value| value.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let is_bun = base == "bun" || base == "bun.exe";
+    let is_node = base == "node" || base == "node.exe";
+
+    if is_bun {
+        for candidate in known_bun_paths() {
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+
+    if is_node {
+        for candidate in known_node_paths() {
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+
+    if let Some(found) = executable_on_path(&base) {
+        return found;
+    }
+
+    // Fall back to the original command and let Command::new report the failure.
+    path
+}
+
+fn known_bun_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(home) = env::var_os("USERPROFILE").or_else(|| env::var_os("HOME")) {
+        paths.push(
+            PathBuf::from(&home)
+                .join(".bun")
+                .join("bin")
+                .join("bun.exe"),
+        );
+        paths.push(PathBuf::from(&home).join(".bun").join("bin").join("bun"));
+    }
+    if let Some(bun_install) = env::var_os("BUN_INSTALL") {
+        let root = PathBuf::from(&bun_install);
+        paths.push(root.join("bun.exe"));
+        paths.push(root.join("bun"));
+        paths.push(root.join("bin").join("bun.exe"));
+        paths.push(root.join("bin").join("bun"));
+    }
+    paths
+}
+
+fn known_node_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let exec = env::current_exe().unwrap_or_default();
+    let exec_base = exec
+        .file_name()
+        .map(|value| value.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    if exec_base == "node.exe" || exec_base == "node" {
+        paths.push(exec);
+    }
+    if cfg!(windows) {
+        let program_files =
+            env::var_os("PROGRAMFILES").unwrap_or_else(|| "C:\\Program Files".into());
+        let program_files_x86 =
+            env::var_os("PROGRAMFILES(X86)").unwrap_or_else(|| "C:\\Program Files (x86)".into());
+        paths.push(
+            PathBuf::from(&program_files)
+                .join("nodejs")
+                .join("node.exe"),
+        );
+        paths.push(
+            PathBuf::from(&program_files_x86)
+                .join("nodejs")
+                .join("node.exe"),
+        );
+    }
+    paths
+}
+
+fn executable_on_path(command: &str) -> Option<PathBuf> {
+    let path_var = env::var_os("PATH")
+        .or_else(|| env::var_os("Path"))
+        .or_else(|| env::var_os("path"))?;
+    let path_str = path_var.to_string_lossy();
+    let separator = if cfg!(windows) { ';' } else { ':' };
+    let names: Vec<String> = if cfg!(windows) {
+        let base = command.strip_suffix(".exe").unwrap_or(command);
+        vec![command.to_string(), base.to_string(), format!("{base}.exe")]
+    } else {
+        vec![command.to_string()]
+    };
+    let extensions: Vec<&str> = if cfg!(windows) {
+        vec![".exe", ".cmd", ".bat", ""]
+    } else {
+        vec![""]
+    };
+
+    for dir in path_str.split(separator) {
+        if dir.is_empty() {
+            continue;
+        }
+        let dir_path = PathBuf::from(dir);
+        for name in &names {
+            for ext in &extensions {
+                let candidate = dir_path.join(format!("{name}{ext}"));
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    None
+}
+
 fn positive(value: &str, name: &str) -> Result<u64, String> {
     value
         .parse::<u64>()

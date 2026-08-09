@@ -1,5 +1,11 @@
 # @narada-core/mcp-runtime-proxy
 
+## Verification
+
+```powershell
+pnpm --filter @narada-core/mcp-runtime-proxy test
+```
+
 Small stdio proxy for carrier-launched MCP servers.
 
 The package also exports `./generation-manager`, a transport-neutral logical
@@ -23,9 +29,13 @@ carrier/session restart owner; the manager never assumes that authority.
 
 The proxy launches an MCP entrypoint with the explicitly materialized
 `--child-command`, forwards stdin/stdout, captures stderr,
-and turns child startup exits into JSON-RPC errors for pending requests. This is
-for carrier diagnostics only; it does not authorize tools, mutate policy, or
-interpret MCP domain behavior.
+and turns child startup exits into JSON-RPC errors for pending requests. It
+does not grant domain or action authority, choose policy, or interpret MCP
+domain behavior. It does enforce lifecycle admission: while declared
+Carrier-entry orientation is incomplete, it filters every request and
+notification category, admits only the contract's bounded bootstrap and
+transport operations, and refuses ordinary work. That lifecycle fence is not
+action admission.
 
 ## Build artifact preflight
 
@@ -39,7 +49,7 @@ longer matches an export target. Re-run the workspace build before retrying;
 the proxy never starts a server against an unverified workspace.
 
 Carrier materialization adds a second contract gate. Every generated proxy
-launch declares `--runtime-contract-version 4`, the current
+launch declares `--runtime-contract-version 6`, the current
 `--artifact-manifest`, and, for a materialized carrier file, a
 `--materialization-sidecar` path. The registrar validates every generated
 proxy, child entrypoint, and manifest reference before writing the carrier
@@ -105,7 +115,7 @@ bun packages/mcp-registrar/dist/src/main.js --materialize-all
 Pass `--runtime-proxy-implementation bun` for the JavaScript rollback path.
 Native mode is Windows-only; non-Windows hosts and Windows hosts without the
 built executable fall back to Bun. An explicit `native` selection still fails
-clearly when the artifact is unavailable. Both modes use runtime contract v4 and therefore carry explicit
+clearly when the artifact is unavailable. Both modes use runtime contract v6 and therefore carry explicit
 `--child-command` and `--registrar-command` values; the proxy executable never
 guesses which JavaScript runtime should launch a domain surface or recovery
 registrar.
@@ -116,6 +126,33 @@ preflight therefore applies at the carrier boundary; it is not a second
 supervisor for that attached child. The native materialization contract keeps
 `--entrypoint` as a validated identity equal to `--child-command`, and records
 `--child-applet` when the child is a multicall applet.
+
+### Orientation enforcement substitutability
+
+The TypeScript and native Rust proxies implement the same narrow enforcement
+contract. An independent `NARADA_ORIENTATION_REQUIRED` materialization signal
+prevents omission of the packet path from reopening ordinary work. They read
+the Carrier-entry packet and its derived acknowledgement projection, validate
+their exact binding fields, return the same structured refusal and `next_call`,
+and re-evaluate the gate on every carrier request or notification. Direct
+`agent_orientation_acknowledge` calls are administrative and are never admitted
+through the blocked occupant projection; the occupant reaches acknowledgement
+only through `agent_orientation_read`'s opaque final continuation. Neither
+implementation compiles manifests, delivers required-read pages, records
+completion evidence, or creates acknowledgements. Those remain canonical
+Agent Context responsibilities; selecting Rust changes the enforcement
+embodiment, never the evidence authority.
+
+`test/fixtures/orientation-entry-admission.v1.json` is the shared adversarial
+corpus. The black-box parity test runs that corpus through the built TypeScript
+and Rust executables, including raw duplicate keys and unusual numeric
+encodings before either parser can normalize them, malformed material, missing
+binding fields, tampered acknowledgements, exact refusal payloads, all blocked
+request/notification categories, and a live blocked-to-open transition. Agent
+Context's Carrier E2E then performs the complete Codex and
+Kimi ceremony through both implementations before admitting an observable
+ordinary effect. Rust remains optional and substitutable; parity is an
+executable contract rather than a claim based on similar source code.
 
 The native executable is a multicall host. Its filesystem applet provides the
 read-only local-filesystem MCP surface: bounded reads, stat, glob, grep,

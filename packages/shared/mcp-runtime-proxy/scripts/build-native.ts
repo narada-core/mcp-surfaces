@@ -1,10 +1,14 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { nativeArtifactRoot, preserveLegacyNativeArtifact, publishImmutableNativeArtifacts, resolveNativeArtifact } from '../src/native-artifact.js';
 import { fileURLToPath } from 'node:url';
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const enforcementContractSource = join(packageRoot, 'src', 'orientation-entry-enforcement-contract.json');
+const enforcementContractOutput = join(packageRoot, 'dist', 'src', 'orientation-entry-enforcement-contract.json');
+mkdirSync(dirname(enforcementContractOutput), { recursive: true });
+copyFileSync(enforcementContractSource, enforcementContractOutput);
 if (process.platform !== 'win32') {
   process.stdout.write(`${JSON.stringify({
     schema: 'narada.mcp_runtime_proxy.native_build.v1',

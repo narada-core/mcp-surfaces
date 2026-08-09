@@ -2,7 +2,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { performance } from 'node:perf_hooks';
 import { processSupervisorEntrypoint } from '@narada-core/process-launch-posture';
@@ -26,6 +26,7 @@ import {
 } from './materialization-contract.js';
 import { preflightWorkspaceArtifacts, type WorkspaceArtifactPreflight } from './workspace-artifact-manifest.js';
 import { describeUnknownError } from './error-description.js';
+import { admitOrientationRequest } from './orientation-entry-admission.js';
 
 type JsonRecord = Record<string, unknown>;
 type RequestLifecycleEvent = {
@@ -742,46 +743,77 @@ export async function runProxy(argv = process.argv.slice(2)): Promise<void> {
     if (drained.requests.length > 0) parentRequestObserved = true;
     for (const request of drained.requests) {
       const params = isJsonRecord(request.params) ? request.params : {};
-      if (request.method === 'tools/call' && params.name === RUNTIME_STATUS_TOOL_NAME) {
-        const id = request.id;
+      const id = request.id;
+      const messageKind = Object.prototype.hasOwnProperty.call(request, 'id')
+        ? 'request'
+        : 'notification';
+      if (
+        request.method === 'tools/call'
+        && params.name === RUNTIME_STATUS_TOOL_NAME
+        && (typeof id === 'string' || typeof id === 'number')
+      ) {
+        const supervisorIdentity = childLaunch.supervisorIdentityPath
+          ? readSupervisorIdentity(childLaunch.supervisorIdentityPath)
+          : null;
+        const serverPid = typeof supervisorIdentity?.managed_child_pid === 'number'
+          ? supervisorIdentity.managed_child_pid
+          : (childLaunch.supervisorPath ? null : child.pid ?? null);
+        const childPidRole = childLaunch.supervisorPath ? 'supervisor' : 'server';
+        const runtimeFreshness = evaluateRuntimeFreshness({
+          tracker: freshnessTracker,
+          surfaceId: options.surfaceId,
+          proxyPid: process.pid,
+          childPid: child.pid ?? null,
+        });
+        const liveness = classifyRuntimeInstance({
+          ...runtimeInstance,
+          managed_child_pid: serverPid,
+          server_pid: serverPid,
+        });
+        const payload = {
+          schema: 'narada.mcp_runtime_proxy.status.v1',
+          status: 'ok',
+          surface_id: options.surfaceId,
+          liveness,
+          runtime_freshness: runtimeFreshness,
+        };
+        writeJsonRpcMessage({
+          jsonrpc: '2.0',
+          id,
+          result: {
+            content: [{ type: 'text', text: `mcp_runtime_proxy_status: ${runtimeFreshness.status}\nproxy_pid: ${process.pid}\nchild_pid: ${child.pid ?? 'unknown'}\nchild_pid_role: ${childPidRole}\nserver_pid: ${serverPid ?? 'unknown'}\nrestart_owner: carrier_or_runtime_supervisor` }],
+            structuredContent: payload,
+          },
+        }, drained.framed);
+        continue;
+      }
+      const admission = admitOrientationRequest({
+        surfaceId: options.surfaceId,
+        messageKind,
+        method: typeof request.method === 'string' ? request.method : null,
+        params,
+      });
+      if (!admission.admitted) {
         if (typeof id === 'string' || typeof id === 'number') {
-          const supervisorIdentity = childLaunch.supervisorIdentityPath
-            ? readSupervisorIdentity(childLaunch.supervisorIdentityPath)
-            : null;
-          const serverPid = typeof supervisorIdentity?.managed_child_pid === 'number'
-            ? supervisorIdentity.managed_child_pid
-            : (childLaunch.supervisorPath ? null : child.pid ?? null);
-          const childPidRole = childLaunch.supervisorPath ? 'supervisor' : 'server';
-          const runtimeFreshness = evaluateRuntimeFreshness({
-            tracker: freshnessTracker,
-            surfaceId: options.surfaceId,
-            proxyPid: process.pid,
-            childPid: child.pid ?? null,
-          });
-          const liveness = classifyRuntimeInstance({
-            ...runtimeInstance,
-            managed_child_pid: serverPid,
-            server_pid: serverPid,
-          });
-          const payload = {
-            schema: 'narada.mcp_runtime_proxy.status.v1',
-            status: 'ok',
-            surface_id: options.surfaceId,
-            liveness,
-            runtime_freshness: runtimeFreshness,
-          };
           writeJsonRpcMessage({
             jsonrpc: '2.0',
             id,
-            result: {
-              content: [{ type: 'text', text: `mcp_runtime_proxy_status: ${runtimeFreshness.status}\nproxy_pid: ${process.pid}\nchild_pid: ${child.pid ?? 'unknown'}\nchild_pid_role: ${childPidRole}\nserver_pid: ${serverPid ?? 'unknown'}\nrestart_owner: carrier_or_runtime_supervisor` }],
-              structuredContent: payload,
+            error: {
+              code: -32000,
+              message: `orientation_required:${admission.state.reason}`,
+              data: admission.state,
             },
           }, drained.framed);
         }
+        recordStartupTrace(startupTrace, options, child, childIdentity, 'request_refused', {
+          method: request.method,
+          request_id: request.id ?? null,
+          reason: admission.state.reason,
+          ordinary_work_gate: admission.state.ordinary_work_gate,
+          delivery_receipt_ref: admission.state.delivery_receipt_ref,
+        });
         continue;
       }
-      const id = request.id;
       if ((typeof id === 'string' || typeof id === 'number') && typeof request.method === 'string') {
         const requestedTransportTimeoutMs = extractRequestedTransportTimeoutMs(request);
         const effectiveTimeoutMs = effectiveRequestTimeoutMs(options.requestTimeoutMs, requestedTransportTimeoutMs, options.toolTimeoutGraceMs);
@@ -1230,6 +1262,7 @@ function serializeRequest(request: PendingRequest): JsonRecord {
 }
 
 function spawnProxyChild(options: ProxyOptions, supervisorPath: string | null): ChildLaunch {
+  const resolvedChildCommand = resolveChildCommand(options.childCommand);
   const spawnOptions: import('node:child_process').SpawnOptions = {
     stdio: ['pipe', 'pipe', 'pipe'],
     env: process.env,
@@ -1248,7 +1281,7 @@ function spawnProxyChild(options: ProxyOptions, supervisorPath: string | null): 
         '--parent-pid',
         String(process.pid),
         '--',
-        options.childCommand,
+        resolvedChildCommand,
         ...options.childPrefixArgs,
         ...(options.childInvocationKind === 'native_entrypoint' ? [] : [options.childInvocationKind === 'native_applet' ? options.childApplet! : options.entrypoint]),
         ...options.childArgs,
@@ -1258,7 +1291,7 @@ function spawnProxyChild(options: ProxyOptions, supervisorPath: string | null): 
     };
   }
   return {
-    child: spawn(options.childCommand, [
+    child: spawn(resolvedChildCommand, [
       ...options.childPrefixArgs,
       ...(options.childInvocationKind === 'native_entrypoint' ? [] : [options.childInvocationKind === 'native_applet' ? options.childApplet! : options.entrypoint]),
       ...options.childArgs,
@@ -1266,6 +1299,95 @@ function spawnProxyChild(options: ProxyOptions, supervisorPath: string | null): 
     supervisorPath: null,
     supervisorIdentityPath: null,
   };
+}
+
+function resolveChildCommand(childCommand: string): string {
+  if (isAbsolute(childCommand)) return childCommand;
+  if (existsSync(childCommand)) return resolve(childCommand);
+
+  const base = basename(childCommand).toLowerCase();
+  const isBun = base === 'bun' || base === 'bun.exe';
+  const isNode = base === 'node' || base === 'node.exe';
+
+  if (isBun) {
+    const candidates = knownBunPaths();
+    for (const candidate of candidates) {
+      if (existsSync(candidate)) return candidate;
+    }
+  }
+
+  if (isNode) {
+    const candidates = knownNodePaths();
+    for (const candidate of candidates) {
+      if (existsSync(candidate)) return candidate;
+    }
+  }
+
+  const pathCandidates = executableOnPath(base);
+  if (pathCandidates.length > 0) return pathCandidates[0];
+
+  // Fall back to the original command and let spawn report the failure.
+  return childCommand;
+}
+
+function knownBunPaths(): string[] {
+  const home = process.env.USERPROFILE || process.env.HOME || '';
+  const bunInstall = process.env.BUN_INSTALL || '';
+  const candidates: string[] = [];
+  if (home) {
+    candidates.push(join(home, '.bun', 'bin', 'bun.exe'));
+    candidates.push(join(home, '.bun', 'bin', 'bun'));
+  }
+  if (bunInstall) {
+    candidates.push(join(bunInstall, 'bun.exe'));
+    candidates.push(join(bunInstall, 'bun'));
+    candidates.push(join(bunInstall, 'bin', 'bun.exe'));
+    candidates.push(join(bunInstall, 'bin', 'bun'));
+  }
+  return candidates;
+}
+
+function knownNodePaths(): string[] {
+  const candidates: string[] = [];
+  // If the proxy itself is running under Node, use that interpreter.
+  const execBase = basename(process.execPath).toLowerCase();
+  if (execBase === 'node.exe' || execBase === 'node') {
+    candidates.push(process.execPath);
+  }
+  const programFiles = process.env.PROGRAMFILES || 'C:\\Program Files';
+  const programFilesX86 = process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)';
+  if (process.platform === 'win32') {
+    candidates.push(join(programFiles, 'nodejs', 'node.exe'));
+    candidates.push(join(programFilesX86, 'nodejs', 'node.exe'));
+  }
+  const home = process.env.USERPROFILE || process.env.HOME || '';
+  if (home && process.platform !== 'win32') {
+    candidates.push(join(home, '.nvm', 'versions', 'node', 'current', 'bin', 'node'));
+  }
+  return candidates;
+}
+
+function executableOnPath(command: string): string[] {
+  const pathVar = process.env.PATH || process.env.Path || process.env.path || '';
+  if (!pathVar) return [];
+  const separator = process.platform === 'win32' ? ';' : ':';
+  const extensions = process.platform === 'win32' ? ['.exe', '.cmd', '.bat', ''] : [''];
+  const names = process.platform === 'win32'
+    ? [command, command.replace(/\.exe$/i, ''), `${command}.exe`]
+    : [command];
+  const found: string[] = [];
+  for (const dir of pathVar.split(separator)) {
+    if (!dir) continue;
+    for (const name of names) {
+      for (const ext of extensions) {
+        const candidate = join(dir, `${name}${ext}`);
+        if (existsSync(candidate)) {
+          found.push(candidate);
+        }
+      }
+    }
+  }
+  return found;
 }
 
 function readSupervisorIdentity(path: string): JsonRecord | null {

@@ -1,0 +1,301 @@
+{
+  "schema": "narada.mcp_runtime_proxy.orientation_entry_conformance.v1",
+  "base": {
+    "entry_packet": {
+      "schema": "narada.carrier_entry.orientation_packet.v1",
+      "ordinary_work_gate": "acknowledgement_required",
+      "acknowledgement_projection": {
+        "schema": "narada.carrier_entry.orientation_acknowledgement_projection_ref.v1",
+        "relative_path": "acknowledgement.json",
+        "posture": "derived_readback_of_canonical_acknowledgement"
+      },
+      "orientation_brief": {
+        "schema": "narada.orientation_brief.v1",
+        "brief_id": "brief:fixture",
+        "brief_digest": "brief-digest",
+        "admission_receipt_ref": "admission:fixture",
+        "entry_state": "orientation_required",
+        "action_admission": "separate_required",
+        "coordinate": {
+          "authority_scope": "fixture",
+          "site_ref": "site:fixture",
+          "carrier_session_id": "carrier-fixture",
+          "authority_epoch": 4
+        },
+        "manifest_ref": {
+          "manifest_id": "manifest:fixture",
+          "manifest_digest": "manifest-digest"
+        }
+      },
+      "delivery_receipt": {
+        "schema": "narada.carrier_session.orientation_delivery_receipt.v1",
+        "receipt_id": "delivery:fixture",
+        "status": "delivered",
+        "ordinary_work_gate": "delivery_required",
+        "delivery_mode": "carrier_entry_injection",
+        "delivered_at": "2026-08-09T00:00:00.000Z",
+        "authority_readback_ref": "agent-context:orientation-delivery:fixture",
+        "admission_receipt_ref": "admission:fixture",
+        "coordinate": {
+          "authority_scope": "fixture",
+          "site_ref": "site:fixture",
+          "carrier_session_id": "carrier-fixture",
+          "authority_epoch": 4
+        },
+        "manifest_id": "manifest:fixture",
+        "manifest_digest": "manifest-digest",
+        "brief_id": "brief:fixture",
+        "brief_digest": "brief-digest"
+      }
+    },
+    "acknowledgement": {
+      "schema": "narada.carrier_entry.orientation_acknowledgement_projection.v1",
+      "status": "open",
+      "ordinary_work_gate": "open",
+      "delivery_receipt_ref": "delivery:fixture",
+      "manifest_id": "manifest:fixture",
+      "manifest_digest": "manifest-digest",
+      "brief_id": "brief:fixture",
+      "brief_digest": "brief-digest",
+      "coordinate": {
+        "authority_scope": "fixture",
+        "site_ref": "site:fixture",
+        "carrier_session_id": "carrier-fixture",
+        "authority_epoch": 4
+      },
+      "acknowledgement_ref": "orientation-ack:fixture",
+      "acknowledged_at": "2026-08-09T00:00:01.000Z",
+      "acknowledgement_semantics": "receipt_and_required_reads_not_comprehension",
+      "action_admission": "separate_required",
+      "canonical_readback_ref": "agent-context:orientation-acknowledgements:fixture",
+      "projection_posture": "derived_readback_not_independent_authority"
+    }
+  },
+  "cases": [
+    {
+      "id": "entry_environment_absent",
+      "entry": { "mode": "environment_absent" },
+      "acknowledgement": { "mode": "absent" },
+      "expected": { "status": "not_required", "reason": "carrier_entry_packet_not_supplied", "delivery_receipt_ref": null, "acknowledgement_ref": null, "call_posture": "open" }
+    },
+    {
+      "id": "required_entry_environment_absent",
+      "required_signal": "required",
+      "entry": { "mode": "environment_absent" },
+      "acknowledgement": { "mode": "absent" },
+      "expected": { "status": "blocked", "reason": "orientation_entry_packet_required", "delivery_receipt_ref": null, "acknowledgement_ref": null, "call_posture": "orientation_only" }
+    },
+    {
+      "id": "required_signal_invalid",
+      "required_signal": "invalid",
+      "entry": { "mode": "base" },
+      "acknowledgement": { "mode": "absent" },
+      "expected": { "status": "blocked", "reason": "orientation_required_signal_invalid", "delivery_receipt_ref": null, "acknowledgement_ref": null, "call_posture": "orientation_only" }
+    },
+    {
+      "id": "required_signal_conflict",
+      "required_signal": "not_required",
+      "entry": { "mode": "base" },
+      "acknowledgement": { "mode": "absent" },
+      "expected": { "status": "blocked", "reason": "orientation_required_signal_conflict", "delivery_receipt_ref": null, "acknowledgement_ref": null, "call_posture": "orientation_only" }
+    },
+    {
+      "id": "entry_path_relative",
+      "entry": { "mode": "base", "environment": "relative" },
+      "acknowledgement": { "mode": "absent" },
+      "expected": { "status": "blocked", "reason": "orientation_entry_packet_path_invalid", "delivery_receipt_ref": null, "acknowledgement_ref": null, "call_posture": "orientation_only" }
+    },
+    {
+      "id": "entry_path_padded",
+      "entry": { "mode": "base", "environment": "padded_absolute" },
+      "acknowledgement": { "mode": "absent" },
+      "expected": { "status": "blocked", "reason": "orientation_acknowledgement_required", "delivery_receipt_ref": "delivery:fixture", "acknowledgement_ref": null, "call_posture": "orientation_only" }
+    },
+    {
+      "id": "entry_file_missing",
+      "entry": { "mode": "missing" },
+      "acknowledgement": { "mode": "absent" },
+      "expected": { "status": "blocked", "reason": "orientation_entry_packet_unavailable", "delivery_receipt_ref": null, "acknowledgement_ref": null, "call_posture": "orientation_only" }
+    },
+    {
+      "id": "entry_json_malformed",
+      "entry": { "mode": "malformed" },
+      "acknowledgement": { "mode": "absent" },
+      "expected": { "status": "blocked", "reason": "orientation_entry_packet_invalid", "delivery_receipt_ref": null, "acknowledgement_ref": null, "call_posture": "orientation_only" }
+    },
+    {
+      "id": "entry_duplicate_schema_key_raw",
+      "entry": { "mode": "raw_replace", "raw_replace": { "search": "\"schema\":\"narada.carrier_entry.orientation_packet.v1\"", "replacement": "\"schema\":\"narada.carrier_entry.orientation_packet.v1\",\"schema\":\"narada.carrier_entry.orientation_packet.v1\"" } },
+      "acknowledgement": { "mode": "absent" },
+      "expected": { "status": "blocked", "reason": "orientation_entry_packet_invalid", "delivery_receipt_ref": null, "acknowledgement_ref": null, "call_posture": "orientation_only" }
+    },
+    {
+      "id": "entry_epoch_exponent_raw",
+      "entry": { "mode": "raw_replace", "raw_replace": { "search": "\"authority_epoch\":4", "replacement": "\"authority_epoch\":4e0", "replace_all": true } },
+      "acknowledgement": { "mode": "absent" },
+      "expected": { "status": "blocked", "reason": "orientation_acknowledgement_required", "delivery_receipt_ref": "delivery:fixture", "acknowledgement_ref": null, "call_posture": "orientation_only" }
+    },
+    {
+      "id": "entry_epoch_unsafe_decimal_raw",
+      "entry": { "mode": "raw_replace", "raw_replace": { "search": "\"authority_epoch\":4", "replacement": "\"authority_epoch\":9007199254740992.0", "replace_all": true } },
+      "acknowledgement": { "mode": "absent" },
+      "expected": { "status": "blocked", "reason": "orientation_entry_delivery_binding_invalid", "delivery_receipt_ref": "delivery:fixture", "acknowledgement_ref": null, "call_posture": "orientation_only" }
+    },
+    {
+      "id": "entry_packet_array",
+      "entry": { "mode": "literal", "value": [] },
+      "acknowledgement": { "mode": "absent" },
+      "expected": { "status": "blocked", "reason": "orientation_entry_packet_invalid", "delivery_receipt_ref": null, "acknowledgement_ref": null, "call_posture": "orientation_only" }
+    },
+    {
+      "id": "entry_packet_schema_invalid",
+      "entry": { "mode": "base", "mutations": [{ "op": "set", "path": "/schema", "value": "wrong" }] },
+      "acknowledgement": { "mode": "absent" },
+      "expected": { "status": "blocked", "reason": "orientation_entry_packet_invalid", "delivery_receipt_ref": null, "acknowledgement_ref": null, "call_posture": "orientation_only" }
+    },
+    {
+      "id": "entry_packet_gate_invalid",
+      "entry": { "mode": "base", "mutations": [{ "op": "set", "path": "/ordinary_work_gate", "value": "open" }] },
+      "acknowledgement": { "mode": "absent" },
+      "expected": { "status": "blocked", "reason": "orientation_entry_packet_invalid", "delivery_receipt_ref": null, "acknowledgement_ref": null, "call_posture": "orientation_only" }
+    },
+    {
+      "id": "acknowledgement_ref_schema_missing",
+      "entry": { "mode": "base", "mutations": [{ "op": "remove", "path": "/acknowledgement_projection/schema" }] },
+      "acknowledgement": { "mode": "absent" },
+      "expected": { "status": "blocked", "reason": "orientation_acknowledgement_projection_ref_invalid", "delivery_receipt_ref": "delivery:fixture", "acknowledgement_ref": null, "call_posture": "orientation_only" }
+    },
+    {
+      "id": "acknowledgement_ref_posture_invalid",
+      "entry": { "mode": "base", "mutations": [{ "op": "set", "path": "/acknowledgement_projection/posture", "value": "authority" }] },
+      "acknowledgement": { "mode": "absent" },
+      "expected": { "status": "blocked", "reason": "orientation_acknowledgement_projection_ref_invalid", "delivery_receipt_ref": "delivery:fixture", "acknowledgement_ref": null, "call_posture": "orientation_only" }
+    },
+    {
+      "id": "acknowledgement_ref_path_invalid",
+      "entry": { "mode": "base", "mutations": [{ "op": "set", "path": "/acknowledgement_projection/relative_path", "value": "../acknowledgement.json" }] },
+      "acknowledgement": { "mode": "absent" },
+      "expected": { "status": "blocked", "reason": "orientation_acknowledgement_projection_ref_invalid", "delivery_receipt_ref": "delivery:fixture", "acknowledgement_ref": null, "call_posture": "orientation_only" }
+    },
+    {
+      "id": "brief_id_missing",
+      "entry": { "mode": "base", "mutations": [{ "op": "remove", "path": "/orientation_brief/brief_id" }] },
+      "acknowledgement": { "mode": "absent" },
+      "expected": { "status": "blocked", "reason": "orientation_entry_delivery_binding_invalid", "delivery_receipt_ref": "delivery:fixture", "acknowledgement_ref": null, "call_posture": "orientation_only" }
+    },
+    {
+      "id": "brief_digest_blank",
+      "entry": { "mode": "base", "mutations": [{ "op": "set", "path": "/orientation_brief/brief_digest", "value": " " }] },
+      "acknowledgement": { "mode": "absent" },
+      "expected": { "status": "blocked", "reason": "orientation_entry_delivery_binding_invalid", "delivery_receipt_ref": "delivery:fixture", "acknowledgement_ref": null, "call_posture": "orientation_only" }
+    },
+    {
+      "id": "brief_manifest_id_missing",
+      "entry": { "mode": "base", "mutations": [{ "op": "remove", "path": "/orientation_brief/manifest_ref/manifest_id" }] },
+      "acknowledgement": { "mode": "absent" },
+      "expected": { "status": "blocked", "reason": "orientation_entry_delivery_binding_invalid", "delivery_receipt_ref": "delivery:fixture", "acknowledgement_ref": null, "call_posture": "orientation_only" }
+    },
+    {
+      "id": "brief_coordinate_epoch_unsafe",
+      "entry": { "mode": "base", "mutations": [{ "op": "set", "path": "/orientation_brief/coordinate/authority_epoch", "value": 9007199254740992 }] },
+      "acknowledgement": { "mode": "absent" },
+      "expected": { "status": "blocked", "reason": "orientation_entry_delivery_binding_invalid", "delivery_receipt_ref": "delivery:fixture", "acknowledgement_ref": null, "call_posture": "orientation_only" }
+    },
+    {
+      "id": "brief_action_admission_invalid",
+      "entry": { "mode": "base", "mutations": [{ "op": "set", "path": "/orientation_brief/action_admission", "value": "granted" }] },
+      "acknowledgement": { "mode": "absent" },
+      "expected": { "status": "blocked", "reason": "orientation_entry_delivery_binding_invalid", "delivery_receipt_ref": "delivery:fixture", "acknowledgement_ref": null, "call_posture": "orientation_only" }
+    },
+    {
+      "id": "delivery_receipt_id_missing",
+      "entry": { "mode": "base", "mutations": [{ "op": "remove", "path": "/delivery_receipt/receipt_id" }] },
+      "acknowledgement": { "mode": "absent" },
+      "expected": { "status": "blocked", "reason": "orientation_entry_delivery_binding_invalid", "delivery_receipt_ref": null, "acknowledgement_ref": null, "call_posture": "orientation_only" }
+    },
+    {
+      "id": "delivery_mode_invalid",
+      "entry": { "mode": "base", "mutations": [{ "op": "set", "path": "/delivery_receipt/delivery_mode", "value": "other" }] },
+      "acknowledgement": { "mode": "absent" },
+      "expected": { "status": "blocked", "reason": "orientation_entry_delivery_binding_invalid", "delivery_receipt_ref": "delivery:fixture", "acknowledgement_ref": null, "call_posture": "orientation_only" }
+    },
+    {
+      "id": "delivery_manifest_mismatch",
+      "entry": { "mode": "base", "mutations": [{ "op": "set", "path": "/delivery_receipt/manifest_digest", "value": "other" }] },
+      "acknowledgement": { "mode": "absent" },
+      "expected": { "status": "blocked", "reason": "orientation_entry_delivery_binding_invalid", "delivery_receipt_ref": "delivery:fixture", "acknowledgement_ref": null, "call_posture": "orientation_only" }
+    },
+    {
+      "id": "delivery_coordinate_mismatch",
+      "entry": { "mode": "base", "mutations": [{ "op": "set", "path": "/delivery_receipt/coordinate/site_ref", "value": "site:other" }] },
+      "acknowledgement": { "mode": "absent" },
+      "expected": { "status": "blocked", "reason": "orientation_entry_delivery_binding_invalid", "delivery_receipt_ref": "delivery:fixture", "acknowledgement_ref": null, "call_posture": "orientation_only" }
+    },
+    {
+      "id": "acknowledgement_json_malformed",
+      "entry": { "mode": "base" },
+      "acknowledgement": { "mode": "malformed" },
+      "expected": { "status": "blocked", "reason": "orientation_acknowledgement_projection_invalid", "delivery_receipt_ref": "delivery:fixture", "acknowledgement_ref": null, "call_posture": "orientation_only" }
+    },
+    {
+      "id": "acknowledgement_array",
+      "entry": { "mode": "base" },
+      "acknowledgement": { "mode": "literal", "value": [] },
+      "expected": { "status": "blocked", "reason": "orientation_acknowledgement_projection_invalid", "delivery_receipt_ref": "delivery:fixture", "acknowledgement_ref": null, "call_posture": "orientation_only" }
+    },
+    {
+      "id": "acknowledgement_delivery_mismatch",
+      "entry": { "mode": "base" },
+      "acknowledgement": { "mode": "base", "mutations": [{ "op": "set", "path": "/delivery_receipt_ref", "value": "delivery:other" }] },
+      "expected": { "status": "blocked", "reason": "orientation_acknowledgement_projection_invalid", "delivery_receipt_ref": "delivery:fixture", "acknowledgement_ref": null, "call_posture": "orientation_only" }
+    },
+    {
+      "id": "acknowledgement_coordinate_mismatch",
+      "entry": { "mode": "base" },
+      "acknowledgement": { "mode": "base", "mutations": [{ "op": "set", "path": "/coordinate/authority_epoch", "value": 5 }] },
+      "expected": { "status": "blocked", "reason": "orientation_acknowledgement_projection_invalid", "delivery_receipt_ref": "delivery:fixture", "acknowledgement_ref": null, "call_posture": "orientation_only" }
+    },
+    {
+      "id": "acknowledgement_semantics_invalid",
+      "entry": { "mode": "base" },
+      "acknowledgement": { "mode": "base", "mutations": [{ "op": "set", "path": "/acknowledgement_semantics", "value": "comprehension" }] },
+      "expected": { "status": "blocked", "reason": "orientation_acknowledgement_projection_invalid", "delivery_receipt_ref": "delivery:fixture", "acknowledgement_ref": null, "call_posture": "orientation_only" }
+    },
+    {
+      "id": "acknowledgement_action_admission_invalid",
+      "entry": { "mode": "base" },
+      "acknowledgement": { "mode": "base", "mutations": [{ "op": "set", "path": "/action_admission", "value": "granted" }] },
+      "expected": { "status": "blocked", "reason": "orientation_acknowledgement_projection_invalid", "delivery_receipt_ref": "delivery:fixture", "acknowledgement_ref": null, "call_posture": "orientation_only" }
+    },
+    {
+      "id": "acknowledgement_readback_missing",
+      "entry": { "mode": "base" },
+      "acknowledgement": { "mode": "base", "mutations": [{ "op": "remove", "path": "/canonical_readback_ref" }] },
+      "expected": { "status": "blocked", "reason": "orientation_acknowledgement_projection_invalid", "delivery_receipt_ref": "delivery:fixture", "acknowledgement_ref": null, "call_posture": "orientation_only" }
+    },
+    {
+      "id": "acknowledgement_ref_blank",
+      "entry": { "mode": "base" },
+      "acknowledgement": { "mode": "base", "mutations": [{ "op": "set", "path": "/acknowledgement_ref", "value": " " }] },
+      "expected": { "status": "blocked", "reason": "orientation_acknowledgement_projection_invalid", "delivery_receipt_ref": "delivery:fixture", "acknowledgement_ref": null, "call_posture": "orientation_only" }
+    },
+    {
+      "id": "acknowledgement_duplicate_status_key_raw",
+      "entry": { "mode": "base" },
+      "acknowledgement": { "mode": "raw_replace", "raw_replace": { "search": "\"status\":\"open\"", "replacement": "\"status\":\"open\",\"status\":\"open\"" } },
+      "expected": { "status": "blocked", "reason": "orientation_acknowledgement_projection_invalid", "delivery_receipt_ref": "delivery:fixture", "acknowledgement_ref": null, "call_posture": "orientation_only" }
+    },
+    {
+      "id": "acknowledgement_absent",
+      "entry": { "mode": "base" },
+      "acknowledgement": { "mode": "absent" },
+      "expected": { "status": "blocked", "reason": "orientation_acknowledgement_required", "delivery_receipt_ref": "delivery:fixture", "acknowledgement_ref": null, "call_posture": "orientation_only" }
+    },
+    {
+      "id": "valid_acknowledgement",
+      "entry": { "mode": "base" },
+      "acknowledgement": { "mode": "base" },
+      "expected": { "status": "open", "reason": "orientation_acknowledged", "delivery_receipt_ref": "delivery:fixture", "acknowledgement_ref": "orientation-ack:fixture", "call_posture": "open" }
+    }
+  ]
+}

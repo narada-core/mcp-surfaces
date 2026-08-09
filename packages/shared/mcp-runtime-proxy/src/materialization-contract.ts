@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { dirname, isAbsolute, resolve } from 'node:path';
 import { describeUnknownError } from './error-description.js';
 
-export const MCP_RUNTIME_CONTRACT_VERSION = 5 as const;
+export const MCP_RUNTIME_CONTRACT_VERSION = 6 as const;
 export const MATERIALIZATION_GENERATION_SCHEMA = 'narada.mcp_materialization_generation.v1' as const;
 
 type JsonRecord = Record<string, unknown>;
@@ -178,6 +178,9 @@ export function validateMaterializedConfiguration(input: {
     const isProxy = launch.args.includes('--surface-id') || launch.args.some((arg) => arg.includes('mcp-runtime-proxy'));
     if (!isProxy) continue;
     proxyCount += 1;
+    if (!isAbsolute(launch.command)) {
+      errors.push({ code: 'materialized_config_proxy_command_not_absolute', server_key: serverKey, detail: { command: launch.command } });
+    }
     const version = argValue(launch.args, '--runtime-contract-version');
     if (version !== String(MCP_RUNTIME_CONTRACT_VERSION)) {
       errors.push({ code: 'materialized_config_contract_version_mismatch', server_key: serverKey, detail: { actual: version, expected: MCP_RUNTIME_CONTRACT_VERSION } });
@@ -203,6 +206,8 @@ export function validateMaterializedConfiguration(input: {
     const childApplet = argValue(launch.args, '--child-applet');
     if (!childCommand) {
       errors.push({ code: 'materialized_config_child_command_missing', server_key: serverKey });
+    } else if (!isAbsolute(childCommand)) {
+      errors.push({ code: 'materialized_config_child_command_not_absolute', server_key: serverKey, detail: { command: childCommand } });
     }
     if (!childEntrypoint) {
       errors.push({ code: 'materialized_config_child_entrypoint_missing', server_key: serverKey });
@@ -226,8 +231,11 @@ export function validateMaterializedConfiguration(input: {
       errors.push({ code: 'materialized_config_child_applet_missing', server_key: serverKey });
     }
     const registrarEntrypoint = argValue(launch.args, '--registrar-entrypoint');
-    if (registrarEntrypoint && !argValue(launch.args, '--registrar-command')) {
+    const registrarCommand = argValue(launch.args, '--registrar-command');
+    if (registrarEntrypoint && !registrarCommand) {
       errors.push({ code: 'materialized_config_registrar_command_missing', server_key: serverKey });
+    } else if (registrarCommand && !isAbsolute(registrarCommand)) {
+      errors.push({ code: 'materialized_config_registrar_command_not_absolute', server_key: serverKey, detail: { command: registrarCommand } });
     }
     const sidecarPath = argValue(launch.args, '--materialization-sidecar');
     if (input.requireSidecar && !sidecarPath) {
@@ -437,7 +445,12 @@ export function preflightMaterializationGeneration(input: {
   const configPath = resolve(generation.config_path);
   const configFingerprint = materializationConfigFileFingerprint(configPath, generation.carrier_kind);
   if (!configFingerprint || configFingerprint !== generation.config_sha256) {
-    return stale('The materialized configuration changed after generation.', { config_path: configPath });
+    return stale('The materialized configuration changed after generation.', {
+      config_path: configPath,
+      expected_config_sha256: generation.config_sha256,
+      actual_config_sha256: configFingerprint,
+      mutation_policy: 'Carrier configs paired with .narada-generation.json are generation-owned. Do not edit them directly; use mcp-loader for progressive attachment or mcp-registrar for an intentional binding, then rematerialize all carriers.',
+    });
   }
   if (!pathEquals(generation.artifact_manifest_path, input.manifestPath) || generation.artifact_manifest_fingerprint !== input.manifestFingerprint) {
     return stale('The materialization generation references a different workspace artifact manifest.', { expected_manifest_path: input.manifestPath, actual_manifest_path: generation.artifact_manifest_path, expected_manifest_fingerprint: input.manifestFingerprint, actual_manifest_fingerprint: generation.artifact_manifest_fingerprint });

@@ -13,6 +13,12 @@ import {
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import {
+  assertOrientationRequiredReadSourceBound,
+  ORIENTATION_REQUIRED_READ_MAX_TOTAL_PAGES,
+  orientationManifestEntryArtifactRef,
+  renderExactContinuityReadMaterial,
+} from './orientation-read-material.js';
 
 export const ORIENTATION_ADMISSION_ENV = 'NARADA_CARRIER_SESSION_ADMISSION_RECEIPT';
 export const ORIENTATION_ACTIVATION_ENV = 'NARADA_CARRIER_SESSION_ACTIVATION_RECEIPT';
@@ -23,6 +29,59 @@ type UnknownRecord = Record<string, any>;
 
 function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+function boundedOrientationText(value: unknown, maxLength = 320): string | null {
+  if (value === null || value === undefined) return null;
+  const text = typeof value === 'string'
+    ? value.trim()
+    : JSON.stringify(value);
+  if (!text) return null;
+  return text.length <= maxLength
+    ? text
+    : text.slice(0, Math.max(1, maxLength - 1)).trimEnd() + '…';
+}
+
+function continuityOccupantSummary(checkpoint: UnknownRecord): JsonObject {
+  const continuation = jsonObject(checkpoint.continuation ?? {});
+  const activeTask = jsonObject(checkpoint.active_task ?? {});
+  const blockers = Array.isArray(checkpoint.continuation_blockers)
+    ? checkpoint.continuation_blockers
+    : [];
+  return {
+    checkpoint_id: String(checkpoint.checkpoint_id),
+    checkpoint_at: boundedOrientationText(checkpoint.checkpoint_at, 80),
+    objective: boundedOrientationText(
+      continuation.objective ?? activeTask.objective ?? activeTask.title,
+    ),
+    current_state: boundedOrientationText(
+      continuation.current_state ?? checkpoint.tactical_resume_notes,
+    ),
+    next_action: boundedOrientationText(
+      continuation.next_action ?? checkpoint.next_intended_action,
+    ),
+    blocker_count: blockers.length,
+    historical_advisory_only: true,
+  };
+}
+
+function workOccupantSummary(work: UnknownRecord): JsonObject {
+  const lifecycle = jsonObject(work.lifecycle ?? {});
+  const specification = jsonObject(work.specification ?? {});
+  const continuationPacket = jsonObject(lifecycle.continuation_packet ?? {});
+  return {
+    task_number: Number(work.task_number),
+    title: boundedOrientationText(specification.title)
+      ?? `Task #${String(work.task_number)}`,
+    status: boundedOrientationText(lifecycle.status, 80),
+    objective: boundedOrientationText(
+      specification.goal_markdown ?? specification.required_work_markdown,
+    ),
+    next_action: boundedOrientationText(
+      continuationPacket.next_action ?? continuationPacket.next_intended_action,
+    ),
+    selection_semantics: 'orientation_only_not_action_authority',
+  };
 }
 
 function canonicalJson(value: unknown): string {
@@ -184,6 +243,7 @@ export interface AgentContextOrientationProjectionInput {
   roleBinding?: unknown;
   exactCheckpoint?: UnknownRecord | null;
   portableContinuation?: UnknownRecord | null;
+  exactWork?: UnknownRecord | null;
   mcpServers?: readonly UnknownRecord[];
 }
 
@@ -254,9 +314,46 @@ export function buildAgentContextOrientationProjections(
   }
 
   const agentsPath = join(input.siteRoot, 'AGENTS.md');
+  let requiredReads: UnknownRecord[] = [];
+  let requiredReadPageCount: any = 0;
   if (existsSync(agentsPath)) {
     const law = readFileSync(agentsPath, 'utf8');
+    requiredReadPageCount += assertOrientationRequiredReadSourceBound(
+      law,
+      'site-file:AGENTS.md',
+    ).page_count;
     const revision = sha256(law);
+    const lineCount = Math.max(1, law.split(/\r?\n/).length);
+    requiredReads = [{
+      step_id: 'read:site-law',
+      ordinal: 1,
+      required: true,
+      source: {
+        source_authority_ref: 'site-law:' + admission.coordinate.site_ref,
+        artifact_ref: 'site-file:AGENTS.md',
+        revision,
+      },
+      tool: {
+        name: 'agent_orientation_read',
+        arguments: {
+          step_id: 'read:site-law',
+        },
+      },
+      completion: {
+        kind: 'tool_result_fields',
+        expected_result: {
+          content_sha256: revision,
+          offset: 1,
+          returned_lines: lineCount,
+        },
+        evidence_fields: [
+          'content_sha256',
+          'content_window_sha256',
+          'offset',
+          'returned_lines',
+        ],
+      },
+    }];
     entries.push(projection(admission, {
       entry_id: 'orientation:site-law',
       compartment: 'law_and_constraints',
@@ -275,6 +372,7 @@ export function buildAgentContextOrientationProjections(
         sha256: revision,
         content_included: false,
         read_required: true,
+        required_read_step_ids: requiredReads.map((step) => String(step.step_id)),
       },
       rendered_text: 'Applicable Site instructions: AGENTS.md (sha256 ' + revision + ').',
     }));
@@ -314,11 +412,13 @@ export function buildAgentContextOrientationProjections(
     revalidation_rule: 'on_entry_procedure_revision',
     evidence_refs: [admission.receipt_id],
     payload: {
+      required_reads: [],
       ordered_steps: [
         {
-          step: 'review_orientation_manifest',
+          step: 'complete_required_reads',
           effect: 'read',
           required: true,
+          completion_evidence: 'orientation_required_read_completion',
         },
         {
           step: 'inspect_named_live_authorities_before_work_mutation',
@@ -338,9 +438,52 @@ export function buildAgentContextOrientationProjections(
 
   if (input.exactCheckpoint?.status === 'ok' && input.exactCheckpoint.checkpoint_id) {
     const checkpoint = jsonObject(input.exactCheckpoint);
-    const revision = sha256Json(checkpoint);
+    const portableContinuation = jsonObject(input.portableContinuation ?? {});
+    const entryId = 'orientation:continuity:'
+      + String(input.exactCheckpoint.checkpoint_id);
+    const readMaterial = renderExactContinuityReadMaterial({
+      checkpoint,
+      portableContinuation,
+    });
+    requiredReadPageCount += assertOrientationRequiredReadSourceBound(
+      readMaterial,
+      orientationManifestEntryArtifactRef(entryId),
+    ).page_count;
+    const revision = sha256(readMaterial);
+    const readStepId = 'read:continuity:' + sha256(entryId).slice(0, 16);
+    const lineCount = Math.max(1, readMaterial.split(/\r?\n/).length);
+    requiredReads.push({
+      step_id: readStepId,
+      ordinal: requiredReads.length + 1,
+      required: true,
+      source: {
+        source_authority_ref: 'agent-continuity:' + admission.coordinate.site_ref,
+        artifact_ref: orientationManifestEntryArtifactRef(entryId),
+        revision,
+      },
+      tool: {
+        name: 'agent_orientation_read',
+        arguments: {
+          step_id: readStepId,
+        },
+      },
+      completion: {
+        kind: 'tool_result_fields',
+        expected_result: {
+          content_sha256: revision,
+          offset: 1,
+          returned_lines: lineCount,
+        },
+        evidence_fields: [
+          'content_sha256',
+          'content_window_sha256',
+          'offset',
+          'returned_lines',
+        ],
+      },
+    });
     entries.push(projection(admission, {
-      entry_id: 'orientation:continuity:' + String(input.exactCheckpoint.checkpoint_id),
+      entry_id: entryId,
       compartment: 'continuity',
       entry_kind: 'exact_continuity',
       source_authority_ref: 'agent-continuity:' + admission.coordinate.site_ref,
@@ -348,19 +491,23 @@ export function buildAgentContextOrientationProjections(
       revision,
       observed_at: observedAt,
       valid_until: null,
-      criticality: 'optional',
+      criticality: 'required',
       projection_status: 'available',
       revalidation_rule: 'never_as_live_truth;verify_exact_hash_on_read',
       evidence_refs: [
         'checkpoint:' + String(input.exactCheckpoint.checkpoint_id),
+        'sha256:' + revision,
         ...(input.portableContinuation?.artifact?.sha256
           ? ['sha256:' + String(input.portableContinuation.artifact.sha256)]
           : []),
       ],
       payload: {
         checkpoint,
-        portable_continuation: jsonObject(input.portableContinuation ?? {}),
+        portable_continuation: portableContinuation,
         historical_advisory_only: true,
+        occupant_summary: continuityOccupantSummary(checkpoint),
+        inspection_call: null,
+        required_read_step_ids: [readStepId],
       },
       rendered_text: 'Exact continuity checkpoint: ' + String(input.exactCheckpoint.checkpoint_id) + '.',
     }));
@@ -376,7 +523,7 @@ export function buildAgentContextOrientationProjections(
       revision: 'unavailable',
       observed_at: observedAt,
       valid_until: null,
-      criticality: 'optional',
+      criticality: 'required',
       projection_status: unavailable ? 'unavailable' : 'incompatible',
       revalidation_rule: 'resolve_exact_checkpoint_before_reassembly',
       evidence_refs: [],
@@ -385,6 +532,71 @@ export function buildAgentContextOrientationProjections(
         source_status: String(input.exactCheckpoint.status ?? 'unknown'),
         source_message: String(input.exactCheckpoint.message ?? ''),
         historical_advisory_only: true,
+      },
+      rendered_text: null,
+    }));
+  }
+
+  if (input.exactWork?.status === 'ok' && input.exactWork.task_number) {
+    const work = jsonObject(input.exactWork);
+    const revision = sha256Json(work);
+    entries.push(projection(admission, {
+      entry_id: 'orientation:work:task-' + String(input.exactWork.task_number),
+      compartment: 'work_orientation',
+      entry_kind: 'exact_work',
+      source_authority_ref: 'task-lifecycle:' + admission.coordinate.site_ref,
+      artifact_ref: 'task:' + String(input.exactWork.task_number),
+      revision,
+      observed_at: observedAt,
+      valid_until: null,
+      criticality: 'required',
+      projection_status: 'available',
+      revalidation_rule: 'inspect_exact_task_live_authority_before_mutation',
+      evidence_refs: [
+        'task:' + String(input.exactWork.task_number),
+        'sha256:' + revision,
+      ],
+      payload: {
+        work,
+        orientation_only: true,
+        action_authority_granted: false,
+        occupant_summary: workOccupantSummary(work),
+        inspection_call: {
+          surface_id: 'task-lifecycle',
+          tool: 'task_lifecycle_inspect_range',
+          arguments: {
+            start_task_number: Number(input.exactWork.task_number),
+            end_task_number: Number(input.exactWork.task_number),
+            include_body: true,
+            limit: 1,
+          },
+        },
+      },
+      rendered_text: 'Exact work selection: task #' + String(input.exactWork.task_number) + '.',
+    }));
+  } else if (input.exactWork?.task_number) {
+    const taskNumber = String(input.exactWork.task_number);
+    entries.push(projection(admission, {
+      entry_id: 'orientation:work:task-' + taskNumber,
+      compartment: 'work_orientation',
+      entry_kind: 'exact_work',
+      source_authority_ref: 'task-lifecycle:' + admission.coordinate.site_ref,
+      artifact_ref: 'task:' + taskNumber,
+      revision: 'unavailable',
+      observed_at: observedAt,
+      valid_until: null,
+      criticality: 'required',
+      projection_status: input.exactWork.status === 'task_not_found'
+        ? 'unavailable'
+        : 'incompatible',
+      revalidation_rule: 'resolve_exact_task_before_reassembly',
+      evidence_refs: [],
+      payload: {
+        requested_task_number: Number(input.exactWork.task_number),
+        source_status: String(input.exactWork.status ?? 'unknown'),
+        source_message: String(input.exactWork.message ?? ''),
+        orientation_only: true,
+        action_authority_granted: false,
       },
       rendered_text: null,
     }));
@@ -419,6 +631,28 @@ export function buildAgentContextOrientationProjections(
       },
       rendered_text: 'Projected MCP servers: ' + servers.map((server) => server.name).join(', ') + '.',
     }));
+  }
+
+  const entryProcedureIndex: any = entries.findIndex(
+    (entry: any) => entry.entry_id === 'orientation:entry-procedure',
+  );
+  if (entryProcedureIndex < 0) {
+    throw new Error('agent_context_orientation_entry_procedure_missing');
+  }
+  const entryProcedure: any = entries[entryProcedureIndex];
+  entries[entryProcedureIndex] = {
+    ...entryProcedure,
+    payload: {
+      ...entryProcedure.payload,
+      required_reads: requiredReads.map((step: any) => jsonObject(step)),
+    },
+  };
+
+  if (requiredReadPageCount > ORIENTATION_REQUIRED_READ_MAX_TOTAL_PAGES) {
+    throw new Error(
+      'agent_context_orientation_required_read_aggregate_page_bound_exceeded:'
+      + `actual=${requiredReadPageCount}:max=${ORIENTATION_REQUIRED_READ_MAX_TOTAL_PAGES}`,
+    );
   }
 
   return entries;

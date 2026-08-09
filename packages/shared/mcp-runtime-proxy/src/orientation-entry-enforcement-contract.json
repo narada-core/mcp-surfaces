@@ -1,0 +1,262 @@
+{
+  "schema": "narada.mcp_runtime_proxy.orientation_entry_enforcement_contract.v1",
+  "environment": {
+    "required_signal": "NARADA_ORIENTATION_REQUIRED",
+    "entry_file": "NARADA_ORIENTATION_ENTRY_FILE",
+    "required_values": ["1", "true", "required"],
+    "not_required_values": ["0", "false", "not_required"]
+  },
+  "state": {
+    "schema": "narada.mcp_runtime_proxy.orientation_entry_admission.v1",
+    "next_call": {
+      "surface_id": "agent-context",
+      "tool": "agent_orientation_read",
+      "arguments": {}
+    },
+    "reasons": {
+      "not_supplied": "carrier_entry_packet_not_supplied",
+      "required_packet_missing": "orientation_entry_packet_required",
+      "required_signal_invalid": "orientation_required_signal_invalid",
+      "required_signal_conflict": "orientation_required_signal_conflict",
+      "entry_path_invalid": "orientation_entry_packet_path_invalid",
+      "entry_unavailable": "orientation_entry_packet_unavailable",
+      "entry_invalid": "orientation_entry_packet_invalid",
+      "delivery_binding_invalid": "orientation_entry_delivery_binding_invalid",
+      "acknowledgement_ref_invalid": "orientation_acknowledgement_projection_ref_invalid",
+      "acknowledgement_required": "orientation_acknowledgement_required",
+      "acknowledgement_invalid": "orientation_acknowledgement_projection_invalid",
+      "acknowledged": "orientation_acknowledged"
+    }
+  },
+  "coordinate": {
+    "non_empty_string_fields": [
+      "authority_scope",
+      "site_ref",
+      "carrier_session_id"
+    ],
+    "positive_safe_integer_field": "authority_epoch",
+    "positive_safe_integer_max": 9007199254740991,
+    "identity_fields": [
+      "authority_scope",
+      "site_ref",
+      "carrier_session_id",
+      "authority_epoch"
+    ]
+  },
+  "rule_sets": {
+    "packet_header": {
+      "equals": [
+        {
+          "path": "/schema",
+          "value": "narada.carrier_entry.orientation_packet.v1"
+        },
+        {
+          "path": "/ordinary_work_gate",
+          "value": "acknowledgement_required"
+        }
+      ]
+    },
+    "delivery_binding": {
+      "equals": [
+        {
+          "path": "/orientation_brief/schema",
+          "value": "narada.orientation_brief.v1"
+        },
+        {
+          "path": "/orientation_brief/entry_state",
+          "value": "orientation_required"
+        },
+        {
+          "path": "/orientation_brief/action_admission",
+          "value": "separate_required"
+        },
+        {
+          "path": "/delivery_receipt/schema",
+          "value": "narada.carrier_session.orientation_delivery_receipt.v1"
+        },
+        {
+          "path": "/delivery_receipt/status",
+          "value": "delivered"
+        },
+        {
+          "path": "/delivery_receipt/ordinary_work_gate",
+          "value": "delivery_required"
+        },
+        {
+          "path": "/delivery_receipt/delivery_mode",
+          "value": "carrier_entry_injection"
+        }
+      ],
+      "non_empty_strings": [
+        "/orientation_brief/brief_id",
+        "/orientation_brief/brief_digest",
+        "/orientation_brief/admission_receipt_ref",
+        "/orientation_brief/manifest_ref/manifest_id",
+        "/orientation_brief/manifest_ref/manifest_digest",
+        "/delivery_receipt/receipt_id",
+        "/delivery_receipt/delivered_at",
+        "/delivery_receipt/authority_readback_ref",
+        "/delivery_receipt/admission_receipt_ref",
+        "/delivery_receipt/brief_id",
+        "/delivery_receipt/brief_digest",
+        "/delivery_receipt/manifest_id",
+        "/delivery_receipt/manifest_digest"
+      ],
+      "coordinate_paths": [
+        "/orientation_brief/coordinate",
+        "/delivery_receipt/coordinate"
+      ],
+      "equal_paths": [
+        [
+          "/delivery_receipt/admission_receipt_ref",
+          "/orientation_brief/admission_receipt_ref"
+        ],
+        [
+          "/delivery_receipt/brief_id",
+          "/orientation_brief/brief_id"
+        ],
+        [
+          "/delivery_receipt/brief_digest",
+          "/orientation_brief/brief_digest"
+        ],
+        [
+          "/delivery_receipt/manifest_id",
+          "/orientation_brief/manifest_ref/manifest_id"
+        ],
+        [
+          "/delivery_receipt/manifest_digest",
+          "/orientation_brief/manifest_ref/manifest_digest"
+        ]
+      ],
+      "equal_coordinates": [
+        [
+          "/delivery_receipt/coordinate",
+          "/orientation_brief/coordinate"
+        ]
+      ]
+    },
+    "acknowledgement_projection_ref": {
+      "equals": [
+        {
+          "path": "/acknowledgement_projection/schema",
+          "value": "narada.carrier_entry.orientation_acknowledgement_projection_ref.v1"
+        },
+        {
+          "path": "/acknowledgement_projection/relative_path",
+          "value": "acknowledgement.json"
+        },
+        {
+          "path": "/acknowledgement_projection/posture",
+          "value": "derived_readback_of_canonical_acknowledgement"
+        }
+      ]
+    },
+    "acknowledgement_projection": {
+      "equals": [
+        {
+          "path": "/acknowledgement/schema",
+          "value": "narada.carrier_entry.orientation_acknowledgement_projection.v1"
+        },
+        {
+          "path": "/acknowledgement/status",
+          "value": "open"
+        },
+        {
+          "path": "/acknowledgement/ordinary_work_gate",
+          "value": "open"
+        },
+        {
+          "path": "/acknowledgement/projection_posture",
+          "value": "derived_readback_not_independent_authority"
+        },
+        {
+          "path": "/acknowledgement/acknowledgement_semantics",
+          "value": "receipt_and_required_reads_not_comprehension"
+        },
+        {
+          "path": "/acknowledgement/action_admission",
+          "value": "separate_required"
+        }
+      ],
+      "non_empty_strings": [
+        "/acknowledgement/delivery_receipt_ref",
+        "/acknowledgement/manifest_id",
+        "/acknowledgement/manifest_digest",
+        "/acknowledgement/brief_id",
+        "/acknowledgement/brief_digest",
+        "/acknowledgement/acknowledgement_ref",
+        "/acknowledgement/acknowledged_at",
+        "/acknowledgement/canonical_readback_ref"
+      ],
+      "coordinate_paths": [
+        "/acknowledgement/coordinate",
+        "/packet/orientation_brief/coordinate"
+      ],
+      "equal_paths": [
+        [
+          "/acknowledgement/delivery_receipt_ref",
+          "/packet/delivery_receipt/receipt_id"
+        ],
+        [
+          "/acknowledgement/manifest_id",
+          "/packet/orientation_brief/manifest_ref/manifest_id"
+        ],
+        [
+          "/acknowledgement/manifest_digest",
+          "/packet/orientation_brief/manifest_ref/manifest_digest"
+        ],
+        [
+          "/acknowledgement/brief_id",
+          "/packet/orientation_brief/brief_id"
+        ],
+        [
+          "/acknowledgement/brief_digest",
+          "/packet/orientation_brief/brief_digest"
+        ]
+      ],
+      "equal_coordinates": [
+        [
+          "/acknowledgement/coordinate",
+          "/packet/orientation_brief/coordinate"
+        ]
+      ]
+    }
+  },
+  "readback_paths": {
+    "delivery_receipt_ref": "/delivery_receipt/receipt_id",
+    "acknowledgement_projection_path": "/acknowledgement_projection/relative_path",
+    "acknowledgement_ref": "/acknowledgement_ref"
+  },
+  "raw_json": {
+    "duplicate_keys": "reject"
+  },
+  "request_admission": {
+    "allowed_request_methods": [
+      "initialize",
+      "ping",
+      "tools/list",
+      "resources/list",
+      "resources/templates/list",
+      "prompts/list",
+      "logging/setLevel"
+    ],
+    "allowed_notification_methods": [
+      "notifications/initialized",
+      "notifications/cancelled",
+      "notifications/progress",
+      "notifications/roots/list_changed"
+    ],
+    "allowed_tool_calls": [
+      {
+        "surface_id": "agent-context",
+        "tool_names": [
+          "agent_orientation_read",
+          "mcp_output_show"
+        ]
+      }
+    ],
+    "proxy_tool_calls": [
+      "mcp_runtime_proxy_status"
+    ]
+  }
+}

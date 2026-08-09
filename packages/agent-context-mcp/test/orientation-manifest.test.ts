@@ -1,12 +1,17 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 import {
   CARRIER_SESSION_ADMISSION_RECEIPT_SCHEMA,
+  buildOrientationBrief,
   type CarrierSessionAdmissionReceipt,
 } from '@narada-core/orientation-manifest';
 import {
   assertAdmissionMatchesAgentContext,
   buildAgentContextOrientationProjections,
+  compileAgentContextOrientation,
 } from '../src/orientation-manifest.js';
 
 function admission(overrides: Partial<CarrierSessionAdmissionReceipt> = {}): CarrierSessionAdmissionReceipt {
@@ -53,6 +58,99 @@ test('Agent Context refuses an expired exact admission receipt', () => {
     }),
     /agent_context_admission_receipt_expired/,
   );
+});
+
+test('exact continuity and work selections are bounded and executable at Carrier entry', () => {
+  const siteRoot = mkdtempSync(join(tmpdir(), 'orientation-actionable-selection-'));
+  writeFileSync(join(siteRoot, 'AGENTS.md'), '# Exact site law\n', 'utf8');
+  try {
+    const compilation: any = compileAgentContextOrientation({
+      siteRoot,
+      siteId: 'narada.test',
+      admissionReceipt: admission({ valid_until: null }),
+      observedAt: '2026-08-08T11:00:00.000Z',
+      exactCheckpoint: {
+        status: 'ok',
+        checkpoint_id: 'checkpoint-exact-1',
+        checkpoint_at: '2026-08-08T10:59:00.000Z',
+        continuation: {
+          objective: 'Preserve exact continuity across occupant turnover.',
+          current_state: 'The evidence boundary is implemented.',
+          next_action: 'Run the performative carrier checks.',
+        },
+        continuation_blockers: [],
+      },
+      exactWork: {
+        status: 'ok',
+        task_id: 'task-exact-42',
+        task_number: 42,
+        lifecycle: {
+          status: 'in_progress',
+          continuation_packet: { next_action: 'Exercise the live gate.' },
+          updated_at: '2026-08-08T10:58:00.000Z',
+        },
+        specification: {
+          title: 'Prove Carrier-entry orientation',
+          goal_markdown: 'Prove ordinary work is impossible before exact orientation.',
+        },
+      },
+    });
+    assert.equal(compilation.manifest.delivery, 'deliverable');
+    const brief: any = buildOrientationBrief({
+      manifest: compilation.manifest,
+      manifestArtifactRef: 'narada-agent-context://orientation-manifest/exact',
+    });
+    assert.equal(brief.continuity_selection.mode, 'exact');
+    assert.equal(
+      brief.continuity_selection.summary.checkpoint_id,
+      'checkpoint-exact-1',
+    );
+    assert.equal(brief.continuity_selection.inspection_call, null);
+    assert.equal(brief.work_selection.summary.task_number, 42);
+    assert.equal(
+      brief.work_selection.summary.next_action,
+      'Exercise the live gate.',
+    );
+    assert.deepEqual(brief.work_selection.inspection_call, {
+      surface_id: 'task-lifecycle',
+      tool: 'task_lifecycle_inspect_range',
+      arguments: {
+        start_task_number: 42,
+        end_task_number: 42,
+        include_body: true,
+        limit: 1,
+      },
+    });
+    assert.equal(brief.required_reads.length, 2);
+    const continuityRead: any = brief.required_reads.find(
+      (step: any) => step.source.artifact_ref.startsWith('orientation-manifest-entry:'),
+    );
+    assert.ok(continuityRead);
+    assert.equal(continuityRead.ordinal, 2);
+    assert.equal(continuityRead.tool.name, 'agent_orientation_read');
+    const continuityEntry: any = compilation.manifest.entries.find(
+      (entry: any) => entry.entry_kind === 'exact_continuity',
+    );
+    assert.equal(continuityRead.source.revision, continuityEntry.revision);
+    assert.equal(brief.inline_bytes <= brief.max_inline_bytes, true);
+  } finally {
+    rmSync(siteRoot, { recursive: true, force: true });
+  }
+});
+
+test('required-read call count is admitted before a Carrier-entry generation exists', () => {
+  const siteRoot = mkdtempSync(join(tmpdir(), 'orientation-page-bound-'));
+  writeFileSync(join(siteRoot, 'AGENTS.md'), '\0'.repeat(70_000), 'utf8');
+  try {
+    assert.throws(() => compileAgentContextOrientation({
+      siteRoot,
+      siteId: 'narada.test',
+      admissionReceipt: admission({ valid_until: null }),
+      observedAt: '2026-08-08T11:00:00.000Z',
+    }), /agent_context_orientation_required_read_page_bound_exceeded/);
+  } finally {
+    rmSync(siteRoot, { recursive: true, force: true });
+  }
 });
 
 test('Agent Context adapter revisions are independent of object insertion order', () => {

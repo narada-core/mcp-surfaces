@@ -10,7 +10,7 @@ import { guidanceToolDefinition } from './guidance.js';
  * andrey-user runtime state or broad User Site surfaces.
  */
 
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -23,14 +23,25 @@ import {
 import {
   CARRIER_SESSION_ACTIVATION_RECEIPT_JSON_SCHEMA,
   CARRIER_SESSION_ADMISSION_RECEIPT_JSON_SCHEMA,
+  CARRIER_SESSION_ORIENTATION_DELIVERY_RECEIPT_JSON_SCHEMA,
+  ORIENTATION_ACKNOWLEDGEMENT_JSON_SCHEMA,
+  ORIENTATION_BRIEF_JSON_SCHEMA,
+  ORIENTATION_MANIFEST_REFERENCE_JSON_SCHEMA,
+  buildOrientationOccupantBrief,
+  buildOrientationReadyProjection,
   parseCarrierSessionActivationReceipt,
   parseCarrierSessionAdmissionReceipt,
+  parseCarrierSessionOrientationDeliveryReceipt,
 } from '@narada-core/orientation-manifest';
 import {
   listAgentStartSessions,
   materializeAgentSessionStart,
   openAgentContextDb,
+  projectOrientationAcknowledgement,
+  readOrientationEntryPacket,
   readOrientationManifestGeneration,
+  recordOrientationAcknowledgement,
+  recordOrientationRequiredRead,
   validateIdentityAgainstRoster,
 } from './session-start.js';
 import {
@@ -53,6 +64,8 @@ const MAX_CONTINUATION_BYTES = 256 * 1024;
 const MAX_CONTINUATION_STATE_BYTES = 64 * 1024;
 const MAX_CONTINUATION_TEXT_LENGTH = 16 * 1024;
 const MAX_CONTINUATION_ARRAY_ITEMS = 200;
+const ORIENTATION_INLINE_CONTENT_BYTES = 6_000;
+const ORIENTATION_INLINE_RESPONSE_BYTES = 32 * 1024;
 const startupTracePath = join(siteRoot, '.ai', 'tmp', 'agent-context-mcp-startup.log');
 const startupTraceEnabled = process.env.NARADA_AGENT_CONTEXT_MCP_TRACE === '1';
 
@@ -79,6 +92,64 @@ function traceStartup(event: any, extra: any = {}) {
   }
 }
 
+const ORIENTATION_MANIFEST_RESOURCE_PREFIX =
+  'narada-agent-context://orientation-manifest/';
+
+function orientationManifestResourceUri(manifestId: string) {
+  return ORIENTATION_MANIFEST_RESOURCE_PREFIX + encodeURIComponent(manifestId);
+}
+
+function listResources() {
+  if (currentToolProjection() === 'occupant') return { resources: [] };
+  const outputResources: any = listOutputResources({ siteRoot });
+  const manifestId: any = exactOrientationManifestId();
+  const manifestResources: any[] = manifestId
+    ? [{
+        uri: orientationManifestResourceUri(manifestId),
+        name: `Orientation Manifest ${manifestId}`,
+        title: 'Exact Carrier-entry Orientation Manifest',
+        description: 'Canonical immutable manifest bound to this admitted Carrier Session.',
+        mimeType: 'application/json',
+      }]
+    : [];
+  return {
+    ...outputResources,
+    resources: [...manifestResources, ...(outputResources.resources ?? [])],
+  };
+}
+
+function readResource(uriValue: any) {
+  if (currentToolProjection() === 'occupant') {
+    throw new Error('agent_context_resources_not_exposed_in_occupant_projection');
+  }
+  const uri: any = String(uriValue ?? '');
+  if (!uri.startsWith(ORIENTATION_MANIFEST_RESOURCE_PREFIX)) {
+    return readOutputResource({ siteRoot, uri });
+  }
+  const requestedManifestId: any = decodeURIComponent(
+    uri.slice(ORIENTATION_MANIFEST_RESOURCE_PREFIX.length),
+  );
+  const evidence: any = exactOrientationEntryEvidence();
+  if (requestedManifestId !== evidence.manifestId) {
+    throw new Error(
+      `agent_context_orientation_manifest_resource_not_current:${requestedManifestId}`,
+    );
+  }
+  const readback: any = readOrientationManifestGeneration({
+    siteRoot,
+    dbPath,
+    manifestId: requestedManifestId,
+    admissionReceipt: evidence.admission,
+  });
+  return {
+    contents: [{
+      uri,
+      mimeType: 'application/json',
+      text: JSON.stringify(readback.manifest, null, 2),
+    }],
+  };
+}
+
 process.on('uncaughtException', (error: any) => {
   traceStartup('uncaughtException', { error: error?.stack ?? String(error) });
   throw error;
@@ -91,12 +162,224 @@ process.on('unhandledRejection', (error: any) => {
 traceStartup('process_start');
 
 const LOCAL_WRITE_TOOLS = new Set([
+  'agent_orientation_read',
+  'agent_orientation_acknowledge',
   'agent_context_start_session',
   'agent_context_checkpoint',
   'agent_context_continuation_export',
 ]);
 
+const ORIENTATION_REQUIRED_READ_PROGRESS_JSON_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    total: { type: 'integer', minimum: 0 },
+    completed: { type: 'integer', minimum: 0 },
+    pending: { type: 'integer', minimum: 0 },
+    completed_step_ids: {
+      type: 'array',
+      items: { type: 'string', minLength: 1 },
+    },
+    pending_step_ids: {
+      type: 'array',
+      items: { type: 'string', minLength: 1 },
+    },
+    completion_refs: {
+      type: 'array',
+      items: { type: 'string', minLength: 1 },
+    },
+    active_step_id: {
+      anyOf: [
+        { type: 'string', minLength: 1 },
+        { type: 'null' },
+      ],
+    },
+    next_byte_offset: {
+      anyOf: [
+        { type: 'integer', minimum: 0 },
+        { type: 'null' },
+      ],
+    },
+  },
+  required: [
+    'total', 'completed', 'pending', 'completed_step_ids',
+    'pending_step_ids', 'completion_refs', 'active_step_id',
+    'next_byte_offset',
+  ],
+} as const;
+
+const ORIENTATION_NEXT_CALL_JSON_SCHEMA = {
+  anyOf: [{
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      tool: { type: 'string', minLength: 1 },
+      arguments: { type: 'object', additionalProperties: true },
+    },
+    required: ['tool', 'arguments'],
+  }, {
+    type: 'null',
+  }],
+} as const;
+
 export const TOOLS = [
+  {
+    name: 'agent_orientation_read',
+    description: 'Receive the exact Carrier-entry Orientation Brief and its next_call. Call with no arguments first, then follow next_call exactly; required-read pages persist server-owned completion evidence and selections inspect exact entry snapshots.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        step_id: {
+          type: 'string',
+          minLength: 1,
+          description: 'Optional exact pending step_id returned by required_read_progress or next_call.',
+        },
+        offset: {
+          type: 'integer',
+          minimum: 0,
+          description: 'Exact UTF-8 byte offset returned by the preceding next_call. Use 0 for the first page.',
+        },
+        selection: {
+          type: 'string',
+          enum: ['continuity', 'work'],
+          description: 'Inspect the exact continuity or work artifact selected by this admitted manifest.',
+        },
+      },
+      additionalProperties: false,
+    },
+    outputSchema: {
+      anyOf: [{
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          schema: { type: 'string', const: 'narada.agent_context.orientation_entry_packet.v2' },
+          status: { type: 'string', enum: ['orientation_required', 'acknowledged'] },
+          source_mutation: { type: 'boolean', const: false },
+          ordinary_work_gate: {
+            type: 'string',
+            enum: ['acknowledgement_required', 'open'],
+          },
+          orientation_brief: ORIENTATION_BRIEF_JSON_SCHEMA,
+          manifest_ref: ORIENTATION_MANIFEST_REFERENCE_JSON_SCHEMA,
+          delivery_receipt_ref: { type: 'string', minLength: 1 },
+          acknowledgement_ref: {
+            anyOf: [
+              { type: 'string', minLength: 1 },
+              { type: 'null' },
+            ],
+          },
+          required_read_progress: ORIENTATION_REQUIRED_READ_PROGRESS_JSON_SCHEMA,
+          next_call: ORIENTATION_NEXT_CALL_JSON_SCHEMA,
+        },
+        required: [
+          'schema', 'status', 'source_mutation', 'ordinary_work_gate',
+          'orientation_brief', 'manifest_ref',
+          'delivery_receipt_ref', 'acknowledgement_ref',
+          'required_read_progress', 'next_call',
+        ],
+      }, {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          schema: { type: 'string', const: 'narada.agent_context.orientation_required_read.v1' },
+          status: {
+            type: 'string',
+            enum: [
+              'page_emitted', 'page_already_emitted',
+              'completed', 'already_completed',
+            ],
+          },
+          source_mutation: { type: 'boolean', const: false },
+          local_persistence: { type: 'boolean', const: true },
+          ordinary_work_gate: { type: 'string', const: 'acknowledgement_required' },
+          step_id: { type: 'string', minLength: 1 },
+          source: { type: 'object', additionalProperties: true },
+          content: {
+            anyOf: [{ type: 'string' }, { type: 'null' }],
+          },
+          page: {
+            anyOf: [
+              { type: 'object', additionalProperties: true },
+              { type: 'null' },
+            ],
+          },
+          result_evidence: {
+            anyOf: [
+              { type: 'object', additionalProperties: true },
+              { type: 'null' },
+            ],
+          },
+          completion_ref: {
+            anyOf: [
+              { type: 'string', minLength: 1 },
+              { type: 'null' },
+            ],
+          },
+          required_read_progress: ORIENTATION_REQUIRED_READ_PROGRESS_JSON_SCHEMA,
+          next_call: ORIENTATION_NEXT_CALL_JSON_SCHEMA,
+        },
+        required: [
+          'schema', 'status', 'source_mutation', 'local_persistence',
+          'ordinary_work_gate', 'step_id', 'source', 'content', 'page',
+          'result_evidence', 'completion_ref', 'required_read_progress',
+          'next_call',
+        ],
+      }, {
+        type: 'object',
+        additionalProperties: true,
+        properties: {
+          schema: {
+            type: 'string',
+            const: 'narada.agent_context.orientation_selection_read.v1',
+          },
+          status: { type: 'string', enum: ['exact', 'omitted'] },
+          source_mutation: { type: 'boolean', const: false },
+          ordinary_work_gate: {
+            type: 'string',
+            enum: ['acknowledgement_required', 'open'],
+          },
+          selection_kind: { type: 'string', enum: ['continuity', 'work'] },
+          manifest_ref: ORIENTATION_MANIFEST_REFERENCE_JSON_SCHEMA,
+        },
+        required: [
+          'schema', 'status', 'source_mutation', 'ordinary_work_gate',
+          'selection_kind', 'manifest_ref', 'selection', 'projection',
+        ],
+      }],
+    },
+  },
+  {
+    name: 'agent_orientation_acknowledge',
+    description: 'Open the orientation gate after Agent Context has recorded every exact required read. No hashes, timestamps, or evidence payloads are accepted from the occupant.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+      required: [],
+      additionalProperties: false,
+    },
+    outputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        schema: {
+          type: 'string',
+          const: 'narada.agent_context.orientation_acknowledgement_record.v1',
+        },
+        status: {
+          type: 'string',
+          enum: ['acknowledged', 'already_acknowledged'],
+        },
+        source_mutation: { type: 'boolean', const: false },
+        local_persistence: { type: 'boolean', const: true },
+        ordinary_work_gate: { type: 'string', const: 'open' },
+        acknowledgement: ORIENTATION_ACKNOWLEDGEMENT_JSON_SCHEMA,
+      },
+      required: [
+        'schema', 'status', 'source_mutation', 'local_persistence',
+        'ordinary_work_gate', 'acknowledgement',
+      ],
+    },
+  },
   guidanceToolDefinition(),
   {
     name: 'agent_context_doctor',
@@ -276,7 +559,48 @@ export const TOOLS = [
       },
     },
   },
-].map((tool: any) => ({ ...tool, annotations: toolAnnotations(tool.name), outputSchema: genericToolOutputSchema() }));
+].map((tool: any) => ({
+  ...tool,
+  annotations: toolAnnotations(tool.name),
+  outputSchema: tool.outputSchema ?? genericToolOutputSchema(),
+}));
+
+export type AgentContextToolProjection = 'occupant' | 'admin';
+
+const OCCUPANT_TOOL_NAMES = new Set([
+  'agent_orientation_read',
+  'mcp_output_show',
+]);
+
+const OCCUPANT_ORIENTATION_READ_TOOL = {
+  name: 'agent_orientation_read',
+  description: 'Receive the bounded Carrier-entry orientation. Call with {} first, then replay only the exact opaque continuation returned in next_call until status=ready. The Carrier retains receipts, hashes, page coordinates, and completion evidence.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      continuation: {
+        type: 'string',
+        minLength: 1,
+        description: 'Opaque continuation returned by the preceding next_call. Do not inspect or alter it.',
+      },
+    },
+    additionalProperties: false,
+  },
+  outputSchema: { type: 'object', additionalProperties: true },
+  annotations: toolAnnotations('agent_orientation_read'),
+};
+
+function currentToolProjection(): AgentContextToolProjection {
+  const selected = String(
+    args['tool-projection']
+      ?? process.env.NARADA_AGENT_CONTEXT_TOOL_PROJECTION
+      ?? 'occupant',
+  ).trim();
+  if (selected !== 'occupant' && selected !== 'admin') {
+    throw new Error(`agent_context_tool_projection_invalid:${selected}`);
+  }
+  return selected;
+}
 
 function toolAnnotations(name: string) {
   const writes = LOCAL_WRITE_TOOLS.has(name);
@@ -284,7 +608,8 @@ function toolAnnotations(name: string) {
     title: name,
     readOnlyHint: !writes,
     destructiveHint: false,
-    idempotentHint: /doctor|whoami|rehydrate|hydrate|startup|list/.test(name),
+    idempotentHint: name.startsWith('agent_orientation_')
+      || /doctor|whoami|rehydrate|hydrate|startup|list/.test(name),
     openWorldHint: false,
   };
 }
@@ -707,8 +1032,13 @@ function sendProgress(message: any, progress: any, progressMessage: any) {
   });
 }
 
-export function listTools() {
-  return TOOLS;
+export function listTools(projection: AgentContextToolProjection = currentToolProjection()) {
+  if (projection === 'admin') return TOOLS;
+  return TOOLS
+    .filter((tool: any) => OCCUPANT_TOOL_NAMES.has(tool.name))
+    .map((tool: any) => tool.name === 'agent_orientation_read'
+      ? OCCUPANT_ORIENTATION_READ_TOOL
+      : tool);
 }
 
 async function handleMessage(message: any) {
@@ -738,28 +1068,33 @@ async function handleMessage(message: any) {
     if (message.method === 'notifications/initialized') return;
     if (message.method === 'tools/list') {
       traceStartup('tools_list');
-      respond(id, { tools: TOOLS });
+      respond(id, { tools: listTools() });
       return;
     }
     if (message.method === 'tools/call') {
       const name = message.params?.name;
       const toolArgs = message.params?.arguments ?? {};
       const result = await callTool(name, toolArgs);
-      respond(id, buildBoundedToolResult({
-        siteRoot,
-        toolName: String(name ?? 'unknown_tool'),
-        value: result,
-        limit: 6000,
-        readerTool: 'mcp_output_show',
-      }));
+      respond(
+        id,
+        name === 'agent_orientation_read' && currentToolProjection() === 'occupant'
+          ? buildInlineOrientationToolResult(result)
+          : buildBoundedToolResult({
+              siteRoot,
+              toolName: String(name ?? 'unknown_tool'),
+              value: result,
+              limit: 6000,
+              readerTool: 'mcp_output_show',
+            }),
+      );
       return;
     }
     if (message.method === 'resources/list') {
-      respond(id, listOutputResources({ siteRoot }));
+      respond(id, listResources());
       return;
     }
     if (message.method === 'resources/read') {
-      respond(id, readOutputResource({ siteRoot, uri: message.params?.uri }));
+      respond(id, readResource(message.params?.uri));
       return;
     }
     if (message.method === 'prompts/list') {
@@ -788,21 +1123,27 @@ async function handleMessage(message: any) {
 }
 
 function listPrompts() {
+  if (currentToolProjection() === 'occupant') return [];
   return [{ name: 'agent_context_startup', title: 'Agent Context Startup', description: 'Guidance for exact admitted Orientation Manifest delivery and bounded continuity.', arguments: [] }];
 }
 
 function promptGet(params: any) {
+  if (currentToolProjection() === 'occupant') {
+    throw new Error('agent_context_prompts_not_exposed_in_occupant_projection');
+  }
   const name = String(params.name ?? '');
   if (name !== 'agent_context_startup') throw new Error(`unknown_prompt: ${name}`);
   return {
     description: 'Guidance for exact admitted Orientation Manifest delivery and bounded continuity.',
-    messages: [{ role: 'user', content: { type: 'text', text: 'At admitted startup, call agent_context_startup_sequence to read the exact immutable Orientation Manifest generation selected by Agent Start. Do not substitute agent_context_hydrate_current: it compiles a diagnostic candidate and omits continuity unless an exact checkpoint id is supplied. Checkpoint meaningful state transitions and use explicit checkpoint/continuation reads for resumption. Neither orientation nor checkpoint evidence is admission for a later action.' } }],
+    messages: [{ role: 'user', content: { type: 'text', text: 'This is the enforced Carrier-entry orientation turn. Call agent_orientation_read({}) and then execute each returned next_call exactly. A continuation is opaque: never inspect or alter it. Stop only when status=ready and ordinary_work_gate=open. Agent Context retains required-read and acknowledgement evidence. The inline brief names exact continuity and work entry snapshots or explicit omissions and carries one canonical manifest_ref. Acknowledgement proves delivery and completed reads, not comprehension or authority for a later action.' } }],
   };
 }
 
 function completeArgument(params: any) {
   const argumentName = String((params.argument && typeof params.argument === 'object' ? params.argument.name : '') ?? '');
-  const values = argumentName === 'name' ? TOOLS.map((tool: any) => tool.name).filter(Boolean).slice(0, 100) : [];
+  const values = argumentName === 'name'
+    ? listTools().map((tool: any) => tool.name).filter(Boolean).slice(0, 100)
+    : [];
   return { completion: { values, total: values.length, hasMore: false } };
 }
 
@@ -810,8 +1151,37 @@ function assistantTextContent(text: string) {
   return { type: 'text', text, annotations: { audience: ['assistant'] } };
 }
 
+function buildInlineOrientationToolResult(value: any) {
+  const text: any = JSON.stringify(value);
+  const contentBytes: any = Buffer.byteLength(text, 'utf8');
+  const responseBytes: any = contentBytes
+    + Buffer.byteLength(JSON.stringify(value), 'utf8');
+  if (
+    contentBytes > ORIENTATION_INLINE_CONTENT_BYTES
+    || responseBytes > ORIENTATION_INLINE_RESPONSE_BYTES
+  ) {
+    throw new Error(
+      'agent_context_orientation_inline_budget_exceeded:'
+      + `content=${contentBytes}:response=${responseBytes}`,
+    );
+  }
+  return {
+    content: [assistantTextContent(text)],
+    structuredContent: value,
+  };
+}
+
 async function callTool(name: any, toolArgs: any) {
+  if (!listTools().some((tool: any) => tool.name === name)) {
+    throw new Error(`agent_context_tool_not_exposed_in_${currentToolProjection()}_projection:${name}`);
+  }
   switch (name) {
+    case 'agent_orientation_read':
+      return currentToolProjection() === 'occupant'
+        ? orientationOccupantRead(toolArgs)
+        : orientationRead(toolArgs);
+    case 'agent_orientation_acknowledge':
+      return orientationAcknowledge(toolArgs);
     case 'agent_context_guidance':
       return buildGuidanceResult(toolArgs);
     case 'agent_context_doctor':
@@ -1359,6 +1729,376 @@ function exactOrientationManifestId(toolArgs: any = {}) {
   return supplied ?? inherited;
 }
 
+function exactOrientationDeliveryReceipt() {
+  const raw = process.env.NARADA_ORIENTATION_DELIVERY_RECEIPT;
+  if (typeof raw !== 'string' || raw.trim() === '') {
+    throw new Error('agent_context_exact_orientation_delivery_receipt_required');
+  }
+  try {
+    return parseCarrierSessionOrientationDeliveryReceipt(JSON.parse(raw));
+  } catch (error: any) {
+    throw new Error(
+      `agent_context_orientation_delivery_receipt_invalid:${error?.message ?? String(error)}`,
+    );
+  }
+}
+
+function exactOrientationEntryEvidence() {
+  const evidence: any = resolveExactOrientationEvidence();
+  if (!evidence.admission_receipt) {
+    throw new Error('agent_context_exact_admission_receipt_required');
+  }
+  const identity = evidence.admission_receipt.agent_identity.local_agent_id;
+  const admission = assertAdmissionMatchesAgentContext(evidence.admission_receipt, {
+    siteId,
+    identity: process.env.NARADA_AGENT_ID ?? identity,
+    carrierSessionId: process.env.NARADA_CARRIER_SESSION_ID ?? null,
+    observedAt: new Date().toISOString(),
+  });
+  const manifestId = exactOrientationManifestId();
+  if (!manifestId) {
+    throw new Error('agent_context_exact_orientation_manifest_id_required');
+  }
+  return {
+    admission,
+    manifestId,
+    deliveryReceipt: exactOrientationDeliveryReceipt(),
+  };
+}
+
+function orientationContinuationSignature(encoded: string, brief: any, delivery: any) {
+  return createHmac(
+    'sha256',
+    `${delivery.receipt_id}\u0000${brief.brief_digest}`,
+  ).update(encoded).digest('base64url');
+}
+
+function orientationContinuationForInternalCall(call: any, brief: any, delivery: any) {
+  if (!call) return null;
+  const payload: any = call.tool === 'agent_orientation_read'
+    ? {
+        schema: 'narada.agent_context.orientation_continuation.v1',
+        phase: 'required_read',
+        step_id: String(call.arguments?.step_id ?? ''),
+        offset: Number(call.arguments?.offset ?? 0),
+      }
+    : call.tool === 'agent_orientation_acknowledge'
+      ? {
+          schema: 'narada.agent_context.orientation_continuation.v1',
+          phase: 'acknowledge',
+        }
+      : null;
+  if (!payload || (payload.phase === 'required_read' && !payload.step_id)) {
+    throw new Error(`agent_context_orientation_internal_next_call_invalid:${String(call.tool)}`);
+  }
+  const encoded: any = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+  const signature: any = orientationContinuationSignature(encoded, brief, delivery);
+  return {
+    surface_id: 'agent-context',
+    tool: 'agent_orientation_read',
+    arguments: { continuation: `oc1.${encoded}.${signature}` },
+  };
+}
+
+function parseOrientationContinuation(value: any, brief: any, delivery: any) {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new Error('agent_context_orientation_continuation_required');
+  }
+  const parts: any[] = value.trim().split('.');
+  if (parts.length !== 3 || parts[0] !== 'oc1') {
+    throw new Error('agent_context_orientation_continuation_invalid');
+  }
+  const expected: any = orientationContinuationSignature(parts[1], brief, delivery);
+  if (parts[2] !== expected) {
+    throw new Error('agent_context_orientation_continuation_binding_mismatch');
+  }
+  let payload: any;
+  try {
+    payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+  } catch {
+    throw new Error('agent_context_orientation_continuation_invalid');
+  }
+  if (
+    payload?.schema !== 'narada.agent_context.orientation_continuation.v1'
+    || !['required_read', 'acknowledge'].includes(payload.phase)
+  ) {
+    throw new Error('agent_context_orientation_continuation_invalid');
+  }
+  if (payload.phase === 'required_read') {
+    if (
+      typeof payload.step_id !== 'string'
+      || !payload.step_id
+      || !Number.isInteger(payload.offset)
+      || payload.offset < 0
+    ) {
+      throw new Error('agent_context_orientation_continuation_invalid');
+    }
+  }
+  return payload;
+}
+
+function occupantReadProgress(progress: any) {
+  return {
+    total: Number(progress.total ?? 0),
+    completed: Number(progress.completed ?? 0),
+    pending: Number(progress.pending ?? 0),
+  };
+}
+
+function occupantReadyResult(packet: any, acknowledgementRef: any = null) {
+  const orientation: any = buildOrientationReadyProjection(packet.orientation_brief);
+  return {
+    schema: 'narada.agent_context.orientation_ready.v1',
+    status: 'ready',
+    source_mutation: false,
+    local_persistence: true,
+    ordinary_work_gate: 'open',
+    orientation,
+    manifest_ref: packet.manifest_ref,
+    acknowledgement_ref: acknowledgementRef ?? packet.acknowledgement_ref,
+    next_call: null,
+    suggested_next_call: orientation.next_meaningful_call,
+  };
+}
+
+function occupantEntryResult(packet: any, delivery: any) {
+  if (packet.ordinary_work_gate === 'open') return occupantReadyResult(packet);
+  return {
+    schema: 'narada.agent_context.orientation_entry.v3',
+    status: 'orientation_required',
+    source_mutation: false,
+    ordinary_work_gate: 'acknowledgement_required',
+    orientation_brief: buildOrientationOccupantBrief(packet.orientation_brief),
+    manifest_ref: packet.manifest_ref,
+    required_read_progress: occupantReadProgress(packet.required_read_progress),
+    next_call: orientationContinuationForInternalCall(
+      packet.next_call,
+      packet.orientation_brief,
+      delivery,
+    ),
+  };
+}
+
+function occupantRequiredReadResult(result: any, packet: any, delivery: any) {
+  const stepIndex: any = packet.orientation_brief.required_reads.findIndex(
+    (step: any) => step.step_id === result.step_id,
+  );
+  const gateOpen: any = packet.ordinary_work_gate === 'open';
+  return {
+    schema: 'narada.agent_context.orientation_material.v1',
+    status: gateOpen ? 'ready' : 'orientation_required',
+    source_mutation: false,
+    local_persistence: true,
+    ordinary_work_gate: gateOpen ? 'open' : 'acknowledgement_required',
+    material: {
+      delivery_status: result.status,
+      ordinal: stepIndex >= 0 ? stepIndex + 1 : null,
+      source_ref: result.source?.artifact_ref ?? null,
+      content: result.content,
+      page: result.page ? {
+        returned_bytes: result.page.returned_bytes,
+        eof: result.page.eof,
+      } : null,
+    },
+    required_read_progress: occupantReadProgress(result.required_read_progress),
+    next_call: gateOpen ? null : orientationContinuationForInternalCall(
+      result.next_call,
+      packet.orientation_brief,
+      delivery,
+    ),
+  };
+}
+
+function orientationOccupantRead(toolArgs: any = {}) {
+  const evidence: any = exactOrientationEntryEvidence();
+  const packet: any = readOrientationEntryPacket({
+    siteRoot,
+    dbPath,
+    manifestId: evidence.manifestId,
+    admissionReceipt: evidence.admission,
+    deliveryReceipt: evidence.deliveryReceipt,
+  });
+  if (packet.ordinary_work_gate === 'open') {
+    return occupantReadyResult(packet);
+  }
+  const continuation: any = toolArgs.continuation;
+  if (continuation === undefined) return occupantEntryResult(packet, evidence.deliveryReceipt);
+
+  let decoded: any;
+  try {
+    decoded = parseOrientationContinuation(
+      continuation,
+      packet.orientation_brief,
+      evidence.deliveryReceipt,
+    );
+  } catch (error) {
+    return {
+      schema: 'narada.agent_context.orientation_recovery.v1',
+      status: 'orientation_required',
+      ordinary_work_gate: packet.ordinary_work_gate,
+      reason_code: error instanceof Error ? error.message : String(error),
+      remediation: 'Use this response next_call exactly; do not reconstruct a continuation.',
+      next_call: orientationContinuationForInternalCall(
+        packet.next_call,
+        packet.orientation_brief,
+        evidence.deliveryReceipt,
+      ),
+    };
+  }
+
+  if (decoded.phase === 'acknowledge') {
+    const record: any = orientationAcknowledge({});
+    const acknowledgedPacket: any = readOrientationEntryPacket({
+      siteRoot,
+      dbPath,
+      manifestId: evidence.manifestId,
+      admissionReceipt: evidence.admission,
+      deliveryReceipt: evidence.deliveryReceipt,
+    });
+    return occupantReadyResult(
+      acknowledgedPacket,
+      `agent-context:orientation_acknowledgements:${record.acknowledgement.acknowledgement_id}`,
+    );
+  }
+
+  const result: any = recordOrientationRequiredRead({
+    siteRoot,
+    dbPath,
+    admissionReceipt: evidence.admission,
+    deliveryReceipt: evidence.deliveryReceipt,
+    brief: packet.orientation_brief,
+    stepId: decoded.step_id,
+    byteOffset: decoded.offset,
+    resultValidator: (candidate: any) => {
+      buildInlineOrientationToolResult(
+        occupantRequiredReadResult(candidate, packet, evidence.deliveryReceipt),
+      );
+    },
+  });
+  return occupantRequiredReadResult(result, packet, evidence.deliveryReceipt);
+}
+
+function orientationRead(toolArgs: any = {}) {
+  const evidence = exactOrientationEntryEvidence();
+  const packet: any = readOrientationEntryPacket({
+    siteRoot,
+    dbPath,
+    manifestId: evidence.manifestId,
+    admissionReceipt: evidence.admission,
+    deliveryReceipt: evidence.deliveryReceipt,
+  });
+  const stepId: any = typeof toolArgs.step_id === 'string'
+    ? toolArgs.step_id.trim()
+    : '';
+  const selection: any = typeof toolArgs.selection === 'string'
+    ? toolArgs.selection.trim()
+    : '';
+  if (stepId && selection) {
+    throw new Error('agent_context_orientation_read_mode_ambiguous');
+  }
+  if (!stepId && toolArgs.offset !== undefined) {
+    throw new Error('agent_context_orientation_required_read_step_id_required_for_offset');
+  }
+  if (selection) {
+    const selectionField: any = selection === 'continuity'
+      ? 'continuity_selection'
+      : selection === 'work'
+        ? 'work_selection'
+        : null;
+    if (!selectionField) {
+      throw new Error(`agent_context_orientation_selection_invalid:${selection}`);
+    }
+    const selected: any = packet.orientation_brief[selectionField];
+    if (selected.mode === 'omitted') {
+      return {
+        schema: 'narada.agent_context.orientation_selection_read.v1',
+        status: 'omitted',
+        source_mutation: false,
+        ordinary_work_gate: packet.ordinary_work_gate,
+        selection_kind: selection,
+        manifest_ref: packet.manifest_ref,
+        selection: selected,
+        projection: null,
+      };
+    }
+    const readback: any = readOrientationManifestGeneration({
+      siteRoot,
+      dbPath,
+      manifestId: evidence.manifestId,
+      admissionReceipt: evidence.admission,
+    });
+    const compartment: any = selection === 'continuity'
+      ? 'continuity'
+      : 'work_orientation';
+    const entry: any = readback.manifest.entries.find(
+      (candidate: any) => candidate.compartment === compartment
+        && candidate.projection_status === 'available',
+    );
+    if (
+      !entry
+      || entry.artifact_ref !== selected.artifact_ref
+      || entry.revision !== selected.revision
+    ) {
+      throw new Error(
+        `agent_context_orientation_selection_binding_mismatch:${selection}`,
+      );
+    }
+    return {
+      schema: 'narada.agent_context.orientation_selection_read.v1',
+      status: 'exact',
+      source_mutation: false,
+      ordinary_work_gate: packet.ordinary_work_gate,
+      selection_kind: selection,
+      manifest_ref: packet.manifest_ref,
+      selection: selected,
+      projection: {
+        entry_id: entry.entry_id,
+        source_authority_ref: entry.source_authority_ref,
+        artifact_ref: entry.artifact_ref,
+        revision: entry.revision,
+        observed_at: entry.observed_at,
+        revalidation_rule: entry.revalidation_rule,
+        payload: entry.payload,
+        rendered_text: entry.rendered_text,
+      },
+    };
+  }
+  if (!stepId) return packet;
+  return recordOrientationRequiredRead({
+    siteRoot,
+    dbPath,
+    admissionReceipt: evidence.admission,
+    deliveryReceipt: evidence.deliveryReceipt,
+    brief: packet.orientation_brief,
+    stepId,
+    byteOffset: toolArgs.offset ?? 0,
+  });
+}
+
+function orientationAcknowledge(toolArgs: any = {}) {
+  const evidence = exactOrientationEntryEvidence();
+  const entryPacket: any = readOrientationEntryPacket({
+    siteRoot,
+    dbPath,
+    manifestId: evidence.manifestId,
+    admissionReceipt: evidence.admission,
+    deliveryReceipt: evidence.deliveryReceipt,
+  });
+  const record: any = recordOrientationAcknowledgement({
+    siteRoot,
+    dbPath,
+    admissionReceipt: evidence.admission,
+    deliveryReceipt: evidence.deliveryReceipt,
+    brief: entryPacket.orientation_brief,
+  });
+  projectOrientationAcknowledgement({
+    siteRoot,
+    entryFile: process.env.NARADA_ORIENTATION_ENTRY_FILE,
+    acknowledgement: record.acknowledgement,
+  });
+  return record;
+}
+
 function startupSequence(toolArgs: any = {}) {
   for (const forbidden of ['checkpoint_id', 'checkpoint_startup', 'generated_at']) {
     if (toolArgs[forbidden] !== undefined) {
@@ -1372,67 +2112,15 @@ function startupSequence(toolArgs: any = {}) {
       };
     }
   }
-  const evidence: any = resolveExactOrientationEvidence(toolArgs);
-  if (!evidence.admission_receipt) {
-    return {
-      schema: 'narada.agent_context.orientation_delivery.v1',
-      status: 'blocked',
-      source_mutation: false,
-      reason: 'agent_context_exact_admission_receipt_required',
-      rejected_fallbacks: ['latest_checkpoint', 'latest_start_event', 'identity_name_inference'],
-    };
-  }
-  const manifestId = exactOrientationManifestId(toolArgs);
-  if (!manifestId) {
-    return {
-      schema: 'narada.agent_context.orientation_delivery.v1',
-      status: 'blocked',
-      source_mutation: false,
-      reason: 'agent_context_exact_orientation_manifest_id_required',
-      rejected_fallbacks: ['latest_manifest_generation', 'recompile_at_delivery'],
-    };
-  }
-  const identity = evidence.admission_receipt.agent_identity.local_agent_id;
-  const admission = assertAdmissionMatchesAgentContext(evidence.admission_receipt, {
-    siteId,
-    identity: process.env.NARADA_AGENT_ID ?? identity,
-    carrierSessionId: process.env.NARADA_CARRIER_SESSION_ID ?? null,
-    observedAt: new Date().toISOString(),
-  });
-  const readback: any = readOrientationManifestGeneration({
-    siteRoot,
-    dbPath,
-    manifestId,
-    admissionReceipt: admission,
-  });
-  const manifest: any = readback.manifest;
-  const continuityEntries = manifest.entries.filter(
-    (entry: any) => entry.compartment === 'continuity',
-  );
+  // Preserve conflict detection for callers of the compatibility alias, while
+  // making the authoritative read use only the exact Carrier-entry evidence.
+  resolveExactOrientationEvidence(toolArgs);
+  exactOrientationManifestId(toolArgs);
+  const packet: any = orientationRead();
   return {
-    schema: 'narada.agent_context.orientation_delivery.v1',
-    status: manifest.delivery === 'deliverable' ? 'ok' : 'blocked',
-    source_mutation: false,
-    delivery_authority_claimed: false,
-    delivery_receipt: null,
-    reason: manifest.delivery === 'deliverable' ? null : 'orientation_manifest_delivery_withheld',
-    site_id: siteId,
-    site_root: siteRoot,
-    whoami: whoami({ admission_receipt: admission, hint: identity }),
-    admission_receipt_ref: admission.receipt_id,
-    orientation_manifest: manifest,
-    manifest_readback: {
-      status: readback.status,
-      storage_ref: readback.storage_ref,
-      exact_generation: true,
-    },
-    continuity_selection: continuityEntries.length === 0
-      ? { mode: 'omitted', entry_ids: [] }
-      : { mode: 'manifest_bound', entry_ids: continuityEntries.map((entry: any) => entry.entry_id) },
-    entry_procedure: manifest.entries.filter(
-      (entry: any) => entry.compartment === 'entry_procedure',
-    ),
-    negative_claims: manifest.negative_claims,
+    ...packet,
+    compatibility_alias: 'agent_context_startup_sequence',
+    canonical_tool: 'agent_orientation_read',
   };
 }
 

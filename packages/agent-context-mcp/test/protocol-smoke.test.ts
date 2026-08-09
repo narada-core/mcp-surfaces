@@ -15,7 +15,12 @@ writeFileSync(join(siteRoot, '.ai', 'agents', 'roster.json'), JSON.stringify({
 }, null, 2), 'utf8');
 
 const serverPath = fileURLToPath(new URL('../src/main.js', import.meta.url));
-const proc = spawn(process.execPath, [serverPath, '--site-root', siteRoot, '--site-id', 'narada-test'], {
+const proc = spawn(process.execPath, [
+  serverPath,
+  '--site-root', siteRoot,
+  '--site-id', 'narada-test',
+  '--tool-projection', 'occupant',
+], {
   cwd: siteRoot,
   env: {
     ...process.env,
@@ -53,8 +58,8 @@ function readOne() {
   return JSON.parse(body);
 }
 
-async function waitFor(id: any) {
-  const deadline = Date.now() + 5000;
+async function waitFor(id: any, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const message = readOne();
     if (message?.id === id) return message;
@@ -65,7 +70,7 @@ async function waitFor(id: any) {
 
 try {
   writeMessage({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05' } });
-  const init = await waitFor(1);
+  const init = await waitFor(1, 30_000);
   assert.equal(init.error, undefined);
   assert.equal(init.result.serverInfo.name, 'narada.test-agent-context-mcp');
 
@@ -73,13 +78,18 @@ try {
   const tools = await waitFor(2);
   assert.equal(tools.error, undefined);
   const names = tools.result.tools.map((tool: any) => tool.name);
-  assert.equal(names.includes('agent_context_start_session'), true);
-  assert.equal(names.includes('agent_context_hydrate_current'), true);
-  assert.equal(names.includes('agent_context_startup_sequence'), true);
-  assert.equal(names.includes('startup_sequence'), false);
-  const continuationExport = tools.result.tools.find((tool: any) => tool.name === 'agent_context_continuation_export');
-  assert.equal(continuationExport?.annotations?.readOnlyHint, false);
-  const descriptorTools = new Map(surfaceDefinition().descriptor.tools.map((tool) => [tool.name, tool]));
+  assert.deepEqual(names, [
+    'agent_orientation_read',
+    'mcp_output_show',
+  ]);
+  assert.equal(names.includes('agent_context_startup_sequence'), false);
+  assert.equal(names.includes('agent_context_checkpoint'), false);
+  const definition = surfaceDefinition();
+  const defaultProjection = definition.descriptor.projections.find(
+    (projection) => projection.id === 'default',
+  );
+  assert.deepEqual(defaultProjection?.exposed_tools, names);
+  const descriptorTools = new Map(definition.descriptor.tools.map((tool) => [tool.name, tool]));
   for (const tool of tools.result.tools) {
     const descriptorTool = descriptorTools.get(tool.name);
     assert.ok(descriptorTool, `surface descriptor is missing ${tool.name}`);
@@ -89,8 +99,9 @@ try {
       `${tool.name} runtime and registrar effect metadata disagree`,
     );
   }
-  assert.equal(descriptorTools.get('agent_context_continuation_export')?.effect.class, 'local_write');
-  assert.equal(descriptorTools.get('agent_context_continuation_read')?.effect.class, 'read');
+  assert.equal(descriptorTools.get('agent_orientation_acknowledge')?.effect.class, 'local_write');
+  assert.equal(names.includes('agent_orientation_acknowledge'), false);
+  assert.equal(descriptorTools.get('agent_orientation_read')?.effect.class, 'local_write');
 
   console.log('agent-context-mcp protocol smoke ok');
 } finally {

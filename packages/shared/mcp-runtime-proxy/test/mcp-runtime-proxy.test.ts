@@ -382,6 +382,13 @@ try {
   let honoredStdout = '';
   honoredProxy.stdout.setEncoding('utf8');
   honoredProxy.stdout.on('data', (chunk) => { honoredStdout += chunk; });
+  // Warm the child process independently. Otherwise Windows process startup
+  // latency is charged to the first tool call and can falsify this watchdog
+  // contract even though the tool's own 150ms latency is within its budget.
+  honoredProxy.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 'honored-warmup', method: 'ping', params: { _meta: { narada_request_timeout_ms: 2_000 } } })}\n`);
+  await waitForOutput(() => honoredStdout.includes('"honored-warmup"'), 5_000);
+  assert.equal(JSON.parse(honoredStdout.trim()).result?.content?.[0]?.text, 'slow-ok-honored-warmup');
+  honoredStdout = '';
   honoredProxy.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 'honored-1', method: 'tools/call', params: { name: 'slow_tool', arguments: {}, _meta: { narada_request_timeout_ms: 300 } } })}\n`);
   await waitForOutput(() => honoredStdout.includes('"honored-1"'), 2000);
   const honoredResponse = JSON.parse(honoredStdout.trim());

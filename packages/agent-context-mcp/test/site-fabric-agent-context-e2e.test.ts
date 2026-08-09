@@ -2,8 +2,14 @@
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { DatabaseSync } from '@narada-core/sqlite';
-import { CARRIER_SESSION_ADMISSION_RECEIPT_SCHEMA } from '@narada-core/orientation-manifest';
-import { materializeAgentSessionStart } from '../src/session-start.js';
+import {
+  CARRIER_SESSION_ADMISSION_RECEIPT_SCHEMA,
+  issueCarrierSessionOrientationDeliveryReceipt,
+} from '@narada-core/orientation-manifest';
+import {
+  materializeAgentSessionStart,
+  recordOrientationDeliveryReceipt,
+} from '../src/session-start.js';
 import { fileURLToPath } from 'node:url';
 import {
   createTemporaryE2eRoot,
@@ -82,15 +88,31 @@ const admittedStart: any = materializeAgentSessionStart({
   generatedAt: '2026-08-08T12:00:01.000Z',
 });
 assert.equal(admittedStart.status, 'materialized');
+const orientationDeliveryReceipt: any = issueCarrierSessionOrientationDeliveryReceipt({
+  admissionReceipt,
+  brief: admittedStart.orientation_brief,
+  deliveredAt: '2026-08-08T12:00:02.000Z',
+});
+recordOrientationDeliveryReceipt({
+  siteRoot,
+  dbPath,
+  admissionReceipt,
+  brief: admittedStart.orientation_brief,
+  deliveryReceipt: orientationDeliveryReceipt,
+});
 
 const serverPath = fileURLToPath(new URL('../src/main.js', import.meta.url));
-const server = spawnJsonlMcpServer(process.execPath, [serverPath, '--site-root', siteRoot, '--site-id', 'fixture-site'], {
+const server = spawnJsonlMcpServer(process.execPath, [
+  serverPath, '--site-root', siteRoot, '--site-id', 'fixture-site',
+  '--tool-projection', 'admin',
+], {
   cwd: siteRoot,
   env: siteFabricChildEnv(siteRoot, {
     NARADA_AGENT_ID: 'fixture.resident',
     NARADA_CARRIER_SESSION_ID: carrierSessionId,
     NARADA_CARRIER_SESSION_ADMISSION_RECEIPT: JSON.stringify(admissionReceipt),
     NARADA_ORIENTATION_MANIFEST_ID: admittedStart.orientation_manifest.manifest_id,
+    NARADA_ORIENTATION_DELIVERY_RECEIPT: JSON.stringify(orientationDeliveryReceipt),
     NARADA_SITE_ROOT: siteRoot,
     NARADA_AGENT_CONTEXT_DB: dbPath,
   }),
@@ -143,16 +165,27 @@ try {
     name: 'agent_context_startup_sequence',
     arguments: {},
   }), 300);
-  assert.equal(startup.status, 'ok', JSON.stringify(startup));
-  assert.equal((startup.orientation_manifest as Record<string, unknown>).delivery, 'deliverable');
+  assert.equal(startup.status, 'orientation_required', JSON.stringify(startup));
+  assert.equal(startup.schema, 'narada.agent_context.orientation_entry_packet.v2');
+  assert.equal(startup.compatibility_alias, 'agent_context_startup_sequence');
+  assert.equal(startup.canonical_tool, 'agent_orientation_read');
   assert.equal(
-    (startup.orientation_manifest as Record<string, unknown>).manifest_id,
+    (startup.manifest_ref as Record<string, unknown>).manifest_id,
     admittedStart.orientation_manifest.manifest_id,
   );
-  assert.deepEqual(startup.orientation_manifest, admittedStart.orientation_manifest);
-  assert.equal((startup.manifest_readback as Record<string, unknown>).exact_generation, true);
-  assert.equal(startup.delivery_authority_claimed, false);
+  assert.equal(startup.delivery_receipt_ref, orientationDeliveryReceipt.receipt_id);
+  assert.deepEqual(startup.next_call, {
+    tool: 'agent_orientation_read',
+    arguments: { step_id: 'read:site-law', offset: 0 },
+  });
   assert.equal('startup_checkpoint' in startup, false);
+
+  const manifestResource = await server.client.request(31, 'resources/read', {
+    uri: (startup.manifest_ref as Record<string, unknown>).artifact_ref,
+  });
+  assert.equal(manifestResource.error, undefined, JSON.stringify(manifestResource));
+  const manifestText = ((manifestResource.result as any).contents[0] as any).text;
+  assert.deepEqual(JSON.parse(manifestText), admittedStart.orientation_manifest);
   const readOnlyDb = new DatabaseSync(dbPath, { readOnly: true });
   const startupCheckpointCount = (
     readOnlyDb.prepare('SELECT COUNT(*) AS count FROM agent_checkpoints').get() as any

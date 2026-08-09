@@ -85,6 +85,7 @@ function columnNames(dbPath: any, table: any) {
   assert.equal(started.compatibility_facade.local_persistence, true);
   assert.deepEqual(started.compatibility_facade.persisted_records, [
     'orientation_manifest_generations',
+    'orientation_brief_generations',
     'agent_start_events',
   ]);
 

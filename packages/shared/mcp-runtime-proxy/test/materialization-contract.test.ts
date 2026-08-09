@@ -58,7 +58,7 @@ function fixture() {
     '--entrypoint', childPath,
     '--',
   ];
-  const structured = { mcpServers: { fixture: { command: 'node', args } } };
+  const structured = { mcpServers: { fixture: { command: process.execPath, args } } };
   return { root, proxyPath, childPath, manifestPath, registrarPath, matrixPath, configPath, sidecarPath, planPath: plan.path, planFingerprint: plan.fingerprint, args, structured };
 }
 
@@ -145,7 +145,7 @@ test('materialized configuration validates the runtime contract and generation p
 test('materialized configuration refuses missing or obsolete launch invariants', () => {
   const f = fixture();
   try {
-    const missingVersion = { mcpServers: { fixture: { command: 'node', args: f.args.filter((arg) => arg !== '--runtime-contract-version' && arg !== String(MCP_RUNTIME_CONTRACT_VERSION)) } } };
+    const missingVersion = { mcpServers: { fixture: { command: process.execPath, args: f.args.filter((arg) => arg !== '--runtime-contract-version' && arg !== String(MCP_RUNTIME_CONTRACT_VERSION)) } } };
     const missingVersionResult = validateMaterializedConfiguration({
       structured: missingVersion,
       artifactManifestPath: f.manifestPath,
@@ -156,7 +156,7 @@ test('materialized configuration refuses missing or obsolete launch invariants',
     assert.equal(missingVersionResult.ok, false);
     assert.equal(missingVersionResult.errors[0]?.code, 'materialized_config_contract_version_mismatch');
 
-    const missingManifest = { mcpServers: { fixture: { command: 'node', args: f.args.filter((arg) => arg !== '--artifact-manifest' && arg !== f.manifestPath) } } };
+    const missingManifest = { mcpServers: { fixture: { command: process.execPath, args: f.args.filter((arg) => arg !== '--artifact-manifest' && arg !== f.manifestPath) } } };
     const missingManifestResult = validateMaterializedConfiguration({
       structured: missingManifest,
       artifactManifestPath: f.manifestPath,
@@ -167,7 +167,7 @@ test('materialized configuration refuses missing or obsolete launch invariants',
     assert.equal(missingManifestResult.ok, false);
     assert.equal(missingManifestResult.errors.some((error) => error.code === 'materialized_config_missing_artifact_manifest'), true);
 
-    const missingSidecar = { mcpServers: { fixture: { command: 'node', args: f.args.filter((arg) => arg !== '--materialization-sidecar' && arg !== f.sidecarPath) } } };
+    const missingSidecar = { mcpServers: { fixture: { command: process.execPath, args: f.args.filter((arg) => arg !== '--materialization-sidecar' && arg !== f.sidecarPath) } } };
     const missingSidecarResult = validateMaterializedConfiguration({
       structured: missingSidecar,
       artifactManifestPath: f.manifestPath,
@@ -177,6 +177,31 @@ test('materialized configuration refuses missing or obsolete launch invariants',
     });
     assert.equal(missingSidecarResult.ok, false);
     assert.equal(missingSidecarResult.errors.some((error) => error.code === 'materialized_config_missing_generation_sidecar'), true);
+
+    const relativeExecutables = {
+      mcpServers: {
+        fixture: {
+          command: 'node',
+          args: f.args.map((arg) => arg === process.execPath ? 'node' : arg),
+        },
+      },
+    };
+    const relativeExecutableResult = validateMaterializedConfiguration({
+      structured: relativeExecutables,
+      artifactManifestPath: f.manifestPath,
+      runtimeProxyEntrypoint: f.proxyPath,
+      expectedSidecarPath: f.sidecarPath,
+      requireSidecar: true,
+    });
+    assert.equal(relativeExecutableResult.ok, false);
+    assert.deepEqual(
+      relativeExecutableResult.errors.map((error) => error.code).filter((code) => code.endsWith('_not_absolute')).sort(),
+      [
+        'materialized_config_child_command_not_absolute',
+        'materialized_config_proxy_command_not_absolute',
+        'materialized_config_registrar_command_not_absolute',
+      ],
+    );
 
     const nativeArgs = [...f.args];
     nativeArgs.splice(nativeArgs.indexOf('--'), 0, '--child-invocation-kind', 'native_entrypoint');
@@ -219,13 +244,13 @@ test('Codex project trust updates do not invalidate the managed MCP projection',
     'trust_level = "trusted"',
     '',
     '[mcp_servers.fixture]',
-    'command = "node"',
+    `command = ${JSON.stringify(process.execPath)}`,
     `args = ${JSON.stringify(args)}`,
     '',
   ].join('\n');
   try {
     const validation = validateMaterializedConfiguration({
-      structured: { mcpServers: { fixture: { command: 'node', args } } },
+      structured: { mcpServers: { fixture: { command: process.execPath, args } } },
       artifactManifestPath: f.manifestPath,
       runtimeProxyEntrypoint: f.proxyPath,
       expectedSidecarPath: sidecarPath,
@@ -284,7 +309,7 @@ test('Codex project trust updates do not invalidate the managed MCP projection',
       { ok: true, generation_fingerprint: generation.generation_fingerprint },
     );
 
-    writeFileSync(configPath, codexUserSettings.replace('command = "node"', 'command = "pnpm"'), 'utf8');
+    writeFileSync(configPath, codexUserSettings.replace(`command = ${JSON.stringify(process.execPath)}`, 'command = "pnpm"'), 'utf8');
     assert.equal(preflightMaterializationGeneration({
       sidecarPath,
       manifestPath: f.manifestPath,
