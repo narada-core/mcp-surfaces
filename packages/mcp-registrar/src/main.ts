@@ -1972,6 +1972,7 @@ type RuntimeMaterializationPlanServer = {
   uses_runtime_proxy: boolean;
   runtime_proxy_implementation?: RuntimeProxyImplementation;
   child_invocation_kind?: 'entrypoint' | 'native_applet' | 'native_entrypoint';
+  child_applet?: string;
   launch: { command: string; args: string[] };
 };
 
@@ -2016,6 +2017,7 @@ function compileCarrierRuntimeMaterializationPlan(
       uses_runtime_proxy: launch.uses_runtime_proxy,
       ...(launch.runtime_proxy_implementation ? { runtime_proxy_implementation: launch.runtime_proxy_implementation } : {}),
       ...(launch.child_invocation_kind ? { child_invocation_kind: launch.child_invocation_kind } : {}),
+      ...(launch.child_applet ? { child_applet: launch.child_applet } : {}),
       launch: { command: launch.command, args: [...launch.args] },
     };
   });

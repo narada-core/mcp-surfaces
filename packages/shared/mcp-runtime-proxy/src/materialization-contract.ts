@@ -212,6 +212,16 @@ export function validateMaterializedConfiguration(input: {
     if (childInvocationKind !== 'entrypoint' && childInvocationKind !== 'native_applet' && childInvocationKind !== 'native_entrypoint') {
       errors.push({ code: 'materialized_config_child_invocation_kind_invalid', server_key: serverKey, detail: { child_invocation_kind: childInvocationKind } });
     }
+    if ((childInvocationKind === 'native_entrypoint' || childInvocationKind === 'native_applet')
+      && childCommand
+      && childEntrypoint
+      && !pathEquals(childCommand, childEntrypoint)) {
+      errors.push({
+        code: 'materialized_config_native_child_entrypoint_mismatch',
+        server_key: serverKey,
+        detail: { child_command: childCommand, child_entrypoint: childEntrypoint, child_invocation_kind: childInvocationKind },
+      });
+    }
     if (childInvocationKind === 'native_applet' && !childApplet) {
       errors.push({ code: 'materialized_config_child_applet_missing', server_key: serverKey });
     }

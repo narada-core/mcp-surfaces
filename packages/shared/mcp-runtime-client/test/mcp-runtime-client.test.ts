@@ -1,12 +1,24 @@
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SiteFabricClient, defaultMcpLoaderEntrypoint } from '../src/index.js';
+import { SiteFabricClient, defaultMcpLoaderEntrypoint, defaultMcpLoaderLaunch, defaultMcpLoaderNativeEntrypoint } from '../src/index.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fakeLoader = resolve(here, 'fake-loader.js');
 
 assert.match(defaultMcpLoaderEntrypoint().replace(/\\/g, '/'), /packages\/mcp-loader-mcp\/dist\/src\/main\.js$/);
+const defaultLaunch = defaultMcpLoaderLaunch();
+const profile = process.env.NARADA_RUNTIME_PROFILE;
+if (existsSync(defaultMcpLoaderNativeEntrypoint()) && profile !== 'bun' && profile !== 'node-compat') {
+  assert.equal(defaultLaunch.implementation, 'native');
+  assert.equal(defaultLaunch.executable.replace(/\\/g, '/'), defaultMcpLoaderNativeEntrypoint().replace(/\\/g, '/'));
+  assert.deepEqual(defaultLaunch.args, []);
+} else {
+  assert.equal(defaultLaunch.implementation, 'javascript');
+  assert.equal(defaultLaunch.executable, process.execPath);
+  assert.deepEqual(defaultLaunch.args, [defaultMcpLoaderEntrypoint()]);
+}
 
 const client = await SiteFabricClient.open({
   siteRoot: 'D:\\fake-site',

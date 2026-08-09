@@ -9,6 +9,10 @@ export {
 export {
   SiteFabricClient,
   defaultMcpLoaderEntrypoint,
+  defaultMcpLoaderLaunch,
+  defaultMcpLoaderNativeEntrypoint,
+  type McpLoaderImplementation,
+  type McpLoaderLaunch,
   type SiteFabricClientOptions,
   type SiteFabricToolCallOptions,
 } from './site-fabric-client.js';

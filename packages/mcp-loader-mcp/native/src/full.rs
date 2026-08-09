@@ -125,6 +125,7 @@ struct Connection {
     surface_id: String,
     runtime_kind: Option<String>,
     runtime_requirements: Vec<String>,
+    runtime_command: String,
     entrypoint: String,
     args: Vec<String>,
     child_invocation_kind: String,
@@ -533,11 +534,23 @@ impl ChildSession {
             Err(_) => return json!({"status":"termination_lock_failed"}),
         };
         if let Ok(Some(status)) = child.try_wait() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::ExitStatusExt;
+                return json!({"status":"already_exited","exit_code":status.code(),"signal":status.signal(),"forced":false});
+            }
+            #[cfg(not(unix))]
             return json!({"status":"already_exited","exit_code":status.code(),"signal":Value::Null,"forced":false});
         }
         let killed = child.kill().is_ok();
         self.killed.store(killed, Ordering::SeqCst);
         let waited = child.wait().ok();
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            return json!({"status":if killed {"terminated"} else {"termination_failed"},"exit_code":waited.as_ref().and_then(|status| status.code()),"signal":waited.as_ref().and_then(|status| status.signal()),"forced":killed});
+        }
+        #[cfg(not(unix))]
         json!({"status":if killed {"terminated"} else {"termination_failed"},"exit_code":waited.as_ref().and_then(|status| status.code()),"signal":Value::Null,"forced":killed})
     }
 
@@ -553,6 +566,19 @@ impl ChildSession {
             .ok()
             .and_then(|mut child| child.try_wait().ok().flatten())
             .and_then(|status| status.code())
+    }
+    #[cfg(unix)]
+    fn signal_code(&self) -> Option<i32> {
+        use std::os::unix::process::ExitStatusExt;
+        self.child
+            .lock()
+            .ok()
+            .and_then(|mut child| child.try_wait().ok().flatten())
+            .and_then(|status| status.signal())
+    }
+    #[cfg(not(unix))]
+    fn signal_code(&self) -> Option<i32> {
+        None
     }
     fn killed(&self) -> bool {
         self.killed.load(Ordering::SeqCst)
@@ -2137,9 +2163,9 @@ fn connection_status(connection: &Connection, state: &LoaderState) -> Value {
         "runtime_kind":connection.runtime_kind,"runtime_requirements":connection.runtime_requirements,
         "lifecycle":connection.lifecycle,
         "runtime_lifecycle":runtime_lifecycle(Some(&connection.connection_id),Some(&connection.lifecycle)),
-        "runtime_freshness":runtime_freshness(state),"entrypoint":connection.entrypoint,"args":connection.args,"child_invocation_kind":connection.child_invocation_kind,
+        "runtime_freshness":runtime_freshness(state),"runtime_command":connection.runtime_command,"entrypoint":connection.entrypoint,"args":connection.args,"child_invocation_kind":connection.child_invocation_kind,
         "status":if live {"live"} else {"closed"},"detached":connection.detached,"initialized":connection.initialized,
-        "pid":connection.session.pid,"exit_code":connection.session.exit_code(),"signal_code":Value::Null,
+        "pid":connection.session.pid,"exit_code":connection.session.exit_code(),"signal_code":connection.session.signal_code(),
         "killed":connection.session.killed(),"pending_count":connection.session.pending.lock().map(|pending| pending.len()).unwrap_or(0),
         "attached_at":ms_to_iso(connection.attached_ms),"detached_at":connection.detached_ms.map(ms_to_iso),
         "stderr_tail":connection.session.stderr_tail(),"server_info":connection.server_info,
@@ -2318,7 +2344,12 @@ fn attach_surface(arguments: &JsonObject, state: &mut LoaderState) -> Result<Val
                     )
                 })?;
                 let child_invocation_kind = extract_proxy_child_invocation_kind(&raw_args);
-                let child_args = extract_proxy_child_args(&raw_args);
+                let child_args = extract_proxy_child_args(&raw_args).ok_or_else(|| {
+                    Diagnostic::new(
+                        "surface_command_unsupported",
+                        format!("surface_command_unsupported:runtime-proxy:{}", command),
+                    )
+                })?;
                 match child_invocation_kind.as_str() {
                     "entrypoint" => (
                         normalize_path(&child_entrypoint),
@@ -2548,7 +2579,7 @@ fn extract_proxy_child_applet(args: &[String]) -> Option<String> {
         .cloned()
 }
 
-fn extract_proxy_child_args(args: &[String]) -> Vec<String> {
+fn extract_proxy_child_args(args: &[String]) -> Option<Vec<String>> {
     let mut child_args = Vec::new();
     let mut found_separator = false;
     for arg in args {
@@ -2558,7 +2589,7 @@ fn extract_proxy_child_args(args: &[String]) -> Vec<String> {
             found_separator = true;
         }
     }
-    child_args
+    found_separator.then_some(child_args)
 }
 
 fn resolve_child_command(command: &str) -> String {
@@ -2624,7 +2655,7 @@ fn open_connection(
                 "entrypoint":entrypoint,
                 "args":resolved_args,
                 "exit_code":session.exit_code(),
-                "signal_code":Value::Null,
+                "signal_code":session.signal_code(),
                 "stderr_tail":session.stderr_tail(),
                 "runtime_lifecycle":runtime_lifecycle(Some(&connection_id),Some(&lifecycle))
             })));
@@ -2645,7 +2676,7 @@ fn open_connection(
                     "entrypoint":entrypoint,
                     "args":resolved_args,
                     "exit_code":session.exit_code(),
-                    "signal_code":Value::Null,
+                    "signal_code":session.signal_code(),
                     "stderr_tail":session.stderr_tail(),
                     "runtime_lifecycle":runtime_lifecycle(Some(&connection_id),Some(&lifecycle))
                 })));
@@ -2680,6 +2711,7 @@ fn open_connection(
         surface_id,
         runtime_kind,
         runtime_requirements,
+        runtime_command: command,
         entrypoint,
         args: resolved_args,
         child_invocation_kind,
@@ -2781,7 +2813,7 @@ fn attached_response(connection: &Connection, state: &LoaderState) -> Value {
         "generation_id":connection.generation_id,"site_root":connection.site_root,"surface_id":connection.surface_id,
         "runtime_kind":connection.runtime_kind,"runtime_requirements":connection.runtime_requirements,
         "runtime_lifecycle":runtime_lifecycle(Some(&connection.connection_id),Some(&connection.lifecycle)),
-        "runtime_freshness":runtime_freshness(state),"entrypoint":connection.entrypoint,"args":connection.args,"child_invocation_kind":connection.child_invocation_kind,
+        "runtime_freshness":runtime_freshness(state),"runtime_command":connection.runtime_command,"entrypoint":connection.entrypoint,"args":connection.args,"child_invocation_kind":connection.child_invocation_kind,
         "server_info":connection.server_info,"tools":connection.tools,"descriptor_digest":connection.descriptor_digest,
         "tool_contract_digest":connection.tool_contract_digest,"declared_tool_contract_digest":connection.declared_tool_contract_digest,
         "lifecycle":connection.lifecycle,"ownership":connection_ownership(connection)
@@ -3439,7 +3471,7 @@ fn typed_result_summary(result: &Value) -> Value {
 fn child_runtime_diagnostic(connection: &Connection, extra: Value) -> Value {
     let mut result = json!({
         "connection_id":connection.connection_id,"surface_id":connection.surface_id,"entrypoint":connection.entrypoint,
-        "args":connection.args,"exit_code":connection.session.exit_code(),"signal_code":Value::Null,
+        "args":connection.args,"exit_code":connection.session.exit_code(),"signal_code":connection.session.signal_code(),
         "stderr_tail":connection.session.stderr_tail(),
         "runtime_lifecycle":runtime_lifecycle(Some(&connection.connection_id),Some(&connection.lifecycle))
     });
@@ -4278,5 +4310,19 @@ fn call_tool(name: &str, arguments: Value, state: &mut LoaderState) -> Result<Va
             "unknown_tool",
             format!("unknown_tool:{}", name),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_proxy_child_args;
+
+    #[test]
+    fn proxy_child_args_require_separator() {
+        assert_eq!(extract_proxy_child_args(&["proxy".to_string()]), None);
+        assert_eq!(
+            extract_proxy_child_args(&["proxy".to_string(), "--".to_string(), "--site-root".to_string()]),
+            Some(vec!["--site-root".to_string()]),
+        );
     }
 }

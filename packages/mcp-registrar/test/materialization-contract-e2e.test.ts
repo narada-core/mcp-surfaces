@@ -462,6 +462,14 @@ test('runtime profiles compile carrier plans with matrix-selected engines', asyn
         assert.ok(row, `${profile}:${surfaceId}:missing`);
         assert.equal(row.runtime_engine_kind, runtimeEngineKind, `${profile}:${surfaceId}:engine`);
       }
+      if (profile === 'native') {
+        const nativeFilesystem = (plan.servers as JsonRecord[]).find((candidate) => candidate.surface_id === 'local-filesystem');
+        const nativeLoader = (plan.servers as JsonRecord[]).find((candidate) => candidate.surface_id === 'mcp-loader');
+        assert.equal(nativeFilesystem?.child_invocation_kind, 'native_applet');
+        assert.equal(nativeFilesystem?.child_applet, 'filesystem');
+        assert.equal(nativeLoader?.child_invocation_kind, 'native_entrypoint');
+        assert.equal(nativeLoader?.child_applet, undefined);
+      }
     }
   } finally {
     rmSync(root, { recursive: true, force: true });

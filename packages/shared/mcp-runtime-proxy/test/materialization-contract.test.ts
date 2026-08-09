@@ -178,6 +178,26 @@ test('materialized configuration refuses missing or obsolete launch invariants',
     assert.equal(missingSidecarResult.ok, false);
     assert.equal(missingSidecarResult.errors.some((error) => error.code === 'materialized_config_missing_generation_sidecar'), true);
 
+    const nativeArgs = [...f.args];
+    nativeArgs.splice(nativeArgs.indexOf('--'), 0, '--child-invocation-kind', 'native_entrypoint');
+    const nativeEntrypointMismatch = {
+      mcpServers: {
+        fixture: {
+          command: process.execPath,
+          args: nativeArgs,
+        },
+      },
+    };
+    const nativeMismatchResult = validateMaterializedConfiguration({
+      structured: nativeEntrypointMismatch,
+      artifactManifestPath: f.manifestPath,
+      runtimeProxyEntrypoint: f.proxyPath,
+      expectedSidecarPath: f.sidecarPath,
+      requireSidecar: true,
+    });
+    assert.equal(nativeMismatchResult.ok, false);
+    assert.equal(nativeMismatchResult.errors.some((error) => error.code === 'materialized_config_native_child_entrypoint_mismatch'), true);
+
     assert.equal(preflightMaterializationGeneration({
       sidecarPath: join(f.root, 'missing-generation.json'),
       manifestPath: f.manifestPath,

@@ -110,6 +110,13 @@ clearly when the artifact is unavailable. Both modes use runtime contract v4 and
 guesses which JavaScript runtime should launch a domain surface or recovery
 registrar.
 
+When a native carrier is consumed by the Rust mcp-loader, the loader unwraps
+native child records and supervises the native child directly. The proxy's
+preflight therefore applies at the carrier boundary; it is not a second
+supervisor for that attached child. The native materialization contract keeps
+`--entrypoint` as a validated identity equal to `--child-command`, and records
+`--child-applet` when the child is a multicall applet.
+
 The native executable is a multicall host. Its filesystem applet provides the
 read-only local-filesystem MCP surface: bounded reads, stat, glob, grep,
 inventory, metrics, doctor, and patch-outcome readback. Read-mode

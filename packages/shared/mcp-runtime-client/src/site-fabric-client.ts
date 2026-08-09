@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { McpProcessClient, isRecord, type JsonRecord } from './process-client.js';
@@ -6,6 +7,7 @@ export interface SiteFabricClientOptions {
   siteRoot: string;
   loaderEntrypoint?: string;
   nodeExecutable?: string;
+  loaderImplementation?: McpLoaderImplementation;
   allowedSurfaceIds?: readonly string[];
   requestTimeoutMs?: number;
   closeTimeoutMs?: number;
@@ -15,6 +17,14 @@ export interface SiteFabricClientOptions {
   materializedResultPageChars?: number;
   env?: NodeJS.ProcessEnv;
 }
+
+export type McpLoaderImplementation = 'native' | 'javascript';
+
+export type McpLoaderLaunch = {
+  executable: string;
+  args: string[];
+  implementation: McpLoaderImplementation;
+};
 
 function isToolResultEnvelope(value: JsonRecord): boolean {
   return value.isError === true || isRecord(value.structuredContent) || Array.isArray(value.content);
@@ -85,15 +95,16 @@ export class SiteFabricClient {
       MAX_MATERIALIZED_RESULT_PAGE_CHARS,
       'materializedResultPageChars',
     );
+    const launch = resolveLoaderLaunch(options);
     const args = [
-      options.loaderEntrypoint ?? defaultMcpLoaderEntrypoint(),
+      ...launch.args,
       '--allowed-site-root', siteRoot,
       '--max-connections', String(maxConnections),
     ];
     for (const surfaceId of allowedSurfaceIds ?? []) args.push('--allowed-surface-id', surfaceId);
 
     const client = await McpProcessClient.start({
-      executable: options.nodeExecutable ?? process.execPath,
+      executable: launch.executable,
       args,
       env: { ...process.env, ...options.env, NARADA_SITE_ROOT: siteRoot },
       requestTimeoutMs: options.requestTimeoutMs,
@@ -288,10 +299,53 @@ export class SiteFabricClient {
 }
 
 export function defaultMcpLoaderEntrypoint(): string {
+  return resolveMcpLoaderPackagePath('dist', 'src', 'main.js');
+}
+
+export function defaultMcpLoaderNativeEntrypoint(): string {
+  return resolveMcpLoaderPackagePath(
+    'dist',
+    'native',
+    process.platform === 'win32' ? 'narada-mcp-loader.exe' : 'narada-mcp-loader',
+  );
+}
+
+export function defaultMcpLoaderLaunch(implementation?: McpLoaderImplementation): McpLoaderLaunch {
+  const resolvedImplementation = implementation ?? defaultMcpLoaderImplementation();
+  if (resolvedImplementation === 'native') {
+    const executable = defaultMcpLoaderNativeEntrypoint();
+    if (!existsSync(executable)) throw new Error(`mcp_runtime_client_native_loader_missing:${executable}`);
+    return { executable, args: [], implementation: 'native' };
+  }
+  return { executable: process.execPath, args: [defaultMcpLoaderEntrypoint()], implementation: 'javascript' };
+}
+
+function resolveLoaderLaunch(options: SiteFabricClientOptions): McpLoaderLaunch {
+  if (options.loaderEntrypoint || options.nodeExecutable) {
+    if (options.loaderImplementation === 'native') throw new Error('mcp_runtime_client_native_loader_conflicts_with_legacy_launch_options');
+    return {
+      executable: options.nodeExecutable ?? process.execPath,
+      args: [options.loaderEntrypoint ?? defaultMcpLoaderEntrypoint()],
+      implementation: 'javascript',
+    };
+  }
+  return defaultMcpLoaderLaunch(options.loaderImplementation);
+}
+
+function defaultMcpLoaderImplementation(): McpLoaderImplementation {
+  const profile = process.env.NARADA_RUNTIME_PROFILE?.trim();
+  if (profile === 'bun' || profile === 'node-compat') return 'javascript';
+  const nativeEntrypoint = defaultMcpLoaderNativeEntrypoint();
+  if (existsSync(nativeEntrypoint)) return 'native';
+  if (profile === 'native') throw new Error(`mcp_runtime_client_native_loader_missing:${nativeEntrypoint}`);
+  return 'javascript';
+}
+
+function resolveMcpLoaderPackagePath(...segments: string[]): string {
   const sourceDirectory = dirname(fileURLToPath(import.meta.url));
   const parent = resolve(sourceDirectory, '..');
   const packageRoot = parent.endsWith(`${separator()}dist`) ? resolve(parent, '..') : parent;
-  return resolve(packageRoot, '..', '..', 'mcp-loader-mcp', 'dist', 'src', 'main.js');
+  return resolve(packageRoot, '..', '..', 'mcp-loader-mcp', ...segments);
 }
 
 function unwrapOuterToolResult(result: JsonRecord): JsonRecord {
