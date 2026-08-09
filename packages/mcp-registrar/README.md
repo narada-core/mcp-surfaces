@@ -6,6 +6,10 @@ MCP surface registrar for binding/unbinding surfaces across Narada sites and car
 
 Manages the surface-to-site-to-carrier weave so carrier and Site MCP config is generated rather than hand-maintained.
 
+The default runtime profile is `native`: task-lifecycle and work-lifecycle
+bindings resolve to their Rust-native adapters. Use the explicit `bun` or
+`node-compat` profile only for compatibility or rollback.
+
 ## V2 native catalog
 Every registered surface resolves from a package-owned `SurfaceDescriptorV2`.
 

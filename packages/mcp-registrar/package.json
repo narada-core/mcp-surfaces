@@ -29,7 +29,8 @@
     "test:kimi-contract:run:node": "node dist/test/moonshot-schema.test.js && node dist/test/kimi-carrier-contract.test.js",
     "test:kimi-contract": "pnpm -w build && pnpm run test:kimi-contract:run",
     "test:kimi-contract:node": "pnpm -w build && pnpm run test:kimi-contract:run:node",
-    "test:kimi-live": "pnpm -w build && node dist/test/kimi-carrier-live-e2e.test.js"
+    "test:kimi-live": "pnpm -w build && node dist/test/kimi-carrier-live-e2e.test.js",
+    "test:default-lifecycle": "pnpm build && node scripts/assert-native-lifecycle-default.mjs"
   },
   "dependencies": {
     "@narada-core/sqlite": "workspace:*",
