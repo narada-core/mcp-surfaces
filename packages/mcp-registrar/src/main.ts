@@ -300,6 +300,7 @@ function componentKindForSurface(surfaceId: string): string {
   if (surfaceId === 'work-lifecycle' || surfaceId === 'work-lifecycle-mcp.local') return 'work-lifecycle-mcp';
   if (surfaceId === 'catalog-observation' || surfaceId === 'catalog-observation-mcp.local') return 'catalog-observation-mcp';
   if (surfaceId === 'operator-routing' || surfaceId === 'operator-routing-mcp.local') return 'operator-routing-mcp';
+  if (surfaceId === 'site-inbox' || surfaceId === 'site-inbox-mcp.local') return 'site-inbox-mcp';
   return 'mcp-javascript-surface';
 }
 
@@ -1883,7 +1884,7 @@ function carrierLaunchCommand(
       && surfaceId === 'local-filesystem');
   const useNativeStructuredCommandApplet = selectedEngine === 'rust' && componentKind === 'structured-command-mcp';
   const useNativeLifecycle = selectedEngine === 'rust' && (componentKind === 'task-lifecycle-mcp' || componentKind === 'work-lifecycle-mcp');
-  const useNativeSharedSurface = selectedEngine === 'rust' && (surfaceId === 'catalog-observation' || surfaceId === 'operator-routing');
+  const useNativeSharedSurface = selectedEngine === 'rust' && (surfaceId === 'catalog-observation' || surfaceId === 'operator-routing' || surfaceId === 'site-inbox');
   const nativeApplet = useNativeFilesystemApplet ? 'filesystem' : useNativeStructuredCommandApplet ? 'structured-command' : null;
   const nativeSharedSurfaceEntrypoint = MCP_NATIVE_SHARED_SURFACES_ENTRYPOINT;
   const nativeLifecycleEntrypoint = componentKind === 'task-lifecycle-mcp' ? MCP_NATIVE_TASK_LIFECYCLE_ENTRYPOINT : MCP_NATIVE_WORK_LIFECYCLE_ENTRYPOINT;

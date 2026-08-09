@@ -7,6 +7,8 @@ use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+mod site_inbox;
+
 const LEGACY_PROTOCOL_VERSION: &str = "2024-11-05";
 const MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
 
@@ -125,6 +127,7 @@ fn handle_request(request: &Value, options: &Options) -> Option<Value> {
             }), options)),
             "tools/call" => call_tool(&options.surface_id, &params, options)
                 .map(|value| modern_result(value, options)),
+            method if options.surface_id == "site-inbox" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => site_inbox::auxiliary(method, &params).map(|value| modern_result(value, options)),
             "initialize" => Err(diagnostic(
                 "initialize_removed",
                 "The 2026-07-28 protocol has no initialize handshake.",
@@ -138,6 +141,7 @@ fn handle_request(request: &Value, options: &Options) -> Option<Value> {
         })
     } else {
         match method {
+            method if options.surface_id == "site-inbox" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => site_inbox::auxiliary(method, &params),
             "initialize" => Ok(initialize_result(options)),
             "tools/list" => Ok(json!({ "tools": list_tools(&options.surface_id) })),
             "tools/call" => call_tool(&options.surface_id, &params, options),
@@ -190,18 +194,26 @@ fn validate_modern_request(params: &Map<String, Value>) -> Result<(), Value> {
     Ok(())
 }
 
+fn server_name(options: &Options) -> String {
+    if options.surface_id == "site-inbox" { "narada-site-inbox-mcp".to_string() } else { format!("{}-mcp", options.surface_id) }
+}
+
+fn capabilities(surface_id: &str) -> Value {
+    if surface_id == "site-inbox" { json!({"tools":{},"prompts":{},"completions":{},"logging":{}}) } else { json!({"tools":{}}) }
+}
+
 fn initialize_result(options: &Options) -> Value {
     json!({
         "protocolVersion": LEGACY_PROTOCOL_VERSION,
-        "capabilities": { "tools": {} },
-        "serverInfo": { "name": format!("{}-mcp", options.surface_id), "version": "0.1.0" }
+        "capabilities": capabilities(&options.surface_id),
+        "serverInfo": { "name": server_name(options), "version": "0.1.0" }
     })
 }
 
 fn server_discover_result(options: &Options) -> Value {
     modern_result(json!({
         "supportedVersions": [MODERN_PROTOCOL_VERSION, LEGACY_PROTOCOL_VERSION],
-        "capabilities": { "tools": {} },
+        "capabilities": capabilities(&options.surface_id),
         "ttlMs": 3_600_000,
         "cacheScope": "public"
     }), options)
@@ -216,13 +228,14 @@ fn modern_result(value: Value, options: &Options) -> Value {
         .unwrap_or_default();
     meta.insert(
         "io.modelcontextprotocol/serverInfo".to_string(),
-        json!({ "name": format!("{}-mcp", options.surface_id), "version": "0.1.0" }),
+        json!({ "name": server_name(options), "version": "0.1.0" }),
     );
     result.insert("_meta".to_string(), Value::Object(meta));
     Value::Object(result)
 }
 fn list_tools(surface_id: &str) -> Vec<Value> {
     match surface_id {
+        "site-inbox" => site_inbox::list_tools(),
         "catalog-observation" => vec![
             guidance_tool("catalog-observation"),
             tool("catalog_observation_observe", "Observe a provider model catalog through the Narada-owned observation port.", json!({
@@ -289,6 +302,7 @@ fn call_tool(surface_id: &str, params: &Map<String, Value>, options: &Options) -
         ("operator-routing", "operator_routing_guidance") => operator_guidance(&args),
         ("operator-routing", "operator_route_doctor") => operator_route_doctor(options),
         ("operator-routing", "operator_route_request") => operator_route_request(&args, options),
+        ("site-inbox", name) => site_inbox::call_tool(name, &args, &options.site_root),
         (_, unknown) => return Err(diagnostic("unknown_tool", &format!("unknown_tool:{unknown}"), json!({ "tool_name": unknown }))),
     }?;
     let is_error = result.get("status").and_then(Value::as_str) == Some("unavailable");
