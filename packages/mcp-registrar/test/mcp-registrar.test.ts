@@ -31,6 +31,7 @@ const expectedUserSiteRoot = resolve(
 ).replace(/\\/g, '/');
 const nativeRuntimeArtifactAvailable = process.platform === 'win32'
   && resolveNativeArtifact(join(workspaceRoot, 'packages', 'shared', 'mcp-runtime-proxy'), 'narada-mcp-runtime.exe') !== null;
+const nativeSharedSurfaceArtifactAvailable = process.platform === 'win32' && existsSync(workspacePath('packages', 'shared', 'mcp-surfaces-native', 'dist', 'native', 'narada-mcp-surfaces.exe'));
 assert.equal(
   defaultRuntimeProxyImplementation(process.platform, nativeRuntimeArtifactAvailable),
   nativeRuntimeArtifactAvailable ? 'native' : 'bun',
@@ -1146,6 +1147,32 @@ try {
     assert.equal(structuredServer.args[structuredServer.args.indexOf('--child-invocation-kind') + 1], 'native_applet');
     assert.equal(structuredServer.args[structuredServer.args.indexOf('--child-applet') + 1], 'structured-command');
     assert.match(structuredServer.command, /narada-mcp-runtime\.exe$/i);
+  }
+  if (nativeRuntimeArtifactAvailable && nativeSharedSurfaceArtifactAvailable) {
+    for (const [surfaceId, args] of [
+      ['catalog-observation', []],
+      ['operator-routing', ['--site-root', '{site_root}']],
+    ] as const) {
+      const sharedBindConfig: any = buildSiteBindConfig(
+        { site_id: 'shared-' + surfaceId, root, config_path: join(root, 'site.json'), surfaces: [] },
+        {
+          id: surfaceId,
+          package: surfaceId + '-mcp',
+          entrypoint: 'C:/workspace/mcp-surfaces/packages/' + surfaceId + '-mcp/dist/src/main.js',
+          kind: 'mcp_surface',
+          args: [...args],
+          tools: [],
+        },
+      );
+      const sharedServer: any = Object.values(sharedBindConfig.config.mcpServers as Record<string, any>).find((candidate: any) => candidate.surface_id === surfaceId);
+      assert.ok(sharedServer);
+      assert.equal(sharedServer.args[sharedServer.args.indexOf('--child-invocation-kind') + 1], 'native_entrypoint');
+      assert.match(sharedServer.command, /narada-mcp-runtime\.exe$/i);
+      assert.match(sharedServer.args[sharedServer.args.indexOf('--child-command') + 1], /narada-mcp-surfaces\.exe$/i);
+      const separator = sharedServer.args.indexOf('--');
+      assert.equal(sharedServer.args[separator + 1], '--surface-id');
+      assert.equal(sharedServer.args[separator + 2], surfaceId);
+    }
   }
   assert.equal(schedServer.narada_scope.bound_into_site, 'narada-sonar');
 
