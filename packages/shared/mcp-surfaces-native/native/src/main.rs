@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 mod site_inbox;
 mod simple_surfaces;
+mod runtime_introspection;
 
 const LEGACY_PROTOCOL_VERSION: &str = "2024-11-05";
 const MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
@@ -201,6 +202,7 @@ fn server_name(options: &Options) -> String {
         "site-lifecycle" => "site-lifecycle-mcp".to_string(),
         "site-registry" => "site-registry-mcp".to_string(),
         "project-state" => "project-state-mcp".to_string(),
+        "runtime-introspection" => "runtime-introspection-mcp".to_string(),
         _ => format!("{}-mcp", options.surface_id),
     }
 }
@@ -275,6 +277,7 @@ fn list_tools(surface_id: &str) -> Vec<Value> {
             }), false),
         ],
         "site-lifecycle" | "site-registry" | "project-state" => simple_surfaces::list_tools(surface_id),
+        "runtime-introspection" => runtime_introspection::list_tools(),
         _ => Vec::new(),
     }
 }
@@ -314,6 +317,7 @@ fn call_tool(surface_id: &str, params: &Map<String, Value>, options: &Options) -
         ("site-lifecycle", name) | ("site-registry", name) | ("project-state", name) => {
             simple_surfaces::call_tool(surface_id, name, &args, &options.site_root)
         }
+        ("runtime-introspection", name) => runtime_introspection::call_tool(name, &args, &options.site_root),
         (_, unknown) => return Err(diagnostic("unknown_tool", &format!("unknown_tool:{unknown}"), json!({ "tool_name": unknown }))),
     }?;
     let is_error = result.get("status").and_then(Value::as_str) == Some("unavailable");
