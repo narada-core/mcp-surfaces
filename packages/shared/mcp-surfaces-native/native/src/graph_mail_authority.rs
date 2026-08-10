@@ -37,6 +37,7 @@ pub fn supports(name: &str) -> bool {
             | "graph_mail_attachment_list"
             | "graph_mail_attachment_get"
             | "graph_mail_attachment_add"
+            | "graph_mail_attachment_upload_session_create"
             | "graph_mail_attachment_delete"
             | "graph_mail_draft_create"
             | "graph_mail_reply_draft_create"
@@ -61,6 +62,7 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<V
         "graph_mail_attachment_list" => attachment_list(&policy, args),
         "graph_mail_attachment_get" => attachment_get(&policy, args),
         "graph_mail_attachment_add" => attachment_add(&policy, args),
+        "graph_mail_attachment_upload_session_create" => attachment_upload_session_create(&policy, args),
         "graph_mail_attachment_delete" => attachment_delete(&policy, args),
         "graph_mail_draft_create" => draft_create(&policy, args, root),
         "graph_mail_reply_draft_create" => derived_draft_create(&policy, args, root, "createReply"),
@@ -378,6 +380,45 @@ fn attachment_delete(policy: &Policy, args: &Map<String, Value>) -> Result<Value
         "schema":"narada.graph_mail_mcp.attachment_delete.v1",
         "status":"deleted",
         "result":result
+    }))
+}
+
+fn attachment_upload_session_create(
+    policy: &Policy,
+    args: &Map<String, Value>,
+) -> Result<Value, Value> {
+    let message_id = attachment_message_id(args)?;
+    let name = required_string(args, "name")?;
+    let size = required_positive_number(args, "size")?;
+    let mut attachment_item = Map::new();
+    attachment_item.insert("attachmentType".to_string(), json!("file"));
+    attachment_item.insert("name".to_string(), json!(name));
+    attachment_item.insert("size".to_string(), json!(size));
+    if let Some(value) = optional_string(args, "content_type") {
+        attachment_item.insert("contentType".to_string(), json!(value));
+    }
+    if let Some(value) = args.get("is_inline").and_then(Value::as_bool) {
+        attachment_item.insert("isInline".to_string(), json!(value));
+    }
+    if let Some(value) = optional_string(args, "content_id") {
+        attachment_item.insert("contentId".to_string(), json!(value));
+    }
+    let body = json!({"AttachmentItem":Value::Object(attachment_item)});
+    let suffix = format!(
+        "messages/{}/attachments/createUploadSession",
+        encode_component(&message_id)
+    );
+    let result = policy.adapter.request(
+        "POST",
+        mailbox(args),
+        &suffix,
+        &Map::new(),
+        Some(&body),
+    )?;
+    Ok(json!({
+        "schema":"narada.graph_mail_mcp.attachment_upload_session.v1",
+        "status":"created",
+        "upload_session":result
     }))
 }
 
@@ -1003,6 +1044,14 @@ fn mailbox<'a>(args: &'a Map<String, Value>) -> Option<&'a str> { args.get("mail
 fn mailbox_value(args: &Map<String, Value>) -> Value { mailbox(args).map(|value| json!(value)).unwrap_or_else(|| json!("me")) }
 fn optional_string(args: &Map<String, Value>, key: &str) -> Option<String> { args.get(key).and_then(Value::as_str).map(str::trim).filter(|value| !value.is_empty()).map(ToOwned::to_owned) }
 fn required_string(args: &Map<String, Value>, key: &str) -> Result<String, Value> { optional_string(args, key).ok_or_else(|| invalid(key)) }
+fn required_positive_number(args: &Map<String, Value>, key: &str) -> Result<u64, Value> {
+    let value = args
+        .get(key)
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0)
+        .ok_or_else(|| invalid(key))?;
+    Ok(value)
+}
 fn bounded_top(value: Option<&Value>, fallback: u64) -> u64 { value.and_then(Value::as_u64).unwrap_or(fallback).clamp(1, 100) }
 
 fn encode_component(value: &str) -> String {
@@ -1028,6 +1077,7 @@ mod tests {
     fn operation_support_is_limited_to_ported_provider_slice() {
         assert!(supports("graph_mail_query"));
         assert!(supports("graph_mail_message_mark_read"));
+        assert!(supports("graph_mail_attachment_upload_session_create"));
         assert!(supports("graph_mail_draft_send"));
         assert!(supports("graph_mail_reply_all_to_last_in_thread_draft_create"));
         assert!(!supports("graph_mail_attachment_upload_file"));
