@@ -33,6 +33,7 @@ struct Options {
     site_root: PathBuf,
     registry_path: Option<PathBuf>,
     log_root: Option<PathBuf>,
+    native_authority: bool,
 }
 
 fn main() {
@@ -44,6 +45,9 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let options = parse_options(env::args().skip(1).collect())?;
+    if options.native_authority && options.surface_id == "calendar" {
+        env::set_var("NARADA_NATIVE_GRAPH_AUTHORITY", "1");
+    }
     let stdin = io::stdin();
     let mut reader = BufReader::new(stdin.lock());
     let mut stdout = io::stdout().lock();
@@ -108,9 +112,15 @@ fn parse_options(args: Vec<String>) -> Result<Options, String> {
     let mut site_root = None;
     let mut registry_path = None;
     let mut log_root = None;
+    let mut native_authority = false;
     let mut index = 0;
     while index < args.len() {
         let key = args[index].as_str();
+        if key == "--native-authority" {
+            native_authority = true;
+            index += 1;
+            continue;
+        }
         let value = args.get(index + 1).ok_or_else(|| format!("native_surface_argument_value_required:{key}"))?;
         match key {
             "--surface-id" => surface_id = Some(value.clone()),
@@ -125,7 +135,7 @@ fn parse_options(args: Vec<String>) -> Result<Options, String> {
     }
     let surface_id = surface_id.ok_or("native_surface_missing_surface_id")?;
     let site_root = site_root.unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    Ok(Options { surface_id, site_root, registry_path, log_root })
+    Ok(Options { surface_id, site_root, registry_path, log_root, native_authority })
 }
 
 fn handle_request(request: &Value, options: &Options) -> Option<Value> {
@@ -563,6 +573,7 @@ mod tests {
             site_root: PathBuf::from("."),
             registry_path: None,
             log_root: None,
+            native_authority: false,
         }
     }
 
@@ -654,6 +665,7 @@ mod tests {
             site_root: root.clone(),
             registry_path: None,
             log_root: Some(root.join("log")),
+            native_authority: false,
         };
         let params = json!({"name":"operator_route_request","arguments":{"transcript":"route this","target_runtime":"codex","request_id":"route-test"}});
         let result = call_tool("operator-routing", params.as_object().expect("params"), &options).expect("route");

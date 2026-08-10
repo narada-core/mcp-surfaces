@@ -884,6 +884,7 @@ function runCalendarAuthorityBridge() {
   const cleanEnv = { ...process.env };
   delete cleanEnv.NARADA_CALENDAR_AUTHORITY_ENTRYPOINT;
   delete cleanEnv.NARADA_CALENDAR_AUTHORITY_ARGS;
+  cleanEnv.NARADA_NATIVE_GRAPH_AUTHORITY = '0';
   const request = { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'calendar_event_query', arguments: { start_datetime: '2026-01-01T00:00:00Z', end_datetime: '2026-01-02T00:00:00Z', limit: 1 } } };
   const refusal = runMailbox(executable, ['--surface-id', 'calendar', '--site-root', packageRoot], [request], packageRoot, cleanEnv)[0];
   assertSame('calendar.authority.refusal', {
@@ -988,10 +989,10 @@ server.listen(0, '127.0.0.1', async () => {
     const port = server.address().port;
     const config = JSON.stringify({ graph_base_url: 'http://127.0.0.1:' + port + '/v1.0', allowed_mailboxes: ['fixture@example.test'], allow_event_writes: true, write_approval_token: 'approve-1' });
     for (const root of [bunRoot, rustRoot]) { mkdirSync(root + '/.ai', { recursive: true }); writeFileSync(root + '/.ai/calendar-mcp.json', config); }
-    const env = { ...process.env, GRAPH_ACCESS_TOKEN: 'fixture-token', NARADA_NATIVE_GRAPH_AUTHORITY: '1', NARADA_NATIVE_GRAPH_ALLOW_INSECURE_TEST: '1' };
+    const env = { ...process.env, GRAPH_ACCESS_TOKEN: 'fixture-token', NARADA_NATIVE_GRAPH_ALLOW_INSECURE_TEST: '1' };
     for (const key of ['MS_GRAPH_ACCESS_TOKEN', 'GRAPH_TENANT_ID', 'GRAPH_CLIENT_ID', 'GRAPH_CLIENT_SECRET', 'GRAPH_TOKEN_ENDPOINT', 'NARADA_CALENDAR_AUTHORITY_ENTRYPOINT', 'NARADA_CALENDAR_AUTHORITY_ARGS']) delete env[key];
     const bun = await run(bunCommand, [bunEntrypoint, '--site-root', bunRoot], env);
-    const rust = await run(nativeExecutable, ['--surface-id', 'calendar', '--site-root', rustRoot], env);
+    const rust = await run(nativeExecutable, ['--surface-id', 'calendar', '--native-authority', '--site-root', rustRoot], env);
     server.close(() => process.stdout.write(JSON.stringify({ bun, rust, received }) + '\n'));
   } catch (error) {
     server.close(() => { process.stderr.write(String(error.stack ?? error) + '\n'); process.exit(1); });
