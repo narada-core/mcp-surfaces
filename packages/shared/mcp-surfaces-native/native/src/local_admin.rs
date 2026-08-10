@@ -112,11 +112,103 @@ fn nars_call(name: &str, args: &Map<String, Value>, root: &Path) -> Result<Value
         _ => Err(error("unknown_tool", &format!("unknown_tool:{name}"))),
     }
 }
-fn nars_list(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> { let limit=args.get("limit").and_then(Value::as_u64).unwrap_or(20).clamp(1,100) as usize; let mut sessions=Vec::new(); let dirs=session_roots(root); for base in dirs.iter().take(4) { if let Ok(entries)=fs::read_dir(base) { for entry in entries.filter_map(Result::ok).take(MAX_SESSIONS) { if !entry.path().is_dir(){continue;} let Some(id)=entry.file_name().to_str().map(str::to_string) else {continue;}; if let Ok(record)=read_session(root,&id,args.get("site_id").and_then(Value::as_str)) { sessions.push(compact_session(&record,&id)); } } } } sessions.sort_by(|a,b| b.get("updated_at").and_then(Value::as_str).cmp(&a.get("updated_at").and_then(Value::as_str))); sessions.truncate(limit); Ok(json!({"schema":"narada.nars_session.sessions.v1","status":"ok","count":sessions.len(),"limit":limit,"authority_root":root.to_string_lossy(),"sessions":sessions,"native_read_only":true})) }
-fn nars_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> { let id=required(args,"session_id")?; let record=read_session(root,&id,args.get("site_id").and_then(Value::as_str))?; Ok(json!({"schema":"narada.nars_session.session.v1","status":"ok","session":record,"native_read_only":true})) }
+fn nars_list(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(20).clamp(1, 100) as usize;
+    let site_id = args.get("site_id").and_then(Value::as_str).map(str::to_string).or_else(|| env::var("NARADA_SITE_ID").ok().filter(|value| !value.trim().is_empty()));
+    let mut sessions = Vec::new();
+    for base in session_roots(root).iter().take(4) {
+        if let Ok(entries) = fs::read_dir(base) {
+            for entry in entries.filter_map(Result::ok).take(MAX_SESSIONS) {
+                if !entry.path().is_dir() { continue; }
+                let Some(id) = entry.file_name().to_str().map(str::to_string) else { continue; };
+                if let Ok(record) = read_session(root, &id, site_id.as_deref()) {
+                    sessions.push(public_session(&record, &id, root, json!({"status":"not_requested"})));
+                }
+            }
+        }
+    }
+    sessions.sort_by(|left, right| right.get("last_seen_at").and_then(Value::as_str).cmp(&left.get("last_seen_at").and_then(Value::as_str)));
+    sessions.truncate(limit);
+    Ok(json!({
+        "schema":"narada.nars_session_mcp.sessions.v1",
+        "status":"ok",
+        "site_id":site_id,
+        "authority_root":root.to_string_lossy(),
+        "scope_root":root.to_string_lossy(),
+        "site_root":root.to_string_lossy(),
+        "scope":"local_site",
+        "scope_semantics":"The envelope roots identify the bound discovery authority; each session.site_root identifies that session's admitted Site root.",
+        "authority_count":1,
+        "selected_site_ids":[site_id],
+        "count":sessions.len(),
+        "sessions":sessions,
+    }))
+}
+
+fn nars_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let id = required(args, "session_id")?;
+    let record = read_session(root, &id, args.get("site_id").and_then(Value::as_str))?;
+    Ok(json!({
+        "schema":"narada.nars_session_mcp.session.v1",
+        "status":"ok",
+        "scope":"local_site",
+        "authority_root":root.to_string_lossy(),
+        "scope_root":root.to_string_lossy(),
+        "session":public_session(&record, &id, root, json!({"status":"not_requested"})),
+        "authority":authority_summary(&record),
+    }))
+}
 fn input_status(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> { let id=required(args,"session_id")?; let input=args.get("input_event_id").or_else(||args.get("request_id")).or_else(||args.get("directive_id")).and_then(Value::as_str); let base=session_roots(root).into_iter().find(|p|p.join(&id).is_dir()).unwrap_or_else(||root.to_path_buf()); let path=base.join(&id).join("input-status.json"); if !path.exists() { return Ok(json!({"schema":"narada.nars_session.input_status.v1","status":"not_materialized","session_id":id,"input_event_id":input,"outcome":null,"terminal_state":null,"native_read_only":true})); } let value=read_bounded_json(&path)?; Ok(json!({"schema":"narada.nars_session.input_status.v1","status":"ok","session_id":id,"input_event_id":input,"record":value,"native_read_only":true})) }
 fn read_session(root: &Path, id: &str, _site_id: Option<&str>) -> Result<Value, Value> { if id.is_empty()||id.len()>160||!id.chars().all(|c|c.is_ascii_alphanumeric()||c=='-'||c=='_') { return Err(error("session_id_invalid","session_id_invalid")); } for path in session_index_paths(root,id) { if path.exists() { return read_bounded_json(&path); } } Err(error("nars_session_not_found","nars_session_not_found")) }
-fn compact_session(record: &Value, id: &str) -> Value { json!({"session_id":record.get("session_id").and_then(Value::as_str).unwrap_or(id),"site_id":record.get("site_id"),"site_root":record.get("site_root"),"status":record.get("status"),"health_endpoint":record.get("health_endpoint"),"updated_at":record.get("updated_at").or_else(||record.get("last_seen_at")),"authority_epoch":record.get("authority_epoch")}) }
+fn public_session(record: &Value, id: &str, root: &Path, health: Value) -> Value {
+    let heartbeat_path = record.get("heartbeat_path").and_then(Value::as_str).map(str::to_string).or_else(|| record.get("session_dir").and_then(Value::as_str).map(|directory| PathBuf::from(directory).join("heartbeat.json").to_string_lossy().to_string()));
+    let heartbeat_value = heartbeat_path.as_deref().and_then(|path| read_bounded_json(Path::new(path)).ok()).and_then(|value| value.get("heartbeat_at").or_else(|| value.get("last_written_at")).or_else(|| value.get("timestamp")).cloned());
+    let terminal_state = record.get("terminal_state").cloned().unwrap_or(Value::Null);
+    let (display_state, display_state_reason, liveness_source) = if terminal_state.as_str() == Some("closed") {
+        ("closed", "terminal_state_closed", "session_index_and_heartbeat")
+    } else {
+        ("historical", "historical_record_only", "session_index")
+    };
+    let authority = authority_summary(record);
+    json!({
+        "session_id":record.get("session_id").and_then(Value::as_str).unwrap_or(id),
+        "carrier_session_id":record.get("carrier_session_id").or_else(||record.get("session_id")).cloned().unwrap_or_else(||json!(id)),
+        "nars_session_id":record.get("nars_session_id").or_else(||record.get("session_id")).cloned().unwrap_or_else(||json!(id)),
+        "site_id":record.get("site_id").cloned().unwrap_or(Value::Null),
+        "site_root":record.get("site_root").cloned().unwrap_or_else(||json!(root.to_string_lossy())),
+        "agent_id":record.get("agent_id").cloned().unwrap_or(Value::Null),
+        "runtime_kind":record.get("runtime_kind").cloned().unwrap_or(Value::Null),
+        "launch_operator_surface_kind":record.get("launch_operator_surface_kind").cloned().unwrap_or(Value::Null),
+        "display_state":display_state,
+        "display_state_reason":display_state_reason,
+        "persisted_display_state":record.get("display_state").cloned().unwrap_or(Value::Null),
+        "status_hint":record.get("status_hint").cloned().unwrap_or(Value::Null),
+        "started_at":record.get("started_at").cloned().unwrap_or(Value::Null),
+        "last_seen_at":record.get("last_seen_at").cloned().unwrap_or(Value::Null),
+        "last_seen_source":"session_index_projection",
+        "heartbeat_at":heartbeat_value.clone().unwrap_or(Value::Null),
+        "heartbeat_fresh":false,
+        "heartbeat_age_ms":Value::Null,
+        "health_observed_at":Value::Null,
+        "liveness":{"source":liveness_source,"observed_at":Value::Null,"heartbeat_path":heartbeat_path,"heartbeat_at":heartbeat_value.unwrap_or(Value::Null),"heartbeat_age_ms":Value::Null,"heartbeat_fresh":false},
+        "terminal_state":terminal_state,
+        "health":health,
+        "event_endpoint_available":record.get("event_endpoint").and_then(Value::as_str).map(|value| !value.is_empty()).unwrap_or(false),
+        "health_endpoint_available":record.get("health_endpoint").and_then(Value::as_str).map(|value| !value.is_empty()).unwrap_or(false),
+        "authority":authority,
+    })
+}
+
+fn authority_summary(record: &Value) -> Value {
+    json!({
+        "authority_runtime_id":record.get("authority_runtime_id").cloned().unwrap_or(Value::Null),
+        "authority_epoch":record.get("authority_epoch").cloned().unwrap_or(Value::Null),
+        "source_write_admission":record.get("source_write_admission").cloned().unwrap_or(Value::Null),
+        "authority_transition_state":record.get("authority_transition_state").cloned().unwrap_or(Value::Null),
+        "superseded_by_session_id":record.get("superseded_by_session_id").cloned().unwrap_or(Value::Null),
+        "authority_locator_ref":record.get("authority_locator_ref").cloned().unwrap_or(Value::Null),
+    })
+}
 
 fn quota_call(name: &str, _args: &Map<String, Value>, root: &Path) -> Result<Value, Value> { match name { "quota_meter_guidance" => Ok(guidance_result("quota-meter", _args)), "quota_meter_overlay_status" => Ok(quota_status(root)), "quota_meter_glide_status" => Err(authority_boundary("quota-meter", name, "quota_provider_read_authority_not_enabled_in_native_slice", "Use the quota-meter provider adapter without passing credentials through MCP.")), "quota_meter_overlay_start" | "quota_meter_overlay_stop" => Err(authority_boundary("quota-meter", name, "quota_overlay_process_authority_not_enabled_in_native_slice", "Use the owning quota-meter process authority.")), _ => Err(error("unknown_tool", &format!("unknown_tool:{name}"))), } }
 fn quota_status(root: &Path) -> Value {

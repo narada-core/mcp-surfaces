@@ -599,6 +599,56 @@ function runQuotaMeterParity() {
   }
 }
 
+function runNarsSessionParity() {
+  const workspaceRoot = resolve(packageRoot, '..', '..', '..');
+  const bunEntrypoint = join(workspaceRoot, 'packages', 'nars-session-mcp', 'src', 'main.ts');
+  if (!existsSync(bunEntrypoint)) throw new Error('nars_session_parity_bun_entrypoint_missing:' + bunEntrypoint);
+  const root = mkdtempSync(join(tmpdir(), 'narada-nars-session-native-parity-'));
+  try {
+    const sessionDirectory = join(root, '.narada', 'crew', 'nars-sessions', 'session_test');
+    mkdirSync(sessionDirectory, { recursive: true });
+    writeFileSync(join(sessionDirectory, 'session-index-record.json'), JSON.stringify({
+      schema: 'narada.nars.session_index_record.v1',
+      session_id: 'session_test',
+      carrier_session_id: 'carrier_test',
+      nars_session_id: 'nars_test',
+      site_id: 'test-site',
+      site_root: root,
+      agent_id: 'fixture-agent',
+      runtime_kind: 'fixture-runtime',
+      launch_operator_surface_kind: 'codex',
+      status_hint: 'closed',
+      started_at: '2026-01-01T00:00:00.000Z',
+      last_seen_at: '2026-01-01T00:01:00.000Z',
+      terminal_state: 'closed',
+      event_endpoint: null,
+      health_endpoint: null,
+      authority_runtime_id: 'runtime_test',
+      authority_epoch: 2,
+      source_write_admission: 'inactive',
+    }), 'utf8');
+    const requests = [{
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'nars_session_list', arguments: { include_health: false, limit: 10 } },
+    }, {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: { name: 'nars_session_show', arguments: { session_id: 'session_test', include_health: false } },
+    }];
+    const env = { ...process.env, NARADA_SITE_ROOT: root, NARADA_SITE_ID: 'test-site', NARADA_AGENT_ID: 'fixture.agent' };
+    const bun = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', [bunEntrypoint], requests, workspaceRoot, env);
+    const rust = runMailbox(executable, ['--surface-id', 'nars-session', '--site-root', root], requests, workspaceRoot, env);
+    assertSame('nars_session.list', mailboxStructured(bun, 1, 'bun'), mailboxStructured(rust, 1, 'rust'));
+    assertSame('nars_session.show', mailboxStructured(bun, 2, 'bun'), mailboxStructured(rust, 2, 'rust'));
+    return { status: 'passed', fixture: 'closed_local_session_projection', compared: ['list', 'show'] };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 const mailboxParity = runMailboxParity();
 const artifactsParity = runArtifactsParity();
 const sopParity = runSopParity();
@@ -610,6 +660,7 @@ const graphMailParity = runGraphMailParity();
 const operatorOverlayParity = runOperatorOverlayParity();
 const browserControlParity = runBrowserControlParity();
 const quotaMeterParity = runQuotaMeterParity();
+const narsSessionParity = runNarsSessionParity();
 process.stdout.write(JSON.stringify({
   schema: 'narada.mcp_surfaces_native.protocol_parity.v1',
   status: 'passed',
@@ -628,4 +679,5 @@ process.stdout.write(JSON.stringify({
   operator_overlay_parity: operatorOverlayParity,
   browser_control_parity: browserControlParity,
   quota_meter_parity: quotaMeterParity,
+  nars_session_parity: narsSessionParity,
 }) + '\n');
