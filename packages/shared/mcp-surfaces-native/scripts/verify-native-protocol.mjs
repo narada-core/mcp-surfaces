@@ -1107,6 +1107,21 @@ function runGraphMailParity() {
   try {
     const configDir = join(root, '.ai');
     mkdirSync(configDir, { recursive: true });
+    const outputValue = { fixture: 'graph-mail', items: [1, 2] };
+    const outputText = JSON.stringify(outputValue, null, 2);
+    const outputRef = 'mcp_output:graph-mail-fixture';
+    const outputRecord = {
+      schema: 'narada.mcp_output_ref.v1',
+      ref: outputRef,
+      output_id: 'graph-mail-fixture',
+      tool_name: 'graph_mail_query',
+      full_output_char_length: outputText.length,
+      truncated: true,
+      sha256: createHash('sha256').update(JSON.stringify(stable(outputValue))).digest('hex'),
+      full_output: outputValue,
+    };
+    mkdirSync(join(root, '.ai', 'tmp', 'mcp-outputs', 'workspace'), { recursive: true });
+    writeFileSync(join(root, '.ai', 'tmp', 'mcp-outputs', 'workspace', 'graph-mail-fixture.json'), JSON.stringify(outputRecord), 'utf8');
     writeFileSync(join(configDir, 'graph-mail-mcp.json'), JSON.stringify({
       graph_base_url: 'https://graph.microsoft.com/v1.0///',
       allowed_mailboxes: ['fixture@example.test'],
@@ -1126,10 +1141,20 @@ function runGraphMailParity() {
       jsonrpc: '2.0',
       id: 1,
       method: 'tools/call',
-      params: { name: 'graph_mail_doctor', arguments: {} },
+      params: { name: 'graph_mail_guidance', arguments: { workflow: 'fixture', tool: 'graph_mail_query' } },
     }, {
       jsonrpc: '2.0',
       id: 2,
+      method: 'tools/call',
+      params: { name: 'graph_mail_output_show', arguments: { ref: outputRef, offset: 0, limit: 1000 } },
+    }, {
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'tools/call',
+      params: { name: 'graph_mail_doctor', arguments: {} },
+    }, {
+      jsonrpc: '2.0',
+      id: 4,
       method: 'tools/call',
       params: { name: 'graph_mail_auth_status', arguments: {} },
     }];
@@ -1137,9 +1162,11 @@ function runGraphMailParity() {
     for (const key of ['MS_GRAPH_ACCESS_TOKEN', 'GRAPH_ACCESS_TOKEN', 'GRAPH_TENANT_ID', 'GRAPH_CLIENT_ID', 'GRAPH_CLIENT_SECRET', 'GRAPH_TOKEN_ENDPOINT']) delete env[key];
     const bun = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', [bunEntrypoint, '--site-root', root], requests, workspaceRoot, env);
     const rust = runMailbox(executable, ['--surface-id', 'graph-mail', '--site-root', root], requests, workspaceRoot, env);
-    assertSame('graph_mail.doctor', mailboxStructured(bun, 1, 'bun'), mailboxStructured(rust, 1, 'rust'));
-    assertSame('graph_mail.auth_status', mailboxStructured(bun, 2, 'bun'), mailboxStructured(rust, 2, 'rust'));
-    return { status: 'passed', fixture: 'local_policy_posture', compared: ['doctor', 'auth_status'] };
+    assertSame('graph_mail.guidance', mailboxStructured(bun, 1, 'bun'), mailboxStructured(rust, 1, 'rust'));
+    assertSame('graph_mail.output_show', mailboxStructured(bun, 2, 'bun'), mailboxStructured(rust, 2, 'rust'));
+    assertSame('graph_mail.doctor', mailboxStructured(bun, 3, 'bun'), mailboxStructured(rust, 3, 'rust'));
+    assertSame('graph_mail.auth_status', mailboxStructured(bun, 4, 'bun'), mailboxStructured(rust, 4, 'rust'));
+    return { status: 'passed', fixture: 'local_policy_posture', compared: ['guidance', 'output_show', 'doctor', 'auth_status'] };
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

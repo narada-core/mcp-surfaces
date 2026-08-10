@@ -6,6 +6,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const MAX_BYTES: u64 = 256_000;
+const MAX_OUTPUT_BYTES: u64 = 10 * 1024 * 1024;
+const DEFAULT_OUTPUT_LIMIT: u64 = 10_000;
+const MAX_OUTPUT_LIMIT: u64 = 20_000;
 const DEFAULT_GRAPH_BASE_URL: &str = "https://graph.microsoft.com/v1.0";
 const CLOUDFLARE_PACKAGE_FILTER: &str = "@narada-core/cloudflare-carrier";
 const CLOUDFLARE_WORKER_URL: &str = "https://narada-cloudflare-carrier.andrei-kokoev.workers.dev";
@@ -79,7 +82,7 @@ pub fn auxiliary(surface_id: &str, method: &str, params: &Map<String, Value>) ->
 }
 
 pub fn call_tool(surface_id: &str, name: &str, args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
-    if name.ends_with("_guidance") { return Ok(guidance_result(surface_id, args)); }
+    if name.ends_with("_guidance") { return Ok(if surface_id == "graph-mail" { graph_mail_guidance(args) } else { guidance_result(surface_id, args) }); }
     match (surface_id, name) {
         ("operator-console-overlay", "operator_console_overlay_status") => Ok(operator_status(root)),
         ("cloudflare-carrier", "cloudflare_doctor") => Ok(cloudflare_doctor(root)),
@@ -90,6 +93,7 @@ pub fn call_tool(surface_id: &str, name: &str, args: &Map<String, Value>, root: 
         ("scheduler", "scheduler_runtime_status") => Ok(json!({"schema":"narada.scheduler.runtime_status.v1","status":"authority_boundary","implementation":"rust-native-contract","native_task_scheduler":false,"native_read_only":true})),
         ("graph-mail", "graph_mail_doctor") => Ok(graph_mail_doctor(root)),
         ("graph-mail", "graph_mail_auth_status") => Ok(graph_mail_auth_status(root)),
+        ("graph-mail", "graph_mail_output_show") | ("browser-control", "mcp_output_show") => output_show(args, root),
         ("browser-control", "browser_control_session_inventory") => Ok(browser_session_inventory(root)),
         _ => Err(boundary(surface_id, name, "external_or_host_authority_not_enabled_in_native_contract", "Use the configured owning surface authority for this operation.")),
     }
@@ -98,6 +102,55 @@ pub fn call_tool(surface_id: &str, name: &str, args: &Map<String, Value>, root: 
 fn entries(surface_id: &str) -> &'static [(&'static str, bool)] { match surface_id { "browser-control" => BROWSER, "operator-console-overlay" => OPERATOR, "cloudflare-carrier" => CLOUDFLARE, "speech" => SPEECH, "scheduler" => SCHEDULER, "graph-mail" => GRAPH_MAIL, _ => &[] } }
 fn guidance(surface_id: &str) -> Value { tool(&format!("{}_guidance", surface_id.replace('-', "_")), format!("Show model-facing operating guidance for {surface_id} MCP workflows."), true) }
 fn guidance_result(surface_id: &str, args: &Map<String, Value>) -> Value { json!({"schema":"narada.host_surface.guidance.v1","status":"ok","surface_id":surface_id,"requested":args,"native_contract":"status probes and explicit authority boundaries","native_read_only":true}) }
+fn graph_mail_guidance(args: &Map<String, Value>) -> Value {
+    let requested = |key: &str| args.get(key).and_then(Value::as_str).map(str::trim).filter(|value| !value.is_empty()).map(|value| Value::String(value.to_string())).unwrap_or(Value::Null);
+    json!({
+        "schema":"narada.mcp_surface.guidance.v0",
+        "status":"ok",
+        "surface_id":"graph-mail",
+        "guidance_tool":"graph_mail_guidance",
+        "purpose":"Policy-gated Microsoft Graph mail live reads and draft lifecycle.",
+        "requested":{"workflow":requested("workflow"),"tool":requested("tool")},
+        "first_use":[
+            "Call this guidance command when the surface is unfamiliar, when a refusal/error is unclear, or before composing a multi-step workflow.",
+            "Inspect policy/doctor/status tools before mutation or open-world operations.",
+            "Use bounded list/search/query tools for discovery, then show/read/detail tools before acting on a specific object.",
+            "Preserve structuredContent as authoritative evidence; text content is for assistant readability."
+        ],
+        "tool_preference":[
+            {"step":"orient","guidance":"Use *_guidance first when uncertain, then policy/doctor/status tools."},
+            {"step":"discover","guidance":"Use bounded list/search/query commands with explicit limits and filters."},
+            {"step":"inspect","guidance":"Use show/read/detail commands for exact targets before mutation."},
+            {"step":"mutate","guidance":"Only call mutation tools after policy allows it and intent, target, and expected result are explicit."},
+            {"step":"ticket_draft_discard","guidance":"Use graph_mail_ticket_draft_discard for Work-linked drafts so Graph deletion and Work Lifecycle terminalization are connected by a durable disposition receipt."},
+            {"step":"verify","guidance":"Read back state with the owning surface after any mutation."}
+        ],
+        "examples":[
+            {"intent":"First use","call":"graph_mail_guidance({})"},
+            {"intent":"Tool-specific help","call":"graph_mail_guidance({ tool: \"<tool_name>\" })"},
+            {"intent":"Workflow-specific help","call":"graph_mail_guidance({ workflow: \"<workflow_name>\" })"}
+        ],
+        "anti_patterns":[
+            "Do not guess hidden state from a tool name; use doctor/status/list/show tools for evidence.",
+            "Do not treat assistant text as the durable record when structuredContent is present.",
+            "Do not bypass the owning surface with shell scripts when a governed MCP tool exists.",
+            "Do not use graph_mail_draft_discard for a Work-linked ticket draft; the generic path refuses tracked drafts because deletion without a disposition receipt would strand the ticket.",
+            "Do not continue after malformed payloads, empty refs, or ambiguous target identifiers; stop and repair the input."
+        ],
+        "recovery":[
+            "For unknown_tool, call tools/list and this guidance command again after restart.",
+            "For policy refusal, inspect the surface policy/doctor output and report the exact refusal reason.",
+            "For oversized inputs, use the surface payload_ref or output_ref convention when it exists; otherwise reduce scope.",
+            "For unclear behavior, submit surface_feedback_submit with surface_id, kind, summary, reproduction steps, expected behavior, and impact."
+        ],
+        "feedback":{"surface_id":"graph-mail","tool":"surface_feedback_submit","when":["guidance is missing, stale, or contradicted by live behavior","schema shape makes correct usage hard","errors hide the actionable refusal or recovery path"]},
+        "boundaries":[
+            "Guidance is read-only model-facing operating advice.",
+            "Guidance does not weaken policy, authorize mutation, or replace tool schemas.",
+            "The owning MCP surface remains authoritative for state and enforcement."
+        ]
+    })
+}
 fn description(surface_id: &str, name: &str) -> String { format!("Native {surface_id} contract for {name}; external authority remains explicit.") }
 fn operator_status(root: &Path) -> Value {
     let state_root = operator_state_root();
@@ -307,6 +360,66 @@ fn graph_mail_auth_status(root: &Path) -> Value {
     let object = read_json_file(&root.join(".ai/graph-mail-mcp.json")).as_object().cloned().unwrap_or_default();
     let scopes = graph_string_array(&object, "device_code_allowed_scopes", "deviceCodeAllowedScopes");
     json!({"schema":"narada.graph_mail_mcp.auth_status.v1","status":"ok","allow_device_code_auth":graph_bool(&object, "allow_device_code_auth", "allowDeviceCodeAuth"),"device_code_tenant_configured":graph_string(&object, "device_code_tenant_id", "deviceCodeTenantId").is_some() || graph_non_empty_env(root, "GRAPH_TENANT_ID"),"device_code_client_configured":graph_string(&object, "device_code_client_id", "deviceCodeClientId").is_some() || graph_non_empty_env(root, "GRAPH_CLIENT_ID"),"device_code_allowed_scopes":scopes,"delegated_token":graph_delegated_token_summary(root)})
+}
+
+fn output_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let ref_value = args.get("ref").and_then(Value::as_str).map(str::trim);
+    let output_ref_value = args.get("output_ref").and_then(Value::as_str).map(str::trim);
+    if let (Some(reference), Some(output_ref)) = (ref_value, output_ref_value) {
+        if reference != output_ref { return Err(error("output_show_ref_alias_conflict", "output_show_ref_alias_conflict")); }
+    }
+    let reference = ref_value.or(output_ref_value).ok_or_else(|| error("output_show_requires_ref", "output_show_requires_ref"))?;
+    let id = reference.strip_prefix("mcp_output:").ok_or_else(|| error("output_ref_invalid", "output_ref_invalid"))?;
+    if id.len() < 3 || id.len() > 64 || !id.chars().all(|value| value.is_ascii_alphanumeric() || matches!(value, '_' | '-')) {
+        return Err(error("output_ref_invalid", "output_ref_invalid"));
+    }
+    let path = root.join(".ai/tmp/mcp-outputs/workspace").join(format!("{id}.json"));
+    let metadata = fs::metadata(&path).map_err(|_| error("output_ref_not_found", "output_ref_not_found"))?;
+    if !metadata.is_file() { return Err(error("output_ref_not_file", "output_ref_not_file")); }
+    if metadata.len() > MAX_OUTPUT_BYTES { return Err(error("output_ref_too_large", "output_ref_too_large")); }
+    let text = fs::read_to_string(&path).map_err(|_| error("output_ref_not_found", "output_ref_not_found"))?;
+    let record: Value = serde_json::from_str(&text).map_err(|parse_error| error("output_ref_invalid_json", &parse_error.to_string()))?;
+    if record.get("schema").and_then(Value::as_str) != Some("narada.mcp_output_ref.v1") {
+        return Err(error("output_ref_schema_unsupported", "output_ref_schema_unsupported"));
+    }
+    if record.get("ref").and_then(Value::as_str) != Some(reference) || record.get("output_id").and_then(Value::as_str) != Some(id) {
+        return Err(error("output_ref_metadata_mismatch", "output_ref_metadata_mismatch"));
+    }
+    let full_output = record.get("full_output").cloned().unwrap_or(Value::Null);
+    let presentation = serde_json::to_string_pretty(&full_output).unwrap_or_else(|_| full_output.to_string());
+    let offset = match args.get("offset") {
+        None => 0,
+        Some(value) => value.as_u64().ok_or_else(|| error("offset_must_be_non_negative_integer", "offset_must_be_non_negative_integer"))?,
+    };
+    let limit = match args.get("limit").or_else(|| args.get("output_limit")) {
+        None => DEFAULT_OUTPUT_LIMIT,
+        Some(value) => {
+            let value = value.as_u64().ok_or_else(|| error("output_limit_must_be_positive_integer", "output_limit_must_be_positive_integer"))?;
+            if value == 0 { return Err(error("output_limit_must_be_positive_integer", "output_limit_must_be_positive_integer")); }
+            if value > MAX_OUTPUT_LIMIT { return Err(error("output_limit_exceeds_transport_maximum", "output_limit_exceeds_transport_maximum")); }
+            value
+        }
+    };
+    let chars = presentation.chars().collect::<Vec<_>>();
+    let start = (offset as usize).min(chars.len());
+    let chunk = chars.iter().skip(start).take(limit as usize).collect::<String>();
+    let end = start + chunk.chars().count();
+    Ok(json!({
+        "schema":"narada.mcp_output_page.v1",
+        "status":"ok",
+        "ref":reference,
+        "tool_name":record.get("tool_name").cloned().unwrap_or(Value::Null),
+        "full_output_char_length":record.get("full_output_char_length").cloned().unwrap_or_else(|| json!(chars.len())),
+        "byte_size":metadata.len(),
+        "original_truncated":record.get("truncated").and_then(Value::as_bool).unwrap_or(false),
+        "path":format!(".ai/tmp/mcp-outputs/workspace/{id}.json"),
+        "offset":start,
+        "limit":limit,
+        "next_offset":if end < chars.len() { json!(end) } else { Value::Null },
+        "output_limit":limit,
+        "output_truncated":end < chars.len(),
+        "output_text":chunk
+    }))
 }
 
 fn graph_string(object: &Map<String, Value>, snake: &str, camel: &str) -> Option<String> {

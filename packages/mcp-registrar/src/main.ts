@@ -1943,8 +1943,8 @@ function carrierLaunchCommand(
   const effectiveChildCommand = useNativeLoader ? MCP_NATIVE_MCP_LOADER_ENTRYPOINT : nativeApplet ? nativeRuntimeProxyEntrypoint() : useNativeLifecycle ? nativeLifecycleEntrypoint : useNativeSharedSurface ? nativeSharedSurfaceEntrypoint : runtimeCommand;
   const effectiveChildEntrypoint = useNativeLoader ? MCP_NATIVE_MCP_LOADER_ENTRYPOINT : nativeApplet ? nativeRuntimeProxyEntrypoint() : useNativeLifecycle ? nativeLifecycleEntrypoint : useNativeSharedSurface ? nativeSharedSurfaceEntrypoint : childEntrypoint;
   const sidecarPath = configPath ? materializationSidecarPath(configPath) : null;
-  const nativeCalendarAuthority = useNativeSharedSurface && surfaceId === 'calendar';
-  const effectiveChildArgs = useNativeSharedSurface ? ['--surface-id', surfaceId, ...(nativeCalendarAuthority ? ['--native-authority'] : []), ...childArgs] : childArgs;
+  const nativeAuthority = useNativeSharedSurface && (surfaceId === 'calendar' || surfaceId === 'graph-mail');
+  const effectiveChildArgs = useNativeSharedSurface ? ['--surface-id', surfaceId, ...(nativeAuthority ? ['--native-authority'] : []), ...childArgs] : childArgs;
   const childInvocationKind = useNativeLoader || useNativeLifecycle || useNativeSharedSurface ? 'native_entrypoint' : nativeApplet ? 'native_applet' : null;
   if (server.kind === 'local' && !useNativeLoader && !nativeApplet && !useNativeLifecycle && !useNativeSharedSurface) {
     return {
