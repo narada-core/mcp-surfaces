@@ -515,6 +515,68 @@ function runSopRunEventsParity() {
   }
 }
 
+function runSopRunStatusParity() {
+  const workspaceRoot = resolve(packageRoot, '..', '..', '..');
+  const bunEntrypoint = join(workspaceRoot, 'packages', 'sop-mcp', 'dist', 'src', 'main.js');
+  if (!existsSync(bunEntrypoint)) throw new Error('sop_run_status_parity_bun_entrypoint_missing:' + bunEntrypoint);
+  const root = mkdtempSync(join(tmpdir(), 'narada-sop-run-status-native-parity-'));
+  const dbPath = join(root, '.sop', 'sop.db');
+  mkdirSync(dirname(dbPath), { recursive: true });
+  const db = new DatabaseSync(dbPath);
+  try {
+    db.exec(`CREATE TABLE sop_runs (
+      run_id TEXT PRIMARY KEY,
+      sop_id TEXT NOT NULL,
+      sop_version INTEGER NOT NULL,
+      sop_title TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      occurrence_key TEXT NOT NULL DEFAULT '',
+      request_fingerprint TEXT NOT NULL DEFAULT '',
+      definition_fingerprint TEXT NOT NULL DEFAULT '',
+      definition_json TEXT NOT NULL DEFAULT '{}',
+      input_json TEXT NOT NULL DEFAULT '{}',
+      input_ref_json TEXT,
+      output_json TEXT NOT NULL DEFAULT '{}',
+      output_ref_json TEXT,
+      step_states_json TEXT NOT NULL DEFAULT '[]',
+      trigger_source_kind TEXT NOT NULL DEFAULT 'manual',
+      trigger_source_ref TEXT NOT NULL DEFAULT '',
+      triggered_by TEXT NOT NULL DEFAULT '',
+      parent_run_id TEXT,
+      parent_step_id TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      completed_at TEXT
+    )`);
+    const steps = JSON.stringify([{
+      step_id: 'step-1', executor: 'operator', blocking: true, title: 'Approve', status: 'running', depends_on: [],
+      instructions: 'approve', when: null, input: {}, input_ref: null, result_schema: null, action: null,
+      sop_id: null, sop_version: null, wait_policy: null, pinned_child_definition_fingerprint: null,
+      child_run_id: null, action_id: null, started_at: '2026-01-01', completed_at: null,
+      result: { instructions: 'approve now' }, result_ref: null, completion_key: null,
+      completion_fingerprint: null, error_message: null,
+    }]);
+    const insert = db.prepare('INSERT INTO sop_runs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
+    insert.run('run-1', 'demo', 1, 'Demo', 'awaiting_confirmation', 'occ-1', '', '', '{}', '{"input":1}', null, '{}', null, steps, 'manual', '', 'operator', null, null, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', null);
+  } finally {
+    db.close();
+  }
+  try {
+    const request = { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'sop_run_status', arguments: { run_id: 'run-1' } } };
+    const bun = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'node', [bunEntrypoint, '--sop-root', root], [request], workspaceRoot);
+    const rust = runMailbox(executable, ['--surface-id', 'sop', '--site-root', root], [request], workspaceRoot);
+    const comparable = (value) => {
+      if (!value || typeof value !== 'object') return value;
+      const { native_hydration: _nativeHydration, ...publicValue } = value;
+      return publicValue;
+    };
+    assertSame('sop.run_status', comparable(mailboxStructured(bun, 1, 'bun')), comparable(mailboxStructured(rust, 1, 'rust')));
+    return { status: 'passed', fixture: 'durable_run_status_projection', compared: ['full_projection'] };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 function runSurfaceFeedbackParity() {
   const workspaceRoot = resolve(packageRoot, '..', '..', '..');
   const bunEntrypoint = join(workspaceRoot, 'packages', 'surface-feedback-mcp', 'src', 'main.ts');
@@ -927,6 +989,7 @@ const sopParity = runSopParity();
 const sopActionParity = runSopActionParity();
 const sopRunListParity = runSopRunListParity();
 const sopRunEventsParity = runSopRunEventsParity();
+const sopRunStatusParity = runSopRunStatusParity();
 const surfaceFeedbackParity = runSurfaceFeedbackParity();
 const siteLoopParity = runSiteLoopParity();
 const calendarParity = runCalendarParity();
@@ -951,6 +1014,7 @@ process.stdout.write(JSON.stringify({
   sop_action_parity: sopActionParity,
   sop_run_list_parity: sopRunListParity,
   sop_run_events_parity: sopRunEventsParity,
+  sop_run_status_parity: sopRunStatusParity,
   surface_feedback_parity: surfaceFeedbackParity,
   site_loop_parity: siteLoopParity,
   calendar_parity: calendarParity,
