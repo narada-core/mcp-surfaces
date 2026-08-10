@@ -8,6 +8,7 @@ const DB_RELATIVE: &str = ".sop/sop.db";
 const MAX_CANDIDATES: usize = 100;
 const MAX_TEMPLATE_CHARS: usize = 32_000;
 const MAX_TEMPLATE_BYTES: u64 = 512_000;
+const RUN_STATUSES: &[&str] = &["pending", "running", "completed", "failed", "cancelled", "awaiting_confirmation"];
 const MUTATING: &[&str] = &[
     "sop_template_create", "sop_template_update", "sop_template_deprecate", "sop_template_unimport", "sop_template_import_yaml",
     "sop_run_start", "sop_run_refresh", "sop_run_advance", "sop_handoff_claim", "sop_handoff_renew", "sop_handoff_release", "sop_handoff_retry",
@@ -24,7 +25,7 @@ pub fn list_tools() -> Vec<Value> {
         ("sop_template_show", "Show one imported SOP template from the local SOP registry.", json!({"type":"object","properties":{"sop_id":{"type":"string"},"version":{"type":"integer","minimum":1}},"required":["sop_id"],"additionalProperties":false})),
         ("sop_template_search", "Search local SOP registry templates by title or description.", json!({"type":"object","properties":{"query":{"type":"string"},"status":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":100,"default":50}},"required":["query"],"additionalProperties":false})),
         ("sop_run_status", "Read one SOP run from the owning SOP store.", json!({"type":"object","additionalProperties":true})),
-        ("sop_run_list", "List SOP runs from the owning SOP store.", json!({"type":"object","additionalProperties":true})),
+        ("sop_run_list", "List SOP runs with optional filters.", json!({"type":"object","properties":{"sop_id":{"type":"string"},"status":{"type":"string","enum":["pending","running","completed","failed","cancelled","awaiting_confirmation"]},"include_terminal":{"type":"boolean"},"limit":{"type":"integer","minimum":1,"maximum":200,"default":50}},"additionalProperties":false})),
         ("sop_handoff_list", "List SOP handoffs from the owning SOP store.", json!({"type":"object","additionalProperties":true})),
         ("sop_handoff_show", "Show one SOP handoff from the owning SOP store.", json!({"type":"object","additionalProperties":true})),
         ("sop_action_list", "List SOP actions from the owning SOP store.", json!({"type":"object","additionalProperties":true})),
@@ -58,7 +59,8 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<V
         "sop_template_search" => template_search(args, root),
         "sop_template_list" => template_list(args, root),
         "sop_template_show" => template_show(args, root),
-        "sop_run_status" | "sop_run_list" | "sop_handoff_list" | "sop_handoff_show" | "sop_run_coverage_since" | "sop_run_events" | "sop_outbox_list" => Err(authority_boundary(name)),
+        "sop_run_status" | "sop_handoff_list" | "sop_handoff_show" | "sop_run_coverage_since" | "sop_run_events" | "sop_outbox_list" => Err(authority_boundary(name)),
+        "sop_run_list" => run_list(args, root),
         "sop_action_list" => action_list(args, root),
         "sop_action_show" => action_show(args, root),
         name if MUTATING.contains(&name) => Err(authority_boundary(name)),
@@ -187,10 +189,35 @@ fn action_record(value: Value) -> Value {
     json!({"schema":"narada.sop.action.v1","action_id":member(&value,"action_id"),"run_id":member(&value,"run_id"),"step_id":member(&value,"step_id"),"occurrence_key":member(&value,"occurrence_key"),"surface_id":member(&value,"surface_id"),"tool_name":member(&value,"tool_name"),"arguments":member(&value,"arguments_json"),"request_fingerprint":member(&value,"request_fingerprint"),"status":member(&value,"status"),"completion_key":member(&value,"completion_key"),"completion_fingerprint":member(&value,"completion_fingerprint"),"operation_ref":member(&value,"operation_ref"),"result":member(&value,"result_json"),"result_ref":member(&value,"result_ref_json"),"error_message":member(&value,"error_message"),"created_at":member(&value,"created_at"),"updated_at":member(&value,"updated_at"),"completed_at":member(&value,"completed_at")})
 }
 
+fn run_list(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(50).clamp(1, 200);
+    let mut sql = String::from("SELECT * FROM sop_runs");
+    let mut values = Vec::<String>::new();
+    let mut conditions = Vec::<&str>::new();
+    if let Some(sop_id) = args.get("sop_id").and_then(Value::as_str).filter(|value| !value.trim().is_empty()) { conditions.push("sop_id = ?"); values.push(sop_id.to_string()); }
+    if let Some(status) = args.get("status").and_then(Value::as_str).filter(|value| !value.trim().is_empty()) {
+        if !RUN_STATUSES.contains(&status) { return Err(json!({"schema":"narada.sop_mcp.error.v1","code":"sop_run_status_unsupported","message":format!("sop_run_status_unsupported:{status}"),"details":{"status":status,"allowed":RUN_STATUSES}})); }
+        conditions.push("status = ?"); values.push(status.to_string());
+    }
+    if args.get("include_terminal").and_then(Value::as_bool) != Some(true) { conditions.push("status NOT IN ('completed','failed','cancelled')"); }
+    if !conditions.is_empty() { sql.push_str(" WHERE "); sql.push_str(&conditions.join(" AND ")); }
+    sql.push_str(" ORDER BY created_at DESC LIMIT ?");
+    values.push(limit.to_string());
+    let Some(connection) = open_db(root)? else { return Ok(json!({"schema":"narada.sop.run_list.v2","status":"missing","items":[],"count":0,"db_path":db_path(root).to_string_lossy()})); };
+    let mut statement = connection.prepare(&sql).map_err(|e| error("sop_run_query_failed", &e.to_string()))?;
+    let rows = statement.query_map(rusqlite::params_from_iter(values.iter()), row_value).map_err(|e| error("sop_run_query_failed", &e.to_string()))?;
+    let items = rows.take(200).map(|row| row.map(|value| run_summary(&value)).map_err(|e| error("sop_run_row_failed", &e.to_string()))).collect::<Result<Vec<_>, _>>()?;
+    Ok(json!({"schema":"narada.sop.run_list.v2","status":"ok","items":items,"count":items.len(),"db_path":db_path(root).to_string_lossy()}))
+}
+
+fn run_summary(value: &Value) -> Value {
+    json!({"schema":"narada.sop.run_summary.v2","run_id":member(value,"run_id"),"sop_id":member(value,"sop_id"),"sop_version":member(value,"sop_version"),"sop_title":member(value,"sop_title"),"occurrence_key":member(value,"occurrence_key"),"status":member(value,"status"),"parent_run_id":member(value,"parent_run_id"),"parent_step_id":member(value,"parent_step_id"),"created_at":member(value,"created_at"),"updated_at":member(value,"updated_at"),"completed_at":member(value,"completed_at")})
+}
+
 fn doctor(root: &Path) -> Result<Value, Value> {
     let dirs = sops_dirs(root); let mut counts = Vec::new();
     for dir in &dirs { let count = fs::read_dir(dir).ok().map(|entries| entries.filter_map(Result::ok).filter(|entry| entry.path().file_name().and_then(|v|v.to_str()).map(|v|v.ends_with(".sop.yaml")).unwrap_or(false)).take(MAX_CANDIDATES).count()).unwrap_or(0); counts.push(json!({"path":dir.to_string_lossy(),"candidate_count":count})); }
-    Ok(json!({"schema":"narada.sop_mcp.doctor.v1","status":"ok","site_root":root.to_string_lossy(),"sops_dirs":counts,"native_adapter":"template_and_action_read","execution":"authority_boundary","server_name":SERVER_NAME}))
+    Ok(json!({"schema":"narada.sop_mcp.doctor.v1","status":"ok","site_root":root.to_string_lossy(),"sops_dirs":counts,"native_adapter":"template_action_run_list_read","execution":"authority_boundary","server_name":SERVER_NAME}))
 }
 
 fn candidate_entries(root: &Path) -> Vec<(String, PathBuf)> {
@@ -255,6 +282,21 @@ mod tests {
         let show = action_show(&json!({"action_id":"action-1"}).as_object().unwrap(), &root).expect("show");
         assert_eq!(show["schema"], "narada.sop.action.v1");
         assert_eq!(show["arguments"], json!({}));
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn native_sop_run_list_reads_nonterminal_summaries() {
+        let root = std::env::temp_dir().join(format!("narada-sop-runs-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join(".sop")).expect("root");
+        let connection = Connection::open(db_path(&root)).expect("db");
+        connection.execute_batch("CREATE TABLE sop_runs (run_id TEXT, sop_id TEXT, sop_version INTEGER, sop_title TEXT, status TEXT, occurrence_key TEXT, parent_run_id TEXT, parent_step_id TEXT, created_at TEXT, updated_at TEXT, completed_at TEXT); INSERT INTO sop_runs VALUES ('run-1','demo',1,'Demo','running','occ-1',NULL,NULL,'2026-01-01','2026-01-01',NULL); INSERT INTO sop_runs VALUES ('run-2','demo',1,'Demo','completed','occ-2',NULL,NULL,'2026-01-02','2026-01-02','2026-01-02');").expect("schema");
+        drop(connection);
+        let list = run_list(&json!({"limit":10}).as_object().unwrap(), &root).expect("list");
+        assert_eq!(list["count"], 1);
+        assert_eq!(list["items"][0]["run_id"], "run-1");
+        let invalid = run_list(&json!({"status":"unknown"}).as_object().unwrap(), &root).expect_err("status validation");
+        assert_eq!(invalid["code"], "sop_run_status_unsupported");
         fs::remove_dir_all(root).expect("cleanup");
     }
 }
