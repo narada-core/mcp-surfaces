@@ -185,7 +185,50 @@ fn feedback_stats(args: &Map<String, Value>, root: &Path) -> Result<Value, Value
     Ok(json!({"schema":"narada.surface_feedback.stats.v1","status":"ok","scope":read_scope,"by_surface":by_surface,"by_status":by_status,"read_only_native":true}))
 }
 
-fn proof_template(args: &Map<String, Value>) -> Value { json!({"schema":"narada.surface_feedback.live_proof_template.v1","status":"ok","workflow":args.get("workflow").cloned().unwrap_or(Value::Null),"surface_id":args.get("surface_id").cloned().unwrap_or(Value::Null),"evidence":[{"kind":"command","command":"<bounded-live-command>","result":"<captured-result>"},{"kind":"readback","surface":"<owning-surface>","result":"<captured-readback>"}],"requirements":["No mock-only claim.","Include the exact command and bounded output.","Read back durable state from the owning surface."]}) }
+fn proof_template(args: &Map<String, Value>) -> Value {
+    let optional = |key: &str| args.get(key).and_then(Value::as_str).map(str::trim).filter(|value| !value.is_empty()).map(ToOwned::to_owned).map(Value::String).unwrap_or(Value::Null);
+    json!({
+        "schema": "narada.surface_feedback.live_proof_template.v1",
+        "status": "ok",
+        "workflow": optional("workflow"),
+        "surface_id": optional("surface_id"),
+        "purpose": "Capture evidence expectations for live, no-mock, no-fallback E2E authority/projection behavior.",
+        "recommended_feedback": {
+            "kind": "observation",
+            "details_format": "json_or_markdown_with_live_proof_contract"
+        },
+        "live_proof_contract": {
+            "authority_location": {
+                "deployed": "<where the deployed authority or projection state lives>",
+                "local": "<where local source/test authority lives>"
+            },
+            "transport": {
+                "live_transport_assumption": "<named live transport path and why it is expected>",
+                "replay_vs_live_delivery": "<how replay evidence is distinguished from live delivery>"
+            },
+            "success": {
+                "semantic_success_point": "<observable state/event that proves live success>",
+                "saved_evidence_file": "<required artifact path or null when not applicable>"
+            },
+            "exclusions": {
+                "no_mock": "<evidence that mocks were not used>",
+                "no_fallback": "<evidence that fallback path was not used>",
+                "no_shim": "<evidence that compatibility shim did not carry the behavior>"
+            },
+            "negative_controls": {
+                "revocation_or_refusal_proof": "<how revoked/unauthorized paths fail>"
+            },
+            "test_alignment": {
+                "unit_tests_specify_deployed_transport": "<yes/no/unknown plus file references>"
+            }
+        },
+        "usage": [
+            "Use this template in feedback details when reporting live-proof gaps or observations.",
+            "Use it in task context when converting feedback into implementation work.",
+            "Do not treat a completed template as proof by itself; proof requires cited artifacts and live readback."
+        ]
+    })
+}
 fn authority_boundary(name: &str) -> Value { json!({"schema":"narada.surface_feedback.authority_boundary.v1","status":"unavailable","tool_name":name,"reason":"surface_feedback_mutation_not_enabled_in_native_read_slice","remediation":"Use the configured surface-feedback authority for writes, imports, task handoffs, and status changes."}) }
 fn error(code: &str, message: &str) -> Value { json!({"schema":"narada.surface_feedback.error.v1","code":code,"message":message}) }
 fn tool(name: &str, description: &str, input_schema: Value, read_only: bool) -> Value { json!({"name":name,"description":description,"annotations":{"title":name,"readOnlyHint":read_only,"destructiveHint":!read_only,"idempotentHint":read_only,"openWorldHint":false},"inputSchema":input_schema,"outputSchema":{"type":"object","additionalProperties":true}}) }
