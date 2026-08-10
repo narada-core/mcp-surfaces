@@ -31,7 +31,7 @@ pub fn list_tools() -> Vec<Value> {
         ("sop_action_list", "List SOP actions from the owning SOP store.", json!({"type":"object","additionalProperties":true})),
         ("sop_action_show", "Show one SOP action from the owning SOP store.", json!({"type":"object","additionalProperties":true})),
         ("sop_run_coverage_since", "Read SOP coverage evidence from the owning SOP store.", json!({"type":"object","additionalProperties":true})),
-        ("sop_run_events", "Read SOP run events from the owning SOP store.", json!({"type":"object","additionalProperties":true})),
+        ("sop_run_events", "List bounded SOP run events in reverse insertion order.", json!({"type":"object","properties":{"run_id":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":500,"default":50},"offset":{"type":"integer","minimum":0,"maximum":100000,"default":0}},"required":["run_id"],"additionalProperties":false})),
         ("sop_outbox_list", "Read SOP outbox entries from the owning SOP store.", json!({"type":"object","additionalProperties":true})),
     ] {
         tools.push(tool(name, description, schema, true));
@@ -59,9 +59,10 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<V
         "sop_template_search" => template_search(args, root),
         "sop_template_list" => template_list(args, root),
         "sop_template_show" => template_show(args, root),
-        "sop_run_coverage_since" | "sop_run_events" | "sop_outbox_list" => Err(authority_boundary(name)),
+        "sop_run_coverage_since" | "sop_outbox_list" => Err(authority_boundary(name)),
         "sop_run_status" => run_status(args, root),
         "sop_run_list" => run_list(args, root),
+        "sop_run_events" => run_events(args, root),
         "sop_handoff_list" => handoff_list(args, root),
         "sop_handoff_show" => handoff_show(args, root),
         "sop_action_list" => action_list(args, root),
@@ -312,10 +313,25 @@ fn handoff_record(value: Value) -> Value {
     json!({"schema":"narada.sop.handoff.v1","handoff_id":member(&value,"handoff_id"),"run_id":member(&value,"run_id"),"step_id":member(&value,"step_id"),"occurrence_key":member(&value,"occurrence_key"),"sop_id":member(&value,"sop_id"),"sop_version":member(&value,"sop_version"),"executor":member(&value,"executor"),"title":member(&value,"title"),"instructions":member(&value,"instructions"),"input":member(&value,"input_json"),"input_ref":member(&value,"input_ref_json"),"result_schema":member(&value,"result_schema_json"),"request_fingerprint":member(&value,"request_fingerprint"),"status":member(&value,"status"),"lease_owner":member(&value,"lease_owner"),"lease_expires_at":member(&value,"lease_expires_at"),"attempt_count":member(&value,"attempt_count"),"last_error":member(&value,"last_error"),"completion_key":member(&value,"completion_key"),"completion_fingerprint":member(&value,"completion_fingerprint"),"principal":member(&value,"principal"),"result":member(&value,"result_json"),"result_ref":member(&value,"result_ref_json"),"error_message":member(&value,"error_message"),"created_at":member(&value,"created_at"),"updated_at":member(&value,"updated_at"),"completed_at":member(&value,"completed_at")})
 }
 
+fn run_events(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let run_id = args.get("run_id").and_then(Value::as_str).filter(|value| !value.trim().is_empty()).ok_or_else(|| error("sop_requires_run_id", "sop_requires_run_id"))?;
+    let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(50).clamp(1, 500);
+    let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0).min(100_000);
+    let Some(connection) = open_db(root)? else { return Ok(json!({"items":[],"count":0,"run_id":run_id})); };
+    let mut statement = connection.prepare("SELECT * FROM sop_events WHERE run_id = ? ORDER BY rowid DESC LIMIT ? OFFSET ?").map_err(|e| error("sop_event_query_failed", &e.to_string()))?;
+    let rows = statement.query_map(params![run_id, limit, offset], row_value).map_err(|e| error("sop_event_query_failed", &e.to_string()))?;
+    let items = rows.take(500).map(|row| row.map(event_record).map_err(|e| error("sop_event_row_failed", &e.to_string()))).collect::<Result<Vec<_>, _>>()?;
+    Ok(json!({"items":items,"count":items.len(),"run_id":run_id}))
+}
+
+fn event_record(value: Value) -> Value {
+    json!({"event_id":member(&value,"event_id"),"run_id":member(&value,"run_id"),"step_id":member(&value,"step_id"),"event_kind":member(&value,"event_kind"),"details":member(&value,"details_json"),"recorded_at":member(&value,"recorded_at")})
+}
+
 fn doctor(root: &Path) -> Result<Value, Value> {
     let dirs = sops_dirs(root); let mut counts = Vec::new();
     for dir in &dirs { let count = fs::read_dir(dir).ok().map(|entries| entries.filter_map(Result::ok).filter(|entry| entry.path().file_name().and_then(|v|v.to_str()).map(|v|v.ends_with(".sop.yaml")).unwrap_or(false)).take(MAX_CANDIDATES).count()).unwrap_or(0); counts.push(json!({"path":dir.to_string_lossy(),"candidate_count":count})); }
-    Ok(json!({"schema":"narada.sop_mcp.doctor.v1","status":"ok","site_root":root.to_string_lossy(),"sops_dirs":counts,"native_adapter":"template_action_run_status_handoff_list_read","execution":"authority_boundary","server_name":SERVER_NAME}))
+    Ok(json!({"schema":"narada.sop_mcp.doctor.v1","status":"ok","site_root":root.to_string_lossy(),"sops_dirs":counts,"native_adapter":"template_action_run_status_handoff_event_read","execution":"authority_boundary","server_name":SERVER_NAME}))
 }
 
 fn candidate_entries(root: &Path) -> Vec<(String, PathBuf)> {
@@ -428,6 +444,20 @@ mod tests {
         let show = handoff_show(&json!({"handoff_id":"handoff-1"}).as_object().unwrap(), &root).expect("show");
         assert_eq!(show["schema"], "narada.sop.handoff.v1");
         assert!(show.get("lease_token").is_none());
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn native_sop_run_events_page_durable_records() {
+        let root = std::env::temp_dir().join(format!("narada-sop-events-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join(".sop")).expect("root");
+        let connection = Connection::open(db_path(&root)).expect("db");
+        connection.execute_batch("CREATE TABLE sop_events (event_id TEXT, run_id TEXT, step_id TEXT, event_kind TEXT, details_json TEXT, recorded_at TEXT); INSERT INTO sop_events VALUES ('event-1','run-1','step-1','step_started','{\"detail\":1}','2026-01-01'); INSERT INTO sop_events VALUES ('event-2','run-1','','run_completed','{}','2026-01-02');").expect("schema");
+        drop(connection);
+        let page = run_events(&json!({"run_id":"run-1","limit":1}).as_object().unwrap(), &root).expect("events");
+        assert_eq!(page["count"], 1);
+        assert_eq!(page["items"][0]["event_id"], "event-2");
+        assert_eq!(page["items"][0]["details"], json!({}));
         fs::remove_dir_all(root).expect("cleanup");
     }
 }
