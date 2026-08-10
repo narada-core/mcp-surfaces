@@ -15,6 +15,7 @@ mod calendar;
 mod site_coherence;
 mod site_loop;
 mod surface_feedback;
+mod sop;
 
 const LEGACY_PROTOCOL_VERSION: &str = "2024-11-05";
 const MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
@@ -143,6 +144,7 @@ fn handle_request(request: &Value, options: &Options) -> Option<Value> {
             method if options.surface_id == "calendar" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => calendar::auxiliary(method, &params).map(|value| modern_result(value, options)),
             method if options.surface_id == "site-loop" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => site_loop::auxiliary(method, &params).map(|value| modern_result(value, options)),
             method if options.surface_id == "surface-feedback" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => surface_feedback::auxiliary(method, &params).map(|value| modern_result(value, options)),
+            method if options.surface_id == "sop" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => sop::auxiliary(method, &params).map(|value| modern_result(value, options)),
             "initialize" => Err(diagnostic(
                 "initialize_removed",
                 "The 2026-07-28 protocol has no initialize handshake.",
@@ -160,6 +162,7 @@ fn handle_request(request: &Value, options: &Options) -> Option<Value> {
             method if options.surface_id == "calendar" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => calendar::auxiliary(method, &params),
             method if options.surface_id == "site-loop" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => site_loop::auxiliary(method, &params),
             method if options.surface_id == "surface-feedback" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => surface_feedback::auxiliary(method, &params),
+            method if options.surface_id == "sop" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => sop::auxiliary(method, &params),
             "initialize" => Ok(initialize_result(options)),
             "tools/list" => Ok(json!({ "tools": list_tools(&options.surface_id) })),
             "tools/call" => call_tool(&options.surface_id, &params, options),
@@ -217,6 +220,7 @@ fn server_name(options: &Options) -> String {
         "site-inbox" => "narada-site-inbox-mcp".to_string(),
         "site-loop" => "narada-site-loop-mcp".to_string(),
         "surface-feedback" => "surface-feedback-mcp".to_string(),
+        "sop" => "sop-mcp".to_string(),
         "site-lifecycle" => "site-lifecycle-mcp".to_string(),
         "calendar" => "narada-calendar-mcp".to_string(),
         "site-registry" => "site-registry-mcp".to_string(),
@@ -229,6 +233,7 @@ fn server_name(options: &Options) -> String {
 }
 
 fn capabilities(surface_id: &str) -> Value {
+    if surface_id == "sop" { return json!({"tools":{},"prompts":{},"completions":{},"logging":{}}); }
     if surface_id == "site-loop" { return json!({"tools":{},"prompts":{},"completions":{},"logging":{}}); }
     if surface_id == "surface-feedback" { return json!({"tools":{},"prompts":{},"completions":{},"logging":{}}); }
     if surface_id == "calendar" { return json!({"tools":{},"prompts":{},"completions":{},"logging":{}}); }
@@ -272,6 +277,7 @@ fn list_tools(surface_id: &str) -> Vec<Value> {
         "calendar" => calendar::list_tools(),
         "site-loop" => site_loop::list_tools(),
         "surface-feedback" => surface_feedback::list_tools(),
+        "sop" => sop::list_tools(),
         "catalog-observation" => vec![
             guidance_tool("catalog-observation"),
             tool("catalog_observation_observe", "Observe a provider model catalog through the Narada-owned observation port.", json!({
@@ -346,6 +352,7 @@ fn call_tool(surface_id: &str, params: &Map<String, Value>, options: &Options) -
         ("calendar", name) => calendar::call_tool(name, &args, &options.site_root),
         ("site-loop", name) => site_loop::call_tool(name, &args, &options.site_root),
         ("surface-feedback", name) => surface_feedback::call_tool(name, &args, &options.site_root),
+        ("sop", name) => sop::call_tool(name, &args, &options.site_root),
         ("site-lifecycle", name) | ("site-registry", name) | ("project-state", name) => {
             simple_surfaces::call_tool(surface_id, name, &args, &options.site_root)
         }
