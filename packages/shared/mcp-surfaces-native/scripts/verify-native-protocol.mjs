@@ -880,6 +880,39 @@ function runCalendarParity() {
   }
 }
 
+function runCalendarAuthorityBridge() {
+  const cleanEnv = { ...process.env };
+  delete cleanEnv.NARADA_CALENDAR_AUTHORITY_ENTRYPOINT;
+  delete cleanEnv.NARADA_CALENDAR_AUTHORITY_ARGS;
+  const request = { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'calendar_event_query', arguments: { start_datetime: '2026-01-01T00:00:00Z', end_datetime: '2026-01-02T00:00:00Z', limit: 1 } } };
+  const refusal = runMailbox(executable, ['--surface-id', 'calendar', '--site-root', packageRoot], [request], packageRoot, cleanEnv)[0];
+  assertSame('calendar.authority.refusal', {
+    schema: refusal.error?.data?.schema,
+    status: refusal.error?.data?.status,
+    reason: refusal.error?.data?.reason,
+    tool_name: refusal.error?.data?.tool_name,
+  }, {
+    schema: 'narada.calendar_mcp.authority_boundary.v1',
+    status: 'unavailable',
+    reason: 'native_calendar_external_authority_not_enabled',
+    tool_name: 'calendar_event_query',
+  });
+  const authorityScript = "let body='';process.stdin.on('data',chunk=>body+=chunk).on('end',()=>{const request=JSON.parse(body);process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:request.id,result:{schema:'narada.calendar_mcp.authority_fixture.v1',status:'ok',method:request.method,arguments:request.params}}));});";
+  const authorityEnv = {
+    ...cleanEnv,
+    NARADA_CALENDAR_AUTHORITY_ENTRYPOINT: process.execPath,
+    NARADA_CALENDAR_AUTHORITY_ARGS: ['-e', authorityScript].join(String.fromCharCode(31)),
+  };
+  const forwarded = runMailbox(executable, ['--surface-id', 'calendar', '--site-root', packageRoot], [request], packageRoot, authorityEnv);
+  assertSame('calendar.authority.forwarded', mailboxStructured(forwarded, 1, 'native-calendar-authority'), {
+    schema: 'narada.calendar_mcp.authority_fixture.v1',
+    status: 'ok',
+    method: 'calendar_event_query',
+    arguments: request.params.arguments,
+  });
+  return { status: 'passed', fixture: 'opt_in_stdio_authority_bridge', compared: ['unconfigured_refusal', 'configured_forwarding'] };
+}
+
 function runCloudflareParity() {
   const workspaceRoot = resolve(packageRoot, '..', '..', '..');
   const bunEntrypoint = join(workspaceRoot, 'packages', 'cloudflare-carrier-mcp', 'src', 'main.ts');
@@ -1168,6 +1201,7 @@ const sopOutboxParity = runSopOutboxParity();
 const surfaceFeedbackParity = runSurfaceFeedbackParity();
 const siteLoopParity = runSiteLoopParity();
 const calendarParity = runCalendarParity();
+const calendarAuthorityBridge = runCalendarAuthorityBridge();
 const cloudflareParity = runCloudflareParity();
 const graphMailParity = runGraphMailParity();
 const operatorOverlayParity = runOperatorOverlayParity();
@@ -1196,6 +1230,7 @@ process.stdout.write(JSON.stringify({
   surface_feedback_parity: surfaceFeedbackParity,
   site_loop_parity: siteLoopParity,
   calendar_parity: calendarParity,
+  calendar_authority_bridge: calendarAuthorityBridge,
   cloudflare_parity: cloudflareParity,
   graph_mail_parity: graphMailParity,
   operator_overlay_parity: operatorOverlayParity,

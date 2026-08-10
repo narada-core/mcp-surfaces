@@ -14,6 +14,25 @@ pub trait AuthorityAdapter {
     fn call(&self, method: &str, params: &Map<String, Value>) -> Result<Value, Value>;
 }
 
+/// Forward a boundary operation only when its owning authority has been
+/// explicitly configured.  An absent entrypoint returns `None`, preserving
+/// the surface's structured refusal and the Bun fallback selected by the
+/// runtime matrix.  A configured entrypoint is authoritative for that call.
+pub fn call_if_configured(
+    surface_id: &str,
+    method: &str,
+    params: &Map<String, Value>,
+) -> Option<Result<Value, Value>> {
+    let key = format!(
+        "NARADA_{}_AUTHORITY_ENTRYPOINT",
+        surface_id.replace('-', "_").to_ascii_uppercase()
+    );
+    let configured = std::env::var(&key)
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    configured.map(|_| StdioAuthorityAdapter::from_env(surface_id).and_then(|adapter| adapter.call(method, params)))
+}
+
 pub struct StdioAuthorityAdapter {
     executable: String,
     args: Vec<String>,

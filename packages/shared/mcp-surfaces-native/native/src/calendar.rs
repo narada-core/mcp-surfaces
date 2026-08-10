@@ -47,9 +47,16 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<V
         "calendar_guidance" => Ok(guidance(args)),
         "calendar_doctor" => doctor(root),
         "calendar_output_show" => output_show(args, root),
-        "calendar_list" | "calendar_event_query" | "calendar_event_show" | "calendar_event_create" | "calendar_event_update" | "calendar_event_delete" => Err(authority_boundary(name)),
+        "calendar_list" | "calendar_event_query" | "calendar_event_show" | "calendar_event_create" | "calendar_event_update" | "calendar_event_delete" => authority_call(name, args),
         _ => Err(error("unknown_tool", &format!("unknown_tool:{name}"))),
     }
+}
+
+fn authority_call(name: &str, args: &Map<String, Value>) -> Result<Value, Value> {
+    if let Some(result) = crate::authority::call_if_configured("calendar", name, args) {
+        return result;
+    }
+    Err(authority_boundary(name))
 }
 
 fn guidance_tool() -> Value {
