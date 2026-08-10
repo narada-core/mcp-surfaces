@@ -12,6 +12,9 @@ import { describeUnknownError } from './error-description.js';
 
 type JsonRecord = Record<string, unknown>;
 
+const MODERN_PROTOCOL_VERSION = '2026-07-28';
+const MODERN_PROTOCOL_VERSION_META = 'io.modelcontextprotocol/protocolVersion';
+
 export type GenerationState =
   | 'starting'
   | 'warming'
@@ -184,9 +187,10 @@ export class GenerationManager {
   async route(request: JsonRecord, options: { session_id?: string } = {}): Promise<RouteResult> {
     const active = this.activeGeneration();
     if (active === null) throw new Error('mcp_generation_active_missing');
-    let sessionId = options.session_id ?? null;
+    const modern = isModernProtocolRequest(request);
+    let sessionId = modern ? null : options.session_id ?? null;
     let generation = active;
-    if (active.candidate.adapter.transport === 'streamable_http') {
+    if (active.candidate.adapter.transport === 'streamable_http' && !modern) {
       if (sessionId === null) {
         sessionId = randomUUID();
         this.sessions.set(sessionId, active.candidate.generation_id);
@@ -449,7 +453,12 @@ export class JsonLineStdioGenerationAdapter implements GenerationAdapter<StdioHa
       handle,
       String(request.method ?? 'tools/call'),
       isRecord(request.params) ? request.params : {},
-    );
+    ).then((result) => {
+      if (isModernProtocolRequest(request) && typeof result.resultType !== 'string') {
+        throw new Error('mcp_modern_result_type_missing');
+      }
+      return result;
+    });
   }
 
   async terminate(handle: StdioHandle): Promise<void> {
@@ -573,7 +582,11 @@ export class StreamableHttpGenerationAdapter implements GenerationAdapter<{ url:
     if (isRecord(response.error)) {
       throw new Error(describeUnknownError(response.error, 'mcp_http_generation_error'));
     }
-    return isRecord(response.result) ? response.result : response;
+    const result = isRecord(response.result) ? response.result : response;
+    if (isModernProtocolRequest(request) && typeof result.resultType !== 'string') {
+      throw new Error('mcp_modern_result_type_missing');
+    }
+    return result;
   }
 
   async terminate(): Promise<void> {
@@ -585,6 +598,12 @@ export class StreamableHttpGenerationAdapter implements GenerationAdapter<{ url:
     message: JsonRecord,
     sessionId: string | null,
   ): Promise<JsonRecord> {
+    const modern = isModernProtocolRequest(message);
+    const method = typeof message.method === 'string' ? message.method : '';
+    const params = isRecord(message.params) ? message.params : {};
+    const name = method === 'tools/call' && typeof params.name === 'string'
+      ? params.name
+      : method;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.options.timeout_ms ?? 5_000);
     try {
@@ -593,7 +612,13 @@ export class StreamableHttpGenerationAdapter implements GenerationAdapter<{ url:
         headers: {
           'content-type': 'application/json',
           ...this.options.headers,
-          ...(sessionId === null ? {} : { 'mcp-session-id': sessionId }),
+          ...(modern
+            ? {
+                'MCP-Protocol-Version': MODERN_PROTOCOL_VERSION,
+                'Mcp-Method': method,
+                'Mcp-Name': name,
+              }
+            : sessionId === null ? {} : { 'mcp-session-id': sessionId }),
         },
         body: JSON.stringify(message),
         signal: controller.signal,
@@ -618,7 +643,7 @@ export async function startStableHttpGenerationEndpoint(
       const chunks: Buffer[] = [];
       for await (const chunk of request) chunks.push(Buffer.from(chunk));
       const message = JSON.parse(Buffer.concat(chunks).toString('utf8')) as JsonRecord;
-      const sessionHeader = request.headers['mcp-session-id'];
+      const sessionHeader = isModernProtocolRequest(message) ? undefined : request.headers['mcp-session-id'];
       const sessionId = Array.isArray(sessionHeader) ? sessionHeader[0] : sessionHeader;
       const routed = await manager.route(message, { session_id: sessionId });
       if (routed.session_id) response.setHeader('mcp-session-id', routed.session_id);
@@ -654,6 +679,12 @@ function retiredRouteResult(
     session_id: sessionId,
     error: retiredError(generation, 'already_retired'),
   };
+}
+
+function isModernProtocolRequest(message: JsonRecord): boolean {
+  const params = isRecord(message.params) ? message.params : {};
+  const meta = isRecord(params._meta) ? params._meta : {};
+  return meta[MODERN_PROTOCOL_VERSION_META] === MODERN_PROTOCOL_VERSION;
 }
 
 function retiredError(generation: InternalGeneration, reason: string): JsonRecord {

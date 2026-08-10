@@ -46,6 +46,14 @@ const definitions: McpToolDefinition[] = [
   },
 ];
 
+const modernMeta = {
+  _meta: {
+    'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+    'io.modelcontextprotocol/clientInfo': { name: 'generation-test-client', version: '1.0.0' },
+    'io.modelcontextprotocol/clientCapabilities': {},
+  },
+};
+
 test('structured MCP errors never collapse to object stringification', () => {
   assert.equal(describeUnknownError({ message: 'child failed', data: { code: 'child_failure' } }), 'child failed');
   assert.match(describeUnknownError({ data: { code: 'child_failure', reason: 'structured failure' } }), /structured failure/);
@@ -240,6 +248,32 @@ test('stable HTTP endpoint pins existing sessions and routes new sessions concur
   }
 });
 
+test('modern HTTP requests are stateless and use standard routing headers', async () => {
+  const backend = await startModernAwareBackend('modern');
+  const manager = new GenerationManager();
+  const stable = await startStableHttpGenerationEndpoint(manager);
+  try {
+    await manager.bootstrap(httpCandidate('modern-http', backend));
+    const response = await post(stable.url, {
+      jsonrpc: '2.0',
+      id: 'modern-call',
+      method: 'tools/call',
+      params: {
+        name: 'generation_fixture_echo',
+        arguments: { value: 'modern' },
+        ...modernMeta,
+      },
+    });
+    assert.equal(response.sessionId, null);
+    assert.equal(response.body.resultType, 'complete');
+    assert.equal((response.body.structuredContent as any).version, 'modern');
+  } finally {
+    await stable.close();
+    await manager.close();
+    await backend.close();
+  }
+});
+
 function httpCandidate(
   generationId: string,
   backend: { url: string; close(): Promise<void> },
@@ -279,6 +313,54 @@ async function startBackend(version: string): Promise<{ url: string; close(): Pr
       response.writeHead(200, { 'content-type': 'application/json' });
       response.end(JSON.stringify({ jsonrpc: '2.0', id: message.id ?? null, result }));
     })();
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => resolve());
+  });
+  const address = server.address();
+  if (address === null || typeof address === 'string') throw new Error('backend_address_missing');
+  return {
+    url: `http://127.0.0.1:${address.port}/mcp`,
+    close: () => new Promise<void>((resolve, reject) =>
+      server.close((error) => error ? reject(error) : resolve())),
+  };
+}
+
+async function startModernAwareBackend(version: string): Promise<{ url: string; close(): Promise<void> }> {
+  const server = createServer((request, response) => {
+    void (async () => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) chunks.push(Buffer.from(chunk));
+      const message = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, any>;
+      const meta = message.params?._meta;
+      const modern = meta?.['io.modelcontextprotocol/protocolVersion'] === '2026-07-28';
+      const method = String(message.method ?? '');
+      const expectedName = method === 'tools/call' ? String(message.params?.name ?? '') : method;
+      if (modern) {
+        if (request.headers['mcp-protocol-version'] !== '2026-07-28') throw new Error('modern_protocol_header_missing');
+        if (request.headers['mcp-method'] !== method) throw new Error('modern_method_header_missing');
+        if (request.headers['mcp-name'] !== expectedName) throw new Error('modern_name_header_missing');
+        if (request.headers['mcp-session-id'] !== undefined) throw new Error('modern_session_header_present');
+      }
+      let result: Record<string, unknown>;
+      if (method === 'initialize') {
+        result = { protocolVersion: '2024-11-05', capabilities: { tools: {} } };
+      } else if (method === 'tools/list') {
+        result = modern
+          ? { resultType: 'complete', tools: definitions, ttlMs: 300_000, cacheScope: 'public' }
+          : { tools: definitions };
+      } else {
+        result = modern
+          ? { resultType: 'complete', content: [{ type: 'text', text: version }], structuredContent: { version, value: message.params?.arguments?.value } }
+          : { content: [{ type: 'text', text: version }], structuredContent: { version, value: message.params?.arguments?.value } };
+      }
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ jsonrpc: '2.0', id: message.id ?? null, result }));
+    })().catch((error) => {
+      response.writeHead(500, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
+    });
   });
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
