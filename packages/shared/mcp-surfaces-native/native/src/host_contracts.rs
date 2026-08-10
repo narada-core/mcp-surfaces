@@ -4,6 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const MAX_BYTES: u64 = 256_000;
+const CLOUDFLARE_PACKAGE_FILTER: &str = "@narada-core/cloudflare-carrier";
+const CLOUDFLARE_WORKER_URL: &str = "https://narada-cloudflare-carrier.andrei-kokoev.workers.dev";
 const BROWSER: &[(&str, bool)] = &[
     ("browser_control_session_inventory", true), ("browser_control_attach", false),
     ("browser_control_status", true), ("browser_control_navigate", false),
@@ -97,18 +99,35 @@ fn description(surface_id: &str, name: &str) -> String { format!("Native {surfac
 fn operator_status(root: &Path) -> Value { let state_root=env::var("NARADA_WINDOW_SURFACE_OVERLAY_STATE_ROOT").ok().unwrap_or_else(||root.join(".narada/runtime/operator-console-overlay").to_string_lossy().to_string()); let state_path=Path::new(&state_root).join("overlay-state.json"); let metadata=metadata(&state_path); json!({"schema":"narada.operator_console_overlay.status.v1","status":if metadata.is_some(){"present"}else{"not_active"},"state_root_configured":true,"state_file_present":metadata.is_some(),"state_file":file_meta(metadata),"native_read_only":true}) }
 fn cloudflare_doctor(root: &Path) -> Value {
     let empty = Map::new();
-    let session = cloudflare_session_status(&empty, root);
-    let (health_path, health_configured) = cloudflare_path(&empty, "health_file", root, "CLOUDFLARE_HEALTH_FILE", "cloudflare_health.json");
+    let repo_root = env::var("NARADA_ROOT").ok().filter(|value| !value.trim().is_empty()).map(PathBuf::from).unwrap_or_else(|| root.to_path_buf());
+    let session = cloudflare_session_status(&empty, &repo_root);
+    let (health_path, _) = cloudflare_path(&empty, "health_file", &repo_root, "CLOUDFLARE_HEALTH_FILE", ".narada/site-continuity/health/cloudflare-continuity-health-last.json");
     let health_status = match bounded_json(&health_path) {
         Ok(Some(value)) => value.get("status").cloned().unwrap_or_else(|| json!("unknown")),
         Ok(None) => json!("missing"),
         Err(_) => json!("invalid_json"),
     };
-    json!({"schema":"narada.cloudflare_carrier.doctor.v1","status":"ok","site_root":root.to_string_lossy(),"session_status":session.get("status"),"session_fresh":session.get("is_fresh"),"session_file_configured":cloudflare_path(&empty, "session_file", root, "CLOUDFLARE_SESSION_FILE", "cloudflare_session.json").1,"health_file_configured":health_configured,"health_status":health_status,"native_external_api":false,"native_read_only":true})
+    let (session_path, _) = cloudflare_path(&empty, "session_file", &repo_root, "CLOUDFLARE_SESSION_FILE", ".narada/auth/cloudflare-operator-session.json");
+    let projection_root = env::var("NARADA_CLOUDFLARE_PROJECTION_REGISTRY_ROOT").ok().filter(|value| !value.trim().is_empty()).map(PathBuf::from).unwrap_or_else(|| repo_root.join(".narada/crew/nars-projections"));
+    let worker_url = env::var("CLOUDFLARE_CARRIER_URL").ok().filter(|value| !value.trim().is_empty()).map(|value| value.trim_end_matches('/').to_string()).unwrap_or_else(|| CLOUDFLARE_WORKER_URL.to_string());
+    json!({"schema":"narada.cloudflare_carrier_mcp.doctor.v1","status":"ok","repo_root":normalized_path(&repo_root),"package_filter":CLOUDFLARE_PACKAGE_FILTER,"worker_url":worker_url,"session_file":normalized_path(&session_path),"session_status":session.get("status").cloned().unwrap_or(Value::Null),"session_fresh":session.get("is_fresh").cloned().unwrap_or(Value::Null),"operator_action":cloudflare_doctor_operator_action(&session),"health_file":normalized_path(&health_path),"health_file_exists":metadata(&health_path).is_some(),"health_status":health_status,"projection_registry_root":normalized_path(&projection_root),"projection_registry_exists":projection_root.exists(),"projection_registry_status":if projection_root.exists(){"ready"}else{"missing"}})
+}
+
+fn cloudflare_doctor_operator_action(session: &Value) -> Value {
+    match session.get("status").and_then(Value::as_str) {
+        Some("missing") => json!("run_pnpm_cloudflare_operator_login"),
+        Some("present") if session.get("is_fresh").and_then(Value::as_bool) == Some(false) => json!("run_pnpm_cloudflare_operator_login_then_cloudflare_operator_check_human"),
+        Some("present") if session.get("has_cookie").and_then(Value::as_bool) == Some(false) => json!("run_pnpm_cloudflare_operator_login_to_capture_cookie"),
+        _ => Value::Null,
+    }
+}
+
+fn normalized_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 
 fn cloudflare_session_status(args: &Map<String, Value>, root: &Path) -> Value {
-    let (path, _) = cloudflare_path(args, "session_file", root, "CLOUDFLARE_SESSION_FILE", "cloudflare_session.json");
+    let (path, _) = cloudflare_path(args, "session_file", root, "CLOUDFLARE_SESSION_FILE", ".narada/auth/cloudflare-operator-session.json");
     let Some(metadata) = metadata(&path) else {
         return json!({"status":"missing","session_file":path.to_string_lossy(),"has_cookie":false,"is_fresh":false});
     };
@@ -124,7 +143,7 @@ fn cloudflare_session_status(args: &Map<String, Value>, root: &Path) -> Value {
 }
 
 fn cloudflare_health(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
-    let (path, _) = cloudflare_path(args, "health_file", root, "CLOUDFLARE_HEALTH_FILE", "cloudflare_health.json");
+    let (path, _) = cloudflare_path(args, "health_file", root, "CLOUDFLARE_HEALTH_FILE", ".narada/site-continuity/health/cloudflare-continuity-health-last.json");
     let Some(value) = bounded_json(&path).map_err(|detail| error("cloudflare_health_parse_failed", detail))? else {
         return Ok(json!({"status":"missing","health_file":path.to_string_lossy()}));
     };
@@ -190,7 +209,7 @@ fn read_json_file(path: &Path) -> Value {
 fn cloudflare_path(args: &Map<String, Value>, field: &str, root: &Path, variable: &str, default_name: &str) -> (PathBuf, bool) {
     let requested = args.get(field).and_then(Value::as_str).map(str::to_string).filter(|value| !value.trim().is_empty()).or_else(|| env::var(variable).ok().filter(|value| !value.trim().is_empty()));
     let configured = requested.is_some();
-    let path = requested.map(PathBuf::from).unwrap_or_else(|| root.join(".narada/runtime/cloudflare").join(default_name));
+    let path = requested.map(PathBuf::from).unwrap_or_else(|| root.join(default_name));
     (path, configured)
 }
 fn bounded_json(path: &Path) -> Result<Option<Value>, &'static str> {
@@ -218,7 +237,7 @@ mod tests {
     #[test]
     fn cloudflare_session_status_redacts_cookie_and_reports_freshness() {
         let root = temp_root("session");
-        let path = root.join(".narada/runtime/cloudflare/cloudflare_session.json");
+        let path = root.join(".narada/auth/cloudflare-operator-session.json");
         fs::create_dir_all(path.parent().expect("parent")).expect("directory");
         fs::write(&path, r#"{"cookie":"narada_operator_session=secret","captured_at":"2026-08-09T00:00:00Z","worker_url":"https://worker.example","principal":"operator"}"#).expect("write");
         let response = cloudflare_session_status(&Map::new(), &root);
@@ -231,7 +250,7 @@ mod tests {
     #[test]
     fn cloudflare_health_reads_bounded_projection_fields() {
         let root = temp_root("health");
-        let path = root.join(".narada/runtime/cloudflare/cloudflare_health.json");
+        let path = root.join(".narada/site-continuity/health/cloudflare-continuity-health-last.json");
         fs::create_dir_all(path.parent().expect("parent")).expect("directory");
         fs::write(&path, r#"{"generated_at":"2026-08-09T00:00:00Z","continuity_health":{"local_sync_status":"healthy"},"scheduler_task_readback":{"scheduled_task_state":"Ready"},"cloudflare_product_posture":{"site_product_overview":{"site_count":2}},"cloudflare_product_binding_alignment":{"state":"aligned"}}"#).expect("write");
         let response = cloudflare_health(&Map::new(), &root).expect("health");

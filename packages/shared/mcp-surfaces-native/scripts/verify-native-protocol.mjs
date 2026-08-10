@@ -428,12 +428,20 @@ function runCloudflareParity() {
       id: 2,
       method: 'tools/call',
       params: { name: 'cloudflare_session_status', arguments: { session_file: join(root, 'missing-session.json') } },
+    }, {
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'tools/call',
+      params: { name: 'cloudflare_doctor', arguments: {} },
     }];
-    const bun = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', [bunEntrypoint, '--site-root', root], requests, workspaceRoot);
-    const rust = runMailbox(executable, ['--surface-id', 'cloudflare-carrier', '--site-root', root], requests, workspaceRoot);
+    const env = { ...process.env, NARADA_ROOT: root };
+    for (const key of ['CLOUDFLARE_CARRIER_URL', 'CLOUDFLARE_SESSION_FILE', 'CLOUDFLARE_HEALTH_FILE', 'NARADA_CLOUDFLARE_PROJECTION_REGISTRY_ROOT']) delete env[key];
+    const bun = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', [bunEntrypoint, '--site-root', root], requests, workspaceRoot, env);
+    const rust = runMailbox(executable, ['--surface-id', 'cloudflare-carrier', '--site-root', root], requests, workspaceRoot, env);
     assertSame('cloudflare.health', mailboxStructured(bun, 1, 'bun'), mailboxStructured(rust, 1, 'rust'));
     assertSame('cloudflare.session_status', mailboxStructured(bun, 2, 'bun'), mailboxStructured(rust, 2, 'rust'));
-    return { status: 'passed', fixture: 'local_health_projection', compared: ['health', 'session_status'] };
+    assertSame('cloudflare.doctor', mailboxStructured(bun, 3, 'bun'), mailboxStructured(rust, 3, 'rust'));
+    return { status: 'passed', fixture: 'local_health_projection', compared: ['health', 'session_status', 'doctor'] };
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
