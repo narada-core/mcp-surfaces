@@ -213,8 +213,42 @@ function runArtifactsParity() {
   return { status: 'passed', fixture: 'pure_message_part', compared: ['message_part', 'operator_message', 'recommendation'] };
 }
 
+function runSopParity() {
+  const workspaceRoot = resolve(packageRoot, '..', '..', '..');
+  const bunEntrypoint = join(workspaceRoot, 'packages', 'sop-mcp', 'dist', 'src', 'main.js');
+  if (!existsSync(bunEntrypoint)) throw new Error('sop_parity_bun_entrypoint_missing:' + bunEntrypoint);
+  const root = mkdtempSync(join(tmpdir(), 'narada-sop-native-parity-'));
+  try {
+    const setupAndReads = [
+      { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'sop_template_create', arguments: { sop_id: 'fixture', title: 'Fixture SOP', description: 'Parity fixture', steps: [{ id: 'step-1', executor: 'agent', title: 'Inspect', instructions: 'Inspect fixture' }] } } },
+      { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'sop_template_list', arguments: {} } },
+      { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'sop_template_show', arguments: { sop_id: 'fixture' } } },
+      { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'sop_template_search', arguments: { query: 'Fixture' } } },
+    ];
+    const reads = setupAndReads.slice(1);
+    const bun = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', [bunEntrypoint, '--sop-root', root], setupAndReads, workspaceRoot);
+    const rust = runMailbox(executable, ['--surface-id', 'sop', '--site-root', root], reads.map((request, index) => ({ ...request, id: index + 2 })), workspaceRoot);
+    const bunList = mailboxStructured(bun, 2, 'bun');
+    const rustList = mailboxStructured(rust, 2, 'rust');
+    const listComparable = (value) => Object.fromEntries(['schema', 'items', 'count'].map((key) => [key, value?.[key]]));
+    assertSame('sop.template_list', listComparable(bunList), listComparable(rustList));
+    const bunShow = mailboxStructured(bun, 3, 'bun');
+    const rustShow = mailboxStructured(rust, 3, 'rust');
+    const showComparable = (value) => Object.fromEntries(Object.keys(value ?? {}).filter((key) => key !== 'native_hydration').map((key) => [key, value[key]]));
+    assertSame('sop.template_show', showComparable(bunShow), showComparable(rustShow));
+    const bunSearch = mailboxStructured(bun, 4, 'bun');
+    const rustSearch = mailboxStructured(rust, 4, 'rust');
+    const searchComparable = (value) => Object.fromEntries(['schema', 'query', 'items', 'count'].map((key) => [key, value?.[key]]));
+    assertSame('sop.template_search', searchComparable(bunSearch), searchComparable(rustSearch));
+    return { status: 'passed', fixture: 'local_template_registry', compared: ['template_list', 'template_show', 'template_search'] };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 const mailboxParity = runMailboxParity();
 const artifactsParity = runArtifactsParity();
+const sopParity = runSopParity();
 process.stdout.write(JSON.stringify({
   schema: 'narada.mcp_surfaces_native.protocol_parity.v1',
   status: 'passed',
@@ -224,4 +258,5 @@ process.stdout.write(JSON.stringify({
   defaults_changed: false,
   mailbox_parity: mailboxParity,
   artifacts_parity: artifactsParity,
+  sop_parity: sopParity,
 }) + '\n');
