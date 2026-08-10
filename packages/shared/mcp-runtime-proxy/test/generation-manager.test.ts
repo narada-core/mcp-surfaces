@@ -254,7 +254,7 @@ test('modern HTTP requests are stateless and use standard routing headers', asyn
   const stable = await startStableHttpGenerationEndpoint(manager);
   try {
     await manager.bootstrap(httpCandidate('modern-http', backend));
-    const response = await post(stable.url, {
+    const message = {
       jsonrpc: '2.0',
       id: 'modern-call',
       method: 'tools/call',
@@ -263,6 +263,13 @@ test('modern HTTP requests are stateless and use standard routing headers', asyn
         arguments: { value: 'modern' },
         ...modernMeta,
       },
+    };
+    const missingHeaders = await post(stable.url, message);
+    assert.equal(missingHeaders.body.error?.code, -32020);
+    const response = await post(stable.url, message, undefined, {
+      'MCP-Protocol-Version': '2026-07-28',
+      'Mcp-Method': 'tools/call',
+      'Mcp-Name': 'generation_fixture_echo',
     });
     assert.equal(response.sessionId, null);
     assert.equal(response.body.resultType, 'complete');
@@ -379,12 +386,14 @@ async function post(
   url: string,
   message: Record<string, unknown>,
   sessionId?: string,
+  headers: Record<string, string> = {},
 ): Promise<{ body: Record<string, any>; sessionId: string | null }> {
   const response = await fetch(url, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
       ...(sessionId ? { 'mcp-session-id': sessionId } : {}),
+      ...headers,
     },
     body: JSON.stringify(message),
   });

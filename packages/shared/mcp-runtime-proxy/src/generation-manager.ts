@@ -643,6 +643,14 @@ export async function startStableHttpGenerationEndpoint(
       const chunks: Buffer[] = [];
       for await (const chunk of request) chunks.push(Buffer.from(chunk));
       const message = JSON.parse(Buffer.concat(chunks).toString('utf8')) as JsonRecord;
+      if (isModernProtocolRequest(message)) {
+        const headerError = modernHeaderError(request.headers, message);
+        if (headerError !== null) {
+          response.writeHead(400, { 'content-type': 'application/json' });
+          response.end(JSON.stringify({ jsonrpc: '2.0', id: message.id ?? null, error: headerError }));
+          return;
+        }
+      }
       const sessionHeader = isModernProtocolRequest(message) ? undefined : request.headers['mcp-session-id'];
       const sessionId = Array.isArray(sessionHeader) ? sessionHeader[0] : sessionHeader;
       const routed = await manager.route(message, { session_id: sessionId });
@@ -685,6 +693,43 @@ function isModernProtocolRequest(message: JsonRecord): boolean {
   const params = isRecord(message.params) ? message.params : {};
   const meta = isRecord(params._meta) ? params._meta : {};
   return meta[MODERN_PROTOCOL_VERSION_META] === MODERN_PROTOCOL_VERSION;
+}
+
+function modernHeaderError(
+  headers: NodeJS.Dict<string | string[]>,
+  message: JsonRecord,
+): JsonRecord | null {
+  const method = typeof message.method === 'string' ? message.method : '';
+  const params = isRecord(message.params) ? message.params : {};
+  const expectedName = method === 'tools/call' && typeof params.name === 'string'
+    ? params.name
+    : method;
+  const protocolVersion = headerText(headers['mcp-protocol-version']);
+  const routedMethod = headerText(headers['mcp-method']);
+  const routedName = headerText(headers['mcp-name']);
+  if (protocolVersion === MODERN_PROTOCOL_VERSION && routedMethod === method && routedName === expectedName) return null;
+  return {
+    code: -32020,
+    message: 'MCP standard header mismatch',
+    data: {
+      code: 'header_mismatch',
+      expected: {
+        protocolVersion: MODERN_PROTOCOL_VERSION,
+        method,
+        name: expectedName,
+      },
+      received: {
+        protocolVersion,
+        method: routedMethod,
+        name: routedName,
+      },
+    },
+  };
+}
+
+function headerText(value: string | string[] | undefined): string | null {
+  if (Array.isArray(value)) return value[0] ?? null;
+  return value ?? null;
 }
 
 function retiredError(generation: InternalGeneration, reason: string): JsonRecord {
