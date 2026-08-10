@@ -42,6 +42,7 @@ pub fn supports(name: &str) -> bool {
             | "graph_mail_reply_draft_create"
             | "graph_mail_reply_all_draft_create"
             | "graph_mail_forward_draft_create"
+            | "graph_mail_reply_all_to_last_in_thread_draft_create"
             | "graph_mail_draft_update"
             | "graph_mail_draft_discard"
             | "graph_mail_draft_send"
@@ -65,6 +66,7 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<V
         "graph_mail_reply_draft_create" => derived_draft_create(&policy, args, root, "createReply"),
         "graph_mail_reply_all_draft_create" => derived_draft_create(&policy, args, root, "createReplyAll"),
         "graph_mail_forward_draft_create" => derived_draft_create(&policy, args, root, "createForward"),
+        "graph_mail_reply_all_to_last_in_thread_draft_create" => reply_all_to_last_in_thread(&policy, args, root),
         "graph_mail_draft_update" => draft_update(&policy, args, root),
         "graph_mail_draft_discard" => draft_discard(&policy, args, root),
         "graph_mail_draft_send" => draft_send(&policy, args, root),
@@ -423,10 +425,13 @@ fn derived_draft_create(
 ) -> Result<Value, Value> {
     let message_id = required_string(args, "message_id")?;
     if optional_string(args, "comment_html").is_some() {
-        return Err(boundary(
-            &format!("graph_mail_{action}_draft_create"),
-            "graph_mail_html_reply_requires_quote_preservation_port",
-        ));
+        if action == "createForward" {
+            return Err(unavailable(
+                "comment_html_reply_only",
+                "comment_html is supported only for reply and reply-all",
+            ));
+        }
+        return html_reply_draft_create(policy, args, root, action);
     }
     let body = derived_draft_body(args, action)?;
     let suffix = format!(
@@ -462,6 +467,141 @@ fn derived_draft_create(
         "schema":"narada.graph_mail_mcp.draft.v1",
         "status":"created",
         "draft":result
+    }))
+}
+
+fn html_reply_draft_create(
+    policy: &Policy,
+    args: &Map<String, Value>,
+    root: &Path,
+    action: &str,
+) -> Result<Value, Value> {
+    let message_id = required_string(args, "message_id")?;
+    let comment_html = required_string(args, "comment_html")?;
+    if args.get("comment").and_then(Value::as_str).is_some()
+        || args.get("body_text").and_then(Value::as_str).is_some()
+        || args.get("body_html").and_then(Value::as_str).is_some()
+    {
+        return Err(unavailable(
+            "comment_html_body_conflict",
+            "provide comment_html alone",
+        ));
+    }
+    let create_suffix = format!("messages/{}/{}", encode_component(&message_id), action);
+    record_audit(
+        root,
+        json!({"event_kind":format!("{action}_html_requested"),"mailbox_id":mailbox_value(args),"message_id":message_id}),
+    )?;
+    let created = policy.adapter.request(
+        "POST",
+        mailbox(args),
+        &create_suffix,
+        &Map::new(),
+        Some(&json!({})),
+    )?;
+    let draft_id = required_draft_id(&created)?;
+    let draft_suffix = format!("messages/{}", encode_component(&draft_id));
+    let observed = policy
+        .adapter
+        .request("GET", mailbox(args), &draft_suffix, &Map::new(), None)?;
+    let quote_html = graph_body_as_html(observed.get("body").or_else(|| created.get("body")))?;
+    if quote_html.trim().is_empty() {
+        return Err(unavailable(
+            "graph_reply_html_quote_missing",
+            "Graph did not return quoted history",
+        ));
+    }
+    let composed_html = format!(
+        "{}<div data-narada-quoted-history=\"true\">{}</div>",
+        comment_html, quote_html
+    );
+    let patched = policy.adapter.request(
+        "PATCH",
+        mailbox(args),
+        &draft_suffix,
+        &Map::new(),
+        Some(&json!({"body":{"contentType":"HTML","content":composed_html}})),
+    )?;
+    if patched.get("isDraft").and_then(Value::as_bool) == Some(false) {
+        return Err(unavailable(
+            "graph_reply_html_draft_not_unsent",
+            "Graph returned a sent message",
+        ));
+    }
+    record_audit(
+        root,
+        json!({"event_kind":format!("{action}_html_completed"),"mailbox_id":mailbox_value(args),"message_id":message_id,"draft_id":draft_id,"quote_preserved":true}),
+    )?;
+    Ok(json!({
+        "schema":"narada.graph_mail_mcp.draft.v1",
+        "status":"created",
+        "draft":patched,
+        "reply_body_mode":"comment_html",
+        "quote_preserved":true,
+        "unsent":patched.get("isDraft").and_then(Value::as_bool) != Some(false)
+    }))
+}
+
+fn reply_all_to_last_in_thread(
+    policy: &Policy,
+    args: &Map<String, Value>,
+    root: &Path,
+) -> Result<Value, Value> {
+    let conversation_id = required_string(args, "conversation_id")?;
+    let filter = format!(
+        "conversationId eq '{}'",
+        conversation_id.replace('\'', "''")
+    );
+    let mut query = Map::new();
+    query.insert("$filter".to_string(), json!(filter));
+    query.insert(
+        "$orderby".to_string(),
+        json!("receivedDateTime desc"),
+    );
+    query.insert("$top".to_string(), json!(1));
+    query.insert(
+        "$select".to_string(),
+        json!("id,conversationId,receivedDateTime"),
+    );
+    let messages = policy
+        .adapter
+        .request("GET", mailbox(args), "messages", &query, None)?;
+    let last_message = messages
+        .get("value")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .ok_or_else(|| unavailable("graph_mail_thread_no_messages", "conversation has no messages"))?;
+    let message_id = last_message
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| unavailable("graph_mail_thread_last_message_missing_id", "last message has no id"))?
+        .to_string();
+    let body = derived_draft_body(args, "createReplyAll")?;
+    let suffix = format!(
+        "messages/{}/createReplyAll",
+        encode_component(&message_id)
+    );
+    record_audit(
+        root,
+        json!({"event_kind":"createReplyAll_to_last_in_thread_requested","mailbox_id":mailbox_value(args),"conversation_id":conversation_id,"message_id":message_id}),
+    )?;
+    let draft = policy.adapter.request(
+        "POST",
+        mailbox(args),
+        &suffix,
+        &Map::new(),
+        Some(&Value::Object(body)),
+    )?;
+    record_audit(
+        root,
+        json!({"event_kind":"createReplyAll_to_last_in_thread_completed","mailbox_id":mailbox_value(args),"conversation_id":conversation_id,"message_id":message_id,"draft_id":draft.get("id").cloned().unwrap_or(Value::Null)}),
+    )?;
+    Ok(json!({
+        "schema":"narada.graph_mail_mcp.draft.v1",
+        "status":"created",
+        "source_message_id":message_id,
+        "draft":draft
     }))
 }
 
@@ -729,6 +869,52 @@ fn graph_reply_reference(value: &Value) -> Option<String> {
         })
 }
 
+fn required_draft_id(value: &Value) -> Result<String, Value> {
+    let draft_id = value
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| unavailable("graph_ticket_draft_id_missing", "Graph draft id is missing"))?;
+    if value.get("isDraft").and_then(Value::as_bool) == Some(false) {
+        return Err(unavailable(
+            "graph_ticket_draft_not_unsent",
+            "Graph returned a sent message instead of a draft",
+        ));
+    }
+    Ok(draft_id.to_string())
+}
+
+fn graph_body_as_html(value: Option<&Value>) -> Result<String, Value> {
+    let Some(body) = value.and_then(Value::as_object) else {
+        return Ok(String::new());
+    };
+    let Some(content) = body.get("content").and_then(Value::as_str) else {
+        return Ok(String::new());
+    };
+    if body
+        .get("contentType")
+        .and_then(Value::as_str)
+        .map(|value| value.eq_ignore_ascii_case("html"))
+        == Some(true)
+    {
+        return Ok(content.to_string());
+    }
+    Ok(content
+        .split(['\r', '\n'])
+        .filter(|line| !line.is_empty())
+        .map(|line| format!("<p>{}</p>", escape_html(line)))
+        .collect::<String>())
+}
+
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
 fn strip_graph_attachment_contents(value: Value) -> Value {
     match value {
         Value::Array(items) => Value::Array(
@@ -843,6 +1029,7 @@ mod tests {
         assert!(supports("graph_mail_query"));
         assert!(supports("graph_mail_message_mark_read"));
         assert!(supports("graph_mail_draft_send"));
+        assert!(supports("graph_mail_reply_all_to_last_in_thread_draft_create"));
         assert!(!supports("graph_mail_attachment_upload_file"));
         assert!(!supports("graph_mail_ticket_draft_upsert"));
     }
