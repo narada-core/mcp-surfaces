@@ -658,6 +658,54 @@ function runSopHandoffParity() {
   }
 }
 
+function runSopRunCoverageParity() {
+  const workspaceRoot = resolve(packageRoot, '..', '..', '..');
+  const bunEntrypoint = join(workspaceRoot, 'packages', 'sop-mcp', 'dist', 'src', 'main.js');
+  if (!existsSync(bunEntrypoint)) throw new Error('sop_run_coverage_parity_bun_entrypoint_missing:' + bunEntrypoint);
+  const root = mkdtempSync(join(tmpdir(), 'narada-sop-run-coverage-native-parity-'));
+  const dbPath = join(root, '.sop', 'sop.db');
+  mkdirSync(dirname(dbPath), { recursive: true });
+  const db = new DatabaseSync(dbPath);
+  try {
+    db.exec(`CREATE TABLE sop_templates (sop_id TEXT, version INTEGER, title TEXT, status TEXT, updated_at TEXT);
+      CREATE TABLE sop_runs (
+        run_id TEXT PRIMARY KEY, sop_id TEXT NOT NULL, sop_version INTEGER NOT NULL, sop_title TEXT NOT NULL,
+        status TEXT NOT NULL, occurrence_key TEXT NOT NULL, request_fingerprint TEXT NOT NULL DEFAULT '',
+        definition_fingerprint TEXT NOT NULL DEFAULT '', definition_json TEXT NOT NULL DEFAULT '{}',
+        input_json TEXT NOT NULL DEFAULT '{}', input_ref_json TEXT, output_json TEXT NOT NULL DEFAULT '{}',
+        output_ref_json TEXT, step_states_json TEXT NOT NULL DEFAULT '[]', trigger_source_kind TEXT NOT NULL DEFAULT 'manual',
+        trigger_source_ref TEXT NOT NULL DEFAULT '', triggered_by TEXT NOT NULL DEFAULT '', parent_run_id TEXT,
+        parent_step_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, completed_at TEXT
+      )`);
+    const insertTemplate = db.prepare('INSERT INTO sop_templates VALUES (?,?,?,?,?)');
+    insertTemplate.run('old-run', 1, 'Old run', 'active', '2026-01-03T00:00:00Z');
+    insertTemplate.run('fresh-run', 1, 'Fresh run', 'active', '2026-01-04T00:00:00Z');
+    insertTemplate.run('never-run', 1, 'Never run', 'active', '2026-01-05T00:00:00Z');
+    insertTemplate.run('deprecated-run', 1, 'Deprecated run', 'deprecated', '2026-01-02T00:00:00Z');
+    const insertRun = db.prepare('INSERT INTO sop_runs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
+    const runRow = (runId, sopId, status, createdAt, completedAt = null) => [runId, sopId, 1, `${sopId} title`, status, `${runId}-occ`, '', '', '{}', '{}', null, '{}', null, '[]', 'manual', '', 'operator', null, null, createdAt, createdAt, completedAt];
+    insertRun.run(...runRow('run-old', 'old-run', 'completed', '2026-01-01T00:00:00Z', '2026-01-01T00:01:00Z'));
+    insertRun.run(...runRow('run-fresh', 'fresh-run', 'running', '2026-01-03T00:00:00Z'));
+  } finally {
+    db.close();
+  }
+  try {
+    const since = '2026-01-02T00:00:00Z';
+    const requests = [
+      { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'sop_run_coverage_since', arguments: { since, template_status: 'active' } } },
+      { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'sop_run_coverage_since', arguments: { since, template_status: 'active', include_terminal: false } } },
+      { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'sop_run_coverage_since', arguments: { since, template_status: 'active', status: 'completed' } } },
+      { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'sop_run_coverage_since', arguments: { since, template_status: 'deprecated' } } },
+    ];
+    const bun = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'node', [bunEntrypoint, '--sop-root', root], requests, workspaceRoot);
+    const rust = runMailbox(executable, ['--surface-id', 'sop', '--site-root', root], requests, workspaceRoot);
+    for (const request of requests) assertSame(`sop.run_coverage.${request.id}`, mailboxStructured(bun, request.id, 'bun'), mailboxStructured(rust, request.id, 'rust'));
+    return { status: 'passed', fixture: 'durable_run_coverage_projection', compared: ['active', 'non_terminal', 'status_filter', 'template_status'] };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 function runSurfaceFeedbackParity() {
   const workspaceRoot = resolve(packageRoot, '..', '..', '..');
   const bunEntrypoint = join(workspaceRoot, 'packages', 'surface-feedback-mcp', 'src', 'main.ts');
@@ -1072,6 +1120,7 @@ const sopRunListParity = runSopRunListParity();
 const sopRunEventsParity = runSopRunEventsParity();
 const sopRunStatusParity = runSopRunStatusParity();
 const sopHandoffParity = runSopHandoffParity();
+const sopRunCoverageParity = runSopRunCoverageParity();
 const surfaceFeedbackParity = runSurfaceFeedbackParity();
 const siteLoopParity = runSiteLoopParity();
 const calendarParity = runCalendarParity();
@@ -1098,6 +1147,7 @@ process.stdout.write(JSON.stringify({
   sop_run_events_parity: sopRunEventsParity,
   sop_run_status_parity: sopRunStatusParity,
   sop_handoff_parity: sopHandoffParity,
+  sop_run_coverage_parity: sopRunCoverageParity,
   surface_feedback_parity: surfaceFeedbackParity,
   site_loop_parity: siteLoopParity,
   calendar_parity: calendarParity,
