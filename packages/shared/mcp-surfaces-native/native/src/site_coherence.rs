@@ -3,6 +3,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use time::OffsetDateTime;
 
+const MAX_JSON_BYTES: u64 = 256_000;
+
 pub fn list_tools() -> Vec<Value> {
     vec![
         tool(
@@ -202,6 +204,7 @@ impl Paths {
 }
 
 fn read_json(path: &Path) -> Option<Value> {
+    if fs::metadata(path).ok()?.len() > MAX_JSON_BYTES { return None; }
     let content = fs::read_to_string(path).ok()?;
     serde_json::from_str(&content).ok()
 }

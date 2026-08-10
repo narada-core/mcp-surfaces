@@ -7,6 +7,7 @@ const SERVER_NAME: &str = "sop-mcp";
 const DB_RELATIVE: &str = ".sop/sop.db";
 const MAX_CANDIDATES: usize = 100;
 const MAX_TEMPLATE_CHARS: usize = 32_000;
+const MAX_TEMPLATE_BYTES: u64 = 512_000;
 const MUTATING: &[&str] = &[
     "sop_template_create", "sop_template_update", "sop_template_deprecate", "sop_template_unimport", "sop_template_import_yaml",
     "sop_run_start", "sop_run_refresh", "sop_run_advance", "sop_handoff_claim", "sop_handoff_renew", "sop_handoff_release", "sop_handoff_retry",
@@ -175,6 +176,7 @@ fn safe_id(args: &Map<String, Value>) -> Result<String, Value> { let id = args.g
 
 fn candidate_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     let id = safe_id(args)?; let Some((_, path)) = candidate_entries(root).into_iter().find(|(candidate, _)| candidate == &id) else { return Err(error("sop_yaml_not_found","sop_yaml_not_found")); };
+    if fs::metadata(&path).map_err(|e|error("sop_yaml_read_failed",&e.to_string()))?.len() > MAX_TEMPLATE_BYTES { return Err(error("sop_yaml_too_large", "sop_yaml_too_large")); }
     let text = fs::read_to_string(&path).map_err(|e|error("sop_yaml_read_failed",&e.to_string()))?; let truncated = text.chars().count() > MAX_TEMPLATE_CHARS; let bounded = text.chars().take(MAX_TEMPLATE_CHARS).collect::<String>();
     Ok(json!({"schema":"narada.sop_mcp.template_candidate.v1","status":"ok","sop_id":id,"path":path.to_string_lossy(),"raw_yaml":bounded,"truncated":truncated,"import_state":"unverified","native_read_only":true}))
 }
