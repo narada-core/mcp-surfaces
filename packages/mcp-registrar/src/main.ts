@@ -294,6 +294,7 @@ function componentKindForSurface(surfaceId: string): string {
   if (surfaceId === 'mcp-loader' || surfaceId === 'mcp-loader-mcp.local') return 'mcp-loader-mcp';
   if (surfaceId === 'local-filesystem' || surfaceId === 'local-filesystem-mcp.local') return 'filesystem-mcp';
   if (surfaceId === 'structured-command' || surfaceId === 'structured-command-mcp.local') return 'structured-command-mcp';
+  if (surfaceId === 'git' || surfaceId === 'git-mcp.local') return 'git-mcp';
   if (surfaceId === 'agent-context' || surfaceId === 'agent-context-mcp.local') return 'agent-context-mcp';
   if (surfaceId === 'mcp-registrar' || surfaceId === 'mcp-registrar-mcp.local') return 'mcp-registrar';
   if (surfaceId === 'task-lifecycle' || surfaceId === 'task-lifecycle-mcp.local') return 'task-lifecycle-mcp';
@@ -1905,9 +1906,10 @@ function carrierLaunchCommand(
     || (server.surface_implementation === 'native'
       && surfaceId === 'local-filesystem');
   const useNativeStructuredCommandApplet = selectedEngine === 'rust' && componentKind === 'structured-command-mcp';
+  const useNativeGitApplet = selectedEngine === 'rust' && componentKind === 'git-mcp';
   const useNativeLifecycle = selectedEngine === 'rust' && (componentKind === 'task-lifecycle-mcp' || componentKind === 'work-lifecycle-mcp');
   const useNativeSharedSurface = selectedEngine === 'rust' && (surfaceId === 'catalog-observation' || surfaceId === 'operator-routing' || surfaceId === 'site-inbox' || surfaceId === 'site-lifecycle' || surfaceId === 'site-registry' || surfaceId === 'project-state' || surfaceId === 'runtime-introspection' || surfaceId === 'site-coherence' || surfaceId === 'launcher' || surfaceId === 'mailbox' || surfaceId === 'graph-mail' || surfaceId === 'calendar' || surfaceId === 'site-loop' || surfaceId === 'worker-delegation' || surfaceId === 'delegated-task' || surfaceId === 'sop' || surfaceId === 'scheduler' || surfaceId === 'surface-feedback' || surfaceId === 'speech' || surfaceId === 'artifacts' || surfaceId === 'nars-session' || surfaceId === 'quota-meter' || surfaceId === 'operator-console-overlay' || surfaceId === 'browser-control' || surfaceId === 'cloudflare-carrier');
-  const nativeApplet = useNativeFilesystemApplet ? 'filesystem' : useNativeStructuredCommandApplet ? 'structured-command' : null;
+  const nativeApplet = useNativeFilesystemApplet ? 'filesystem' : useNativeStructuredCommandApplet ? 'structured-command' : useNativeGitApplet ? 'git' : null;
   const nativeSharedSurfaceEntrypoint = MCP_NATIVE_SHARED_SURFACES_ENTRYPOINT;
   const nativeLifecycleEntrypoint = componentKind === 'task-lifecycle-mcp' ? MCP_NATIVE_TASK_LIFECYCLE_ENTRYPOINT : MCP_NATIVE_WORK_LIFECYCLE_ENTRYPOINT;
   if (useNativeLifecycle && !existsSync(nativeLifecycleEntrypoint)) {
