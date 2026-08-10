@@ -1,6 +1,7 @@
 use serde_json::{json, Map, Value};
 use std::fs;
 use std::path::Path;
+use crate::graph_authority::CalendarGraphAdapter;
 
 const SERVER_NAME: &str = "narada-calendar-mcp";
 const MAX_TEXT_BYTES: u64 = 512_000;
@@ -75,7 +76,11 @@ fn doctor(root: &Path) -> Result<Value, Value> {
     let object = policy.as_object().cloned().unwrap_or_default();
     let allowed = object.get("allowed_mailboxes").or_else(|| object.get("allowedMailboxes")).cloned().unwrap_or_else(|| json!([]));
     let writes = object.get("allow_event_writes").and_then(Value::as_bool).unwrap_or(false) || object.get("allowEventWrites").and_then(Value::as_bool).unwrap_or(false);
-    Ok(json!({"schema":"narada.calendar_mcp.doctor.v1","status":"ok","site_root":root.to_string_lossy(),"policy_path":path.to_string_lossy(),"policy_status":policy_status,"graph_base_url":object.get("graph_base_url").cloned().unwrap_or_else(|| json!("https://graph.microsoft.com/v1.0")),"allowed_mailboxes":allowed,"allow_event_writes":writes,"write_approval_token_configured":object.get("write_approval_token").or_else(|| object.get("writeApprovalToken")).and_then(Value::as_str).is_some(),"native_adapter":"contract_only","native_adapter_status":"awaiting_explicit_external-authority_approval","server_name":SERVER_NAME}))
+    let adapter_status = match CalendarGraphAdapter::from_site_root(root) {
+        Ok(_) => json!({"kind":"rust_graph_http","status":"ready","credentials_present":true}),
+        Err(value) => json!({"kind":"rust_graph_http","status":"unavailable","reason":value.get("reason").cloned().unwrap_or(Value::Null)}),
+    };
+    Ok(json!({"schema":"narada.calendar_mcp.doctor.v1","status":"ok","site_root":root.to_string_lossy(),"policy_path":path.to_string_lossy(),"policy_status":policy_status,"graph_base_url":object.get("graph_base_url").cloned().unwrap_or_else(|| json!("https://graph.microsoft.com/v1.0")),"allowed_mailboxes":allowed,"allow_event_writes":writes,"write_approval_token_configured":object.get("write_approval_token").or_else(|| object.get("writeApprovalToken")).and_then(Value::as_str).is_some(),"native_adapter":"rust_graph_http","native_adapter_status":adapter_status,"server_name":SERVER_NAME}))
 }
 
 fn output_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
@@ -129,7 +134,7 @@ mod tests {
         let tools = list_tools();
         assert!(tools.iter().any(|tool| tool["name"] == "calendar_event_query"));
         let doctor = call_tool("calendar_doctor", &Map::new(), &root).expect("doctor");
-        assert_eq!(doctor["native_adapter"], "contract_only");
+        assert_eq!(doctor["native_adapter"], "rust_graph_http");
         let refusal = call_tool("calendar_event_query", &Map::new(), &root).expect_err("boundary");
         assert_eq!(refusal["status"], "unavailable");
         fs::remove_dir_all(root).expect("cleanup");
