@@ -1145,6 +1145,114 @@ function runGraphMailParity() {
   }
 }
 
+function runGraphMailNativeGraphParity() {
+  const workspaceRoot = resolve(packageRoot, '..', '..', '..');
+  const bunEntrypoint = join(workspaceRoot, 'packages', 'graph-mail-mcp', 'src', 'main.ts');
+  if (!existsSync(bunEntrypoint)) throw new Error('graph_mail_native_graph_bun_entrypoint_missing:' + bunEntrypoint);
+  const root = mkdtempSync(join(tmpdir(), 'narada-graph-mail-native-graph-'));
+  const fixtureScript = join(root, 'graph-mail-fixture.mjs');
+  const requests = [
+    { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'graph_mail_query', arguments: { mailbox_id: 'fixture@example.test', limit: 2, query: 'needle' } } },
+    { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'graph_mail_message_show', arguments: { mailbox_id: 'fixture@example.test', message_id: 'message-1' } } },
+    { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'graph_mail_folder_list', arguments: { mailbox_id: 'fixture@example.test', limit: 2 } } },
+    { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'graph_mail_folder_create', arguments: { mailbox_id: 'fixture@example.test', display_name: 'Customers', confirm_write: true, approval_token: 'org-fixture' } } },
+    { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'graph_mail_message_move', arguments: { mailbox_id: 'fixture@example.test', message_id: 'message-1', destination_folder_id: 'folder-2', confirm_write: true, approval_token: 'org-fixture' } } },
+    { jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'graph_mail_message_mark_read', arguments: { mailbox_id: 'fixture@example.test', message_id: 'message-1', idempotency_key: 'fixture-mark-read', confirm_write: true, approval_token: 'org-fixture' } } },
+  ];
+  const cleanEnv = { ...process.env, NARADA_GRAPH_MAIL_FIXTURE_REQUESTS: JSON.stringify(requests) };
+  for (const key of ['MS_GRAPH_ACCESS_TOKEN', 'GRAPH_ACCESS_TOKEN', 'GRAPH_TENANT_ID', 'GRAPH_CLIENT_ID', 'GRAPH_CLIENT_SECRET', 'GRAPH_TOKEN_ENDPOINT', 'NARADA_NATIVE_GRAPH_MAIL_AUTHORITY', 'NARADA_NATIVE_GRAPH_ALLOW_INSECURE_TEST']) delete cleanEnv[key];
+  const fixture = String.raw`import { createServer } from 'node:http';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+
+const [nativeExecutable, bunEntrypoint, bunCommand, bunRoot, rustRoot] = process.argv.slice(2);
+const requests = JSON.parse(process.env.NARADA_GRAPH_MAIL_FIXTURE_REQUESTS ?? '[]');
+const received = [];
+const server = createServer((request, response) => {
+  const chunks = [];
+  request.on('data', (chunk) => chunks.push(chunk));
+  request.on('end', () => {
+    const raw = Buffer.concat(chunks).toString('utf8');
+    let body = null;
+    try { body = raw ? JSON.parse(raw) : null; } catch { body = raw; }
+    received.push({ method: request.method, url: request.url, authorization: request.headers.authorization ?? null, body });
+    const url = request.url ?? '';
+    let status = 200;
+    let payload = { value: [] };
+    if (request.method === 'GET' && url.includes('/messages/message-1')) payload = { id: 'message-1', subject: 'Needle' };
+    else if (request.method === 'GET' && url.includes('/messages')) payload = { value: [{ id: 'message-1', subject: 'Needle' }] };
+    else if (request.method === 'GET' && url.includes('/mailFolders')) payload = { value: [{ id: 'folder-1', displayName: 'Inbox' }] };
+    else if (request.method === 'POST' && url.endsWith('/mailFolders')) { status = 201; payload = { id: 'folder-2', displayName: 'Customers' }; }
+    else if (request.method === 'POST' && url.includes('/move')) { status = 200; payload = { id: 'message-1', parentFolderId: 'folder-2' }; }
+    else if (request.method === 'PATCH') { status = 204; payload = null; }
+    response.statusCode = status;
+    if (payload === null) { response.end(); return; }
+    response.setHeader('content-type', 'application/json');
+    response.end(JSON.stringify(payload));
+  });
+});
+
+function run(command, args, env) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { env, windowsHide: true });
+    let stdout = '';
+    let stderr = '';
+    const timer = setTimeout(() => { child.kill(); reject(new Error('graph_mail_fixture_child_timeout:' + command)); }, 30000);
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.on('error', (error) => { clearTimeout(timer); reject(error); });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code !== 0) { reject(new Error('graph_mail_fixture_child_exit:' + command + ':' + code + ':' + stderr.slice(-1000))); return; }
+      try { resolve(stdout.trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line))); }
+      catch (error) { reject(new Error('graph_mail_fixture_child_output_invalid:' + error.message + ':' + stdout.slice(-1000))); }
+    });
+    child.stdin.end(requests.map((request) => JSON.stringify(request)).join('\n') + '\n');
+  });
+}
+
+server.listen(0, '127.0.0.1', async () => {
+  try {
+    const port = server.address().port;
+    const config = JSON.stringify({ graph_base_url: 'http://127.0.0.1:' + port + '/v1.0', allowed_mailboxes: ['fixture@example.test'], allow_folder_create: true, allow_message_move: true, allow_message_mark_read: true, mailbox_organization_approval_token: 'org-fixture' });
+    for (const root of [bunRoot, rustRoot]) { mkdirSync(root + '/.ai', { recursive: true }); writeFileSync(root + '/.ai/graph-mail-mcp.json', config); }
+    const env = { ...process.env, GRAPH_ACCESS_TOKEN: 'fixture-token', NARADA_NATIVE_GRAPH_ALLOW_INSECURE_TEST: '1' };
+    for (const key of ['MS_GRAPH_ACCESS_TOKEN', 'GRAPH_TENANT_ID', 'GRAPH_CLIENT_ID', 'GRAPH_CLIENT_SECRET', 'GRAPH_TOKEN_ENDPOINT', 'NARADA_GRAPH_MAIL_AUTHORITY_ENTRYPOINT', 'NARADA_GRAPH_MAIL_AUTHORITY_ARGS']) delete env[key];
+    const bun = await run(bunCommand, [bunEntrypoint, '--site-root', bunRoot], env);
+    const rust = await run(nativeExecutable, ['--surface-id', 'graph-mail', '--native-authority', '--site-root', rustRoot], env);
+    server.close(() => process.stdout.write(JSON.stringify({ bun, rust, received }) + '\n'));
+  } catch (error) {
+    server.close(() => { process.stderr.write(String(error.stack ?? error) + '\n'); process.exit(1); });
+  }
+});
+`;
+  writeFileSync(fixtureScript, fixture, 'utf8');
+  try {
+    const result = spawnSync(process.execPath, [fixtureScript, executable, bunEntrypoint, process.env.NARADA_BUN_EXECUTABLE ?? 'bun', join(root, 'bun'), join(root, 'rust')], {
+      cwd: workspaceRoot,
+      env: cleanEnv,
+      encoding: 'utf8',
+      timeout: 90_000,
+      maxBuffer: 4 * 1024 * 1024,
+      windowsHide: true,
+    });
+    if (result.error) throw new Error('graph_mail_native_graph_fixture_spawn_failed:' + result.error.message);
+    if (result.status !== 0) throw new Error('graph_mail_native_graph_fixture_exit:' + result.status + ':' + String(result.stderr).slice(-1500));
+    const payload = JSON.parse(String(result.stdout).trim());
+    for (const id of [1, 2, 3, 4, 5, 6]) assertSame('graph_mail.native_graph.' + id, mailboxStructured(payload.bun, id, 'bun'), mailboxStructured(payload.rust, id, 'rust'));
+    const expectedMethods = ['GET', 'GET', 'GET', 'POST', 'POST', 'PATCH'];
+    assertSame('graph_mail.native_graph.bun_methods', payload.received.slice(0, 6).map((value) => value.method), expectedMethods);
+    assertSame('graph_mail.native_graph.rust_methods', payload.received.slice(6, 12).map((value) => value.method), expectedMethods);
+    if (payload.received.some((value) => value.authorization !== 'Bearer fixture-token')) throw new Error('graph_mail_native_graph_fixture_authorization_mismatch');
+    const auditPath = join(root, 'rust', '.ai', 'audit', 'graph-mail-mcp.jsonl');
+    const auditKinds = readFileSync(auditPath, 'utf8').trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line).event_kind);
+    assertSame('graph_mail.native_graph.audit', auditKinds, ['folder_create_requested', 'folder_create_completed', 'message_move_requested', 'message_move_completed', 'message_mark_read_requested', 'message_mark_read_completed']);
+    return { status: 'passed', fixture: 'loopback_graph_mail_authority', compared: ['query', 'message_show', 'folder_list', 'folder_create', 'message_move', 'message_mark_read', 'audit'] };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 function runOperatorOverlayParity() {
   const workspaceRoot = resolve(packageRoot, '..', '..', '..');
   const bunEntrypoint = join(workspaceRoot, 'packages', 'operator-console-overlay-mcp', 'src', 'main.ts');
@@ -1318,6 +1426,7 @@ const siteLoopParity = runSiteLoopParity();
 const calendarParity = runCalendarParity();
 const calendarAuthorityBridge = runCalendarAuthorityBridge();
 const calendarNativeGraphParity = runCalendarNativeGraphParity();
+const graphMailNativeGraphParity = runGraphMailNativeGraphParity();
 const cloudflareParity = runCloudflareParity();
 const graphMailParity = runGraphMailParity();
 const operatorOverlayParity = runOperatorOverlayParity();
@@ -1348,6 +1457,7 @@ process.stdout.write(JSON.stringify({
   calendar_parity: calendarParity,
   calendar_authority_bridge: calendarAuthorityBridge,
   calendar_native_graph_parity: calendarNativeGraphParity,
+  graph_mail_native_graph_parity: graphMailNativeGraphParity,
   cloudflare_parity: cloudflareParity,
   graph_mail_parity: graphMailParity,
   operator_overlay_parity: operatorOverlayParity,

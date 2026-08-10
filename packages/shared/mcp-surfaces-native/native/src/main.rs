@@ -14,6 +14,7 @@ mod launcher;
 mod calendar;
 mod authority;
 mod graph_authority;
+mod graph_mail_authority;
 mod delegated_task;
 mod worker_delegation;
 mod local_admin;
@@ -45,6 +46,9 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let options = parse_options(env::args().skip(1).collect())?;
+    if options.native_authority && options.surface_id == "graph-mail" {
+        env::set_var("NARADA_NATIVE_GRAPH_MAIL_AUTHORITY", "1");
+    }
     if options.native_authority && options.surface_id == "calendar" {
         env::set_var("NARADA_NATIVE_GRAPH_AUTHORITY", "1");
     }
@@ -400,6 +404,7 @@ fn call_tool(surface_id: &str, params: &Map<String, Value>, options: &Options) -
         ("worker-delegation", name) => worker_delegation::call_tool(name, &args, &options.site_root),
         ("artifacts", name) | ("nars-session", name) | ("quota-meter", name) => local_admin::call_tool(surface_id, name, &args, &options.site_root),
         ("mailbox", name) => mailbox::call_tool(name, &args, &options.site_root),
+        ("graph-mail", name) if graph_mail_authority::enabled() && graph_mail_authority::supports(name) => graph_mail_authority::call_tool(name, &args, &options.site_root),
         ("browser-control", name) | ("operator-console-overlay", name) | ("cloudflare-carrier", name) | ("speech", name) | ("scheduler", name) | ("graph-mail", name) => host_contracts::call_tool(surface_id, name, &args, &options.site_root),
         ("operator-routing", "operator_route_request") => operator_route_request(&args, options),
         ("site-inbox", name) => site_inbox::call_tool(name, &args, &options.site_root),

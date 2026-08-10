@@ -57,7 +57,11 @@ impl GraphAuth {
 
 impl CalendarGraphAdapter {
     pub fn from_site_root(root: &Path) -> Result<Self, Value> {
-        let config_path = root.join(".ai/calendar-mcp.json");
+        Self::from_config(root, ".ai/calendar-mcp.json")
+    }
+
+    pub fn from_config(root: &Path, relative_config_path: &str) -> Result<Self, Value> {
+        let config_path = root.join(relative_config_path);
         let config = if config_path.exists() {
             let metadata = fs::metadata(&config_path)
                 .map_err(|error| unavailable("calendar_config_read_failed", &error.to_string()))?;
