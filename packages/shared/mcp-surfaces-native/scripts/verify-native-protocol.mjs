@@ -307,6 +307,7 @@ function runSiteLoopParity() {
       display_name: 'Fixture Loop',
       resident: { agent_id: 'fixture-agent', role: 'resident' },
       scheduler: { default_task_name: 'Fixture-Loop' },
+      docs: [{ path: 'README.md', description: 'Fixture documentation' }],
       policy: {},
       persistence: {
         schema: 'narada.site_loop.persistence.v2',
@@ -317,12 +318,19 @@ function runSiteLoopParity() {
         compression: 'gzip',
       },
     }), 'utf8');
-    const requests = [{ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'site_loop_config_validate', arguments: {} } }];
+    writeFileSync(join(root, 'README.md'), 'Fixture Site Loop documentation.\n', 'utf8');
+    const requests = [{ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'site_loop_config_validate', arguments: {} } }, {
+      jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'site_docs_list', arguments: {} },
+    }, {
+      jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'site_docs_show', arguments: { path: 'README.md' } },
+    }];
     const bun = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', [bunEntrypoint, '--site-root', root], requests, workspaceRoot);
     const rust = runMailbox(executable, ['--surface-id', 'site-loop', '--site-root', root], requests, workspaceRoot);
     const comparable = (value) => Object.fromEntries(['schema', 'status', 'site_root', 'path', 'schema_id', 'config_schema', 'loop_id', 'site_id', 'display_name', 'errors', 'active_tools_refuse'].map((key) => [key, value?.[key]]));
     assertSame('site_loop.config_validate', comparable(mailboxStructured(bun, 1, 'bun')), comparable(mailboxStructured(rust, 1, 'rust')));
-    return { status: 'passed', fixture: 'config_validation', compared: ['config_validate'] };
+    assertSame('site_loop.docs_list', mailboxStructured(bun, 2, 'bun'), mailboxStructured(rust, 2, 'rust'));
+    assertSame('site_loop.docs_show', mailboxStructured(bun, 3, 'bun'), mailboxStructured(rust, 3, 'rust'));
+    return { status: 'passed', fixture: 'config_and_docs_read', compared: ['config_validate', 'docs_list', 'docs_show'] };
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

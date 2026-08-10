@@ -315,8 +315,8 @@ fn config_validate(root: &Path) -> Result<Value, Value> {
 fn docs_list(root: &Path) -> Result<Value, Value> {
     let config = load_config(root)?;
     let docs = config.as_ref().and_then(Value::as_object).and_then(|v| v.get("docs")).and_then(Value::as_array).cloned().unwrap_or_default();
-    let entries = docs.into_iter().take(100).filter_map(|item| { let object = item.as_object()?; Some(json!({"path":object.get("path"),"description":object.get("description")})) }).collect::<Vec<_>>();
-    Ok(json!({"schema":"narada.site_loop.docs.v1","status":"ok","count":entries.len(),"docs":entries}))
+    let entries = docs.into_iter().take(100).collect::<Vec<_>>();
+    Ok(json!({"status":"ok","site_root":root.to_string_lossy(),"docs":entries}))
 }
 
 fn docs_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
@@ -327,10 +327,10 @@ fn docs_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     if !allowed { return Err(error("doc_not_allowlisted", "doc_not_allowlisted")); }
     let path = root.join(requested);
     if path.components().any(|component| matches!(component, std::path::Component::ParentDir)) { return Err(error("doc_path_invalid", "doc_path_invalid")); }
-    if fs::metadata(&path).map_err(|_| error("doc_not_found", "doc_not_found"))?.len() > MAX_TEXT_BYTES { return Err(error("doc_too_large", "doc_too_large")); }
+    let Some(metadata) = fs::metadata(&path).ok() else { return Ok(json!({"status":"missing","site_root":root.to_string_lossy(),"path":requested})); };
+    if metadata.len() > MAX_TEXT_BYTES { return Err(error("doc_too_large", "doc_too_large")); }
     let text = fs::read_to_string(&path).map_err(|_| error("doc_not_found", "doc_not_found"))?;
-    let text = text.chars().take(20_000).collect::<String>();
-    Ok(json!({"schema":"narada.site_loop.doc.v1","status":"ok","path":requested,"text":text,"truncated":text.chars().count() >= 20_000}))
+    Ok(json!({"status":"ok","site_root":root.to_string_lossy(),"path":requested,"content":text}))
 }
 
 fn test_list(root: &Path) -> Result<Value, Value> {
