@@ -50,6 +50,7 @@ function run(surface) {
     { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} },
     { jsonrpc: '2.0', id: 3, method: 'server/discover', params: modernMeta },
     { jsonrpc: '2.0', id: 4, method: 'tools/list', params: modernMeta },
+    { jsonrpc: '2.0', id: 5, method: 'initialize', params: modernMeta },
   ];
   const result = spawnSync(executable, ['--surface-id', surface, '--site-root', packageRoot], {
     input: requests.map((request) => JSON.stringify(request)).join('\n') + '\n',
@@ -76,6 +77,8 @@ for (const surface of surfaces) {
   const modernTools = byId.get(4)?.result;
   if (modernTools?.resultType !== 'complete' || !Array.isArray(modernTools.tools) || modernTools.tools.length === 0) throw new Error(`${surface}:modern_tools_list_incomplete`);
   if (modernTools.cacheScope !== 'public' || !Number.isFinite(modernTools.ttlMs)) throw new Error(`${surface}:modern_tools_cache_metadata_missing`);
+  const modernInitialize = byId.get(5)?.error;
+  if (modernInitialize?.data?.code !== 'initialize_removed') throw new Error(`${surface}:modern_initialize_not_removed`);
 }
 
 process.stdout.write(JSON.stringify({
