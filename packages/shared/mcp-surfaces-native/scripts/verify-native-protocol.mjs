@@ -418,6 +418,63 @@ function runSopActionParity() {
   }
 }
 
+function runSopRunListParity() {
+  const workspaceRoot = resolve(packageRoot, '..', '..', '..');
+  const bunEntrypoint = join(workspaceRoot, 'packages', 'sop-mcp', 'dist', 'src', 'main.js');
+  if (!existsSync(bunEntrypoint)) throw new Error('sop_run_list_parity_bun_entrypoint_missing:' + bunEntrypoint);
+  const root = mkdtempSync(join(tmpdir(), 'narada-sop-run-list-native-parity-'));
+  const dbPath = join(root, '.sop', 'sop.db');
+  mkdirSync(dirname(dbPath), { recursive: true });
+  const db = new DatabaseSync(dbPath);
+  try {
+    db.exec(`CREATE TABLE sop_runs (
+      run_id TEXT PRIMARY KEY,
+      sop_id TEXT NOT NULL,
+      sop_version INTEGER NOT NULL,
+      sop_title TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      occurrence_key TEXT NOT NULL DEFAULT '',
+      request_fingerprint TEXT NOT NULL DEFAULT '',
+      definition_fingerprint TEXT NOT NULL DEFAULT '',
+      definition_json TEXT NOT NULL DEFAULT '{}',
+      input_json TEXT NOT NULL DEFAULT '{}',
+      input_ref_json TEXT,
+      output_json TEXT NOT NULL DEFAULT '{}',
+      output_ref_json TEXT,
+      step_states_json TEXT NOT NULL DEFAULT '[]',
+      trigger_source_kind TEXT NOT NULL DEFAULT 'manual',
+      trigger_source_ref TEXT NOT NULL DEFAULT '',
+      triggered_by TEXT NOT NULL DEFAULT '',
+      parent_run_id TEXT,
+      parent_step_id TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      completed_at TEXT
+    )`);
+    const insert = db.prepare('INSERT INTO sop_runs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
+    const row = (runId, status, createdAt, completedAt = null) => [runId, 'fixture', 1, 'Fixture', status, `${runId}-occ`, '', '', '{}', '{}', null, '{}', null, '[]', 'manual', 'fixture', 'tester', null, null, createdAt, createdAt, completedAt];
+    insert.run(...row('run-pending', 'pending', '2026-01-01T00:00:00Z'));
+    insert.run(...row('run-completed', 'completed', '2026-01-02T00:00:00Z', '2026-01-02T00:01:00Z'));
+    insert.run(...row('run-failed', 'failed', '2026-01-03T00:00:00Z', '2026-01-03T00:01:00Z'));
+  } finally {
+    db.close();
+  }
+  try {
+    const requests = [
+      { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'sop_run_list', arguments: { include_terminal: true } } },
+      { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'sop_run_list', arguments: { status: 'pending' } } },
+      { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'sop_run_list', arguments: { include_terminal: false } } },
+    ];
+    const bun = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'node', [bunEntrypoint, '--sop-root', root], requests, workspaceRoot);
+    const rust = runMailbox(executable, ['--surface-id', 'sop', '--site-root', root], requests, workspaceRoot);
+    const comparable = (value) => ({ schema: value?.schema, count: value?.count, items: value?.items });
+    for (const request of requests) assertSame(`sop.run_list.${request.id}`, comparable(mailboxStructured(bun, request.id, 'bun')), comparable(mailboxStructured(rust, request.id, 'rust')));
+    return { status: 'passed', fixture: 'durable_run_list_projection', compared: ['all', 'status_filter', 'terminal_filter'] };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 function runSurfaceFeedbackParity() {
   const workspaceRoot = resolve(packageRoot, '..', '..', '..');
   const bunEntrypoint = join(workspaceRoot, 'packages', 'surface-feedback-mcp', 'src', 'main.ts');
@@ -828,6 +885,7 @@ const workerDelegationParity = runWorkerDelegationParity();
 const artifactsParity = runArtifactsParity();
 const sopParity = runSopParity();
 const sopActionParity = runSopActionParity();
+const sopRunListParity = runSopRunListParity();
 const surfaceFeedbackParity = runSurfaceFeedbackParity();
 const siteLoopParity = runSiteLoopParity();
 const calendarParity = runCalendarParity();
@@ -850,6 +908,7 @@ process.stdout.write(JSON.stringify({
   artifacts_parity: artifactsParity,
   sop_parity: sopParity,
   sop_action_parity: sopActionParity,
+  sop_run_list_parity: sopRunListParity,
   surface_feedback_parity: surfaceFeedbackParity,
   site_loop_parity: siteLoopParity,
   calendar_parity: calendarParity,
