@@ -1,6 +1,6 @@
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde_json::{json, Map, Value};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -8,6 +8,7 @@ const SERVER_NAME: &str = "surface-feedback-mcp";
 const FEEDBACK_KINDS: &[&str] = &["bug", "improvement", "gap", "observation"];
 const FEEDBACK_STATUSES: &[&str] = &["submitted", "acknowledged", "routed", "converted_to_task", "closed"];
 const READ_SCOPES: &[&str] = &["all_authorized", "store_reconciliation", "authority_visible", "owned_surfaces", "authority_site_submissions"];
+const MAX_IMPORT_IDS: usize = 200;
 
 pub fn list_tools() -> Vec<Value> {
     vec![
@@ -54,13 +55,15 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<V
         "surface_feedback_stats" => feedback_stats(args, root),
         "surface_feedback_submit" => feedback_submit(args, root),
         "surface_feedback_update_status" => feedback_update_status(args, root),
-        "surface_feedback_update_status_batch" | "surface_feedback_convert_to_task" | "surface_feedback_import" => Err(authority_boundary(name)),
+        "surface_feedback_update_status_batch" => feedback_update_status_batch(args, root),
+        "surface_feedback_import" => feedback_import(args, root),
+        "surface_feedback_convert_to_task" => Err(authority_boundary(name)),
         _ => Err(error("unknown_tool", &format!("unknown_tool:{name}"))),
     }
 }
 
 fn guidance_tool() -> Value { tool("surface_feedback_guidance", "Show model-facing operating guidance for surface feedback workflows.", json!({"type":"object","properties":{"workflow":{"type":"string"},"tool":{"type":"string"}},"additionalProperties":false}), true) }
-fn guidance(args: &Map<String, Value>) -> Value { json!({"schema":"narada.mcp_surface.guidance.v0","status":"ok","surface_id":"surface-feedback","guidance_tool":"surface_feedback_guidance","purpose":"Inspect bounded feedback evidence with explicit read scope.","requested":{"workflow":args.get("workflow").cloned().unwrap_or(Value::Null),"tool":args.get("tool").cloned().unwrap_or(Value::Null)},"first_use":["Call surface_feedback_doctor first.","Choose a server-bound read scope explicitly.","Use list or actionable_queue for bounded discovery, then show before mutation.","Task conversion and status changes remain owner-authorized."],"boundaries":["The native slice opens the feedback SQLite store read-only.","It never creates tasks, changes statuses, imports entries, or executes tasks.","Authority and provenance scopes remain with the owning surface-feedback process."]}) }
+fn guidance(args: &Map<String, Value>) -> Value { json!({"schema":"narada.mcp_surface.guidance.v0","status":"ok","surface_id":"surface-feedback","guidance_tool":"surface_feedback_guidance","purpose":"Inspect bounded feedback evidence with explicit read scope.","requested":{"workflow":args.get("workflow").cloned().unwrap_or(Value::Null),"tool":args.get("tool").cloned().unwrap_or(Value::Null)},"first_use":["Call surface_feedback_doctor first.","Choose a server-bound read scope explicitly.","Use list or actionable_queue for bounded discovery, then show before mutation.","Task conversion remains owner-authorized."],"boundaries":["The native slice reads and writes only the configured feedback SQLite store.","It does not create tasks or execute them; task conversion remains with the task-lifecycle authority.","Authority and provenance scopes remain server-bound."]}) }
 
 fn feedback_path(root: &Path) -> std::path::PathBuf { root.join(".feedback/surface-feedback.db") }
 
@@ -124,6 +127,140 @@ fn feedback_update_status(args: &Map<String, Value>, root: &Path) -> Result<Valu
     let _ = db.execute("INSERT INTO feedback_events (event_id,feedback_id,event_type,actor_principal,status,task_ref,task_status,note,details_json,created_at) VALUES (?1,?2,'status_updated',?3,?4,?5,?6,?7,?8,?9)", params![format!("sfb_evt_{}", Uuid::new_v4()), id, principal, status, task_ref, task_status, note, json!({"previous_status":previous_status,"authority_site_id":authority_site}).to_string(), now]);
     Ok(json!({"schema":"narada.surface_feedback.update_status.v1","status":"updated","feedback_id":id,"new_status":status,"resolved_by":principal,"resolution_note":note,"updated_at":now,"native_write":true}))
 }
+
+fn feedback_update_status_batch(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let updates = args.get("updates").and_then(Value::as_array).ok_or_else(|| error("feedback_batch_requires_updates", "feedback_batch_requires_updates"))?;
+    if updates.is_empty() || updates.len() > MAX_IMPORT_IDS {
+        return Err(error("feedback_batch_invalid_size", "feedback_batch_invalid_size"));
+    }
+    let mut succeeded = Vec::new();
+    let mut failed = Vec::new();
+    for (index, update) in updates.iter().enumerate() {
+        let object = update.as_object();
+        let feedback_id = object.and_then(|value| value.get("feedback_id")).and_then(Value::as_str).map(str::trim).filter(|value| !value.is_empty()).map(ToOwned::to_owned);
+        let result = object.map(|value| feedback_update_status(value, root)).unwrap_or_else(|| Err(error("feedback_update_must_be_object", "feedback_update_must_be_object")));
+        match result {
+            Ok(value) => succeeded.push(json!({
+                "feedback_id": feedback_id.or_else(|| value.get("feedback_id").and_then(Value::as_str).map(ToOwned::to_owned)),
+                "status": value.get("new_status").cloned().unwrap_or(Value::Null),
+                "resolution_note": value.get("resolution_note").cloned().unwrap_or(Value::Null),
+                "updated_at": value.get("updated_at").cloned().unwrap_or(Value::Null),
+                "result": value,
+            })),
+            Err(diagnostic) => failed.push(json!({
+                "index": index,
+                "feedback_id": feedback_id,
+                "code": diagnostic.get("code").cloned().unwrap_or_else(|| json!("feedback_update_failed")),
+                "message": diagnostic.get("message").cloned().unwrap_or_else(|| json!("feedback_update_failed")),
+                "details": diagnostic.get("details").cloned().unwrap_or_else(|| json!({})),
+            })),
+        }
+    }
+    let status = if failed.is_empty() { "updated" } else if succeeded.is_empty() { "failed" } else { "partial" };
+    Ok(json!({
+        "schema": "narada.surface_feedback.status_batch.v1",
+        "status": status,
+        "requested_count": updates.len(),
+        "updated_count": succeeded.len(),
+        "failed_count": failed.len(),
+        "updates": succeeded,
+        "failures": failed,
+        "native_write": true,
+    }))
+}
+
+const FEEDBACK_ROW_FIELDS: &[&str] = &[
+    "feedback_id", "surface_id", "submitter_site_id", "submitter_principal", "kind", "summary", "details",
+    "status", "resolution_note", "resolved_by", "task_ref", "task_status", "created_at", "updated_at",
+];
+
+fn feedback_columns(db: &Connection) -> Result<std::collections::BTreeSet<String>, Value> {
+    let mut statement = db.prepare("PRAGMA table_info(feedback_entries)").map_err(|e| error("feedback_schema_probe_failed", &e.to_string()))?;
+    let rows = statement.query_map([], |row| row.get::<_, String>(1)).map_err(|e| error("feedback_schema_probe_failed", &e.to_string()))?;
+    let mut columns = std::collections::BTreeSet::new();
+    for row in rows { columns.insert(row.map_err(|e| error("feedback_schema_probe_failed", &e.to_string()))?); }
+    Ok(columns)
+}
+
+fn feedback_row(db: &Connection, feedback_id: &str) -> Result<Option<Value>, Value> {
+    let columns = feedback_columns(db)?;
+    if !columns.contains("feedback_id") { return Err(error("feedback_entries_schema_missing_required_columns", "feedback_entries_schema_missing_required_columns")); }
+    let selection = FEEDBACK_ROW_FIELDS.iter().map(|field| {
+        if columns.contains(*field) { (*field).to_string() } else { format!("NULL AS {field}") }
+    }).collect::<Vec<_>>().join(", ");
+    let sql = format!("SELECT {selection} FROM feedback_entries WHERE feedback_id = ?1 LIMIT 1");
+    db.query_row(&sql, params![feedback_id], |row| {
+        let mut object = Map::new();
+        for (index, field) in FEEDBACK_ROW_FIELDS.iter().enumerate() {
+            let value = row.get::<_, Option<String>>(index).ok().flatten().map(Value::String).unwrap_or(Value::Null);
+            object.insert((*field).to_string(), value);
+        }
+        Ok(Value::Object(object))
+    }).optional().map_err(|e| error("feedback_query_failed", &e.to_string()))
+}
+
+fn import_source_path(args: &Map<String, Value>, root: &Path) -> Result<PathBuf, Value> {
+    let source_root = args.get("source_feedback_root").and_then(Value::as_str).filter(|value| !value.trim().is_empty());
+    let source_db = args.get("source_db_path").and_then(Value::as_str).filter(|value| !value.trim().is_empty());
+    if source_root.is_some() && source_db.is_some() { return Err(error("feedback_import_source_ambiguous", "feedback_import_source_ambiguous")); }
+    let path = if let Some(value) = source_root {
+        PathBuf::from(value).join(".feedback").join("surface-feedback.db")
+    } else if let Some(value) = source_db {
+        PathBuf::from(value)
+    } else {
+        return Err(error("feedback_import_requires_source", "feedback_import_requires_source"));
+    };
+    let path = if path.is_absolute() { path } else { root.join(path) };
+    Ok(path)
+}
+
+fn same_feedback_path(left: &Path, right: &Path) -> bool {
+    left.canonicalize().unwrap_or_else(|_| left.to_path_buf()) == right.canonicalize().unwrap_or_else(|_| right.to_path_buf())
+}
+
+fn feedback_import(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let source_path = import_source_path(args, root)?;
+    let target_path = feedback_path(root);
+    if same_feedback_path(&source_path, &target_path) {
+        return Err(error("feedback_import_same_store", "feedback_import_same_store"));
+    }
+    if !source_path.exists() { return Err(error("feedback_import_source_missing", "feedback_import_source_missing")); }
+    let ids = args.get("feedback_ids").and_then(Value::as_array).ok_or_else(|| error("feedback_import_requires_feedback_ids", "feedback_import_requires_feedback_ids"))?;
+    let ids = ids.iter().filter_map(Value::as_str).map(str::trim).filter(|value| !value.is_empty()).map(ToOwned::to_owned).collect::<Vec<_>>();
+    if ids.is_empty() || ids.len() > MAX_IMPORT_IDS { return Err(error("feedback_import_requires_feedback_ids", "feedback_import_requires_feedback_ids")); }
+    let source = Connection::open_with_flags(&source_path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|e| error("feedback_import_source_open_failed", &e.to_string()))?;
+    let target = open_db_rw(root)?;
+    let mut imported = Vec::new();
+    let mut skipped = Vec::new();
+    let mut missing = Vec::new();
+    target.execute_batch("BEGIN IMMEDIATE").map_err(|e| error("feedback_import_begin_failed", &e.to_string()))?;
+    let result = (|| -> Result<(), Value> {
+        for id in &ids {
+            let Some(row) = feedback_row(&source, id)? else { missing.push(id.clone()); continue; };
+            if feedback_row(&target, id)?.is_some() {
+                skipped.push(json!({"feedback_id": id, "reason": "already_exists"}));
+                continue;
+            }
+            let get = |name: &str| row.get(name).cloned().unwrap_or(Value::Null);
+            let text = |name: &str| get(name).as_str().unwrap_or("").to_string();
+            target.execute("INSERT INTO feedback_entries (feedback_id,surface_id,submitter_site_id,submitter_principal,kind,summary,details,status,resolution_note,resolved_by,task_ref,task_status,source_db_path,source_updated_at,source_sync_mode,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,'explicit_import',?15,?16)", params![
+                text("feedback_id"), text("surface_id"), text("submitter_site_id"), text("submitter_principal"), text("kind"), text("summary"), text("details"),
+                { let value = text("status"); if value.is_empty() { "submitted".to_string() } else { value } },
+                optional_text(&get("resolution_note")), optional_text(&get("resolved_by")), optional_text(&get("task_ref")), optional_text(&get("task_status")),
+                source_path.to_string_lossy().to_string(), text("updated_at"), text("created_at"), text("updated_at")
+            ]).map_err(|e| error("feedback_import_insert_failed", &e.to_string()))?;
+            imported.push(json!({"feedback_id":id,"surface_id":text("surface_id"),"submitter_site_id":text("submitter_site_id"),"submitter_principal":text("submitter_principal"),"kind":text("kind"),"summary":text("summary"),"details":text("details"),"status":text("status"),"source_db_path":source_path.to_string_lossy().to_string(),"source_sync_mode":"explicit_import","created_at":text("created_at"),"updated_at":text("updated_at")}));
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => target.execute_batch("COMMIT").map_err(|e| error("feedback_import_commit_failed", &e.to_string()))?,
+        Err(error) => { let _ = target.execute_batch("ROLLBACK"); return Err(error); }
+    }
+    Ok(json!({"schema":"narada.surface_feedback.import.v1","status":if missing.is_empty() && skipped.is_empty(){"imported"}else{"partial"},"source_db_path":source_path.to_string_lossy(),"target_db_path":target_path.to_string_lossy(),"requested_count":ids.len(),"imported_count":imported.len(),"skipped_count":skipped.len(),"missing_count":missing.len(),"imported":imported,"skipped":skipped,"missing_feedback_ids":missing,"native_write":true}))
+}
+
+fn optional_text(value: &Value) -> Option<String> { value.as_str().map(str::to_string).filter(|value| !value.is_empty()) }
 
 fn doctor(root: &Path) -> Result<Value, Value> {
     let path = feedback_path(root);
@@ -248,5 +385,31 @@ mod tests {
         let submitted = call_tool("surface_feedback_submit", &json!({"surface_id":"site-loop","submitter_site_id":"site-a","submitter_principal":"agent-a","kind":"observation","summary":"native write"}).as_object().unwrap(), &root).expect("submit");
         assert_eq!(submitted["status"], "submitted");
         std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn native_feedback_batch_update_and_explicit_import() {
+        let root = std::env::temp_dir().join(format!("narada-feedback-import-{}", uuid::Uuid::new_v4()));
+        let source_root = std::env::temp_dir().join(format!("narada-feedback-source-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join(".feedback")).expect("root");
+        std::fs::create_dir_all(source_root.join(".feedback")).expect("source");
+        let schema = "CREATE TABLE feedback_entries (feedback_id TEXT PRIMARY KEY,surface_id TEXT,submitter_site_id TEXT,submitter_principal TEXT,kind TEXT,summary TEXT,details TEXT,status TEXT,resolution_note TEXT,resolved_by TEXT,task_ref TEXT,task_status TEXT,source_db_path TEXT,source_updated_at TEXT,source_sync_mode TEXT,created_at TEXT,updated_at TEXT);";
+        let db = Connection::open(root.join(".feedback/surface-feedback.db")).expect("db");
+        db.execute_batch(&format!("{schema} CREATE TABLE feedback_events (event_id TEXT PRIMARY KEY,feedback_id TEXT,event_type TEXT,actor_principal TEXT,status TEXT,note TEXT,details_json TEXT,created_at TEXT);")) .expect("schema");
+        drop(db);
+        let source = Connection::open(source_root.join(".feedback/surface-feedback.db")).expect("source db");
+        source.execute_batch(schema).expect("source schema");
+        source.execute("INSERT INTO feedback_entries (feedback_id,surface_id,submitter_site_id,submitter_principal,kind,summary,details,status,created_at,updated_at) VALUES ('f2','site-loop','site-a','agent-a','observation','import me','details','submitted','2026-01-01','2026-01-01')", []).expect("source row");
+        drop(source);
+        std::env::set_var("NARADA_SITE_ID", "site-a");
+        std::env::set_var("NARADA_AGENT_ID", "agent-a");
+        let submitted = feedback_submit(&json!({"surface_id":"calendar","submitter_site_id":"site-a","submitter_principal":"agent-a","kind":"bug","summary":"batch me"}).as_object().unwrap(), &root).expect("submit");
+        let batch = feedback_update_status_batch(&json!({"updates":[{"feedback_id":submitted["feedback_id"].clone(),"status":"acknowledged","resolution_note":"ack"}]}).as_object().unwrap(), &root).expect("batch");
+        assert_eq!(batch["status"], "updated");
+        let imported = feedback_import(&json!({"source_feedback_root":source_root.to_string_lossy(),"feedback_ids":["f2"]}).as_object().unwrap(), &root).expect("import");
+        assert_eq!(imported["status"], "imported");
+        assert_eq!(imported["imported_count"], 1);
+        std::fs::remove_dir_all(root).expect("cleanup");
+        std::fs::remove_dir_all(source_root).expect("source cleanup");
     }
 }
