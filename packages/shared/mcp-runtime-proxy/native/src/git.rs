@@ -298,6 +298,11 @@ fn list_tools() -> Vec<Value> {
             true,
         ),
         tool(
+            "git_workflow_record",
+            "Record a bounded multi-repository workflow handoff in the local Git audit ledger.",
+            false,
+        ),
+        tool(
             "git_status",
             "Inspect branch, upstream, remotes, and bounded dirty-state summaries.",
             true,
@@ -380,6 +385,7 @@ fn call_tool(
         "git_guidance" => guidance(args),
         "git_policy_inspect" => Ok(policy(state)),
         "git_begin_work_scope" => git_begin_work_scope(state, args, cancellation),
+        "git_workflow_record" => git_workflow_record(state, args, cancellation),
         "git_status" => git_status(state, args, cancellation),
         "git_sync_status" => git_sync_status(state, args, cancellation),
         "git_branch_list" => git_branch_list(state, args, cancellation),
@@ -400,7 +406,7 @@ fn call_tool(
 
 fn guidance(_args: &Value) -> Result<Value, GitError> {
     Ok(
-        json!({"schema": "narada.mcp_surface.guidance.v0", "status": "ok", "surface_id": "git", "purpose": "Governed Git inspection and publication workflows.", "tool_inventory": {"read": ["git_policy_inspect", "git_begin_work_scope", "git_status", "git_sync_status", "git_branch_list", "git_changed_summary", "git_repositories_summary", "git_diff", "git_log", "git_show"], "write": ["git_add", "git_commit", "git_push", "git_fetch", "git_rebase", "git_merge"]}, "native_boundary": "Rust canary covers bounded read operations and non-mutating work-scope admission; JavaScript remains authoritative for scoped mutation, recovery, and publication."}),
+        json!({"schema": "narada.mcp_surface.guidance.v0", "status": "ok", "surface_id": "git", "purpose": "Governed Git inspection and publication workflows.", "tool_inventory": {"read": ["git_policy_inspect", "git_begin_work_scope", "git_status", "git_sync_status", "git_branch_list", "git_changed_summary", "git_repositories_summary", "git_diff", "git_log", "git_show"], "write": ["git_workflow_record", "git_add", "git_commit", "git_push", "git_fetch", "git_rebase", "git_merge"]}, "native_boundary": "Rust canary covers bounded read operations, non-mutating work-scope admission, and local workflow records; JavaScript remains authoritative for scoped mutation, recovery, and publication."}),
     )
 }
 
@@ -615,6 +621,90 @@ fn resolve_work_scope(state: &State, reference: &str, repository_root: &str) -> 
         return Err(GitError::new("git_work_scope_repository_mismatch", "git_work_scope_repository_mismatch", json!({"work_scope_ref": reference, "repository_root": repository_root, "expected_repository_root": scope.repository_root, "mutation_started": false, "atomic": true})));
     }
     Ok(scope)
+}
+
+fn git_workflow_record(
+    state: &State,
+    args: &Value,
+    cancellation: Option<Arc<AtomicBool>>,
+) -> Result<Value, GitError> {
+    if state.mode != "write" {
+        return Err(GitError::new(
+            "git_write_mode_required",
+            "git_write_mode_required",
+            json!({"tool_name": "git_workflow_record", "mode": state.mode, "mutation_started": false, "atomic": true}),
+        ));
+    }
+    let scope_label = args
+        .get("scope_label")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| GitError::new("git_workflow_record_requires_scope_label", "git_workflow_record_requires_scope_label", json!({})))?;
+    let repositories = args
+        .get("repositories")
+        .and_then(Value::as_array)
+        .ok_or_else(|| GitError::new("git_workflow_record_requires_repositories", "git_workflow_record_requires_repositories", json!({})))?;
+    if repositories.is_empty() {
+        return Err(GitError::new("git_workflow_record_requires_repositories", "git_workflow_record_requires_repositories", json!({})));
+    }
+    let mut records = Vec::new();
+    for repository in repositories {
+        let working_directory = repository
+            .get("working_directory")
+            .and_then(Value::as_str)
+            .ok_or_else(|| GitError::new("git_workflow_record_requires_working_directory", "git_workflow_record_requires_working_directory", json!({})))?;
+        let status = git_status(state, &json!({"working_directory": working_directory}), cancellation.clone())?;
+        let push_status = repository
+            .get("push_status")
+            .and_then(Value::as_str)
+            .unwrap_or("not_attempted");
+        if !matches!(push_status, "pushed" | "not_attempted" | "failed" | "not_pushable") {
+            return Err(GitError::new("git_workflow_record_invalid_push_status", "git_workflow_record_invalid_push_status", json!({"push_status": push_status})));
+        }
+        records.push(json!({
+            "working_directory": status.get("working_directory"),
+            "repository_root": status.get("repository_root"),
+            "branch": status.get("branch"),
+            "upstream": status.get("upstream"),
+            "staged_paths": repository.get("staged_paths").cloned().unwrap_or_else(|| json!([])),
+            "committed_sha": repository.get("committed_sha").cloned().unwrap_or(Value::Null),
+            "pushed": repository.get("pushed").and_then(Value::as_bool).unwrap_or(false),
+            "push_status": push_status,
+            "push_reason": repository.get("push_reason").cloned().unwrap_or(Value::Null),
+            "unrelated_dirty_paths_left": repository.get("unrelated_dirty_paths_left").cloned().unwrap_or_else(|| json!([])),
+            "post_status": status,
+        }));
+    }
+    let recorded_at = now_rfc3339();
+    let record = json!({
+        "schema": "narada.git.workflow_record.v1",
+        "status": "recorded",
+        "workflow_id": args.get("workflow_id").and_then(Value::as_str).filter(|value| !value.trim().is_empty()).map(str::to_string).unwrap_or_else(|| unique_id("gitwf")),
+        "scope_label": scope_label,
+        "recorded_at": recorded_at,
+        "summary": args.get("summary").cloned().unwrap_or(Value::Null),
+        "repositories": records,
+    });
+    let ledger_path = state.output_root.join(".ai").join("state").join("git-mcp-audit").join("git-workflows.jsonl");
+    if let Some(parent) = ledger_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| GitError::new("git_workflow_record_persist_failed", error.to_string(), json!({"path": parent})))?;
+    }
+    let line = format!("{}\n", serde_json::to_string(&record).unwrap_or_else(|_| "{}".to_string()));
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&ledger_path)
+        .map_err(|error| GitError::new("git_workflow_record_persist_failed", error.to_string(), json!({"path": ledger_path})))?;
+    file.write_all(line.as_bytes())
+        .map_err(|error| GitError::new("git_workflow_record_persist_failed", error.to_string(), json!({"path": ledger_path})))?;
+    Ok(json!({"schema": "narada.git.workflow_record.v1", "status": "recorded", "workflow_id": record.get("workflow_id"), "scope_label": scope_label, "recorded_at": recorded_at, "summary": record.get("summary"), "repositories": record.get("repositories"), "ledger_path": ledger_path.to_string_lossy()}))
+}
+
+fn now_rfc3339() -> String {
+    OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| String::new())
 }
 
 fn git_sync_status(

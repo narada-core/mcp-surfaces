@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -16,9 +16,9 @@ function git(root: string, args: string[]): string {
   return execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }).trim();
 }
 
-function run(root: string, requests: JsonRecord[]): Promise<JsonRecord[]> {
+function run(root: string, requests: JsonRecord[], mode = 'read'): Promise<JsonRecord[]> {
   return new Promise((resolvePromise, rejectPromise) => {
-    const child = spawn(executable, ['git', '--mode', 'read', '--allowed-root', root, '--output-root', root], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+    const child = spawn(executable, ['git', '--mode', mode, '--allowed-root', root, '--output-root', root], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
     let stdout = '';
     let stderr = '';
     child.stdout.setEncoding('utf8');
@@ -69,6 +69,7 @@ try {
     { jsonrpc: '2.0', id: 11, method: 'tools/call', params: { name: 'git_diff', arguments: { working_directory: root, scope: 'working', limit: 4000 } } },
     { jsonrpc: '2.0', id: 12, method: 'tools/call', params: { name: 'git_log', arguments: { working_directory: root, limit: 2 } } },
     { jsonrpc: '2.0', id: 13, method: 'tools/call', params: { name: 'git_status', arguments: { working_directory: root, pathspec: 'src', format: 'paths' } } },
+    { jsonrpc: '2.0', id: 14, method: 'tools/call', params: { name: 'git_workflow_record', arguments: { scope_label: 'native-read-canary', repositories: [{ working_directory: root }] } } },
     { jsonrpc: "2.0", id: 20, method: "server/discover", params: { _meta: modernMeta } },
     { jsonrpc: "2.0", id: 21, method: "tools/list", params: { _meta: modernMeta } },
     { jsonrpc: "2.0", id: 22, method: "tools/call", params: { _meta: modernMeta, name: "git_policy_inspect", arguments: {} } },
@@ -87,6 +88,7 @@ try {
     'git_guidance',
     'git_policy_inspect',
     'git_begin_work_scope',
+    'git_workflow_record',
     'git_status',
     'git_sync_status',
     'git_branch_list',
@@ -119,6 +121,14 @@ try {
   const commit = byId.get(12)?.result?.structuredContent?.commits?.[0]?.hash;
   assert.match(String(commit), /^[0-9a-f]{40}$/);
   assert.deepEqual(byId.get(13)?.result?.structuredContent?.paths, ['src/main.txt']);
+  assert.equal(byId.get(14)?.error?.data?.code, 'git_write_mode_required');
+
+  const writeResponses = await run(root, [{ jsonrpc: '2.0', id: 30, method: 'tools/call', params: { name: 'git_workflow_record', arguments: { scope_label: 'native-write-canary', summary: 'bounded audit record', repositories: [{ working_directory: root, push_status: 'not_attempted' }] } } }], 'write');
+  const workflow = writeResponses[0]?.result?.structuredContent;
+  assert.equal(workflow?.schema, 'narada.git.workflow_record.v1');
+  assert.equal(workflow?.status, 'recorded');
+  assert.equal(existsSync(String(workflow?.ledger_path)), true);
+  assert.match(readFileSync(String(workflow?.ledger_path), 'utf8'), /native-write-canary/);
 
   const showResponses = await run(root, [
     { jsonrpc: '2.0', id: 12, method: 'tools/call', params: { name: 'git_show', arguments: { working_directory: root, commit, include_patch: false } } },
