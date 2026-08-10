@@ -57,7 +57,7 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<V
         "surface_feedback_update_status" => feedback_update_status(args, root),
         "surface_feedback_update_status_batch" => feedback_update_status_batch(args, root),
         "surface_feedback_import" => feedback_import(args, root),
-        "surface_feedback_convert_to_task" => Err(authority_boundary(name)),
+        "surface_feedback_convert_to_task" => feedback_convert_to_task(args, root),
         _ => Err(error("unknown_tool", &format!("unknown_tool:{name}"))),
     }
 }
@@ -126,6 +126,59 @@ fn feedback_update_status(args: &Map<String, Value>, root: &Path) -> Result<Valu
     db.execute("UPDATE feedback_entries SET status=?1,resolved_by=?2,resolution_note=?3,task_ref=COALESCE(?4,task_ref),task_status=COALESCE(?5,task_status),updated_at=?6 WHERE feedback_id=?7", params![status, principal, note, task_ref, task_status, now, id]).map_err(|e| error("feedback_update_failed", &e.to_string()))?;
     let _ = db.execute("INSERT INTO feedback_events (event_id,feedback_id,event_type,actor_principal,status,task_ref,task_status,note,details_json,created_at) VALUES (?1,?2,'status_updated',?3,?4,?5,?6,?7,?8,?9)", params![format!("sfb_evt_{}", Uuid::new_v4()), id, principal, status, task_ref, task_status, note, json!({"previous_status":previous_status,"authority_site_id":authority_site}).to_string(), now]);
     Ok(json!({"schema":"narada.surface_feedback.update_status.v1","status":"updated","feedback_id":id,"new_status":status,"resolved_by":principal,"resolution_note":note,"updated_at":now,"native_write":true}))
+}
+
+fn configured_task_call(name: &str, arguments: Value) -> Result<Option<Value>, Value> {
+    let params = json!({"name": name, "arguments": arguments});
+    let Some(result) = crate::authority::call_if_configured("surface-feedback", "tools/call", params.as_object().expect("task authority params")) else {
+        return Ok(None);
+    };
+    let value = result?;
+    if value.get("isError").and_then(Value::as_bool) == Some(true) {
+        return Err(error("task_lifecycle_tool_refused", "task_lifecycle_tool_refused"));
+    }
+    Ok(Some(value.get("structuredContent").cloned().unwrap_or(value)))
+}
+
+fn feedback_convert_to_task(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let feedback_id = required_arg(args, "feedback_id", "feedback_requires_feedback_id")?;
+    let db = open_db_rw(root)?;
+    let row: Option<(String, String, String, String, String, Option<String>, Option<String>, Option<String>)> = db.query_row(
+        "SELECT surface_id,submitter_site_id,summary,details,status,task_ref,task_status,resolution_note FROM feedback_entries WHERE feedback_id=?1",
+        params![feedback_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?)),
+    ).optional().map_err(|e| error("feedback_query_failed", &e.to_string()))?;
+    let Some((surface_id, submitter_site_id, summary, details, status, existing_task_ref, existing_task_status, existing_note)) = row else {
+        return Err(error("feedback_not_found", "feedback_not_found"));
+    };
+    if let Some(task_ref) = existing_task_ref {
+        if status != "converted_to_task" { return Err(error("feedback_task_link_conflict", "feedback_task_link_conflict")); }
+        return Ok(json!({"schema":"narada.surface_feedback.convert_to_task.v1","status":"already_linked","feedback_id":feedback_id,"task_ref":task_ref,"task_status":existing_task_status,"resolution_note":existing_note,"handoff_authorization":{"scope":"canonical_user_site_handoff","authorization_basis":"canonical_feedback_store_and_server_binding"}}));
+    }
+    let payload = json!({
+        "title": args.get("task_title").and_then(Value::as_str).filter(|value| !value.trim().is_empty()).unwrap_or_else(|| "Address feedback"),
+        "goal": format!("Address feedback {feedback_id} for {surface_id}: {summary}"),
+        "context": format!("Source feedback: {feedback_id}\nSurface: {surface_id}\nSubmitter site: {submitter_site_id}\nDetails: {details}"),
+        "required_work": format!("Inspect feedback {feedback_id}; implement the smallest coherent fix; add focused tests; record verification evidence."),
+        "non_goals": "Do not execute the task from surface-feedback; task execution remains owned by task-lifecycle and worker surfaces.",
+        "acceptance_criteria": [format!("The concern described by feedback {feedback_id} is addressed or an exact blocker is recorded."), "Focused tests cover the changed behavior."],
+        "idempotency_key": format!("surface-feedback:{feedback_id}"),
+    });
+    let payload_args = json!({"payload_id":format!("surface-feedback-{feedback_id}-task"),"payload":payload,"created_by":std::env::var("NARADA_AGENT_ID").ok().unwrap_or_else(|| "surface-feedback".to_string())});
+    let Some(payload_result) = configured_task_call("mcp_payload_create", payload_args)? else { return Err(authority_boundary("surface_feedback_convert_to_task")); };
+    let payload_ref = payload_result.get("ref").or_else(|| payload_result.get("payload_ref")).and_then(Value::as_str).ok_or_else(|| error("feedback_task_payload_ref_missing", "feedback_task_payload_ref_missing"))?;
+    let Some(task_result) = configured_task_call("task_lifecycle_create", json!({"payload_ref":payload_ref}))? else { return Err(authority_boundary("surface_feedback_convert_to_task")); };
+    let task_number = task_result.get("task_number").and_then(Value::as_i64);
+    let task_id = task_result.get("task_id").and_then(Value::as_str);
+    let task_ref = task_result.get("task_ref").and_then(Value::as_str).map(ToOwned::to_owned)
+        .or_else(|| task_number.map(|value| format!("task #{value}")))
+        .or_else(|| task_id.map(ToOwned::to_owned))
+        .ok_or_else(|| error("feedback_task_create_result_invalid", "feedback_task_create_result_invalid"))?;
+    let task_status = task_result.get("task_status").and_then(Value::as_str).or_else(|| task_result.get("status").and_then(Value::as_str)).unwrap_or("opened");
+    let resolved_by = std::env::var("NARADA_AGENT_ID").ok().filter(|value| !value.trim().is_empty()).unwrap_or_else(|| "surface-feedback".to_string());
+    let note = args.get("resolution_note").and_then(Value::as_str).filter(|value| !value.trim().is_empty()).map(ToOwned::to_owned).unwrap_or_else(|| format!("Created {task_ref} from feedback via surface_feedback_convert_to_task."));
+    db.execute("UPDATE feedback_entries SET status='converted_to_task',resolved_by=?1,resolution_note=?2,task_ref=?3,task_status=?4,updated_at=?5 WHERE feedback_id=?6", params![resolved_by, note, task_ref, task_status, now_iso(), feedback_id]).map_err(|e| error("feedback_task_link_failed", &e.to_string()))?;
+    Ok(json!({"schema":"narada.surface_feedback.convert_to_task.v1","status":"converted","feedback_id":feedback_id,"task_ref":task_ref,"task_number":task_number,"task_id":task_id,"task_status":task_status,"task_creation":{"status":"created_or_recovered","payload_ref":payload_ref,"idempotency_key":format!("surface-feedback:{feedback_id}")},"handoff_authorization":{"scope":"canonical_user_site_handoff","authorization_basis":"canonical_feedback_store_and_server_binding","authority_site_id":std::env::var("NARADA_SITE_ID").ok()},"next_action":{"surface_id":"task-lifecycle","tool":"task_lifecycle_show","arguments":{"task_number":task_number}}}))
 }
 
 fn feedback_update_status_batch(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
