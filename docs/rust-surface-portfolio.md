@@ -67,6 +67,13 @@ The Rust proxy itself is shared infrastructure rather than a catalog surface;
 it is already Rust-native and is benchmarked independently from child-surface
 implementations.
 
+The runtime matrix may also record `rust: experimental` for a surface listed
+here as JavaScript-native. That combination is deliberate: the native module
+owns a wire-complete, bounded contract/read slice and makes the remaining
+authority boundary explicit, while the JavaScript implementation remains the
+behavioral authority and default. It is not a claim of domain or provider
+parity, and it does not justify changing the registrar default by itself.
+
 ## Default and rollback controls
 
 The native proxy default retains `--runtime-proxy-implementation bun` as its carrier-wide rollback.
