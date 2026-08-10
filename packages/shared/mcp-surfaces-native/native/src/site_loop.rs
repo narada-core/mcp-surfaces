@@ -336,8 +336,17 @@ fn docs_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
 fn test_list(root: &Path) -> Result<Value, Value> {
     let config = load_config(root)?;
     let tests = config.as_ref().and_then(Value::as_object).and_then(|v|v.get("tests")).and_then(Value::as_object).cloned().unwrap_or_default();
-    let entries = tests.into_iter().take(100).map(|(name, value)| json!({"selector":name,"command":value.get("command"),"args":value.get("args")})).collect::<Vec<_>>();
-    Ok(json!({"schema":"narada.site_loop.tests.v1","status":"ok","count":entries.len(),"tests":entries,"execution":"authority_boundary"}))
+    let entries = tests.into_iter().take(100).filter_map(|(name, value)| {
+        let object = value.as_object()?;
+        let command = object.get("command").and_then(Value::as_str)?;
+        let args = object.get("args").and_then(Value::as_array).cloned().unwrap_or_default();
+        let command_line = std::iter::once(command.to_string())
+            .chain(args.into_iter().filter_map(|value| value.as_str().map(ToOwned::to_owned)))
+            .collect::<Vec<_>>()
+            .join(" ");
+        Some(json!({"selector":name,"command":command_line}))
+    }).collect::<Vec<_>>();
+    Ok(json!({"status":"ok","site_root":root.to_string_lossy(),"tests":entries}))
 }
 
 fn status(root: &Path) -> Result<Value, Value> {

@@ -308,6 +308,7 @@ function runSiteLoopParity() {
       resident: { agent_id: 'fixture-agent', role: 'resident' },
       scheduler: { default_task_name: 'Fixture-Loop' },
       docs: [{ path: 'README.md', description: 'Fixture documentation' }],
+      tests: { smoke_echo: { command: 'node', args: ['-e', 'process.stdout.write("ok")'] } },
       policy: {},
       persistence: {
         schema: 'narada.site_loop.persistence.v2',
@@ -323,6 +324,8 @@ function runSiteLoopParity() {
       jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'site_docs_list', arguments: {} },
     }, {
       jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'site_docs_show', arguments: { path: 'README.md' } },
+    }, {
+      jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'site_test_list', arguments: {} },
     }];
     const bun = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', [bunEntrypoint, '--site-root', root], requests, workspaceRoot);
     const rust = runMailbox(executable, ['--surface-id', 'site-loop', '--site-root', root], requests, workspaceRoot);
@@ -330,7 +333,8 @@ function runSiteLoopParity() {
     assertSame('site_loop.config_validate', comparable(mailboxStructured(bun, 1, 'bun')), comparable(mailboxStructured(rust, 1, 'rust')));
     assertSame('site_loop.docs_list', mailboxStructured(bun, 2, 'bun'), mailboxStructured(rust, 2, 'rust'));
     assertSame('site_loop.docs_show', mailboxStructured(bun, 3, 'bun'), mailboxStructured(rust, 3, 'rust'));
-    return { status: 'passed', fixture: 'config_and_docs_read', compared: ['config_validate', 'docs_list', 'docs_show'] };
+    assertSame('site_loop.tests_list', mailboxStructured(bun, 4, 'bun'), mailboxStructured(rust, 4, 'rust'));
+    return { status: 'passed', fixture: 'config_docs_and_tests_read', compared: ['config_validate', 'docs_list', 'docs_show', 'tests_list'] };
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
