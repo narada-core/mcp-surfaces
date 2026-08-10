@@ -8,6 +8,9 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 const SERVER_NAME: &str = "narada-site-inbox-mcp";
+const MAX_ENVELOPE_BYTES: u64 = 512_000;
+const MAX_OUTPUT_BYTES: u64 = 512_000;
+const MAX_LOG_BYTES: u64 = 10 * 1024 * 1024;
 const STATUSES: &[&str] = &["received", "acknowledged", "dismissed", "promoted"];
 const ACTIONS: &[&str] = &[
     "acknowledge",
@@ -526,6 +529,7 @@ fn output_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     let path = root
         .join(".ai/tmp/mcp-outputs/workspace")
         .join(format!("{id}.json"));
+    if fs::metadata(&path).map_err(|_| error("output_ref_not_found", &format!("output_ref_not_found:{reference}")))?.len() > MAX_OUTPUT_BYTES { return Err(error("output_ref_too_large", "output_ref_too_large")); }
     let text = fs::read_to_string(&path).map_err(|_| {
         error(
             "output_ref_not_found",
@@ -574,9 +578,9 @@ fn refresh(root: &Path) -> Result<(i64, usize), Value> {
         .map_err(|e| db_err("inbox_index_clear_failed", e))?;
     let mut invalid = 0usize;
     for path in files {
-        let text = match fs::read_to_string(&path) {
-            Ok(v) => v.trim_start_matches('\u{feff}').to_string(),
-            Err(_) => {
+        let text = match fs::metadata(&path).ok().filter(|metadata| metadata.len() <= MAX_ENVELOPE_BYTES).and_then(|_| fs::read_to_string(&path).ok()) {
+            Some(v) => v.trim_start_matches('\u{feff}').to_string(),
+            None => {
                 invalid += 1;
                 continue;
             }
@@ -971,6 +975,7 @@ fn append(root: &Path, event: Value) -> Result<Value, Value> {
 
 fn read_log(root: &Path) -> Result<Vec<Value>, Value> {
     let path = root.join(".ai/state/inbox-admission.log");
+    if let Ok(metadata) = fs::metadata(&path) { if metadata.len() > MAX_LOG_BYTES { return Err(error("inbox_log_too_large", "inbox_log_too_large")); } }
     let text = match fs::read_to_string(path) {
         Ok(value) => value,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -1081,6 +1086,18 @@ mod tests {
         let shown = show(&show_args, &root).expect("show");
         assert_eq!(shown["envelope"]["status"], "acknowledged");
         assert_eq!(shown["envelope"]["payload"]["title"], "Native inbox test");
+        fs::remove_dir_all(&root).expect("cleanup");
+    }
+
+    #[test]
+    fn output_ref_read_refuses_oversized_files() {
+        let root = std::env::temp_dir().join(format!("narada-site-inbox-output-{}", Uuid::new_v4()));
+        let directory = root.join(".ai/tmp/mcp-outputs/workspace");
+        fs::create_dir_all(&directory).expect("directory");
+        fs::write(directory.join("large.json"), vec![b'x'; MAX_OUTPUT_BYTES as usize + 1]).expect("output");
+        let args: Map<String, Value> = serde_json::from_value(json!({"ref":"mcp_output:large"})).expect("args");
+        let refused = output_show(&args, &root).expect_err("oversized output must refuse");
+        assert_eq!(refused["code"], "output_ref_too_large");
         fs::remove_dir_all(&root).expect("cleanup");
     }
 }
