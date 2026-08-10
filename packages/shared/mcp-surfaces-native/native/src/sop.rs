@@ -58,7 +58,9 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<V
         "sop_template_search" => template_search(args, root),
         "sop_template_list" => template_list(args, root),
         "sop_template_show" => template_show(args, root),
-        "sop_run_status" | "sop_run_list" | "sop_handoff_list" | "sop_handoff_show" | "sop_action_list" | "sop_action_show" | "sop_run_coverage_since" | "sop_run_events" | "sop_outbox_list" => Err(authority_boundary(name)),
+        "sop_run_status" | "sop_run_list" | "sop_handoff_list" | "sop_handoff_show" | "sop_run_coverage_since" | "sop_run_events" | "sop_outbox_list" => Err(authority_boundary(name)),
+        "sop_action_list" => action_list(args, root),
+        "sop_action_show" => action_show(args, root),
         name if MUTATING.contains(&name) => Err(authority_boundary(name)),
         _ => Err(error("unknown_tool", &format!("unknown_tool:{name}"))),
     }
@@ -154,10 +156,41 @@ fn template_search(args: &Map<String, Value>, root: &Path) -> Result<Value, Valu
     Ok(json!({"schema":"narada.sop.template_search.v2","status":"ok","query":query,"items":items,"count":items.len(),"db_path":db_path(root).to_string_lossy()}))
 }
 
+fn action_list(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(50).clamp(1, 100);
+    let run_id = args.get("run_id").and_then(Value::as_str);
+    let status = args.get("status").and_then(Value::as_str);
+    let Some(connection) = open_db(root)? else { return Ok(json!({"schema":"narada.sop.action_list.v1","status":"missing","items":[],"count":0,"db_path":db_path(root).to_string_lossy()})); };
+    let items = match (run_id, status) {
+        (Some(run_id), Some(status)) => query_action_rows(&connection, "SELECT action_id, run_id, step_id, occurrence_key, surface_id, tool_name, status, operation_ref, created_at, updated_at, completed_at FROM sop_actions WHERE run_id = ? AND status = ? ORDER BY created_at ASC LIMIT ?", params![run_id, status, limit])?,
+        (Some(run_id), None) => query_action_rows(&connection, "SELECT action_id, run_id, step_id, occurrence_key, surface_id, tool_name, status, operation_ref, created_at, updated_at, completed_at FROM sop_actions WHERE run_id = ? ORDER BY created_at ASC LIMIT ?", params![run_id, limit])?,
+        (None, Some(status)) => query_action_rows(&connection, "SELECT action_id, run_id, step_id, occurrence_key, surface_id, tool_name, status, operation_ref, created_at, updated_at, completed_at FROM sop_actions WHERE status = ? ORDER BY created_at ASC LIMIT ?", params![status, limit])?,
+        (None, None) => query_action_rows(&connection, "SELECT action_id, run_id, step_id, occurrence_key, surface_id, tool_name, status, operation_ref, created_at, updated_at, completed_at FROM sop_actions ORDER BY created_at ASC LIMIT ?", params![limit])?,
+    };
+    Ok(json!({"schema":"narada.sop.action_list.v1","status":"ok","items":items,"count":items.len(),"db_path":db_path(root).to_string_lossy()}))
+}
+
+fn action_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let action_id = args.get("action_id").and_then(Value::as_str).filter(|value| !value.trim().is_empty()).ok_or_else(|| error("sop_requires_action_id", "sop_requires_action_id"))?;
+    let Some(connection) = open_db(root)? else { return Err(error("sop_action_not_found", "sop_action_not_found")); };
+    let row = connection.query_row("SELECT * FROM sop_actions WHERE action_id = ?", params![action_id], row_value).optional().map_err(|e| error("sop_action_query_failed", &e.to_string()))?.ok_or_else(|| error("sop_action_not_found", "sop_action_not_found"))?;
+    Ok(action_record(row))
+}
+
+fn query_action_rows<P: rusqlite::Params>(connection: &Connection, sql: &str, params: P) -> Result<Vec<Value>, Value> {
+    let mut statement = connection.prepare(sql).map_err(|e| error("sop_action_query_failed", &e.to_string()))?;
+    let rows = statement.query_map(params, row_value).map_err(|e| error("sop_action_query_failed", &e.to_string()))?;
+    rows.take(100).map(|row| row.map_err(|e| error("sop_action_row_failed", &e.to_string()))).collect()
+}
+
+fn action_record(value: Value) -> Value {
+    json!({"schema":"narada.sop.action.v1","action_id":member(&value,"action_id"),"run_id":member(&value,"run_id"),"step_id":member(&value,"step_id"),"occurrence_key":member(&value,"occurrence_key"),"surface_id":member(&value,"surface_id"),"tool_name":member(&value,"tool_name"),"arguments":member(&value,"arguments_json"),"request_fingerprint":member(&value,"request_fingerprint"),"status":member(&value,"status"),"completion_key":member(&value,"completion_key"),"completion_fingerprint":member(&value,"completion_fingerprint"),"operation_ref":member(&value,"operation_ref"),"result":member(&value,"result_json"),"result_ref":member(&value,"result_ref_json"),"error_message":member(&value,"error_message"),"created_at":member(&value,"created_at"),"updated_at":member(&value,"updated_at"),"completed_at":member(&value,"completed_at")})
+}
+
 fn doctor(root: &Path) -> Result<Value, Value> {
     let dirs = sops_dirs(root); let mut counts = Vec::new();
     for dir in &dirs { let count = fs::read_dir(dir).ok().map(|entries| entries.filter_map(Result::ok).filter(|entry| entry.path().file_name().and_then(|v|v.to_str()).map(|v|v.ends_with(".sop.yaml")).unwrap_or(false)).take(MAX_CANDIDATES).count()).unwrap_or(0); counts.push(json!({"path":dir.to_string_lossy(),"candidate_count":count})); }
-    Ok(json!({"schema":"narada.sop_mcp.doctor.v1","status":"ok","site_root":root.to_string_lossy(),"sops_dirs":counts,"native_adapter":"template_read_slice","execution":"authority_boundary","server_name":SERVER_NAME}))
+    Ok(json!({"schema":"narada.sop_mcp.doctor.v1","status":"ok","site_root":root.to_string_lossy(),"sops_dirs":counts,"native_adapter":"template_and_action_read","execution":"authority_boundary","server_name":SERVER_NAME}))
 }
 
 fn candidate_entries(root: &Path) -> Vec<(String, PathBuf)> {
@@ -206,6 +239,22 @@ mod tests {
         assert_eq!(template_list(&json!({"limit":1}).as_object().unwrap(), &root).expect("list")["count"], 1);
         assert_eq!(template_show(&json!({"sop_id":"demo"}).as_object().unwrap(), &root).expect("show")["steps"][0]["id"], "step-1");
         assert_eq!(template_search(&json!({"query":"Demo"}).as_object().unwrap(), &root).expect("search")["count"], 1);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn native_sop_action_reads_are_bounded_and_read_only() {
+        let root = std::env::temp_dir().join(format!("narada-sop-actions-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join(".sop")).expect("root");
+        let connection = Connection::open(db_path(&root)).expect("db");
+        connection.execute_batch("CREATE TABLE sop_actions (action_id TEXT, run_id TEXT, step_id TEXT, occurrence_key TEXT, surface_id TEXT, tool_name TEXT, arguments_json TEXT, request_fingerprint TEXT, status TEXT, completion_key TEXT, completion_fingerprint TEXT, operation_ref TEXT, result_json TEXT, result_ref_json TEXT, error_message TEXT, created_at TEXT, updated_at TEXT, completed_at TEXT); INSERT INTO sop_actions VALUES ('action-1','run-1','step-1','occ-1','surface','tool','{}','fingerprint','pending',NULL,NULL,NULL,'{}',NULL,NULL,'2026-01-01','2026-01-01',NULL);").expect("schema");
+        drop(connection);
+        let list = action_list(&json!({"limit":1}).as_object().unwrap(), &root).expect("list");
+        assert_eq!(list["count"], 1);
+        assert_eq!(list["items"][0]["action_id"], "action-1");
+        let show = action_show(&json!({"action_id":"action-1"}).as_object().unwrap(), &root).expect("show");
+        assert_eq!(show["schema"], "narada.sop.action.v1");
+        assert_eq!(show["arguments"], json!({}));
         fs::remove_dir_all(root).expect("cleanup");
     }
 }
