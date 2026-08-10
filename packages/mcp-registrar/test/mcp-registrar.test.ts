@@ -1157,6 +1157,7 @@ try {
       ['site-registry', ['--site-root', '{site_root}']],
       ['project-state', ['--site-root', '{site_root}']],
       ['runtime-introspection', ['--site-root', '{site_root}']],
+      ['site-coherence', ['--site-root', '{site_root}']],
     ] as const) {
       const sharedBindConfig: any = buildSiteBindConfig(
         { site_id: 'shared-' + surfaceId, root, config_path: join(root, 'site.json'), surfaces: [] },
