@@ -70,6 +70,8 @@ try {
     { jsonrpc: '2.0', id: 12, method: 'tools/call', params: { name: 'git_log', arguments: { working_directory: root, limit: 2 } } },
     { jsonrpc: '2.0', id: 13, method: 'tools/call', params: { name: 'git_status', arguments: { working_directory: root, pathspec: 'src', format: 'paths' } } },
     { jsonrpc: '2.0', id: 14, method: 'tools/call', params: { name: 'git_workflow_record', arguments: { scope_label: 'native-read-canary', repositories: [{ working_directory: root }] } } },
+    { jsonrpc: '2.0', id: 15, method: 'tools/call', params: { name: 'git_add', arguments: { working_directory: root, paths: ['src/main.txt'] } } },
+    { jsonrpc: '2.0', id: 16, method: 'tools/call', params: { name: 'git_unstage', arguments: { working_directory: root, paths: ['src/main.txt'] } } },
     { jsonrpc: "2.0", id: 20, method: "server/discover", params: { _meta: modernMeta } },
     { jsonrpc: "2.0", id: 21, method: "tools/list", params: { _meta: modernMeta } },
     { jsonrpc: "2.0", id: 22, method: "tools/call", params: { _meta: modernMeta, name: "git_policy_inspect", arguments: {} } },
@@ -89,6 +91,8 @@ try {
     'git_policy_inspect',
     'git_begin_work_scope',
     'git_workflow_record',
+    'git_add',
+    'git_unstage',
     'git_status',
     'git_sync_status',
     'git_branch_list',
@@ -122,13 +126,23 @@ try {
   assert.match(String(commit), /^[0-9a-f]{40}$/);
   assert.deepEqual(byId.get(13)?.result?.structuredContent?.paths, ['src/main.txt']);
   assert.equal(byId.get(14)?.error?.data?.code, 'git_write_mode_required');
+  assert.equal(byId.get(15)?.error?.data?.code, 'git_write_mode_required');
+  assert.equal(byId.get(16)?.error?.data?.code, 'git_write_mode_required');
 
-  const writeResponses = await run(root, [{ jsonrpc: '2.0', id: 30, method: 'tools/call', params: { name: 'git_workflow_record', arguments: { scope_label: 'native-write-canary', summary: 'bounded audit record', repositories: [{ working_directory: root, push_status: 'not_attempted' }] } } }], 'write');
-  const workflow = writeResponses[0]?.result?.structuredContent;
+  const writeResponses = await run(root, [
+    { jsonrpc: '2.0', id: 30, method: 'tools/call', params: { name: 'git_workflow_record', arguments: { scope_label: 'native-write-canary', summary: 'bounded audit record', repositories: [{ working_directory: root, push_status: 'not_attempted' }] } } },
+    { jsonrpc: '2.0', id: 31, method: 'tools/call', params: { name: 'git_add', arguments: { working_directory: root, paths: ['src/main.txt'] } } },
+    { jsonrpc: '2.0', id: 32, method: 'tools/call', params: { name: 'git_unstage', arguments: { working_directory: root, paths: ['src/main.txt'] } } },
+  ], 'write');
+  const workflow = writeResponses.find((response) => response.id === 30)?.result?.structuredContent;
   assert.equal(workflow?.schema, 'narada.git.workflow_record.v1');
   assert.equal(workflow?.status, 'recorded');
   assert.equal(existsSync(String(workflow?.ledger_path)), true);
   assert.match(readFileSync(String(workflow?.ledger_path), 'utf8'), /native-write-canary/);
+  assert.equal(writeResponses.find((response) => response.id === 31)?.result?.structuredContent?.schema, 'narada.git.add.v1', JSON.stringify(writeResponses.find((response) => response.id === 31)));
+  assert.equal(writeResponses.find((response) => response.id === 31)?.result?.structuredContent?.post_status?.staged?.includes('src/main.txt'), true);
+  assert.equal(writeResponses.find((response) => response.id === 32)?.result?.structuredContent?.schema, 'narada.git.unstage.v1', JSON.stringify(writeResponses.find((response) => response.id === 32)));
+  assert.equal(writeResponses.find((response) => response.id === 32)?.result?.structuredContent?.post_status?.staged?.includes('src/main.txt'), false, JSON.stringify(writeResponses.find((response) => response.id === 32)));
 
   const showResponses = await run(root, [
     { jsonrpc: '2.0', id: 12, method: 'tools/call', params: { name: 'git_show', arguments: { working_directory: root, commit, include_patch: false } } },

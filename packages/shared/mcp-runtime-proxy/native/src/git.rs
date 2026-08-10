@@ -41,6 +41,7 @@ struct State {
     output_root: PathBuf,
     env: HashMap<String, String>,
     work_scopes: Arc<Mutex<HashMap<String, WorkScope>>>,
+    git_write_lock: Arc<Mutex<()>>,
 }
 
 #[derive(Debug)]
@@ -230,6 +231,7 @@ fn parse_state(args: &[String]) -> Result<State, String> {
         output_root,
         env: env::vars().collect(),
         work_scopes: Arc::new(Mutex::new(HashMap::new())),
+        git_write_lock: Arc::new(Mutex::new(())),
     })
 }
 
@@ -300,6 +302,16 @@ fn list_tools() -> Vec<Value> {
         tool(
             "git_workflow_record",
             "Record a bounded multi-repository workflow handoff in the local Git audit ledger.",
+            false,
+        ),
+        tool(
+            "git_add",
+            "Stage explicit repository paths under the governed write mode and optional work scope.",
+            false,
+        ),
+        tool(
+            "git_unstage",
+            "Remove explicit repository paths from the index under the governed write mode.",
             false,
         ),
         tool(
@@ -386,6 +398,8 @@ fn call_tool(
         "git_policy_inspect" => Ok(policy(state)),
         "git_begin_work_scope" => git_begin_work_scope(state, args, cancellation),
         "git_workflow_record" => git_workflow_record(state, args, cancellation),
+        "git_add" => git_add(state, args, cancellation),
+        "git_unstage" => git_unstage(state, args, cancellation),
         "git_status" => git_status(state, args, cancellation),
         "git_sync_status" => git_sync_status(state, args, cancellation),
         "git_branch_list" => git_branch_list(state, args, cancellation),
@@ -406,7 +420,7 @@ fn call_tool(
 
 fn guidance(_args: &Value) -> Result<Value, GitError> {
     Ok(
-        json!({"schema": "narada.mcp_surface.guidance.v0", "status": "ok", "surface_id": "git", "purpose": "Governed Git inspection and publication workflows.", "tool_inventory": {"read": ["git_policy_inspect", "git_begin_work_scope", "git_status", "git_sync_status", "git_branch_list", "git_changed_summary", "git_repositories_summary", "git_diff", "git_log", "git_show"], "write": ["git_workflow_record", "git_add", "git_commit", "git_push", "git_fetch", "git_rebase", "git_merge"]}, "native_boundary": "Rust canary covers bounded read operations, non-mutating work-scope admission, and local workflow records; JavaScript remains authoritative for scoped mutation, recovery, and publication."}),
+        json!({"schema": "narada.mcp_surface.guidance.v0", "status": "ok", "surface_id": "git", "purpose": "Governed Git inspection and publication workflows.", "tool_inventory": {"read": ["git_policy_inspect", "git_begin_work_scope", "git_status", "git_sync_status", "git_branch_list", "git_changed_summary", "git_repositories_summary", "git_diff", "git_log", "git_show"], "write": ["git_workflow_record", "git_add", "git_unstage", "git_commit", "git_push", "git_fetch", "git_rebase", "git_merge"]}, "native_boundary": "Rust canary covers bounded read operations, non-mutating work-scope admission, local workflow records, and reversible index changes; JavaScript remains authoritative for history/remote mutation, recovery, and publication."}),
     )
 }
 
@@ -705,6 +719,91 @@ fn now_rfc3339() -> String {
     OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .unwrap_or_else(|_| String::new())
+}
+
+fn git_add(
+    state: &State,
+    args: &Value,
+    cancellation: Option<Arc<AtomicBool>>,
+) -> Result<Value, GitError> {
+    git_index_change(state, args, cancellation, true)
+}
+
+fn git_unstage(
+    state: &State,
+    args: &Value,
+    cancellation: Option<Arc<AtomicBool>>,
+) -> Result<Value, GitError> {
+    git_index_change(state, args, cancellation, false)
+}
+
+fn git_index_change(
+    state: &State,
+    args: &Value,
+    cancellation: Option<Arc<AtomicBool>>,
+    stage: bool,
+) -> Result<Value, GitError> {
+    if state.mode != "write" {
+        return Err(GitError::new(
+            "git_write_mode_required",
+            "git_write_mode_required",
+            json!({"tool_name": if stage { "git_add" } else { "git_unstage" }, "mode": state.mode, "mutation_started": false, "atomic": true}),
+        ));
+    }
+    let _write_guard = state
+        .git_write_lock
+        .lock()
+        .map_err(|_| GitError::new("git_write_lock_unavailable", "git_write_lock_unavailable", json!({"mutation_started": false, "atomic": true})))?;
+    let cwd = resolve_cwd(state, args)?;
+    let values = args
+        .get("paths")
+        .and_then(Value::as_array)
+        .ok_or_else(|| GitError::new("git_index_change_requires_paths", "git_index_change_requires_paths", json!({})))?;
+    if values.is_empty() {
+        return Err(GitError::new("git_index_change_requires_paths", "git_index_change_requires_paths", json!({})));
+    }
+    let paths = values
+        .iter()
+        .map(|value| {
+            let path = value.as_str().ok_or_else(|| GitError::new("git_invalid_pathspec", "git_invalid_pathspec", json!({})))?;
+            validate_path(path)?;
+            if path == "." || path.contains(['*', '?', '[']) {
+                return Err(GitError::new("git_index_change_requires_explicit_paths", "git_index_change_requires_explicit_paths", json!({"pathspec": path})));
+            }
+            Ok(path.replace('\\', "/"))
+        })
+        .collect::<Result<Vec<_>, GitError>>()?;
+    let repository_root = git_text(state, &cwd, &["rev-parse", "--show-toplevel"], cancellation.clone(), "git_index_change_failed")?.trim().to_string();
+    let scope = if let Some(reference) = args.get("work_scope_ref").and_then(Value::as_str) {
+        let scope = resolve_work_scope(state, reference, &repository_root)?;
+        let base = read_git_base_state(state, &cwd, cancellation.clone());
+        for field in ["head", "index_digest"] {
+            if scope.base_state.get(field) != base.get(field) {
+                return Err(GitError::new("git_work_scope_base_state_mismatch", "git_work_scope_base_state_mismatch", json!({"field": field, "supplied": scope.base_state.get(field), "actual": base.get(field), "mutation_started": false, "atomic": true})));
+            }
+        }
+        if paths.iter().any(|path| !scope.allowed_paths.iter().any(|allowed| path_matches(path, allowed))) {
+            return Err(GitError::new("git_index_change_path_outside_work_scope", "git_index_change_path_outside_work_scope", json!({"work_scope_ref": scope.reference, "allowed_paths": scope.allowed_paths, "paths": paths, "mutation_started": false, "atomic": true})));
+        }
+        Some(scope)
+    } else {
+        None
+    };
+    let path_refs = paths.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut command = if stage { vec!["add", "--"] } else { vec!["reset", "--"] };
+    command.extend(path_refs);
+    let result = run_git(state, &cwd, &command, cancellation);
+    if result.exit_code != Some(0) || result.timed_out || result.cancelled {
+        return Err(GitError::new(if stage { "git_add_failed" } else { "git_unstage_failed" }, if stage { "git_add_failed" } else { "git_unstage_failed" }, json!({"exit_code": result.exit_code, "timed_out": result.timed_out, "cancelled": result.cancelled, "diagnostic_text": result.diagnostic_text, "output_preview": result.output_text.chars().take(PREVIEW_CHAR_LIMIT).collect::<String>()})));
+    }
+    let post_status = git_status(state, &json!({"working_directory": cwd.to_string_lossy()}), None)?;
+    Ok(json!({"schema": if stage { "narada.git.add.v1" } else { "narada.git.unstage.v1" }, "status": "ok", "operation": if stage { "add" } else { "unstage" }, "working_directory": cwd.to_string_lossy(), "repository_root": repository_root, "paths": paths, "work_scope_ref": scope.as_ref().map(|value| value.reference.clone()), "output": result.output_text, "post_status": post_status, "summary": if stage { "staged explicit paths" } else { "unstaged explicit paths" }}))
+}
+
+fn read_git_base_state(state: &State, cwd: &Path, cancellation: Option<Arc<AtomicBool>>) -> Value {
+    let head = git_text(state, cwd, &["rev-parse", "HEAD"], cancellation.clone(), "git_base_state_failed").ok().map(|value| value.trim().to_string());
+    let index_digest = git_text(state, cwd, &["write-tree"], cancellation, "git_base_state_failed").ok().map(|value| value.trim().to_string());
+    json!({"head": head, "index_digest": index_digest})
 }
 
 fn git_sync_status(
