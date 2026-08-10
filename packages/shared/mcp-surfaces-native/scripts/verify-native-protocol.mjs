@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -361,6 +362,57 @@ function runSopParity() {
     const searchComparable = (value) => Object.fromEntries(['schema', 'query', 'items', 'count'].map((key) => [key, value?.[key]]));
     assertSame('sop.template_search', searchComparable(bunSearch), searchComparable(rustSearch));
     return { status: 'passed', fixture: 'local_template_registry', compared: ['template_list', 'template_show', 'template_search'] };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+function runSopActionParity() {
+  const workspaceRoot = resolve(packageRoot, '..', '..', '..');
+  const bunEntrypoint = join(workspaceRoot, 'packages', 'sop-mcp', 'dist', 'src', 'main.js');
+  if (!existsSync(bunEntrypoint)) throw new Error('sop_action_parity_bun_entrypoint_missing:' + bunEntrypoint);
+  const root = mkdtempSync(join(tmpdir(), 'narada-sop-action-native-parity-'));
+  const dbPath = join(root, '.sop', 'sop.db');
+  mkdirSync(dirname(dbPath), { recursive: true });
+  const db = new DatabaseSync(dbPath);
+  try {
+    db.exec(`CREATE TABLE sop_actions (
+      action_id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      step_id TEXT NOT NULL,
+      occurrence_key TEXT NOT NULL,
+      surface_id TEXT NOT NULL,
+      tool_name TEXT NOT NULL,
+      arguments_json TEXT NOT NULL,
+      request_fingerprint TEXT NOT NULL,
+      status TEXT NOT NULL,
+      completion_key TEXT,
+      completion_fingerprint TEXT,
+      operation_ref TEXT,
+      result_json TEXT NOT NULL,
+      result_ref_json TEXT,
+      error_message TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      completed_at TEXT
+    )`);
+    const insert = db.prepare('INSERT INTO sop_actions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
+    insert.run('action-1', 'run-1', 'step-1', 'occ-1', 'surface-a', 'tool-a', '{}', 'fp-a', 'pending', null, null, null, '{}', null, null, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', null);
+    insert.run('action-2', 'run-2', 'step-2', 'occ-2', 'surface-b', 'tool-b', '{"x":1}', 'fp-b', 'completed', 'key', 'cfp', 'op://2', '{"ok":true}', null, null, '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z', '2026-01-02T00:00:01Z');
+  } finally {
+    db.close();
+  }
+  try {
+    const requests = [
+      { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'sop_action_list', arguments: {} } },
+      { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'sop_action_list', arguments: { run_id: 'run-1' } } },
+      { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'sop_action_list', arguments: { status: 'completed' } } },
+    ];
+    const bun = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'node', [bunEntrypoint, '--sop-root', root], requests, workspaceRoot);
+    const rust = runMailbox(executable, ['--surface-id', 'sop', '--site-root', root], requests, workspaceRoot);
+    const comparable = (value) => ({ schema: value?.schema, count: value?.count, items: value?.items });
+    for (const request of requests) assertSame(`sop.action_list.${request.id}`, comparable(mailboxStructured(bun, request.id, 'bun')), comparable(mailboxStructured(rust, request.id, 'rust')));
+    return { status: 'passed', fixture: 'durable_action_list_projection', compared: ['all', 'run_filter', 'status_filter'] };
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -775,6 +827,7 @@ const delegatedTaskParity = runDelegatedTaskParity();
 const workerDelegationParity = runWorkerDelegationParity();
 const artifactsParity = runArtifactsParity();
 const sopParity = runSopParity();
+const sopActionParity = runSopActionParity();
 const surfaceFeedbackParity = runSurfaceFeedbackParity();
 const siteLoopParity = runSiteLoopParity();
 const calendarParity = runCalendarParity();
@@ -796,6 +849,7 @@ process.stdout.write(JSON.stringify({
   worker_delegation_parity: workerDelegationParity,
   artifacts_parity: artifactsParity,
   sop_parity: sopParity,
+  sop_action_parity: sopActionParity,
   surface_feedback_parity: surfaceFeedbackParity,
   site_loop_parity: siteLoopParity,
   calendar_parity: calendarParity,
