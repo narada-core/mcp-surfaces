@@ -1,6 +1,8 @@
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde_json::{json, Map, Value};
 use std::path::Path;
+use time::OffsetDateTime;
+use uuid::Uuid;
 
 const SERVER_NAME: &str = "surface-feedback-mcp";
 const FEEDBACK_KINDS: &[&str] = &["bug", "improvement", "gap", "observation"];
@@ -50,7 +52,9 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<V
         "surface_feedback_actionable_queue" => feedback_list(args, root, true),
         "surface_feedback_show" => feedback_show(args, root),
         "surface_feedback_stats" => feedback_stats(args, root),
-        "surface_feedback_submit" | "surface_feedback_update_status" | "surface_feedback_update_status_batch" | "surface_feedback_convert_to_task" | "surface_feedback_import" => Err(authority_boundary(name)),
+        "surface_feedback_submit" => feedback_submit(args, root),
+        "surface_feedback_update_status" => feedback_update_status(args, root),
+        "surface_feedback_update_status_batch" | "surface_feedback_convert_to_task" | "surface_feedback_import" => Err(authority_boundary(name)),
         _ => Err(error("unknown_tool", &format!("unknown_tool:{name}"))),
     }
 }
@@ -64,6 +68,61 @@ fn open_db(root: &Path) -> Result<Connection, Value> {
     let path = feedback_path(root);
     if !path.exists() { return Err(error("feedback_store_missing", "feedback_store_missing")); }
     Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|e| error("feedback_store_open_failed", &e.to_string()))
+}
+
+fn open_db_rw(root: &Path) -> Result<Connection, Value> {
+    let path = feedback_path(root);
+    if !path.exists() { return Err(error("feedback_store_missing", "feedback_store_missing")); }
+    Connection::open(path).map_err(|e| error("feedback_store_open_failed", &e.to_string()))
+}
+
+fn now_iso() -> String {
+    OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339).unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
+}
+
+fn required_arg(args: &Map<String, Value>, key: &str, code: &str) -> Result<String, Value> {
+    args.get(key).and_then(Value::as_str).map(str::trim).filter(|v| !v.is_empty()).map(ToOwned::to_owned).ok_or_else(|| error(code, code))
+}
+
+fn authority() -> Result<(String, String, Vec<String>), Value> {
+    let site = std::env::var("NARADA_SITE_ID").ok().filter(|v| !v.trim().is_empty()).ok_or_else(|| error("feedback_authority_unconfigured", "feedback_authority_unconfigured"))?;
+    let principal = std::env::var("NARADA_AGENT_ID").ok().filter(|v| !v.trim().is_empty()).unwrap_or_else(|| format!("surface-feedback@{site}"));
+    let owned = std::env::var("NARADA_OWNED_SURFACE_IDS").ok().unwrap_or_default().split(',').map(str::trim).filter(|v| !v.is_empty()).map(ToOwned::to_owned).collect::<Vec<_>>();
+    Ok((site, principal, owned))
+}
+
+fn feedback_submit(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let surface_id = required_arg(args, "surface_id", "feedback_requires_surface_id")?;
+    let submitter_site_id = required_arg(args, "submitter_site_id", "feedback_requires_submitter_site_id")?;
+    let submitter_principal = required_arg(args, "submitter_principal", "feedback_requires_submitter_principal")?;
+    let kind = required_arg(args, "kind", "feedback_requires_kind")?;
+    if !FEEDBACK_KINDS.contains(&kind.as_str()) { return Err(error("feedback_invalid_kind", "feedback_invalid_kind")); }
+    let summary = required_arg(args, "summary", "feedback_requires_summary")?;
+    let details = args.get("details").and_then(Value::as_str).unwrap_or("").to_string();
+    let id = format!("sfb_{}", &Uuid::new_v4().to_string()[..12]);
+    let now = now_iso();
+    let db = open_db_rw(root)?;
+    db.execute("INSERT INTO feedback_entries (feedback_id,surface_id,submitter_site_id,submitter_principal,kind,summary,details,status,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,'submitted',?8,?8)", params![id, surface_id, submitter_site_id, submitter_principal, kind, summary, details, now]).map_err(|e| error("feedback_submit_failed", &e.to_string()))?;
+    let _ = db.execute("INSERT INTO feedback_events (event_id,feedback_id,event_type,actor_principal,status,note,details_json,created_at) VALUES (?1,?2,'submitted',?3,'submitted',?4,?5,?6)", params![format!("sfb_evt_{}", Uuid::new_v4()), id, submitter_principal, summary, json!({"submitter_site_id":submitter_site_id,"surface_id":surface_id,"kind":kind}).to_string(), now]);
+    Ok(json!({"schema":"narada.surface_feedback.submit.v1","status":"submitted","feedback_id":id,"surface_id":surface_id,"submitter_site_id":submitter_site_id,"kind":kind,"summary":summary,"created_at":now,"native_write":true}))
+}
+
+fn feedback_update_status(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let id = required_arg(args, "feedback_id", "feedback_requires_feedback_id")?;
+    let status = required_arg(args, "status", "feedback_requires_status")?;
+    if !FEEDBACK_STATUSES.contains(&status.as_str()) { return Err(error("feedback_invalid_status", "feedback_invalid_status")); }
+    let note = required_arg(args, "resolution_note", "feedback_requires_resolution_note")?;
+    let (authority_site, principal, owned_surfaces) = authority()?;
+    let db = open_db_rw(root)?;
+    let row: Option<(String, String, String)> = db.query_row("SELECT submitter_site_id,surface_id,status FROM feedback_entries WHERE feedback_id=?1", params![id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional().map_err(|e| error("feedback_query_failed", &e.to_string()))?;
+    let Some((submitter_site, surface_id, previous_status)) = row else { return Err(error("feedback_not_found", "feedback_not_found")); };
+    if submitter_site != authority_site && !owned_surfaces.iter().any(|value| value == &surface_id) { return Err(error("feedback_not_visible", "feedback_not_visible")); }
+    let now = now_iso();
+    let task_ref = args.get("task_ref").and_then(Value::as_str);
+    let task_status = args.get("task_status").and_then(Value::as_str);
+    db.execute("UPDATE feedback_entries SET status=?1,resolved_by=?2,resolution_note=?3,task_ref=COALESCE(?4,task_ref),task_status=COALESCE(?5,task_status),updated_at=?6 WHERE feedback_id=?7", params![status, principal, note, task_ref, task_status, now, id]).map_err(|e| error("feedback_update_failed", &e.to_string()))?;
+    let _ = db.execute("INSERT INTO feedback_events (event_id,feedback_id,event_type,actor_principal,status,task_ref,task_status,note,details_json,created_at) VALUES (?1,?2,'status_updated',?3,?4,?5,?6,?7,?8,?9)", params![format!("sfb_evt_{}", Uuid::new_v4()), id, principal, status, task_ref, task_status, note, json!({"previous_status":previous_status,"authority_site_id":authority_site}).to_string(), now]);
+    Ok(json!({"schema":"narada.surface_feedback.update_status.v1","status":"updated","feedback_id":id,"new_status":status,"resolved_by":principal,"resolution_note":note,"updated_at":now,"native_write":true}))
 }
 
 fn doctor(root: &Path) -> Result<Value, Value> {
@@ -143,7 +202,8 @@ mod tests {
         drop(db);
         let list = feedback_list(&json!({"scope":"all_authorized","limit":1}).as_object().unwrap(), &root, false).expect("list");
         assert_eq!(list["count"], 1);
-        assert_eq!(call_tool("surface_feedback_submit", &Map::new(), &root).expect_err("boundary")["status"], "unavailable");
+        let submitted = call_tool("surface_feedback_submit", &json!({"surface_id":"site-loop","submitter_site_id":"site-a","submitter_principal":"agent-a","kind":"observation","summary":"native write"}).as_object().unwrap(), &root).expect("submit");
+        assert_eq!(submitted["status"], "submitted");
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 }
