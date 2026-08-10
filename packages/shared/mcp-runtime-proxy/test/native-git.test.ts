@@ -60,13 +60,15 @@ try {
     { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} },
     { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'git_guidance', arguments: {} } },
     { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'git_policy_inspect', arguments: {} } },
-    { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'git_status', arguments: { working_directory: root } } },
-    { jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'git_sync_status', arguments: { working_directory: root } } },
-    { jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'git_branch_list', arguments: { working_directory: root, scope: 'local' } } },
-    { jsonrpc: '2.0', id: 8, method: 'tools/call', params: { name: 'git_changed_summary', arguments: { working_directory: root } } },
-    { jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'git_repositories_summary', arguments: { working_directories: [root] } } },
-    { jsonrpc: '2.0', id: 10, method: 'tools/call', params: { name: 'git_diff', arguments: { working_directory: root, scope: 'working', limit: 4000 } } },
-    { jsonrpc: '2.0', id: 11, method: 'tools/call', params: { name: 'git_log', arguments: { working_directory: root, limit: 2 } } },
+    { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'git_begin_work_scope', arguments: { working_directory: root, allowed_paths: ['src'] } } },
+    { jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'git_status', arguments: { working_directory: root } } },
+    { jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'git_sync_status', arguments: { working_directory: root } } },
+    { jsonrpc: '2.0', id: 8, method: 'tools/call', params: { name: 'git_branch_list', arguments: { working_directory: root, scope: 'local' } } },
+    { jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'git_changed_summary', arguments: { working_directory: root } } },
+    { jsonrpc: '2.0', id: 10, method: 'tools/call', params: { name: 'git_repositories_summary', arguments: { working_directories: [root] } } },
+    { jsonrpc: '2.0', id: 11, method: 'tools/call', params: { name: 'git_diff', arguments: { working_directory: root, scope: 'working', limit: 4000 } } },
+    { jsonrpc: '2.0', id: 12, method: 'tools/call', params: { name: 'git_log', arguments: { working_directory: root, limit: 2 } } },
+    { jsonrpc: '2.0', id: 13, method: 'tools/call', params: { name: 'git_status', arguments: { working_directory: root, pathspec: 'src', format: 'paths' } } },
     { jsonrpc: "2.0", id: 20, method: "server/discover", params: { _meta: modernMeta } },
     { jsonrpc: "2.0", id: 21, method: "tools/list", params: { _meta: modernMeta } },
     { jsonrpc: "2.0", id: 22, method: "tools/call", params: { _meta: modernMeta, name: "git_policy_inspect", arguments: {} } },
@@ -84,6 +86,7 @@ try {
   assert.deepEqual(byId.get(2)?.result?.tools?.map((tool: JsonRecord) => tool.name), [
     'git_guidance',
     'git_policy_inspect',
+    'git_begin_work_scope',
     'git_status',
     'git_sync_status',
     'git_branch_list',
@@ -97,21 +100,25 @@ try {
   assert.equal(byId.get(3)?.result?.structuredContent?.surface_id, 'git');
   assert.equal(byId.get(4)?.result?.structuredContent?.schema, 'narada.git.policy.v1');
   assert.equal(byId.get(4)?.result?.structuredContent?.mode, 'read');
-  assert.equal(byId.get(5)?.result?.structuredContent?.schema, 'narada.git.status.v1');
-  assert.equal(byId.get(5)?.result?.structuredContent?.clean, false);
-  assert.equal(byId.get(5)?.result?.structuredContent?.untracked?.includes('untracked.txt'), true);
-  assert.equal(byId.get(6)?.result?.structuredContent?.schema, 'narada.git.sync_status.v1');
-  assert.equal(byId.get(6)?.result?.structuredContent?.in_progress, false);
-  assert.equal(byId.get(7)?.result?.structuredContent?.schema, 'narada.git.branch_list.v1');
-  assert.equal(byId.get(7)?.result?.structuredContent?.returned >= 1, true);
-  assert.equal(byId.get(8)?.result?.structuredContent?.schema, 'narada.git.changed_summary.v1');
-  assert.equal(byId.get(8)?.result?.structuredContent?.relevant_changed_count, 0);
-  assert.equal(byId.get(9)?.result?.structuredContent?.repository_count, 1);
-  assert.equal(byId.get(10)?.result?.structuredContent?.schema, 'narada.git.diff.v1');
-  assert.match(String(byId.get(10)?.result?.structuredContent?.diff), /two/);
-  assert.equal(byId.get(11)?.result?.structuredContent?.schema, 'narada.git.log.v1');
-  const commit = byId.get(11)?.result?.structuredContent?.commits?.[0]?.hash;
+  const workScope = byId.get(5)?.result?.structuredContent;
+  assert.equal(workScope?.schema, 'narada.git.work_scope.v1');
+  assert.deepEqual(workScope?.allowed_paths, ['src']);
+  assert.equal(byId.get(6)?.result?.structuredContent?.schema, 'narada.git.status.v1');
+  assert.equal(byId.get(6)?.result?.structuredContent?.clean, false);
+  assert.equal(byId.get(6)?.result?.structuredContent?.untracked?.includes('untracked.txt'), true);
+  assert.equal(byId.get(7)?.result?.structuredContent?.schema, 'narada.git.sync_status.v1');
+  assert.equal(byId.get(7)?.result?.structuredContent?.in_progress, false);
+  assert.equal(byId.get(8)?.result?.structuredContent?.schema, 'narada.git.branch_list.v1');
+  assert.equal(byId.get(8)?.result?.structuredContent?.returned >= 1, true);
+  assert.equal(byId.get(9)?.result?.structuredContent?.schema, 'narada.git.changed_summary.v1');
+  assert.equal(byId.get(9)?.result?.structuredContent?.relevant_changed_count, 0);
+  assert.equal(byId.get(10)?.result?.structuredContent?.repository_count, 1);
+  assert.equal(byId.get(11)?.result?.structuredContent?.schema, 'narada.git.diff.v1');
+  assert.match(String(byId.get(11)?.result?.structuredContent?.diff), /two/);
+  assert.equal(byId.get(12)?.result?.structuredContent?.schema, 'narada.git.log.v1');
+  const commit = byId.get(12)?.result?.structuredContent?.commits?.[0]?.hash;
   assert.match(String(commit), /^[0-9a-f]{40}$/);
+  assert.deepEqual(byId.get(13)?.result?.structuredContent?.paths, ['src/main.txt']);
 
   const showResponses = await run(root, [
     { jsonrpc: '2.0', id: 12, method: 'tools/call', params: { name: 'git_show', arguments: { working_directory: root, commit, include_patch: false } } },

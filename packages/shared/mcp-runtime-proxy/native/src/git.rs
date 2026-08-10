@@ -9,16 +9,28 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    mpsc, Arc,
+    mpsc, Arc, Mutex,
 };
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use time::{format_description::well_known::Rfc3339, Duration as TimeDuration, OffsetDateTime};
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const DEFAULT_MAX_TIMEOUT_MS: u64 = 60_000;
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_OUTPUT_BYTES: usize = 20 * 1024 * 1024;
 const PREVIEW_CHAR_LIMIT: usize = 1_000;
+const WORK_SCOPE_TTL_MINUTES: i64 = 15;
+
+#[derive(Clone)]
+struct WorkScope {
+    reference: String,
+    repository_root: String,
+    allowed_paths: Vec<String>,
+    base_state: Value,
+    created_at: String,
+    expires_at: OffsetDateTime,
+}
 
 #[derive(Clone)]
 struct State {
@@ -28,6 +40,7 @@ struct State {
     max_output_bytes: usize,
     output_root: PathBuf,
     env: HashMap<String, String>,
+    work_scopes: Arc<Mutex<HashMap<String, WorkScope>>>,
 }
 
 #[derive(Debug)]
@@ -216,6 +229,7 @@ fn parse_state(args: &[String]) -> Result<State, String> {
         max_output_bytes,
         output_root,
         env: env::vars().collect(),
+        work_scopes: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 
@@ -276,6 +290,11 @@ fn list_tools() -> Vec<Value> {
         tool(
             "git_policy_inspect",
             "Inspect the policy governing Git MCP operations.",
+            true,
+        ),
+        tool(
+            "git_begin_work_scope",
+            "Issue a short-lived explicit work-scope reference for declared paths and current base state without mutating Git.",
             true,
         ),
         tool(
@@ -360,6 +379,7 @@ fn call_tool(
     let payload = match name {
         "git_guidance" => guidance(args),
         "git_policy_inspect" => Ok(policy(state)),
+        "git_begin_work_scope" => git_begin_work_scope(state, args, cancellation),
         "git_status" => git_status(state, args, cancellation),
         "git_sync_status" => git_sync_status(state, args, cancellation),
         "git_branch_list" => git_branch_list(state, args, cancellation),
@@ -380,7 +400,7 @@ fn call_tool(
 
 fn guidance(_args: &Value) -> Result<Value, GitError> {
     Ok(
-        json!({"schema": "narada.mcp_surface.guidance.v0", "status": "ok", "surface_id": "git", "purpose": "Governed Git inspection and publication workflows.", "tool_inventory": {"read": ["git_policy_inspect", "git_status", "git_sync_status", "git_branch_list", "git_changed_summary", "git_repositories_summary", "git_diff", "git_log", "git_show"], "write": ["git_add", "git_commit", "git_push", "git_fetch", "git_rebase", "git_merge"]}, "native_boundary": "Rust canary covers bounded read operations; JavaScript remains authoritative for scoped mutation, recovery, and publication."}),
+        json!({"schema": "narada.mcp_surface.guidance.v0", "status": "ok", "surface_id": "git", "purpose": "Governed Git inspection and publication workflows.", "tool_inventory": {"read": ["git_policy_inspect", "git_begin_work_scope", "git_status", "git_sync_status", "git_branch_list", "git_changed_summary", "git_repositories_summary", "git_diff", "git_log", "git_show"], "write": ["git_add", "git_commit", "git_push", "git_fetch", "git_rebase", "git_merge"]}, "native_boundary": "Rust canary covers bounded read operations and non-mutating work-scope admission; JavaScript remains authoritative for scoped mutation, recovery, and publication."}),
     )
 }
 
@@ -414,12 +434,187 @@ fn git_status(
         cancellation.clone(),
         "git_status_failed",
     )?;
-    let parsed = parse_status(&status);
+    let mut parsed = parse_status(&status);
+    let query = apply_status_query(state, &mut parsed, args, root.trim())?;
     let remotes = git_remotes(state, &cwd, cancellation.clone())?;
     let upstream = parsed.get("upstream").cloned().unwrap_or(Value::Null);
     Ok(
-        json!({"schema": "narada.git.status.v1", "status": "ok", "working_directory": cwd.to_string_lossy(), "repository_root": root.trim(), "branch": parsed.get("branch"), "upstream": upstream, "ahead": parsed.get("ahead").unwrap_or(&json!(0)), "behind": parsed.get("behind").unwrap_or(&json!(0)), "unborn": parsed.get("unborn").unwrap_or(&Value::Bool(false)), "status_entries": parsed.get("status_entries"), "staged": parsed.get("staged"), "unstaged": parsed.get("unstaged"), "untracked": parsed.get("untracked"), "conflicts": parsed.get("conflicts"), "clean": parsed.get("clean"), "summary": parsed.get("summary"), "format": args.get("format").and_then(Value::as_str).unwrap_or("full"), "query": {"staged_only": args.get("staged_only").and_then(Value::as_bool).unwrap_or(false), "include_untracked": args.get("include_untracked").and_then(Value::as_bool).unwrap_or(true)}, "remotes": remotes, "remote_names": Value::Array(git_remotes_names(state, &cwd, cancellation)?), "push_target": {"status": "unresolved", "remote": Value::Null, "branch": parsed.get("branch"), "reason": "upstream_not_configured"}, "push_remediation": {"kind": "set_upstream_or_push_explicit_target"}}),
+        json!({"schema": "narada.git.status.v1", "status": "ok", "working_directory": cwd.to_string_lossy(), "repository_root": root.trim(), "branch": parsed.get("branch"), "upstream": upstream, "ahead": parsed.get("ahead").unwrap_or(&json!(0)), "behind": parsed.get("behind").unwrap_or(&json!(0)), "unborn": parsed.get("unborn").unwrap_or(&Value::Bool(false)), "status_entries": parsed.get("status_entries"), "staged": parsed.get("staged"), "unstaged": parsed.get("unstaged"), "untracked": parsed.get("untracked"), "conflicts": parsed.get("conflicts"), "paths": parsed.get("paths"), "clean": parsed.get("clean"), "summary": parsed.get("summary"), "format": query.get("format").and_then(Value::as_str).unwrap_or("full"), "query": query, "remotes": remotes, "remote_names": Value::Array(git_remotes_names(state, &cwd, cancellation)?), "push_target": {"status": "unresolved", "remote": Value::Null, "branch": parsed.get("branch"), "reason": "upstream_not_configured"}, "push_remediation": {"kind": "set_upstream_or_push_explicit_target"}}),
     )
+}
+
+fn git_begin_work_scope(
+    state: &State,
+    args: &Value,
+    cancellation: Option<Arc<AtomicBool>>,
+) -> Result<Value, GitError> {
+    let cwd = resolve_cwd(state, args)?;
+    let requested = args
+        .get("allowed_paths")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            GitError::new(
+                "git_begin_work_scope_requires_allowed_paths",
+                "git_begin_work_scope_requires_allowed_paths",
+                json!({}),
+            )
+        })?;
+    if requested.is_empty() {
+        return Err(GitError::new(
+            "git_begin_work_scope_requires_allowed_paths",
+            "git_begin_work_scope_requires_allowed_paths",
+            json!({}),
+        ));
+    }
+    let mut allowed_paths = requested
+        .iter()
+        .map(|value| {
+            let path = value.as_str().ok_or_else(|| {
+                GitError::new(
+                    "git_begin_work_scope_requires_explicit_paths",
+                    "git_begin_work_scope_requires_explicit_paths",
+                    json!({}),
+                )
+            })?;
+            validate_path(path)?;
+            if path == "." || path.contains(['*', '?', '[']) {
+                return Err(GitError::new(
+                    "git_begin_work_scope_requires_explicit_paths",
+                    "git_begin_work_scope_requires_explicit_paths",
+                    json!({"path": path}),
+                ));
+            }
+            Ok(path.replace('\\', "/"))
+        })
+        .collect::<Result<Vec<_>, GitError>>()?;
+    allowed_paths.sort();
+    allowed_paths.dedup();
+    let repository_root = git_text(
+        state,
+        &cwd,
+        &["rev-parse", "--show-toplevel"],
+        cancellation.clone(),
+        "git_begin_work_scope_failed",
+    )?
+    .trim()
+    .to_string();
+    let head = git_text(
+        state,
+        &cwd,
+        &["rev-parse", "HEAD"],
+        cancellation.clone(),
+        "git_begin_work_scope_failed",
+    )
+    .ok()
+    .map(|value| value.trim().to_string());
+    let index_digest = git_text(
+        state,
+        &cwd,
+        &["write-tree"],
+        cancellation,
+        "git_begin_work_scope_failed",
+    )
+    .ok()
+    .map(|value| value.trim().to_string());
+    let base_state = json!({"head": head, "index_digest": index_digest});
+    if let Some(supplied) = args.get("base_state").and_then(Value::as_object) {
+        for field in ["head", "index_digest"] {
+            if let Some(value) = supplied.get(field) {
+                if value != base_state.get(field).unwrap_or(&Value::Null) {
+                    return Err(GitError::new(
+                        "git_work_scope_base_state_mismatch",
+                        "git_work_scope_base_state_mismatch",
+                        json!({"field": field, "supplied": value, "actual": base_state.get(field), "mutation_started": false, "atomic": true}),
+                    ));
+                }
+            }
+        }
+    }
+    let created = OffsetDateTime::now_utc();
+    let expires = created + TimeDuration::minutes(WORK_SCOPE_TTL_MINUTES);
+    let reference = unique_id("gws");
+    let scope = WorkScope {
+        reference: reference.clone(),
+        repository_root: repository_root.clone(),
+        allowed_paths: allowed_paths.clone(),
+        base_state: base_state.clone(),
+        created_at: created.format(&Rfc3339).unwrap_or_default(),
+        expires_at: expires,
+    };
+    state
+        .work_scopes
+        .lock()
+        .map_err(|_| GitError::new("git_work_scope_store_unavailable", "git_work_scope_store_unavailable", json!({})))?
+        .insert(reference.clone(), scope.clone());
+    Ok(json!({"schema": "narada.git.work_scope.v1", "status": "ok", "working_directory": cwd.to_string_lossy(), "repository_root": repository_root, "work_scope_ref": reference, "allowed_paths": allowed_paths, "base_state": base_state, "created_at": scope.created_at, "expires_at": expires.format(&Rfc3339).unwrap_or_default(), "mutation_started": false, "summary": format!("work scope issued for {} path{}", scope.allowed_paths.len(), if scope.allowed_paths.len() == 1 { "" } else { "s" })}))
+}
+
+fn apply_status_query(
+    state: &State,
+    parsed: &mut Value,
+    args: &Value,
+    repository_root: &str,
+) -> Result<Value, GitError> {
+    let scope = if let Some(reference) = args.get("work_scope_ref").and_then(Value::as_str) {
+        Some(resolve_work_scope(state, reference, repository_root)?)
+    } else {
+        None
+    };
+    let filters = pathspecs(args)?;
+    let allowed_paths = scope.as_ref().map(|value| value.allowed_paths.clone());
+    let staged_only = args.get("staged_only").and_then(Value::as_bool).unwrap_or(false);
+    let include_untracked = args.get("include_untracked").and_then(Value::as_bool).unwrap_or(true);
+    let format = args.get("format").and_then(Value::as_str).unwrap_or("full");
+    if !matches!(format, "full" | "paths" | "summary") {
+        return Err(GitError::new("git_invalid_status_format", "git_invalid_status_format", json!({"format": format})));
+    }
+    let entries = parsed
+        .get("status_entries")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let selected = entries
+        .into_iter()
+        .filter(|entry| {
+            let path = entry.get("path").or_else(|| entry.get("display_path")).and_then(Value::as_str).unwrap_or_default();
+            let in_scope = allowed_paths.as_ref().is_none_or(|paths| paths.iter().any(|allowed| path_matches(path, allowed)));
+            let in_pathspec = filters.is_empty() || filters.iter().any(|pattern| path_matches(path, pattern));
+            let staged = !staged_only || entry.get("staged").and_then(Value::as_bool).unwrap_or(false);
+            let untracked = include_untracked || !entry.get("untracked").and_then(Value::as_bool).unwrap_or(false);
+            in_scope && in_pathspec && staged && untracked
+        })
+        .collect::<Vec<_>>();
+    let staged = selected.iter().filter(|entry| entry.get("staged").and_then(Value::as_bool).unwrap_or(false)).filter_map(|entry| entry.get("display_path").cloned()).collect::<Vec<_>>();
+    let unstaged = selected.iter().filter(|entry| entry.get("unstaged").and_then(Value::as_bool).unwrap_or(false)).filter_map(|entry| entry.get("display_path").cloned()).collect::<Vec<_>>();
+    let untracked = selected.iter().filter(|entry| entry.get("untracked").and_then(Value::as_bool).unwrap_or(false)).filter_map(|entry| entry.get("display_path").cloned()).collect::<Vec<_>>();
+    let conflicts = selected.iter().filter(|entry| entry.get("conflict").and_then(Value::as_bool).unwrap_or(false)).filter_map(|entry| entry.get("display_path").cloned()).collect::<Vec<_>>();
+    let clean = staged.is_empty() && unstaged.is_empty() && untracked.is_empty() && conflicts.is_empty();
+    parsed["status_entries"] = if format == "full" { json!(selected) } else { json!([]) };
+    parsed["staged"] = if format == "full" { json!(staged) } else { json!([]) };
+    parsed["unstaged"] = if format == "full" { json!(unstaged) } else { json!([]) };
+    parsed["untracked"] = if format == "full" { json!(untracked) } else { json!([]) };
+    parsed["conflicts"] = if format == "full" { json!(conflicts) } else { json!([]) };
+    parsed["clean"] = json!(clean);
+    parsed["summary"] = json!({"staged_count": staged.len(), "unstaged_count": unstaged.len(), "untracked_count": untracked.len(), "conflict_count": conflicts.len(), "matching_path_count": selected.len(), "clean": clean});
+    if format != "full" {
+        parsed["paths"] = Value::Array(selected.iter().filter_map(|entry| entry.get("display_path").cloned()).collect());
+    }
+    Ok(json!({"work_scope_ref": scope.as_ref().map(|value| value.reference.clone()), "pathspecs": filters, "staged_only": staged_only, "include_untracked": include_untracked, "format": format}))
+}
+
+fn resolve_work_scope(state: &State, reference: &str, repository_root: &str) -> Result<WorkScope, GitError> {
+    let mut scopes = state.work_scopes.lock().map_err(|_| GitError::new("git_work_scope_store_unavailable", "git_work_scope_store_unavailable", json!({})))?;
+    let Some(scope) = scopes.get(reference).cloned() else {
+        return Err(GitError::new("git_work_scope_ref_not_found", "git_work_scope_ref_not_found", json!({"work_scope_ref": reference, "mutation_started": false, "atomic": true})));
+    };
+    if scope.expires_at <= OffsetDateTime::now_utc() {
+        scopes.remove(reference);
+        return Err(GitError::new("git_work_scope_ref_expired", "git_work_scope_ref_expired", json!({"work_scope_ref": reference, "mutation_started": false, "atomic": true})));
+    }
+    if scope.repository_root != repository_root {
+        return Err(GitError::new("git_work_scope_repository_mismatch", "git_work_scope_repository_mismatch", json!({"work_scope_ref": reference, "repository_root": repository_root, "expected_repository_root": scope.repository_root, "mutation_started": false, "atomic": true})));
+    }
+    Ok(scope)
 }
 
 fn git_sync_status(
