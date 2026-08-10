@@ -243,6 +243,79 @@ function runDelegatedTaskParity() {
   }
 }
 
+function runWorkerDelegationParity() {
+  const workspaceRoot = resolve(packageRoot, '..', '..', '..');
+  const bunEntrypoint = join(workspaceRoot, 'packages', 'worker-delegation-mcp', 'src', 'main.ts');
+  if (!existsSync(bunEntrypoint)) throw new Error('worker_delegation_parity_bun_entrypoint_missing:' + bunEntrypoint);
+  const root = mkdtempSync(join(tmpdir(), 'narada-worker-delegation-native-parity-'));
+  const runRoot = join(root, '.narada', 'runtime', 'worker-delegation');
+  const completedId = 'run-fixture-20260101';
+  const runningId = 'run-fixture-20260102';
+  try {
+    mkdirSync(join(runRoot, completedId), { recursive: true });
+    mkdirSync(join(runRoot, runningId), { recursive: true });
+    writeFileSync(join(runRoot, completedId, 'result.json'), JSON.stringify({
+      run_id: completedId,
+      status: 'completed',
+      completion_state: 'complete',
+      requested_mode: 'audit_only',
+      resolved_worker_config: { authority: 'read', runtime: 'codex' },
+      summary: 'fixture complete',
+      error: null,
+      warning_count: 0,
+      timing: { started_at: '2026-01-01T00:00:00.000Z', finished_at: '2026-01-01T00:01:00.000Z', duration_ms: 60_000 },
+      progress: {},
+      run_dir: join(runRoot, completedId),
+    }), 'utf8');
+    writeFileSync(join(runRoot, runningId, 'result.json'), JSON.stringify({
+      run_id: runningId,
+      status: 'running',
+      requested_mode: 'audit_only',
+      resolved_worker_config: { authority: 'read', runtime: 'codex' },
+      summary: 'fixture running',
+      timing: { started_at: new Date().toISOString() },
+      run_dir: join(runRoot, runningId),
+    }), 'utf8');
+    const requests = [
+      { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'worker_dashboard_describe', arguments: { mode: 'single_run', run_id: completedId, include_terminal: true } } },
+      { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'worker_dashboard_describe', arguments: { mode: 'all_active', include_terminal: false, limit: 10 } } },
+      { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'worker_runs_list', arguments: { limit: 10 } } },
+      { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'worker_run_wait', arguments: { run_id: completedId, timeout_ms: 0 } } },
+    ];
+    const bun = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', [bunEntrypoint, '--site-root', root, '--allowed-root', root, '--run-root', runRoot], requests, workspaceRoot);
+    const rust = runMailbox(executable, ['--surface-id', 'worker-delegation', '--site-root', root], requests, workspaceRoot);
+    const projectDashboard = (value) => ({
+      mode: value?.mode,
+      include_terminal: value?.include_terminal,
+      counts: Object.fromEntries(['total', 'active', 'terminal', 'failed'].map((key) => [key, value?.counts?.[key]])),
+      run_ids: (value?.runs ?? []).map((run) => run?.run_id).sort(),
+      statuses: (value?.runs ?? []).map((run) => [run?.run_id, run?.status]).sort((left, right) => String(left[0]).localeCompare(String(right[0]))),
+      pending_run_ids: (value?.pending_join_gates ?? []).map((gate) => gate?.run_id).sort(),
+    });
+    const projectList = (value) => ({
+      status: value?.status,
+      count: value?.count,
+      limit: value?.limit,
+      run_ids: (value?.runs ?? []).map((run) => run?.run_id).sort(),
+      statuses: (value?.runs ?? []).map((run) => [run?.run_id, run?.status]).sort((left, right) => String(left[0]).localeCompare(String(right[0]))),
+    });
+    const projectWait = (value) => ({
+      status: value?.status,
+      wait_status: value?.wait?.status,
+      timeout_ms: value?.wait?.timeout_ms,
+      run_id: value?.run?.run_id,
+      run_status: value?.run?.status,
+    });
+    assertSame('worker_delegation.dashboard.single_run', projectDashboard(mailboxStructured(bun, 1, 'bun')), projectDashboard(mailboxStructured(rust, 1, 'rust')));
+    assertSame('worker_delegation.dashboard.active_filter', projectDashboard(mailboxStructured(bun, 2, 'bun')), projectDashboard(mailboxStructured(rust, 2, 'rust')));
+    assertSame('worker_delegation.runs_list', projectList(mailboxStructured(bun, 3, 'bun')), projectList(mailboxStructured(rust, 3, 'rust')));
+    assertSame('worker_delegation.run_wait', projectWait(mailboxStructured(bun, 4, 'bun')), projectWait(mailboxStructured(rust, 4, 'rust')));
+    return { status: 'passed', fixture: 'durable_run_dashboard_projection', compared: ['dashboard_single_run', 'dashboard_active_filter', 'runs_list', 'run_wait'] };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 function runArtifactsParity() {
   const workspaceRoot = resolve(packageRoot, '..', '..', '..');
   const bunEntrypoint = join(workspaceRoot, 'packages', 'artifacts-mcp', 'src', 'main.ts');
@@ -699,6 +772,7 @@ function runNarsSessionParity() {
 
 const mailboxParity = runMailboxParity();
 const delegatedTaskParity = runDelegatedTaskParity();
+const workerDelegationParity = runWorkerDelegationParity();
 const artifactsParity = runArtifactsParity();
 const sopParity = runSopParity();
 const surfaceFeedbackParity = runSurfaceFeedbackParity();
@@ -719,6 +793,7 @@ process.stdout.write(JSON.stringify({
   defaults_changed: false,
   mailbox_parity: mailboxParity,
   delegated_task_parity: delegatedTaskParity,
+  worker_delegation_parity: workerDelegationParity,
   artifacts_parity: artifactsParity,
   sop_parity: sopParity,
   surface_feedback_parity: surfaceFeedbackParity,

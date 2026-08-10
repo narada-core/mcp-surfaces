@@ -93,7 +93,68 @@ fn runs_list(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> { l
 fn run_wait(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> { let id=run_id(args)?; let run=read_run(root,&id)?; let running=run.get("status").and_then(Value::as_str)==Some("running"); Ok(json!({"schema":"narada.worker.run_wait.v1","status":"ok","wait":{"status":if running{"timed_out"}else{"finished"},"waited":false,"timeout_ms":args.get("timeout_ms").cloned().unwrap_or(json!(0)),"native_execution":"not_polled"},"run":compact_run(&run),"native_read_only":true})) }
 fn run_wait_batch(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> { let ids=args.get("run_ids").and_then(Value::as_array).ok_or_else(||error("worker_run_ids_required","worker_run_ids_required"))?; let mut runs=Vec::new(); for id in ids.iter().take(50).filter_map(Value::as_str) { let mut item=json!({"run_id":id,"status":"error"}); if let Ok(run)=read_run(root,id) { item=json!({"run_id":id,"status":"ok","run":compact_run(&run)}); } runs.push(item); } Ok(json!({"schema":"narada.worker.run_wait_batch.v1","status":"ok","requested_count":ids.len().min(50),"runs":runs,"native_read_only":true})) }
 fn runs_synthesize(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> { let ids=args.get("run_ids").and_then(Value::as_array).ok_or_else(||error("worker_run_ids_required","worker_run_ids_required"))?; let mut counts=Map::new(); let mut found=Vec::new(); for id in ids.iter().take(50).filter_map(Value::as_str) { if let Ok(run)=read_run(root,id) { let status=run.get("status").and_then(Value::as_str).unwrap_or("unknown"); *counts.entry(status.to_string()).or_insert(Value::from(0)) = Value::from(counts.get(status).and_then(Value::as_u64).unwrap_or(0)+1); found.push(id); } } Ok(json!({"schema":"narada.worker.runs_synthesis.v1","status":"ok","requested_count":ids.len().min(50),"run_ids":found,"synthesis":{"counts":counts,"native_read_only":true}})) }
-fn dashboard(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> { let list=runs_list(&json!({"limit":args.get("limit").cloned().unwrap_or(json!(25))}).as_object().unwrap(),root)?; let runs=list.get("runs").cloned().unwrap_or_else(||json!([])); Ok(json!({"schema":"narada.worker.dashboard.v1","status":"ok","mode":"all_active","include_terminal":true,"dashboard":{"server_name":SERVER_NAME,"run_root":run_root(root).to_string_lossy()},"counts":{"runs":runs.as_array().map(Vec::len).unwrap_or(0)},"runs":runs,"topology":[],"steps":[],"pending_join_gates":[],"event_stream":[],"native_read_only":true})) }
+fn dashboard(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let mode = match args.get("mode").and_then(Value::as_str).map(str::trim).filter(|value| !value.is_empty()) {
+        Some("all_active") => "all_active",
+        Some("single_run") => "single_run",
+        Some(_) => return Err(error("worker_invalid_dashboard_mode", "worker_invalid_dashboard_mode")),
+        None if args.get("run_id").and_then(Value::as_str).map(str::trim).filter(|value| !value.is_empty()).is_some() => "single_run",
+        None => "all_active",
+    };
+    let include_terminal = args.get("include_terminal").and_then(Value::as_bool).unwrap_or(mode == "single_run");
+    let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(25).clamp(1, 200) as usize;
+    let mut runs = if mode == "single_run" {
+        let id = run_id(args)?;
+        vec![compact_run(&read_run(root, &id)?)]
+    } else {
+        let list = runs_list(&json!({"limit":200}).as_object().unwrap(), root)?;
+        list.get("runs").and_then(Value::as_array).cloned().unwrap_or_default()
+    };
+    if !include_terminal { runs.retain(|run| !is_terminal_status(run.get("status").and_then(Value::as_str))); }
+    runs.truncate(limit);
+    let total = runs.len();
+    let active = runs.iter().filter(|run| !is_terminal_status(run.get("status").and_then(Value::as_str))).count();
+    let failed = runs.iter().filter(|run| matches!(run.get("status").and_then(Value::as_str), Some("failed" | "completed_with_errors"))).count();
+    let nodes = runs.iter().map(|run| json!({
+        "id":run.get("run_id").cloned().unwrap_or(Value::Null),
+        "label":run.get("run_id").cloned().unwrap_or(Value::Null),
+        "status":run.get("status").cloned().unwrap_or(Value::Null),
+        "worker_session_id":run.get("worker_session_id").cloned().unwrap_or(Value::Null),
+    })).collect::<Vec<_>>();
+    let pending = runs.iter().filter(|run| !is_terminal_status(run.get("status").and_then(Value::as_str))).map(|run| json!({
+        "gate_id":format!("join:{}", run.get("run_id").and_then(Value::as_str).unwrap_or("")),
+        "run_id":run.get("run_id").cloned().unwrap_or(Value::Null),
+        "status":"pending",
+        "waiting_for":[run.get("run_id").cloned().unwrap_or(Value::Null)],
+    })).collect::<Vec<_>>();
+    Ok(json!({
+        "schema":"narada.worker.dashboard.v1",
+        "status":"ok",
+        "mode":mode,
+        "include_terminal":include_terminal,
+        "dashboard":{
+            "kind":"read_only_dashboard_descriptor",
+            "server":{"started":false,"reason":"mcp_tool_is_request_response; use the listed JSON API tool calls or wrap them in a local HTTP process if a long-lived dashboard is required"},
+            "suggested_local_command":Value::Null,
+            "api_endpoints":[
+                {"path":"mcp://tools/worker_dashboard_describe","method":"tools/call","description":"Read-only compact dashboard payload for one run or all active runs.","arguments":{"mode":"all_active|single_run","run_id":"optional run id","include_terminal":"boolean","limit":"1..200"}},
+                {"path":"mcp://tools/worker_runs_list","method":"tools/call","description":"Recent run index with compact status fields.","arguments":{"include_running":true,"include_completed":true,"verbose":false}},
+                {"path":"mcp://tools/worker_run_status","method":"tools/call","description":"Full status for one run, including artifact readback and progress.","arguments":{"run_id":"run-*"}},
+                {"path":"mcp://resources/worker-artifact","method":"resources/read","description":"Read run artifacts such as events.jsonl and result.json for primary run-root records."}
+            ],
+            "refresh":{"tool":"worker_dashboard_describe","arguments":{"mode":mode,"include_terminal":include_terminal,"limit":limit}},
+        },
+        "counts":{"total":total,"active":active,"terminal":total-active,"failed":failed,"runs":total},
+        "runs":runs,
+        "topology":{"graph_kind":"run_dag","dependency_source":"worker-delegation run records; explicit inter-run dependencies are not currently recorded","nodes":nodes,"edges":[]},
+        "steps":[],
+        "pending_join_gates":pending,
+        "event_stream":[],
+        "native_read_only":true
+    }))
+}
+
+fn is_terminal_status(status: Option<&str>) -> bool { matches!(status, Some("completed" | "completed_with_errors" | "failed" | "cancelled")) }
 fn output_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> { let reference=args.get("ref").or_else(||args.get("output_ref")).and_then(Value::as_str).ok_or_else(||error("worker_output_ref_required","worker_output_ref_required"))?; let raw=reference.strip_prefix("worker-artifact:").ok_or_else(||error("worker_output_ref_invalid","worker_output_ref_invalid"))?; let (id,name)=raw.split_once('/').ok_or_else(||error("worker_output_ref_invalid","worker_output_ref_invalid"))?; safe_run_id(id)?; if name.is_empty()||name.len()>100||name.contains('/')||name.contains('\\')||name.contains("..") { return Err(error("worker_output_ref_invalid","worker_output_ref_invalid")); } let path=run_root(root).join(id).join(name); let byte_size=fs::metadata(&path).map_err(|_|error("worker_output_not_found","worker_output_not_found"))?.len(); if byte_size > MAX_FILE_BYTES as u64 { return Err(error("worker_output_too_large","worker_output_too_large")); } let bytes=fs::read(&path).map_err(|_|error("worker_output_not_found","worker_output_not_found"))?; let chars=String::from_utf8_lossy(&bytes).chars().collect::<Vec<_>>(); let offset=args.get("offset").and_then(Value::as_u64).unwrap_or(0).min(chars.len() as u64) as usize; let limit=args.get("limit").and_then(Value::as_u64).unwrap_or(MAX_FILE_BYTES as u64).min(MAX_FILE_BYTES as u64) as usize; let chunk=chars.iter().skip(offset).take(limit).collect::<String>(); let end=offset+chunk.chars().count(); Ok(json!({"schema":"narada.worker.output_page.v1","status":"ok","ref":reference,"path":path.to_string_lossy(),"byte_size":byte_size,"offset":offset,"limit":limit,"next_offset":if end<chars.len(){json!(end)}else{Value::Null},"output_text":chunk,"output_truncated":end<chars.len(),"native_read_only":true})) }
 fn affordances() -> Value { json!({"schema":"narada.worker.operator_affordances.v1","status":"ok","read_tools":READ_TOOLS.iter().map(|(n,_)|*n).collect::<Vec<_>>(),"mutation_tools":MUTATING_TOOLS,"native_read_only":true}) }
 fn compact_run(run: &Value) -> Value { let o=run.as_object().cloned().unwrap_or_default(); json!({"run_id":o.get("run_id"),"status":o.get("status"),"completion_state":o.get("completion_state"),"authority":o.get("authority"),"worker_session_id":o.get("worker_session_id"),"started_at":o.get("timing").and_then(|v|v.get("started_at")),"finished_at":o.get("timing").and_then(|v|v.get("finished_at")),"summary_preview":o.get("summary").or_else(||o.get("last_message")),"error_preview":o.get("error"),"updated_at":o.get("updated_at").or_else(||o.get("timing").and_then(|v|v.get("finished_at")))}) }
@@ -127,6 +188,26 @@ mod tests {
         let page = output_show(&json!({"ref":"worker-artifact:run-2026-01-01T00-00-00Z/worker_prompt.txt","offset":3,"limit":4}).as_object().unwrap(), &root).expect("page");
         assert_eq!(page["output_text"], "3456");
         assert_eq!(page["next_offset"], 7);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn native_worker_dashboard_respects_mode_and_terminal_filter() {
+        let root = std::env::temp_dir().join(format!("narada-worker-dashboard-{}", uuid::Uuid::new_v4()));
+        let completed = run_root(&root).join("run-2026-01-01T00-00-00Z");
+        let running = run_root(&root).join("run-2026-01-01T00-00-01Z");
+        fs::create_dir_all(&completed).expect("completed dir");
+        fs::create_dir_all(&running).expect("running dir");
+        fs::write(completed.join("result.json"), r#"{"run_id":"run-2026-01-01T00-00-00Z","status":"completed","summary":"done"}"#).expect("completed record");
+        fs::write(running.join("result.json"), r#"{"run_id":"run-2026-01-01T00-00-01Z","status":"running","summary":"active"}"#).expect("running record");
+        let selected = dashboard(&json!({"mode":"single_run","run_id":"run-2026-01-01T00-00-00Z"}).as_object().unwrap(), &root).expect("single dashboard");
+        assert_eq!(selected["mode"], "single_run");
+        assert_eq!(selected["counts"]["total"], 1);
+        assert_eq!(selected["runs"][0]["run_id"], "run-2026-01-01T00-00-00Z");
+        let active = dashboard(&json!({"mode":"all_active","include_terminal":false}).as_object().unwrap(), &root).expect("active dashboard");
+        assert_eq!(active["mode"], "all_active");
+        assert_eq!(active["counts"]["active"], 1);
+        assert_eq!(active["runs"][0]["run_id"], "run-2026-01-01T00-00-01Z");
         fs::remove_dir_all(root).expect("cleanup");
     }
 }
