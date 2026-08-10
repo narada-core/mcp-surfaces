@@ -32,6 +32,19 @@ impl CalendarGraphAdapter {
     }
 
     pub fn get(&self, mailbox_id: Option<&str>, suffix: &str, query: &Map<String, Value>) -> Result<Value, Value> {
+        let url = self.build_url(mailbox_id, suffix, query)?;
+        let response = ureq::AgentBuilder::new().timeout(Duration::from_secs(30)).build().get(&url).set("Authorization", &format!("Bearer {}", self.access_token)).set("Accept", "application/json").call();
+        let response = match response { Ok(response) => response, Err(ureq::Error::Status(code, response)) => return Err(http_error(code, response)), Err(error) => return Err(unavailable("graph_request_failed", &error.to_string())) };
+        let status = response.status();
+        let mut reader = response.into_reader().take(MAX_RESPONSE_BYTES);
+        let mut body = Vec::new();
+        reader.read_to_end(&mut body).map_err(|e| unavailable("graph_response_read_failed", &e.to_string()))?;
+        if body.len() as u64 >= MAX_RESPONSE_BYTES { return Err(unavailable("graph_response_too_large", &MAX_RESPONSE_BYTES.to_string())); }
+        if body.is_empty() || status == 204 { return Ok(json!({"status":"accepted","http_status":status})); }
+        serde_json::from_slice(&body).map_err(|e| unavailable("graph_response_invalid_json", &e.to_string()))
+    }
+
+    pub fn build_url(&self, mailbox_id: Option<&str>, suffix: &str, query: &Map<String, Value>) -> Result<String, Value> {
         let mailbox = mailbox_id.filter(|v| !v.trim().is_empty()).or_else(|| self.allowed_mailboxes.first().map(String::as_str)).unwrap_or("me");
         if !self.allowed_mailboxes.is_empty() && !self.allowed_mailboxes.iter().any(|value| value == mailbox) { return Err(unavailable("mailbox_not_allowed", mailbox)); }
         let prefix = if mailbox == "me" { "/me".to_string() } else { format!("/users/{}", encode_segment(mailbox)) };
@@ -43,15 +56,7 @@ impl CalendarGraphAdapter {
             url.push(if first { '?' } else { '&' }); first = false;
             url.push_str(&encode_component(key)); url.push('='); url.push_str(&encode_component(&value));
         }
-        let response = ureq::AgentBuilder::new().timeout(Duration::from_secs(30)).build().get(&url).set("Authorization", &format!("Bearer {}", self.access_token)).set("Accept", "application/json").call();
-        let response = match response { Ok(response) => response, Err(ureq::Error::Status(code, response)) => return Err(http_error(code, response)), Err(error) => return Err(unavailable("graph_request_failed", &error.to_string())) };
-        let status = response.status();
-        let mut reader = response.into_reader().take(MAX_RESPONSE_BYTES);
-        let mut body = Vec::new();
-        reader.read_to_end(&mut body).map_err(|e| unavailable("graph_response_read_failed", &e.to_string()))?;
-        if body.len() as u64 >= MAX_RESPONSE_BYTES { return Err(unavailable("graph_response_too_large", &MAX_RESPONSE_BYTES.to_string())); }
-        if body.is_empty() || status == 204 { return Ok(json!({"status":"accepted","http_status":status})); }
-        serde_json::from_slice(&body).map_err(|e| unavailable("graph_response_invalid_json", &e.to_string()))
+        Ok(url)
     }
 }
 
@@ -90,5 +95,15 @@ mod tests {
     fn production_graph_base_is_restricted() {
         assert!(validate_base_url(DEFAULT_GRAPH_BASE_URL).is_ok());
         assert!(validate_base_url("http://example.invalid/v1.0").is_err());
+    }
+
+    #[test]
+    fn calendar_url_respects_mailbox_allowlist_and_bounds() {
+        let adapter = CalendarGraphAdapter { base_url: DEFAULT_GRAPH_BASE_URL.to_string(), allowed_mailboxes: vec!["user@example.com".to_string()], access_token: "test".to_string() };
+        let mut query = Map::new(); query.insert("$top".to_string(), json!(20));
+        let url = adapter.build_url(Some("user@example.com"), "calendars", &query).expect("url");
+        assert!(url.contains("/users/user%40example.com/calendars"));
+        assert!(url.contains("%24top=20"));
+        assert!(adapter.build_url(Some("other@example.com"), "calendars", &query).is_err());
     }
 }
