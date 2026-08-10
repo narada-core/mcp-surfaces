@@ -706,6 +706,49 @@ function runSopRunCoverageParity() {
   }
 }
 
+function runSopOutboxParity() {
+  const workspaceRoot = resolve(packageRoot, '..', '..', '..');
+  const bunEntrypoint = join(workspaceRoot, 'packages', 'sop-mcp', 'dist', 'src', 'main.js');
+  if (!existsSync(bunEntrypoint)) throw new Error('sop_outbox_parity_bun_entrypoint_missing:' + bunEntrypoint);
+  const root = mkdtempSync(join(tmpdir(), 'narada-sop-outbox-native-parity-'));
+  const dbPath = join(root, '.sop', 'sop.db');
+  mkdirSync(dirname(dbPath), { recursive: true });
+  const db = new DatabaseSync(dbPath);
+  try {
+    db.exec(`CREATE TABLE sop_outbox (
+      event_id TEXT PRIMARY KEY, topic TEXT NOT NULL, partition_key TEXT NOT NULL, run_id TEXT NOT NULL,
+      sop_id TEXT NOT NULL, sop_version INTEGER NOT NULL, occurrence_key TEXT NOT NULL, outcome TEXT NOT NULL,
+      payload_json TEXT NOT NULL, created_at TEXT NOT NULL, available_at TEXT NOT NULL, compacted_at TEXT
+    );
+    CREATE TABLE sop_outbox_consumer_requirements (topic TEXT NOT NULL, consumer_id TEXT NOT NULL, start_at TEXT NOT NULL, registered_at TEXT NOT NULL);
+    CREATE TABLE sop_outbox_receipts (event_id TEXT NOT NULL, consumer_id TEXT NOT NULL, processed_at TEXT NOT NULL, receipt_json TEXT NOT NULL);`);
+    const topic = 'sop.run.terminal.v1';
+    db.prepare('INSERT INTO sop_outbox_consumer_requirements VALUES (?,?,?,?)').run(topic, 'consumer-1', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+    const insert = db.prepare('INSERT INTO sop_outbox VALUES (?,?,?,?,?,?,?,?,?,?,?,?)');
+    const event = (id, createdAt, availableAt, payload = '{}') => [id, topic, `partition-${id}`, `run-${id}`, 'demo', 1, `occ-${id}`, 'completed', payload, createdAt, availableAt, null];
+    insert.run(...event('event-1', '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z', '{"status":"completed"}'));
+    insert.run(...event('event-2', '2026-01-03T00:00:00Z', '2026-01-03T00:00:00Z'));
+    insert.run(...event('event-before-start', '2025-12-31T00:00:00Z', '2025-12-31T00:00:00Z'));
+    insert.run(...event('event-future', '2026-01-04T00:00:00Z', '2099-01-01T00:00:00Z'));
+    db.prepare('INSERT INTO sop_outbox_receipts VALUES (?,?,?,?)').run('event-2', 'consumer-1', '2026-01-03T01:00:00Z', '{}');
+  } finally {
+    db.close();
+  }
+  try {
+    const requests = [
+      { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'sop_outbox_list', arguments: { consumer_id: 'consumer-1' } } },
+      { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'sop_outbox_list', arguments: { consumer_id: 'consumer-1', topic: 'sop.run.terminal.v1' } } },
+      { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'sop_outbox_list', arguments: { consumer_id: 'consumer-1', limit: 1 } } },
+    ];
+    const bun = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'node', [bunEntrypoint, '--sop-root', root], requests, workspaceRoot);
+    const rust = runMailbox(executable, ['--surface-id', 'sop', '--site-root', root], requests, workspaceRoot);
+    for (const request of requests) assertSame(`sop.outbox.${request.id}`, mailboxStructured(bun, request.id, 'bun'), mailboxStructured(rust, request.id, 'rust'));
+    return { status: 'passed', fixture: 'durable_outbox_read_projection', compared: ['all_topics', 'topic_filter', 'limit'] };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 function runSurfaceFeedbackParity() {
   const workspaceRoot = resolve(packageRoot, '..', '..', '..');
   const bunEntrypoint = join(workspaceRoot, 'packages', 'surface-feedback-mcp', 'src', 'main.ts');
@@ -1121,6 +1164,7 @@ const sopRunEventsParity = runSopRunEventsParity();
 const sopRunStatusParity = runSopRunStatusParity();
 const sopHandoffParity = runSopHandoffParity();
 const sopRunCoverageParity = runSopRunCoverageParity();
+const sopOutboxParity = runSopOutboxParity();
 const surfaceFeedbackParity = runSurfaceFeedbackParity();
 const siteLoopParity = runSiteLoopParity();
 const calendarParity = runCalendarParity();
@@ -1148,6 +1192,7 @@ process.stdout.write(JSON.stringify({
   sop_run_status_parity: sopRunStatusParity,
   sop_handoff_parity: sopHandoffParity,
   sop_run_coverage_parity: sopRunCoverageParity,
+  sop_outbox_parity: sopOutboxParity,
   surface_feedback_parity: surfaceFeedbackParity,
   site_loop_parity: siteLoopParity,
   calendar_parity: calendarParity,
