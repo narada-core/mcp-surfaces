@@ -216,23 +216,29 @@ fn non_empty_value(values: &HashMap<String, String>, key: &str) -> bool {
 }
 
 fn output_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
-    let reference = args.get("ref").or_else(|| args.get("output_ref")).and_then(Value::as_str).ok_or_else(|| error("output_ref_required", "output_ref_required"))?;
+    let ref_value = args.get("ref").and_then(Value::as_str).map(str::trim);
+    let output_ref_value = args.get("output_ref").and_then(Value::as_str).map(str::trim);
+    if let (Some(reference), Some(output_ref)) = (ref_value, output_ref_value) {
+        if reference != output_ref { return Err(error("output_show_ref_alias_conflict", "output_show_ref_alias_conflict")); }
+    }
+    let reference = ref_value.or(output_ref_value).ok_or_else(|| error("output_show_requires_ref", "output_show_requires_ref"))?;
     let id = reference.strip_prefix("mcp_output:").ok_or_else(|| error("output_ref_invalid", "output_ref_invalid"))?;
-    if id.is_empty() || id.len() > 80 || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') { return Err(error("output_ref_invalid", "output_ref_invalid")); }
+    if id.len() < 3 || id.len() > 64 || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') { return Err(error("output_ref_invalid", "output_ref_invalid")); }
     let path = root.join(".ai/tmp/mcp-outputs/workspace").join(format!("{id}.json"));
     if fs::metadata(&path).map_err(|_| error("output_ref_not_found", "output_ref_not_found"))?.len() > MAX_TEXT_BYTES { return Err(error("output_ref_too_large", "output_ref_too_large")); }
     let text = fs::read_to_string(&path).map_err(|_| error("output_ref_not_found", "output_ref_not_found"))?;
     let record: Value = serde_json::from_str(&text).map_err(|e| error("output_ref_invalid_json", &e.to_string()))?;
     if record.get("schema").and_then(Value::as_str) != Some("narada.mcp_output_ref.v1") { return Err(error("output_ref_schema_unsupported", "output_ref_schema_unsupported")); }
+    if record.get("ref").and_then(Value::as_str) != Some(reference) || record.get("output_id").and_then(Value::as_str) != Some(id) { return Err(error("output_ref_metadata_mismatch", "output_ref_metadata_mismatch")); }
     let full = record.get("full_output").cloned().unwrap_or(Value::Null);
     let presentation = serde_json::to_string_pretty(&full).unwrap_or_else(|_| full.to_string());
     let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
-    let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(4000).min(10000) as usize;
+    let limit = args.get("limit").or_else(|| args.get("output_limit")).and_then(Value::as_u64).unwrap_or(10000).min(10000) as usize;
     let chars = presentation.chars().collect::<Vec<_>>();
     let start = offset.min(chars.len());
     let chunk = chars.iter().skip(start).take(limit).collect::<String>();
     let end = start + chunk.chars().count();
-    Ok(json!({"schema":"narada.mcp_output_page.v1","status":"ok","ref":reference,"tool_name":record.get("tool_name"),"full_output_char_length":chars.len(),"byte_size":text.len(),"original_truncated":record.get("truncated").and_then(Value::as_bool).unwrap_or(false),"path":path.to_string_lossy(),"offset":start,"limit":limit,"next_offset":if end<chars.len(){json!(end)}else{Value::Null},"output_limit":limit,"output_truncated":end<chars.len(),"output_text":chunk}))
+    Ok(json!({"schema":"narada.mcp_output_page.v1","status":"ok","ref":reference,"tool_name":record.get("tool_name"),"full_output_char_length":record.get("full_output_char_length").cloned().unwrap_or_else(|| json!(chars.len())),"byte_size":text.len(),"original_truncated":record.get("truncated").and_then(Value::as_bool).unwrap_or(false),"path":format!(".ai/tmp/mcp-outputs/workspace/{id}.json"),"offset":start,"limit":limit,"next_offset":if end<chars.len(){json!(end)}else{Value::Null},"output_limit":limit,"output_truncated":end<chars.len(),"output_text":chunk}))
 }
 
 fn write_schema(create: bool, update: bool) -> Value {

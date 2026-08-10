@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -341,9 +342,26 @@ function runCalendarParity() {
       allow_event_writes: true,
       write_approval_token: '',
     }), 'utf8');
+    const outputId = 'fixture123';
+    const outputRef = `mcp_output:${outputId}`;
+    const fullOutput = { answer: 'fixture', items: [1, 2, 3] };
+    const outputRecord = {
+      schema: 'narada.mcp_output_ref.v1',
+      ref: outputRef,
+      output_id: outputId,
+      tool_name: 'calendar_doctor',
+      full_output_char_length: JSON.stringify(fullOutput, null, 2).length,
+      truncated: false,
+      sha256: createHash('sha256').update(JSON.stringify(fullOutput), 'utf8').digest('hex'),
+      full_output: fullOutput,
+    };
+    const outputDir = join(root, '.ai', 'tmp', 'mcp-outputs', 'workspace');
+    mkdirSync(outputDir, { recursive: true });
+    writeFileSync(join(outputDir, `${outputId}.json`), `${JSON.stringify(outputRecord)}\n`, 'utf8');
     const requests = [
       { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'calendar_doctor', arguments: {} } },
       { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'calendar_guidance', arguments: { workflow: '  weekly  ', tool: ' calendar_event_query ' } } },
+      { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'calendar_output_show', arguments: { ref: outputRef, offset: 0, limit: 100 } } },
     ];
     const env = { ...process.env };
     for (const key of ['MS_GRAPH_ACCESS_TOKEN', 'GRAPH_ACCESS_TOKEN', 'GRAPH_TENANT_ID', 'GRAPH_CLIENT_ID', 'GRAPH_CLIENT_SECRET', 'GRAPH_TOKEN_ENDPOINT']) delete env[key];
@@ -351,7 +369,8 @@ function runCalendarParity() {
     const rust = runMailbox(executable, ['--surface-id', 'calendar', '--site-root', root], requests, workspaceRoot, env);
     assertSame('calendar.doctor', mailboxStructured(bun, 1, 'bun'), mailboxStructured(rust, 1, 'rust'));
     assertSame('calendar.guidance', mailboxStructured(bun, 2, 'bun'), mailboxStructured(rust, 2, 'rust'));
-    return { status: 'passed', fixture: 'local_policy_posture', compared: ['doctor', 'guidance'] };
+    assertSame('calendar.output_show', mailboxStructured(bun, 3, 'bun'), mailboxStructured(rust, 3, 'rust'));
+    return { status: 'passed', fixture: 'local_policy_posture', compared: ['doctor', 'guidance', 'output_show'] };
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
