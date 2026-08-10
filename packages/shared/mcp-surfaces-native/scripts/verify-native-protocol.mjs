@@ -570,6 +570,35 @@ function runBrowserControlParity() {
   }
 }
 
+function runQuotaMeterParity() {
+  const workspaceRoot = resolve(packageRoot, '..', '..', '..');
+  const bunEntrypoint = join(workspaceRoot, 'packages', 'quota-meter-mcp', 'src', 'main.ts');
+  if (!existsSync(bunEntrypoint)) throw new Error('quota_meter_parity_bun_entrypoint_missing:' + bunEntrypoint);
+  const root = mkdtempSync(join(tmpdir(), 'narada-quota-meter-native-parity-'));
+  try {
+    const stateRoot = join(root, 'quota-state');
+    mkdirSync(stateRoot, { recursive: true });
+    writeFileSync(join(stateRoot, 'overlay-position.json'), JSON.stringify({
+      left: 42,
+      top: 24,
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    }), 'utf8');
+    const requests = [{
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'quota_meter_overlay_status', arguments: {} },
+    }];
+    const env = { ...process.env, QUOTA_METER_STATE_ROOT: stateRoot };
+    const bun = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', [bunEntrypoint, '--state-root', stateRoot], requests, workspaceRoot, env);
+    const rust = runMailbox(executable, ['--surface-id', 'quota-meter', '--site-root', root], requests, workspaceRoot, env);
+    assertSame('quota_meter.overlay_status', mailboxStructured(bun, 1, 'bun'), mailboxStructured(rust, 1, 'rust'));
+    return { status: 'passed', fixture: 'persisted_position_without_pid', compared: ['overlay_status'] };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 const mailboxParity = runMailboxParity();
 const artifactsParity = runArtifactsParity();
 const sopParity = runSopParity();
@@ -580,6 +609,7 @@ const cloudflareParity = runCloudflareParity();
 const graphMailParity = runGraphMailParity();
 const operatorOverlayParity = runOperatorOverlayParity();
 const browserControlParity = runBrowserControlParity();
+const quotaMeterParity = runQuotaMeterParity();
 process.stdout.write(JSON.stringify({
   schema: 'narada.mcp_surfaces_native.protocol_parity.v1',
   status: 'passed',
@@ -597,4 +627,5 @@ process.stdout.write(JSON.stringify({
   graph_mail_parity: graphMailParity,
   operator_overlay_parity: operatorOverlayParity,
   browser_control_parity: browserControlParity,
+  quota_meter_parity: quotaMeterParity,
 }) + '\n');

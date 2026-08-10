@@ -2,6 +2,7 @@ use serde_json::{json, Map, Value};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 const MAX_BYTES: usize = 256_000;
 const MAX_SESSIONS: usize = 100;
@@ -118,7 +119,78 @@ fn read_session(root: &Path, id: &str, _site_id: Option<&str>) -> Result<Value, 
 fn compact_session(record: &Value, id: &str) -> Value { json!({"session_id":record.get("session_id").and_then(Value::as_str).unwrap_or(id),"site_id":record.get("site_id"),"site_root":record.get("site_root"),"status":record.get("status"),"health_endpoint":record.get("health_endpoint"),"updated_at":record.get("updated_at").or_else(||record.get("last_seen_at")),"authority_epoch":record.get("authority_epoch")}) }
 
 fn quota_call(name: &str, _args: &Map<String, Value>, root: &Path) -> Result<Value, Value> { match name { "quota_meter_guidance" => Ok(guidance_result("quota-meter", _args)), "quota_meter_overlay_status" => Ok(quota_status(root)), "quota_meter_glide_status" => Err(authority_boundary("quota-meter", name, "quota_provider_read_authority_not_enabled_in_native_slice", "Use the quota-meter provider adapter without passing credentials through MCP.")), "quota_meter_overlay_start" | "quota_meter_overlay_stop" => Err(authority_boundary("quota-meter", name, "quota_overlay_process_authority_not_enabled_in_native_slice", "Use the owning quota-meter process authority.")), _ => Err(error("unknown_tool", &format!("unknown_tool:{name}"))), } }
-fn quota_status(root: &Path) -> Value { let base=if root.file_name().and_then(|v|v.to_str()).map(|v|v.eq_ignore_ascii_case(".narada")).unwrap_or(false){root.join("runtime/quota-meter")}else{root.join(".narada/runtime/quota-meter")}; let pid_path=base.join("overlay.pid"); let position_path=base.join("overlay-position.json"); let pid=fs::read_to_string(&pid_path).ok().and_then(|v|v.trim().parse::<u32>().ok()); let position=read_bounded_json(&position_path).ok(); json!({"schema":"narada.quota_meter.overlay_status.v1","status":if pid.is_some(){"unknown_liveness"}else{"stopped"},"running":null,"pid":pid,"pid_path":pid_path.to_string_lossy(),"position_path":position_path.to_string_lossy(),"position":position,"native_read_only":true}) }
+fn quota_status(root: &Path) -> Value {
+    let base = quota_state_root(root);
+    quota_status_at(&base)
+}
+
+fn quota_status_at(base: &Path) -> Value {
+    let pid_path = base.join("overlay.pid");
+    let position_path = base.join("overlay-position.json");
+    let pid = fs::read_to_string(&pid_path).ok().and_then(|value| value.trim().parse::<u32>().ok()).filter(|value| *value > 0);
+    let running = pid.map(quota_process_alive).unwrap_or(false);
+    json!({
+        "schema":"narada.quota_meter.overlay_status.v1",
+        "status":if running { "running" } else if pid.is_some() { "stale" } else { "stopped" },
+        "running":running,
+        "pid":pid,
+        "pid_path":pid_path.to_string_lossy(),
+        "position_path":position_path.to_string_lossy(),
+        "position":quota_position(&position_path),
+    })
+}
+
+fn quota_state_root(root: &Path) -> PathBuf {
+    if let Ok(value) = env::var("QUOTA_METER_STATE_ROOT") {
+        if !value.trim().is_empty() { return PathBuf::from(value); }
+    }
+    let base = env::var("LOCALAPPDATA")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| env::var("TEMP").ok().filter(|value| !value.trim().is_empty()))
+        .or_else(|| env::var("TMP").ok().filter(|value| !value.trim().is_empty()))
+        .unwrap_or_else(|| root.to_string_lossy().to_string());
+    PathBuf::from(base).join("quota-meter")
+}
+
+fn quota_position(path: &Path) -> Value {
+    let Ok(value) = read_bounded_json(path) else { return Value::Null; };
+    let Some(object) = value.as_object() else { return Value::Null; };
+    json!({
+        "left":object.get("left").cloned().unwrap_or(Value::Null),
+        "top":object.get("top").cloned().unwrap_or(Value::Null),
+        "updated_at":object.get("updatedAt").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn quota_process_alive(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        let filter = format!("PID eq {pid}");
+        let needle = format!("\"{pid}\"");
+        return Command::new("tasklist")
+            .args(["/FI", filter.as_str(), "/FO", "CSV", "/NH"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .map(|output| output.contains(&needle))
+            .unwrap_or(false);
+    }
+    #[cfg(unix)]
+    {
+        return Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = pid;
+        false
+    }
+}
 
 fn session_roots(root: &Path) -> Vec<PathBuf> { let control=if root.file_name().and_then(|v|v.to_str()).map(|v|v.eq_ignore_ascii_case(".narada")).unwrap_or(false){root.to_path_buf()}else{root.join(".narada")}; vec![control.join("crew/nars-sessions"),root.join("crew/nars-sessions")] }
 fn session_index_paths(root: &Path, id: &str) -> Vec<PathBuf> { session_roots(root).into_iter().map(|base|base.join(id).join("session-index-record.json")).collect() }
@@ -148,6 +220,21 @@ mod tests {
         let read = artifact_read(&Map::from_iter([(String::from("session_id"), json!("session-1")), (String::from("artifact_id"), json!("artifact-1"))]), &root).expect("read");
         assert_eq!(read["artifact"]["title"], "Read me");
         assert_eq!(read["message_part"]["type"], "artifact_ref");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn quota_status_projects_position_without_process_authority() {
+        let suffix = SystemTime::now().duration_since(UNIX_EPOCH).expect("clock").as_nanos();
+        let root = std::env::temp_dir().join(format!("narada-quota-status-{suffix}"));
+        fs::create_dir_all(&root).expect("directory");
+        fs::write(root.join("overlay-position.json"), r#"{"left":42,"top":24,"updatedAt":"2026-08-09T00:00:00Z"}"#).expect("position");
+        let response = quota_status_at(&root);
+        assert_eq!(response["schema"], "narada.quota_meter.overlay_status.v1");
+        assert_eq!(response["status"], "stopped");
+        assert_eq!(response["running"], false);
+        assert_eq!(response["position"]["left"], 42);
+        assert_eq!(response["position"]["updated_at"], "2026-08-09T00:00:00Z");
         let _ = fs::remove_dir_all(root);
     }
 }
