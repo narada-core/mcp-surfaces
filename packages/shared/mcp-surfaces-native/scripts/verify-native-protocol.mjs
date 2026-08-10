@@ -376,12 +376,70 @@ function runCalendarParity() {
   }
 }
 
+function runCloudflareParity() {
+  const workspaceRoot = resolve(packageRoot, '..', '..', '..');
+  const bunEntrypoint = join(workspaceRoot, 'packages', 'cloudflare-carrier-mcp', 'src', 'main.ts');
+  if (!existsSync(bunEntrypoint)) throw new Error('cloudflare_parity_bun_entrypoint_missing:' + bunEntrypoint);
+  const root = mkdtempSync(join(tmpdir(), 'narada-cloudflare-native-parity-'));
+  try {
+    const healthFile = join(root, 'cloudflare-health.json');
+    writeFileSync(healthFile, JSON.stringify({
+      generated_at: '2026-01-01T00:00:00Z',
+      continuity_health: {
+        local_sync_status: 'healthy',
+        local_sync_artifact_count: 3,
+        local_inbound_status: 'idle',
+        local_inbound_artifact_count: 2,
+        reconciliation_execution_status: 'ready',
+        reconciliation_execution_plan_status: 'planned',
+      },
+      scheduler_task_readback: {
+        scheduled_task_state: 'Ready',
+        last_run_time: '2026-01-01T00:01:00Z',
+        last_result: 'ok',
+        next_run_time: '2026-01-01T01:00:00Z',
+        cadence_status: 'hourly',
+      },
+      cloudflare_product_posture: {
+        state: 'healthy',
+        status: 'ok',
+        site_product_overview: {
+          site_count: 4,
+          health_counts: { healthy: 4 },
+          next_action: 'none',
+          next_reason: null,
+        },
+      },
+      cloudflare_product_binding_alignment: {
+        state: 'aligned',
+        status: 'ok',
+        reason: null,
+        local_site_count: 4,
+        cloudflare_product_next_action: 'none',
+      },
+    }), 'utf8');
+    const requests = [{
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'cloudflare_health', arguments: { health_file: healthFile } },
+    }];
+    const bun = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', [bunEntrypoint, '--site-root', root], requests, workspaceRoot);
+    const rust = runMailbox(executable, ['--surface-id', 'cloudflare-carrier', '--site-root', root], requests, workspaceRoot);
+    assertSame('cloudflare.health', mailboxStructured(bun, 1, 'bun'), mailboxStructured(rust, 1, 'rust'));
+    return { status: 'passed', fixture: 'local_health_projection', compared: ['health'] };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 const mailboxParity = runMailboxParity();
 const artifactsParity = runArtifactsParity();
 const sopParity = runSopParity();
 const surfaceFeedbackParity = runSurfaceFeedbackParity();
 const siteLoopParity = runSiteLoopParity();
 const calendarParity = runCalendarParity();
+const cloudflareParity = runCloudflareParity();
 process.stdout.write(JSON.stringify({
   schema: 'narada.mcp_surfaces_native.protocol_parity.v1',
   status: 'passed',
@@ -395,4 +453,5 @@ process.stdout.write(JSON.stringify({
   surface_feedback_parity: surfaceFeedbackParity,
   site_loop_parity: siteLoopParity,
   calendar_parity: calendarParity,
+  cloudflare_parity: cloudflareParity,
 }) + '\n');

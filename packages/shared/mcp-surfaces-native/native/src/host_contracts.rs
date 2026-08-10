@@ -126,7 +126,7 @@ fn cloudflare_session_status(args: &Map<String, Value>, root: &Path) -> Value {
 fn cloudflare_health(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     let (path, _) = cloudflare_path(args, "health_file", root, "CLOUDFLARE_HEALTH_FILE", "cloudflare_health.json");
     let Some(value) = bounded_json(&path).map_err(|detail| error("cloudflare_health_parse_failed", detail))? else {
-        return Ok(json!({"status":"missing","health_file":path.to_string_lossy(),"native_read_only":true}));
+        return Ok(json!({"status":"missing","health_file":path.to_string_lossy()}));
     };
     let continuity = value.get("continuity_health").and_then(Value::as_object);
     let cloudflare = value.get("cloudflare_product_posture").and_then(Value::as_object);
@@ -168,7 +168,6 @@ fn cloudflare_health(args: &Map<String, Value>, root: &Path) -> Result<Value, Va
             "local_site_count":get(alignment,"local_site_count",json!(0)),
             "cloudflare_next_action":get(alignment,"cloudflare_product_next_action",Value::Null)
         },
-        "native_read_only":true
     }))
 }
 
@@ -244,4 +243,3 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 }
-
