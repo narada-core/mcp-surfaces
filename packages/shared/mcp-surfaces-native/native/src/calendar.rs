@@ -3,6 +3,9 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
+#[path = "calendar_provider.rs"]
+mod provider;
+
 const SERVER_NAME: &str = "narada-calendar-mcp";
 const DEFAULT_GRAPH_BASE_URL: &str = "https://graph.microsoft.com/v1.0";
 const MAX_TEXT_BYTES: u64 = 512_000;
