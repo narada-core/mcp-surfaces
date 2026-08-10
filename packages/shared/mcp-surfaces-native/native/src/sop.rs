@@ -24,7 +24,7 @@ pub fn list_tools() -> Vec<Value> {
         ("sop_template_list", "List imported SOP templates from the local SOP registry.", json!({"type":"object","properties":{"status":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":100,"default":50}},"additionalProperties":false})),
         ("sop_template_show", "Show one imported SOP template from the local SOP registry.", json!({"type":"object","properties":{"sop_id":{"type":"string"},"version":{"type":"integer","minimum":1}},"required":["sop_id"],"additionalProperties":false})),
         ("sop_template_search", "Search local SOP registry templates by title or description.", json!({"type":"object","properties":{"query":{"type":"string"},"status":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":100,"default":50}},"required":["query"],"additionalProperties":false})),
-        ("sop_run_status", "Read one SOP run from the owning SOP store.", json!({"type":"object","additionalProperties":true})),
+        ("sop_run_status", "Get the durable status and step state for one SOP occurrence.", json!({"type":"object","properties":{"run_id":{"type":"string"}},"required":["run_id"],"additionalProperties":false})),
         ("sop_run_list", "List SOP runs with optional filters.", json!({"type":"object","properties":{"sop_id":{"type":"string"},"status":{"type":"string","enum":["pending","running","completed","failed","cancelled","awaiting_confirmation"]},"include_terminal":{"type":"boolean"},"limit":{"type":"integer","minimum":1,"maximum":200,"default":50}},"additionalProperties":false})),
         ("sop_handoff_list", "List SOP handoffs from the owning SOP store.", json!({"type":"object","additionalProperties":true})),
         ("sop_handoff_show", "Show one SOP handoff from the owning SOP store.", json!({"type":"object","additionalProperties":true})),
@@ -59,7 +59,8 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<V
         "sop_template_search" => template_search(args, root),
         "sop_template_list" => template_list(args, root),
         "sop_template_show" => template_show(args, root),
-        "sop_run_status" | "sop_handoff_list" | "sop_handoff_show" | "sop_run_coverage_since" | "sop_run_events" | "sop_outbox_list" => Err(authority_boundary(name)),
+        "sop_handoff_list" | "sop_handoff_show" | "sop_run_coverage_since" | "sop_run_events" | "sop_outbox_list" => Err(authority_boundary(name)),
+        "sop_run_status" => run_status(args, root),
         "sop_run_list" => run_list(args, root),
         "sop_action_list" => action_list(args, root),
         "sop_action_show" => action_show(args, root),
@@ -210,14 +211,71 @@ fn run_list(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     Ok(json!({"schema":"narada.sop.run_list.v2","status":"ok","items":items,"count":items.len(),"db_path":db_path(root).to_string_lossy()}))
 }
 
+fn run_status(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let run_id = args.get("run_id").and_then(Value::as_str).filter(|value| !value.trim().is_empty()).ok_or_else(|| error("sop_requires_run_id", "sop_requires_run_id"))?;
+    let Some(connection) = open_db(root)? else { return Err(error("sop_run_not_found", &format!("sop_run_not_found:{run_id}"))); };
+    let row = connection.query_row("SELECT * FROM sop_runs WHERE run_id = ? LIMIT 1", params![run_id], row_value).optional().map_err(|e| error("sop_run_query_failed", &e.to_string()))?;
+    let Some(row) = row else { return Err(error("sop_run_not_found", &format!("sop_run_not_found:{run_id}"))); };
+    let result = run_detail(row);
+    let encoded = serde_json::to_vec(&result).map_err(|e| error("sop_run_encode_failed", &e.to_string()))?;
+    if encoded.len() > MAX_TEMPLATE_BYTES as usize { return Err(error("sop_run_result_too_large", "sop_run_result_too_large")); }
+    Ok(result)
+}
+
 fn run_summary(value: &Value) -> Value {
     json!({"schema":"narada.sop.run_summary.v2","run_id":member(value,"run_id"),"sop_id":member(value,"sop_id"),"sop_version":member(value,"sop_version"),"sop_title":member(value,"sop_title"),"occurrence_key":member(value,"occurrence_key"),"status":member(value,"status"),"parent_run_id":member(value,"parent_run_id"),"parent_step_id":member(value,"parent_step_id"),"created_at":member(value,"created_at"),"updated_at":member(value,"updated_at"),"completed_at":member(value,"completed_at")})
+}
+
+fn run_detail(value: Value) -> Value {
+    let steps = member(&value, "step_states_json");
+    let parse_error = if steps.is_array() { Value::Null } else { json!("step_states_json is not an array") };
+    let step_values = steps.as_array().cloned().unwrap_or_default();
+    let next_steps = step_values.iter().filter(|step| member(step, "status").as_str() == Some("running")).map(|step| {
+        let action = member(step, "action");
+        let action_target = action.as_object().map(|object| json!({"surface_id":object.get("surface_id").cloned().unwrap_or(Value::Null),"tool_name":object.get("tool_name").cloned().unwrap_or(Value::Null)}));
+        let result = member(step, "result");
+        let instructions = result.as_object().and_then(|object| object.get("instructions")).cloned().filter(|value| !value.is_null()).unwrap_or_else(|| member(step, "instructions"));
+        json!({"step_id":member(step,"step_id"),"executor":member(step,"executor"),"title":member(step,"title"),"instructions":instructions,"child_run_id":member(step,"child_run_id"),"child_sop_id":member(step,"sop_id"),"action_id":member(step,"action_id"),"action_target":action_target,"result":result,"result_ref":member(step,"result_ref")})
+    }).collect::<Vec<_>>();
+    let child_pins = step_values.iter().filter(|step| member(step, "executor").as_str() == Some("sop")).map(|step| json!({"step_id":member(step,"step_id"),"sop_id":member(step,"sop_id"),"sop_version":member(step,"sop_version"),"definition_fingerprint":member(step,"pinned_child_definition_fingerprint")})).collect::<Vec<_>>();
+    json!({
+        "schema":"narada.sop.run.v2",
+        "run_id":member(&value,"run_id"),
+        "sop_id":member(&value,"sop_id"),
+        "sop_version":member(&value,"sop_version"),
+        "sop_title":member(&value,"sop_title"),
+        "status":member(&value,"status"),
+        "occurrence_key":member(&value,"occurrence_key"),
+        "request_fingerprint":member(&value,"request_fingerprint"),
+        "definition_fingerprint":member(&value,"definition_fingerprint"),
+        "input":member(&value,"input_json"),
+        "input_ref":member(&value,"input_ref_json"),
+        "output":member(&value,"output_json"),
+        "output_ref":member(&value,"output_ref_json"),
+        "step_states":step_values,
+        "step_states_parse_error":parse_error,
+        "trigger_source_kind":member(&value,"trigger_source_kind"),
+        "trigger_source_ref":member(&value,"trigger_source_ref"),
+        "triggered_by":member(&value,"triggered_by"),
+        "parent_run_id":member(&value,"parent_run_id"),
+        "parent_step_id":member(&value,"parent_step_id"),
+        "created_at":member(&value,"created_at"),
+        "updated_at":member(&value,"updated_at"),
+        "completed_at":member(&value,"completed_at"),
+        "definition_snapshot":{"stored":true,"fingerprint":member(&value,"definition_fingerprint"),"sop_id":member(&value,"sop_id"),"sop_version":member(&value,"sop_version"),"child_pins":child_pins},
+        "admission":Value::Null,
+        "next_awaits_confirmation":next_steps.iter().any(|step| matches!(step.get("executor").and_then(Value::as_str),Some("agent")|Some("operator"))),
+        "next_steps":next_steps,
+        "next_step":next_steps.first().cloned().unwrap_or(Value::Null),
+        "relationship_reconciliation":{"mode":"automatic","repair_tool":"sop_run_refresh"},
+        "native_hydration":"bounded_sqlite_read"
+    })
 }
 
 fn doctor(root: &Path) -> Result<Value, Value> {
     let dirs = sops_dirs(root); let mut counts = Vec::new();
     for dir in &dirs { let count = fs::read_dir(dir).ok().map(|entries| entries.filter_map(Result::ok).filter(|entry| entry.path().file_name().and_then(|v|v.to_str()).map(|v|v.ends_with(".sop.yaml")).unwrap_or(false)).take(MAX_CANDIDATES).count()).unwrap_or(0); counts.push(json!({"path":dir.to_string_lossy(),"candidate_count":count})); }
-    Ok(json!({"schema":"narada.sop_mcp.doctor.v1","status":"ok","site_root":root.to_string_lossy(),"sops_dirs":counts,"native_adapter":"template_action_run_list_read","execution":"authority_boundary","server_name":SERVER_NAME}))
+    Ok(json!({"schema":"narada.sop_mcp.doctor.v1","status":"ok","site_root":root.to_string_lossy(),"sops_dirs":counts,"native_adapter":"template_action_run_status_list_read","execution":"authority_boundary","server_name":SERVER_NAME}))
 }
 
 fn candidate_entries(root: &Path) -> Vec<(String, PathBuf)> {
@@ -297,6 +355,23 @@ mod tests {
         assert_eq!(list["items"][0]["run_id"], "run-1");
         let invalid = run_list(&json!({"status":"unknown"}).as_object().unwrap(), &root).expect_err("status validation");
         assert_eq!(invalid["code"], "sop_run_status_unsupported");
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn native_sop_run_status_rehydrates_bounded_public_projection() {
+        let root = std::env::temp_dir().join(format!("narada-sop-run-status-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join(".sop")).expect("root");
+        let connection = Connection::open(db_path(&root)).expect("db");
+        connection.execute_batch("CREATE TABLE sop_runs (run_id TEXT, sop_id TEXT, sop_version INTEGER, sop_title TEXT, status TEXT, occurrence_key TEXT, request_fingerprint TEXT, definition_fingerprint TEXT, definition_json TEXT, input_json TEXT, input_ref_json TEXT, output_json TEXT, output_ref_json TEXT, step_states_json TEXT, trigger_source_kind TEXT, trigger_source_ref TEXT, triggered_by TEXT, parent_run_id TEXT, parent_step_id TEXT, created_at TEXT, updated_at TEXT, completed_at TEXT);").expect("schema");
+        let steps = r#"[{"step_id":"step-1","executor":"operator","blocking":true,"title":"Approve","status":"running","depends_on":[],"instructions":"approve","when":null,"input":{},"input_ref":null,"result_schema":null,"action":null,"sop_id":null,"sop_version":null,"wait_policy":null,"pinned_child_definition_fingerprint":null,"child_run_id":null,"action_id":null,"started_at":"2026-01-01","completed_at":null,"result":{"instructions":"approve now"},"result_ref":null,"completion_key":null,"completion_fingerprint":null,"error_message":null}]"#;
+        connection.execute("INSERT INTO sop_runs (run_id,sop_id,sop_version,sop_title,status,occurrence_key,request_fingerprint,definition_fingerprint,definition_json,input_json,input_ref_json,output_json,output_ref_json,step_states_json,trigger_source_kind,trigger_source_ref,triggered_by,parent_run_id,parent_step_id,created_at,updated_at,completed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", params!["run-1", "demo", 1, "Demo", "awaiting_confirmation", "occ-1", "request-fp", "definition-fp", r#"{"steps":[]}"#, r#"{"input":1}"#, Option::<String>::None, r#"{}"#, Option::<String>::None, steps, "manual", "", "operator", Option::<String>::None, Option::<String>::None, "2026-01-01", "2026-01-01", Option::<String>::None]).expect("run");
+        drop(connection);
+        let status = run_status(&json!({"run_id":"run-1"}).as_object().unwrap(), &root).expect("status");
+        assert_eq!(status["schema"], "narada.sop.run.v2");
+        assert_eq!(status["step_states"][0]["status"], "running");
+        assert_eq!(status["next_awaits_confirmation"], true);
+        assert_eq!(status["next_step"]["instructions"], "approve now");
         fs::remove_dir_all(root).expect("cleanup");
     }
 }
