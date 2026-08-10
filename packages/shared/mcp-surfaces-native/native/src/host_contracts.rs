@@ -1,9 +1,11 @@
 use serde_json::{json, Map, Value};
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 const MAX_BYTES: u64 = 256_000;
+const DEFAULT_GRAPH_BASE_URL: &str = "https://graph.microsoft.com/v1.0";
 const CLOUDFLARE_PACKAGE_FILTER: &str = "@narada-core/cloudflare-carrier";
 const CLOUDFLARE_WORKER_URL: &str = "https://narada-cloudflare-carrier.andrei-kokoev.workers.dev";
 const BROWSER: &[(&str, bool)] = &[
@@ -194,12 +196,70 @@ fn graph_mail_doctor(root: &Path) -> Value {
     let path = root.join(".ai/graph-mail-mcp.json");
     let policy = read_json_file(&path);
     let object = policy.as_object().cloned().unwrap_or_default();
-    let token_present = env::var("MS_GRAPH_ACCESS_TOKEN").ok().or_else(|| env::var("GRAPH_ACCESS_TOKEN").ok()).map(|value| !value.trim().is_empty()).unwrap_or(false);
-    json!({"schema":"narada.graph_mail_mcp.doctor.v1","status":"ok","site_root":root.to_string_lossy(),"graph_base_url":object.get("graph_base_url").cloned().unwrap_or_else(||json!("https://graph.microsoft.com/v1.0")),"has_access_token":token_present,"auth_mode":if token_present{"access_token"}else{"missing"},"allowed_mailboxes":object.get("allowed_mailboxes").or_else(||object.get("allowedMailboxes")).cloned().unwrap_or_else(||json!([])),"allowed_attachment_roots":object.get("allowed_attachment_roots").or_else(||object.get("allowedAttachmentRoots")).cloned().unwrap_or_else(||json!([])),"allow_device_code_auth":object.get("allow_device_code_auth").and_then(Value::as_bool).unwrap_or(false),"allow_send_draft":object.get("allow_send_draft").and_then(Value::as_bool).unwrap_or(false),"allow_folder_create":object.get("allow_folder_create").and_then(Value::as_bool).unwrap_or(false),"allow_message_move":object.get("allow_message_move").and_then(Value::as_bool).unwrap_or(false),"allow_message_mark_read":object.get("allow_message_mark_read").and_then(Value::as_bool).unwrap_or(false),"token_values_exposed":false,"native_read_only":true})
+    let graph_base_url = object.get("graph_base_url").and_then(Value::as_str).filter(|value| !value.trim().is_empty()).map(|value| value.trim_end_matches('/').to_string()).unwrap_or_else(|| DEFAULT_GRAPH_BASE_URL.to_string());
+    let allowed_mailboxes = graph_string_array(&object, "allowed_mailboxes", "allowedMailboxes");
+    let allowed_attachment_roots = {
+        let values = graph_string_array(&object, "allowed_attachment_roots", "allowedAttachmentRoots");
+        if values.is_empty() { vec![Value::String(root.to_string_lossy().to_string())] } else { values.into_iter().filter_map(|value| value.as_str().map(|path| Value::String(resolve_graph_path(root, path)))).collect() }
+    };
+    let allow_device_code_auth = graph_bool(&object, "allow_device_code_auth", "allowDeviceCodeAuth");
+    let device_code_tenant = graph_string(&object, "device_code_tenant_id", "deviceCodeTenantId");
+    let device_code_client = graph_string(&object, "device_code_client_id", "deviceCodeClientId");
+    let device_code_allowed_scopes = graph_string_array(&object, "device_code_allowed_scopes", "deviceCodeAllowedScopes");
+    let (has_access_token, auth_mode) = graph_auth_posture(root, allow_device_code_auth, &device_code_allowed_scopes);
+    let delegated_token = graph_delegated_token_summary(root);
+    json!({"schema":"narada.graph_mail_mcp.doctor.v1","status":"ok","site_root":root.to_string_lossy(),"graph_base_url":graph_base_url,"has_access_token":has_access_token,"auth_mode":auth_mode,"allowed_mailboxes":allowed_mailboxes,"allowed_attachment_roots":allowed_attachment_roots,"allow_device_code_auth":allow_device_code_auth,"device_code_tenant_configured":device_code_tenant.is_some() || graph_non_empty_env(root, "GRAPH_TENANT_ID"),"device_code_client_configured":device_code_client.is_some() || graph_non_empty_env(root, "GRAPH_CLIENT_ID"),"device_code_allowed_scopes":device_code_allowed_scopes,"delegated_token":delegated_token,"allow_send_draft":graph_bool(&object, "allow_send_draft", "allowSendDraft"),"send_approval_token_configured":graph_token_configured(&object, "send_approval_token", "sendApprovalToken"),"allow_folder_create":graph_bool(&object, "allow_folder_create", "allowFolderCreate"),"allow_message_move":graph_bool(&object, "allow_message_move", "allowMessageMove"),"allow_message_mark_read":graph_bool(&object, "allow_message_mark_read", "allowMessageMarkRead"),"mailbox_organization_approval_token_configured":graph_token_configured(&object, "mailbox_organization_approval_token", "mailboxOrganizationApprovalToken"),"server_name":"narada-graph-mail-mcp"})
 }
 fn graph_mail_auth_status(root: &Path) -> Value {
-    let token_present = env::var("MS_GRAPH_ACCESS_TOKEN").ok().or_else(|| env::var("GRAPH_ACCESS_TOKEN").ok()).map(|value| !value.trim().is_empty()).unwrap_or(false);
-    json!({"schema":"narada.graph_mail_mcp.auth_status.v1","status":if token_present{"configured"}else{"missing"},"site_root":root.to_string_lossy(),"access_token_present":token_present,"token_values_exposed":false,"native_read_only":true})
+    let object = read_json_file(&root.join(".ai/graph-mail-mcp.json")).as_object().cloned().unwrap_or_default();
+    let scopes = graph_string_array(&object, "device_code_allowed_scopes", "deviceCodeAllowedScopes");
+    json!({"schema":"narada.graph_mail_mcp.auth_status.v1","status":"ok","allow_device_code_auth":graph_bool(&object, "allow_device_code_auth", "allowDeviceCodeAuth"),"device_code_tenant_configured":graph_string(&object, "device_code_tenant_id", "deviceCodeTenantId").is_some() || graph_non_empty_env(root, "GRAPH_TENANT_ID"),"device_code_client_configured":graph_string(&object, "device_code_client_id", "deviceCodeClientId").is_some() || graph_non_empty_env(root, "GRAPH_CLIENT_ID"),"device_code_allowed_scopes":scopes,"delegated_token":graph_delegated_token_summary(root)})
+}
+
+fn graph_string(object: &Map<String, Value>, snake: &str, camel: &str) -> Option<String> {
+    object.get(snake).or_else(|| object.get(camel)).and_then(Value::as_str).filter(|value| !value.trim().is_empty()).map(ToOwned::to_owned)
+}
+fn graph_string_array(object: &Map<String, Value>, snake: &str, camel: &str) -> Vec<Value> {
+    object.get(snake).or_else(|| object.get(camel)).and_then(Value::as_array).map(|items| items.iter().filter_map(|value| value.as_str().filter(|item| !item.trim().is_empty()).map(|item| Value::String(item.to_string()))).collect()).unwrap_or_default()
+}
+fn graph_bool(object: &Map<String, Value>, snake: &str, camel: &str) -> bool {
+    object.get(snake).or_else(|| object.get(camel)).and_then(Value::as_bool).unwrap_or(false)
+}
+fn graph_token_configured(object: &Map<String, Value>, snake: &str, camel: &str) -> bool {
+    graph_string(object, snake, camel).is_some()
+}
+fn resolve_graph_path(root: &Path, value: &str) -> String {
+    let path = PathBuf::from(value);
+    if path.is_absolute() { path.to_string_lossy().to_string() } else { root.join(path).to_string_lossy().to_string() }
+}
+fn graph_auth_posture(root: &Path, allow_device_code: bool, scopes: &[Value]) -> (bool, &'static str) {
+    let delegated = graph_delegated_token_summary(root);
+    let delegated_allowed = allow_device_code && delegated.get("status").and_then(Value::as_str).map(|status| status == "available" || status == "refreshable").unwrap_or(false) && delegated.get("scope").and_then(Value::as_str).map(|scope| scopes.iter().any(|value| value.as_str() == Some(scope))).unwrap_or(false);
+    if delegated_allowed { return (true, "delegated_device_code"); }
+    let graph_access = graph_non_empty_env(root, "GRAPH_ACCESS_TOKEN");
+    let client_credentials = graph_non_empty_env(root, "GRAPH_TENANT_ID") && graph_non_empty_env(root, "GRAPH_CLIENT_ID") && graph_non_empty_env(root, "GRAPH_CLIENT_SECRET");
+    let ms_access = graph_non_empty_env(root, "MS_GRAPH_ACCESS_TOKEN");
+    if graph_access || (!client_credentials && ms_access) { (true, "access_token") } else if client_credentials { (true, "client_credentials") } else { (false, "missing") }
+}
+fn graph_delegated_token_summary(root: &Path) -> Value {
+    let value = read_json_file(&root.join(".ai/runtime/graph-mail-mcp/delegated-token.json"));
+    let Some(object) = value.as_object() else { return json!({"status":"missing","fresh":false}); };
+    if object.get("schema").and_then(Value::as_str) != Some("narada.graph_mail_mcp.delegated_token.v1") { return json!({"status":"missing","fresh":false}); }
+    let expires = object.get("expires_at_ms").and_then(Value::as_i64).unwrap_or(0);
+    let fresh = expires > chrono_now_ms() + 60_000;
+    let refreshable = object.get("refresh_token").and_then(Value::as_str).map(|value| !value.trim().is_empty()).unwrap_or(false);
+    json!({"status":if fresh{"available"}else if refreshable{"refreshable"}else{"expired"},"fresh":fresh,"refreshable":refreshable,"auth_mode":object.get("auth_mode").cloned().unwrap_or(Value::Null),"tenant_id":object.get("tenant_id").cloned().unwrap_or(Value::Null),"client_id":object.get("client_id").cloned().unwrap_or(Value::Null),"scope":object.get("scope").cloned().unwrap_or(Value::Null),"acquired_at":object.get("acquired_at").cloned().unwrap_or(Value::Null),"expires_at_ms":object.get("expires_at_ms").cloned().unwrap_or(Value::Null)})
+}
+fn chrono_now_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|duration| duration.as_millis() as i64).unwrap_or(0)
+}
+fn graph_non_empty_env(root: &Path, key: &str) -> bool {
+    let mut values = HashMap::new();
+    for path in [root.parent().map(|parent| parent.join(".env")), Some(root.join(".env"))].into_iter().flatten() {
+        if let Ok(text) = fs::read_to_string(path) { for line in text.lines() { if let Some((name, value)) = line.split_once('=') { values.insert(name.trim().to_string(), value.trim().trim_matches(['\'', '"']).to_string()); } } }
+    }
+    if let Ok(value) = env::var(key) { values.insert(key.to_string(), value); }
+    values.get(key).map(|value| !value.trim().is_empty()).unwrap_or(false)
 }
 fn read_json_file(path: &Path) -> Value {
     let Ok(meta) = fs::metadata(path) else { return Value::Object(Map::new()); };

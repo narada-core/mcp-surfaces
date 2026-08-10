@@ -447,6 +447,52 @@ function runCloudflareParity() {
   }
 }
 
+function runGraphMailParity() {
+  const workspaceRoot = resolve(packageRoot, '..', '..', '..');
+  const bunEntrypoint = join(workspaceRoot, 'packages', 'graph-mail-mcp', 'src', 'main.ts');
+  if (!existsSync(bunEntrypoint)) throw new Error('graph_mail_parity_bun_entrypoint_missing:' + bunEntrypoint);
+  const root = mkdtempSync(join(tmpdir(), 'narada-graph-mail-native-parity-'));
+  try {
+    const configDir = join(root, '.ai');
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(join(configDir, 'graph-mail-mcp.json'), JSON.stringify({
+      graph_base_url: 'https://graph.microsoft.com/v1.0///',
+      allowed_mailboxes: ['fixture@example.test'],
+      allowed_attachment_roots: ['attachments'],
+      allow_device_code_auth: true,
+      device_code_tenant_id: 'tenant-fixture',
+      device_code_client_id: 'client-fixture',
+      device_code_allowed_scopes: ['Mail.Read'],
+      allow_send_draft: true,
+      send_approval_token: '',
+      allow_folder_create: true,
+      allow_message_move: false,
+      allow_message_mark_read: true,
+      mailbox_organization_approval_token: 'org-fixture',
+    }), 'utf8');
+    const requests = [{
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'graph_mail_doctor', arguments: {} },
+    }, {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: { name: 'graph_mail_auth_status', arguments: {} },
+    }];
+    const env = { ...process.env };
+    for (const key of ['MS_GRAPH_ACCESS_TOKEN', 'GRAPH_ACCESS_TOKEN', 'GRAPH_TENANT_ID', 'GRAPH_CLIENT_ID', 'GRAPH_CLIENT_SECRET', 'GRAPH_TOKEN_ENDPOINT']) delete env[key];
+    const bun = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', [bunEntrypoint, '--site-root', root], requests, workspaceRoot, env);
+    const rust = runMailbox(executable, ['--surface-id', 'graph-mail', '--site-root', root], requests, workspaceRoot, env);
+    assertSame('graph_mail.doctor', mailboxStructured(bun, 1, 'bun'), mailboxStructured(rust, 1, 'rust'));
+    assertSame('graph_mail.auth_status', mailboxStructured(bun, 2, 'bun'), mailboxStructured(rust, 2, 'rust'));
+    return { status: 'passed', fixture: 'local_policy_posture', compared: ['doctor', 'auth_status'] };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 const mailboxParity = runMailboxParity();
 const artifactsParity = runArtifactsParity();
 const sopParity = runSopParity();
@@ -454,6 +500,7 @@ const surfaceFeedbackParity = runSurfaceFeedbackParity();
 const siteLoopParity = runSiteLoopParity();
 const calendarParity = runCalendarParity();
 const cloudflareParity = runCloudflareParity();
+const graphMailParity = runGraphMailParity();
 process.stdout.write(JSON.stringify({
   schema: 'narada.mcp_surfaces_native.protocol_parity.v1',
   status: 'passed',
@@ -468,4 +515,5 @@ process.stdout.write(JSON.stringify({
   site_loop_parity: siteLoopParity,
   calendar_parity: calendarParity,
   cloudflare_parity: cloudflareParity,
+  graph_mail_parity: graphMailParity,
 }) + '\n');
