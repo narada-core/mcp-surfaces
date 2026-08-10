@@ -61,7 +61,69 @@ fn tool(name: &str, description: &str, input_schema: Value, read_only: bool) -> 
 }
 
 fn guidance(args: &Map<String, Value>) -> Value {
-    json!({"schema":"narada.mcp_surface.guidance.v0","status":"ok","surface_id":"calendar","guidance_tool":"calendar_guidance","purpose":"Policy-bounded calendar reads and explicitly approved event writes.","requested":{"workflow":args.get("workflow").cloned().unwrap_or(Value::Null),"tool":args.get("tool").cloned().unwrap_or(Value::Null)},"first_use":["Call calendar_doctor first.","Use explicit start_datetime and end_datetime for event queries.","Use show/read tools before any mutation.","Keep the external Graph adapter authority explicit."],"boundaries":["This native layer does not transmit Graph credentials or mutate external calendar state.","The existing Graph adapter remains authoritative until a separately approved native adapter is implemented.","Materialized output refs are local and bounded."]})
+    let workflow = trimmed_arg(args, "workflow");
+    let tool = trimmed_arg(args, "tool");
+    json!({
+        "schema": "narada.mcp_surface.guidance.v0",
+        "status": "ok",
+        "surface_id": "calendar",
+        "guidance_tool": "calendar_guidance",
+        "purpose": "Policy-gated Microsoft Graph calendar reads and guarded event lifecycle.",
+        "requested": {"workflow": workflow, "tool": tool},
+        "first_use": [
+            "Call this guidance command when the surface is unfamiliar, when a refusal/error is unclear, or before composing a multi-step workflow.",
+            "Inspect policy/doctor/status tools before mutation or open-world operations.",
+            "Use bounded list/search/query tools for discovery, then show/read/detail tools before acting on a specific object.",
+            "Preserve structuredContent as authoritative evidence; text content is for assistant readability."
+        ],
+        "tool_preference": [
+            {"step":"orient","guidance":"Use *_guidance first when uncertain, then policy/doctor/status tools."},
+            {"step":"discover","guidance":"Use bounded list/search/query commands with explicit limits and filters."},
+            {"step":"inspect","guidance":"Use show/read/detail commands for exact targets before mutation."},
+            {"step":"mutate","guidance":"Only call mutation tools after policy allows it and intent, target, and expected result are explicit."},
+            {"step":"verify","guidance":"Read back state with the owning surface after any mutation."}
+        ],
+        "examples": [
+            {"intent":"First use","call":"calendar_guidance({})"},
+            {"intent":"Tool-specific help","call":"calendar_guidance({ tool: \"<tool_name>\" })"},
+            {"intent":"Workflow-specific help","call":"calendar_guidance({ workflow: \"<workflow_name>\" })"}
+        ],
+        "anti_patterns": [
+            "Do not guess hidden state from a tool name; use doctor/status/list/show tools for evidence.",
+            "Do not treat assistant text as the durable record when structuredContent is present.",
+            "Do not bypass the owning surface with shell scripts when a governed MCP tool exists.",
+            "Do not continue after malformed payloads, empty refs, or ambiguous target identifiers; stop and repair the input."
+        ],
+        "recovery": [
+            "For unknown_tool, call tools/list and this guidance command again after restart.",
+            "For policy refusal, inspect the surface policy/doctor output and report the exact refusal reason.",
+            "For oversized inputs, use the surface payload_ref or output_ref convention when it exists; otherwise reduce scope.",
+            "For unclear behavior, submit surface_feedback_submit with surface_id, kind, summary, reproduction steps, expected behavior, and impact."
+        ],
+        "feedback": {
+            "surface_id": "calendar",
+            "tool": "surface_feedback_submit",
+            "when": [
+                "guidance is missing, stale, or contradicted by live behavior",
+                "schema shape makes correct usage hard",
+                "errors hide the actionable refusal or recovery path"
+            ]
+        },
+        "boundaries": [
+            "Guidance is read-only model-facing operating advice.",
+            "Guidance does not weaken policy, authorize mutation, or replace tool schemas.",
+            "The owning MCP surface remains authoritative for state and enforcement."
+        ]
+    })
+}
+
+fn trimmed_arg(args: &Map<String, Value>, key: &str) -> Value {
+    args.get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| Value::String(value.to_string()))
+        .unwrap_or(Value::Null)
 }
 
 fn doctor(root: &Path) -> Result<Value, Value> {
