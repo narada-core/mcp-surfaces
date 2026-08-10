@@ -1,5 +1,6 @@
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde_json::{json, Map, Value};
+use crate::authority::{AuthorityAdapter, StdioAuthorityAdapter};
 use std::path::{Path, PathBuf};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -128,16 +129,30 @@ fn feedback_update_status(args: &Map<String, Value>, root: &Path) -> Result<Valu
     Ok(json!({"schema":"narada.surface_feedback.update_status.v1","status":"updated","feedback_id":id,"new_status":status,"resolved_by":principal,"resolution_note":note,"updated_at":now,"native_write":true}))
 }
 
-fn configured_task_call(name: &str, arguments: Value) -> Result<Option<Value>, Value> {
+fn configured_task_call(root: &Path, name: &str, arguments: Value) -> Result<Option<Value>, Value> {
+    let Some(adapter) = task_authority_adapter(root) else { return Ok(None); };
     let params = json!({"name": name, "arguments": arguments});
-    let Some(result) = crate::authority::call_if_configured("surface-feedback", "tools/call", params.as_object().expect("task authority params")) else {
-        return Ok(None);
-    };
-    let value = result?;
+    let value = adapter.call("tools/call", params.as_object().expect("task authority params"))?;
     if value.get("isError").and_then(Value::as_bool) == Some(true) {
         return Err(error("task_lifecycle_tool_refused", "task_lifecycle_tool_refused"));
     }
     Ok(Some(value.get("structuredContent").cloned().unwrap_or(value)))
+}
+
+fn task_authority_adapter(root: &Path) -> Option<StdioAuthorityAdapter> {
+    let configured = std::env::var("NARADA_SURFACE_FEEDBACK_TASK_AUTHORITY_ENTRYPOINT")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| std::env::var("NARADA_TASK_LIFECYCLE_NATIVE_ENTRYPOINT").ok().filter(|value| !value.trim().is_empty()));
+    let executable = configured.map(PathBuf::from).or_else(|| {
+        let current = std::env::current_exe().ok()?;
+        let shared_root = current.parent()?.parent()?.parent()?.parent()?;
+        let candidate = shared_root.join("mcp-lifecycle-native").join("dist").join("native").join(if cfg!(windows) { "narada-task-lifecycle-mcp.exe" } else { "narada-task-lifecycle-mcp" });
+        candidate.is_file().then_some(candidate)
+    })?;
+    let site_root = std::env::var("NARADA_SITE_ROOT").ok().filter(|value| !value.trim().is_empty()).map(PathBuf::from).unwrap_or_else(|| root.to_path_buf());
+    let args = vec!["--site-root".to_string(), site_root.to_string_lossy().to_string()];
+    Some(StdioAuthorityAdapter::new(executable.to_string_lossy().to_string(), args, "task-lifecycle"))
 }
 
 fn feedback_convert_to_task(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
@@ -165,9 +180,9 @@ fn feedback_convert_to_task(args: &Map<String, Value>, root: &Path) -> Result<Va
         "idempotency_key": format!("surface-feedback:{feedback_id}"),
     });
     let payload_args = json!({"payload_id":format!("surface-feedback-{feedback_id}-task"),"payload":payload,"created_by":std::env::var("NARADA_AGENT_ID").ok().unwrap_or_else(|| "surface-feedback".to_string())});
-    let Some(payload_result) = configured_task_call("mcp_payload_create", payload_args)? else { return Err(authority_boundary("surface_feedback_convert_to_task")); };
+    let Some(payload_result) = configured_task_call(root, "mcp_payload_create", payload_args)? else { return Err(authority_boundary("surface_feedback_convert_to_task")); };
     let payload_ref = payload_result.get("ref").or_else(|| payload_result.get("payload_ref")).and_then(Value::as_str).ok_or_else(|| error("feedback_task_payload_ref_missing", "feedback_task_payload_ref_missing"))?;
-    let Some(task_result) = configured_task_call("task_lifecycle_create", json!({"payload_ref":payload_ref}))? else { return Err(authority_boundary("surface_feedback_convert_to_task")); };
+    let Some(task_result) = configured_task_call(root, "task_lifecycle_create", json!({"payload_ref":payload_ref}))? else { return Err(authority_boundary("surface_feedback_convert_to_task")); };
     let task_number = task_result.get("task_number").and_then(Value::as_i64);
     let task_id = task_result.get("task_id").and_then(Value::as_str);
     let task_ref = task_result.get("task_ref").and_then(Value::as_str).map(ToOwned::to_owned)
