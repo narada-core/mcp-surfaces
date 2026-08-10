@@ -254,7 +254,78 @@ fn attention_summary(connection: &Connection, loop_id: &str) -> Result<Value, Va
     for row in rows { let value = row.map_err(|e| error("site_loop_attention_summary_failed", &e.to_string()))?; counts.insert(json_member(&value, "status").as_str().unwrap_or("unknown").to_string(), json_member(&value, "count")); }
     let open_count = counts.get("opened").and_then(Value::as_i64).unwrap_or(0);
     let acknowledged_count = counts.get("acknowledged").and_then(Value::as_i64).unwrap_or(0);
-    Ok(json!({"schema":"narada.site_operating_loop.attention_summary.v1","loop_id":loop_id,"counts":counts,"open_count":open_count,"acknowledged_count":acknowledged_count,"open_by_severity":{},"native_hydration":"not_enabled"}))
+    let mut severity_statement = connection.prepare("SELECT CASE WHEN json_valid(escalation_summary_json) THEN COALESCE(json_extract(escalation_summary_json, '$.severity'), json_extract(escalation_summary_json, '$.fields.severity'), 'warning') ELSE 'warning' END AS severity, COUNT(*) AS count FROM site_loop_escalations WHERE loop_id = ? AND status = 'opened' GROUP BY severity").map_err(|e| error("site_loop_attention_summary_failed", &e.to_string()))?;
+    let severity_rows = severity_statement.query_map(params![loop_id], row_value).map_err(|e| error("site_loop_attention_summary_failed", &e.to_string()))?;
+    let mut open_by_severity = Map::new();
+    for row in severity_rows { let value = row.map_err(|e| error("site_loop_attention_summary_failed", &e.to_string()))?; open_by_severity.insert(json_member(&value, "severity").as_str().unwrap_or("warning").to_string(), json_member(&value, "count")); }
+    Ok(json!({"schema":"narada.site_operating_loop.attention_summary.v1","loop_id":loop_id,"counts":counts,"open_count":open_count,"acknowledged_count":acknowledged_count,"open_by_severity":open_by_severity}))
+}
+
+fn table_exists(connection: &Connection, name: &str) -> bool {
+    connection.query_row("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1", params![name], |row| row.get::<_, i64>(0)).optional().ok().flatten().is_some()
+}
+
+fn unresolved_backlog_summary(connection: &Connection, loop_id: &str) -> Result<Value, Value> {
+    let empty = || json!({"schema":"narada.site_operating_loop.unresolved_backlog_summary.v1","loop_id":loop_id,"unresolved_count":0,"counts":{},"directives":[],"returned_count":0,"truncated":false});
+    if !table_exists(connection, "directive_outcome_latest") { return Ok(empty()); }
+    let statuses = ["received", "carrier_accepted", "delivery_stale", "action_stale", "blocked_no_carrier"];
+    let mut count_statement = connection.prepare("SELECT outcome, COUNT(*) AS count FROM directive_outcome_latest WHERE loop_id = ? AND outcome IN ('received','carrier_accepted','delivery_stale','action_stale','blocked_no_carrier') GROUP BY outcome").map_err(|e| error("site_loop_unresolved_backlog_summary_failed", &e.to_string()))?;
+    let count_rows = count_statement.query_map(params![loop_id], row_value).map_err(|e| error("site_loop_unresolved_backlog_summary_failed", &e.to_string()))?;
+    let mut counts = Map::new();
+    let mut unresolved_count = 0_i64;
+    for row in count_rows {
+        let value = row.map_err(|e| error("site_loop_unresolved_backlog_summary_failed", &e.to_string()))?;
+        let outcome = json_member(&value, "outcome").as_str().unwrap_or("unknown").to_string();
+        let count = json_member(&value, "count").as_i64().unwrap_or(0);
+        if statuses.contains(&outcome.as_str()) { unresolved_count += count; }
+        counts.insert(outcome, json!(count));
+    }
+    let mut row_statement = connection.prepare("SELECT directive_id, outcome, observed_at, recorded_at FROM directive_outcome_latest WHERE loop_id = ? AND outcome IN ('received','carrier_accepted','delivery_stale','action_stale','blocked_no_carrier') ORDER BY observed_at DESC, recorded_at DESC LIMIT 25").map_err(|e| error("site_loop_unresolved_backlog_summary_failed", &e.to_string()))?;
+    let rows = row_statement.query_map(params![loop_id], row_value).map_err(|e| error("site_loop_unresolved_backlog_summary_failed", &e.to_string()))?;
+    let mut directives = Vec::new();
+    for row in rows {
+        let value = row.map_err(|e| error("site_loop_unresolved_backlog_summary_failed", &e.to_string()))?;
+        directives.push(json!({"directive_id":json_member(&value,"directive_id"),"status":json_member(&value,"outcome"),"observed_at":if !json_member(&value,"observed_at").is_null(){json_member(&value,"observed_at")}else{json_member(&value,"recorded_at")}}));
+    }
+    Ok(json!({"schema":"narada.site_operating_loop.unresolved_backlog_summary.v1","loop_id":loop_id,"unresolved_count":unresolved_count,"counts":counts,"directives":directives,"returned_count":directives.len(),"truncated":(directives.len() as i64) < unresolved_count}))
+}
+
+fn directive_outcome_summary(connection: &Connection, loop_id: &str) -> Result<Value, Value> {
+    let mut counts = Map::new();
+    if table_exists(connection, "directive_outcome_latest") {
+        let mut statement = connection.prepare("SELECT outcome, COUNT(*) AS count FROM directive_outcome_latest WHERE loop_id = ? GROUP BY outcome").map_err(|e| error("site_loop_directive_outcome_summary_failed", &e.to_string()))?;
+        let rows = statement.query_map(params![loop_id], row_value).map_err(|e| error("site_loop_directive_outcome_summary_failed", &e.to_string()))?;
+        for row in rows { let value = row.map_err(|e| error("site_loop_directive_outcome_summary_failed", &e.to_string()))?; counts.insert(json_member(&value,"outcome").as_str().unwrap_or("unknown").to_string(), json_member(&value,"count")); }
+    }
+    let latest_count = counts.values().map(|value| value.as_i64().unwrap_or(0)).sum::<i64>();
+    Ok(json!({"schema":"narada.site_operating_loop.directive_outcome_summary.v1","loop_id":loop_id,"counts":counts,"latest_count":latest_count}))
+}
+
+fn health_summary(connection: &Connection, loop_id: &str) -> Result<Value, Value> {
+    let attention = attention_summary(connection, loop_id)?;
+    let unresolved = unresolved_backlog_summary(connection, loop_id)?;
+    let directive_outcomes = directive_outcome_summary(connection, loop_id)?;
+    let row = if table_exists(connection, "site_loop_health") {
+        connection.query_row("SELECT * FROM site_loop_health WHERE loop_id = ?", params![loop_id], row_value).optional().map_err(|e| error("site_loop_health_query_failed", &e.to_string()))?
+    } else { None };
+    let Some(value) = row else { return Ok(json!({"schema":"narada.site_operating_loop.health.v1","loop_id":loop_id,"status":"unknown","consecutive_failures":0,"attention":attention,"unresolved_backlog":unresolved,"directive_outcomes":directive_outcomes})); };
+    let stored_status = json_member(&value, "status").as_str().unwrap_or("unknown").to_string();
+    let degraded = stored_status == "healthy" && (attention.get("open_count").and_then(Value::as_i64).unwrap_or(0) > 0 || unresolved.get("unresolved_count").and_then(Value::as_i64).unwrap_or(0) > 0);
+    Ok(json!({"schema":"narada.site_operating_loop.health.v1","loop_id":json_member(&value,"loop_id"),"status":if degraded{"degraded"}else{stored_status.as_str()},"persisted_status":stored_status,"consecutive_failures":json_member(&value,"consecutive_failures"),"last_successful_run_id":json_member(&value,"last_successful_run_id"),"last_success_at":json_member(&value,"last_success_at"),"last_run_id":json_member(&value,"last_run_id"),"last_run_at":json_member(&value,"last_run_at"),"failing_step":json_member(&value,"failing_step"),"last_error":json_member(&value,"last_error_json"),"last_error_evidence_ref":json_member(&value,"last_error_evidence_ref"),"last_error_evidence_sha256":json_member(&value,"last_error_evidence_sha256"),"last_error_evidence_bytes":json_member(&value,"last_error_evidence_bytes"),"updated_at":json_member(&value,"updated_at"),"attention":attention,"unresolved_backlog":unresolved,"directive_outcomes":directive_outcomes}))
+}
+
+fn lock_summary(connection: &Connection, loop_id: &str) -> Result<Value, Value> {
+    if !table_exists(connection, "site_loop_locks") { return Ok(Value::Null); }
+    let row = connection.query_row("SELECT * FROM site_loop_locks WHERE loop_id = ?", params![loop_id], row_value).optional().map_err(|e| error("site_loop_lock_query_failed", &e.to_string()))?;
+    let Some(value) = row else { return Ok(Value::Null); };
+    Ok(json!({"schema":"narada.site_operating_loop.lock.v1","loop_id":json_member(&value,"loop_id"),"run_id":json_member(&value,"run_id"),"owner_id":json_member(&value,"owner_id"),"acquired_at":json_member(&value,"acquired_at"),"expires_at":json_member(&value,"expires_at"),"stale_recovery_count":json_member(&value,"stale_recovery_count"),"updated_at":json_member(&value,"updated_at")}))
+}
+
+fn control_summary(connection: &Connection, loop_id: &str) -> Result<Value, Value> {
+    if !table_exists(connection, "site_loop_control") { return Ok(json!({"schema":"narada.site_operating_loop.control.v1","loop_id":loop_id,"paused":false,"mode":"running","reason":Value::Null,"updated_at":Value::Null})); }
+    let row = connection.query_row("SELECT * FROM site_loop_control WHERE loop_id = ?", params![loop_id], row_value).optional().map_err(|e| error("site_loop_control_query_failed", &e.to_string()))?;
+    let Some(value) = row else { return Ok(json!({"schema":"narada.site_operating_loop.control.v1","loop_id":loop_id,"paused":false,"mode":"running","reason":Value::Null,"updated_at":Value::Null})); };
+    Ok(json!({"schema":"narada.site_operating_loop.control.v1","loop_id":json_member(&value,"loop_id"),"paused":json_member(&value,"paused").as_i64().unwrap_or(0) != 0,"mode":json_member(&value,"mode"),"reason":json_member(&value,"reason"),"updated_at":json_member(&value,"updated_at")}))
 }
 
 fn attention_list(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
@@ -350,8 +421,21 @@ fn test_list(root: &Path) -> Result<Value, Value> {
 }
 
 fn status(root: &Path) -> Result<Value, Value> {
-    let doctor = doctor(root)?;
-    Ok(json!({"schema":"narada.site_loop.status.v1","status":"ok","site_root":root.to_string_lossy(),"config_status":doctor.get("config_status"),"loop_id":doctor.get("loop_id"),"site_id":doctor.get("site_id"),"execution":"not_probed_by_native_read_slice"}))
+    let loop_id = configured_loop_id(&Map::new(), root);
+    let Some(connection) = open_db(root)? else {
+        let doctor = doctor(root)?;
+        return Ok(json!({"schema":"narada.site_loop.status.v1","status":"ok","site_root":root.to_string_lossy(),"config_status":doctor.get("config_status"),"loop_id":doctor.get("loop_id"),"site_id":doctor.get("site_id"),"execution":"not_probed_by_native_read_slice"}));
+    };
+    let latest = if table_exists(&connection, "site_loop_runs") {
+        connection.query_row("SELECT * FROM site_loop_runs WHERE loop_id = ? ORDER BY started_at DESC LIMIT 1", params![loop_id], row_value).optional().map_err(|e| error("site_loop_status_query_failed", &e.to_string()))?.map(run_record)
+    } else { None };
+    let mut counts = Map::new();
+    if table_exists(&connection, "site_loop_runs") {
+        let mut statement = connection.prepare("SELECT status, COUNT(*) AS count FROM site_loop_runs WHERE loop_id = ? GROUP BY status").map_err(|e| error("site_loop_status_query_failed", &e.to_string()))?;
+        let rows = statement.query_map(params![loop_id], row_value).map_err(|e| error("site_loop_status_query_failed", &e.to_string()))?;
+        for row in rows { let value = row.map_err(|e| error("site_loop_status_query_failed", &e.to_string()))?; counts.insert(json_member(&value,"status").as_str().unwrap_or("unknown").to_string(), json_member(&value,"count")); }
+    }
+    Ok(json!({"schema":"narada.site_operating_loop.status.v1","loop_id":loop_id,"latest":latest,"counts":counts,"health":health_summary(&connection, &loop_id)?,"lock":lock_summary(&connection, &loop_id)?,"control":control_summary(&connection, &loop_id)?,"attention":attention_summary(&connection, &loop_id)?,"directive_outcomes":directive_outcome_summary(&connection, &loop_id)?,"runtime_host":Value::Null}))
 }
 
 fn unified_status(root: &Path) -> Result<Value, Value> {

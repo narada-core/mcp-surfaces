@@ -320,21 +320,35 @@ function runSiteLoopParity() {
       },
     }), 'utf8');
     writeFileSync(join(root, 'README.md'), 'Fixture Site Loop documentation.\n', 'utf8');
+    const bunCommand = process.env.NARADA_BUN_EXECUTABLE ?? 'bun';
+    const prepare = spawnSync(bunCommand, ['-e', "import { openSiteLoopStore } from './packages/site-loop-mcp/src/site-loop/site-loop-store.ts'; const store = openSiteLoopStore(process.env.NARADA_PARITY_ROOT, { storeMode: 'prepare' }); store.close();"], {
+      cwd: workspaceRoot,
+      env: { ...process.env, NARADA_PARITY_ROOT: root },
+      encoding: 'utf8',
+      timeout: 15_000,
+      maxBuffer: 2 * 1024 * 1024,
+      windowsHide: true,
+    });
+    if (prepare.error) throw new Error('site_loop_parity_store_prepare_failed:' + prepare.error.message);
+    if (prepare.status !== 0) throw new Error('site_loop_parity_store_prepare_exit:' + prepare.status + ':' + String(prepare.stderr).slice(0, 500));
     const requests = [{ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'site_loop_config_validate', arguments: {} } }, {
       jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'site_docs_list', arguments: {} },
     }, {
       jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'site_docs_show', arguments: { path: 'README.md' } },
     }, {
       jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'site_test_list', arguments: {} },
+    }, {
+      jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'site_loop_status', arguments: {} },
     }];
-    const bun = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', [bunEntrypoint, '--site-root', root], requests, workspaceRoot);
+    const bun = runMailbox(bunCommand, [bunEntrypoint, '--site-root', root], requests, workspaceRoot);
     const rust = runMailbox(executable, ['--surface-id', 'site-loop', '--site-root', root], requests, workspaceRoot);
     const comparable = (value) => Object.fromEntries(['schema', 'status', 'site_root', 'path', 'schema_id', 'config_schema', 'loop_id', 'site_id', 'display_name', 'errors', 'active_tools_refuse'].map((key) => [key, value?.[key]]));
     assertSame('site_loop.config_validate', comparable(mailboxStructured(bun, 1, 'bun')), comparable(mailboxStructured(rust, 1, 'rust')));
     assertSame('site_loop.docs_list', mailboxStructured(bun, 2, 'bun'), mailboxStructured(rust, 2, 'rust'));
     assertSame('site_loop.docs_show', mailboxStructured(bun, 3, 'bun'), mailboxStructured(rust, 3, 'rust'));
     assertSame('site_loop.tests_list', mailboxStructured(bun, 4, 'bun'), mailboxStructured(rust, 4, 'rust'));
-    return { status: 'passed', fixture: 'config_docs_and_tests_read', compared: ['config_validate', 'docs_list', 'docs_show', 'tests_list'] };
+    assertSame('site_loop.status', mailboxStructured(bun, 5, 'bun'), mailboxStructured(rust, 5, 'rust'));
+    return { status: 'passed', fixture: 'config_docs_tests_and_status_read', compared: ['config_validate', 'docs_list', 'docs_show', 'tests_list', 'status'] };
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
