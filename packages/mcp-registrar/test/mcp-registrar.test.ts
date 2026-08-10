@@ -1153,6 +1153,9 @@ try {
       ['catalog-observation', []],
       ['operator-routing', ['--site-root', '{site_root}']],
       ['site-inbox', ['--site-root', '{site_root}']],
+      ['site-lifecycle', ['--site-root', '{site_root}']],
+      ['site-registry', ['--site-root', '{site_root}']],
+      ['project-state', ['--site-root', '{site_root}']],
     ] as const) {
       const sharedBindConfig: any = buildSiteBindConfig(
         { site_id: 'shared-' + surfaceId, root, config_path: join(root, 'site.json'), surfaces: [] },

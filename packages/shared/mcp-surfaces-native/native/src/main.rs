@@ -8,6 +8,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 mod site_inbox;
+mod simple_surfaces;
 
 const LEGACY_PROTOCOL_VERSION: &str = "2024-11-05";
 const MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
@@ -195,7 +196,13 @@ fn validate_modern_request(params: &Map<String, Value>) -> Result<(), Value> {
 }
 
 fn server_name(options: &Options) -> String {
-    if options.surface_id == "site-inbox" { "narada-site-inbox-mcp".to_string() } else { format!("{}-mcp", options.surface_id) }
+    match options.surface_id.as_str() {
+        "site-inbox" => "narada-site-inbox-mcp".to_string(),
+        "site-lifecycle" => "site-lifecycle-mcp".to_string(),
+        "site-registry" => "site-registry-mcp".to_string(),
+        "project-state" => "project-state-mcp".to_string(),
+        _ => format!("{}-mcp", options.surface_id),
+    }
 }
 
 fn capabilities(surface_id: &str) -> Value {
@@ -267,6 +274,7 @@ fn list_tools(surface_id: &str) -> Vec<Value> {
                 "additionalProperties": false
             }), false),
         ],
+        "site-lifecycle" | "site-registry" | "project-state" => simple_surfaces::list_tools(surface_id),
         _ => Vec::new(),
     }
 }
@@ -303,6 +311,9 @@ fn call_tool(surface_id: &str, params: &Map<String, Value>, options: &Options) -
         ("operator-routing", "operator_route_doctor") => operator_route_doctor(options),
         ("operator-routing", "operator_route_request") => operator_route_request(&args, options),
         ("site-inbox", name) => site_inbox::call_tool(name, &args, &options.site_root),
+        ("site-lifecycle", name) | ("site-registry", name) | ("project-state", name) => {
+            simple_surfaces::call_tool(surface_id, name, &args, &options.site_root)
+        }
         (_, unknown) => return Err(diagnostic("unknown_tool", &format!("unknown_tool:{unknown}"), json!({ "tool_name": unknown }))),
     }?;
     let is_error = result.get("status").and_then(Value::as_str) == Some("unavailable");
