@@ -221,6 +221,28 @@ function runMailboxParity() {
   }
 }
 
+function runDelegatedTaskParity() {
+  const workspaceRoot = resolve(packageRoot, '..', '..', '..');
+  const bunEntrypoint = join(workspaceRoot, 'packages', 'delegated-task-mcp', 'src', 'main.ts');
+  if (!existsSync(bunEntrypoint)) throw new Error('delegated_task_parity_bun_entrypoint_missing:' + bunEntrypoint);
+  const root = mkdtempSync(join(tmpdir(), 'narada-delegated-task-native-parity-'));
+  try {
+    const requests = [
+      { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'delegated_task_template_catalog', arguments: {} } },
+      { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'delegated_task_template_catalog', arguments: { template_id: 'commit_push_guarded' } } },
+      { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'delegated_task_template_catalog', arguments: { template_id: 'unknown' } } },
+    ];
+    const bun = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', [bunEntrypoint, '--task-root', root, '--site-root', root, '--allowed-root', root], requests, workspaceRoot);
+    const rust = runMailbox(executable, ['--surface-id', 'delegated-task', '--site-root', root], requests, workspaceRoot);
+    for (const request of requests) {
+      assertSame(`delegated_task.template_catalog.${request.id}`, mailboxStructured(bun, request.id, 'bun'), mailboxStructured(rust, request.id, 'rust'));
+    }
+    return { status: 'passed', fixture: 'full_template_catalog', compared: ['all', 'commit_push_guarded', 'unknown'] };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 function runArtifactsParity() {
   const workspaceRoot = resolve(packageRoot, '..', '..', '..');
   const bunEntrypoint = join(workspaceRoot, 'packages', 'artifacts-mcp', 'src', 'main.ts');
@@ -676,6 +698,7 @@ function runNarsSessionParity() {
 }
 
 const mailboxParity = runMailboxParity();
+const delegatedTaskParity = runDelegatedTaskParity();
 const artifactsParity = runArtifactsParity();
 const sopParity = runSopParity();
 const surfaceFeedbackParity = runSurfaceFeedbackParity();
@@ -695,6 +718,7 @@ process.stdout.write(JSON.stringify({
   modern: '2026-07-28',
   defaults_changed: false,
   mailbox_parity: mailboxParity,
+  delegated_task_parity: delegatedTaskParity,
   artifacts_parity: artifactsParity,
   sop_parity: sopParity,
   surface_feedback_parity: surfaceFeedbackParity,
