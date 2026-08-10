@@ -307,6 +307,22 @@ function componentKindForSurface(surfaceId: string): string {
   if (surfaceId === 'runtime-introspection' || surfaceId === 'runtime-introspection-mcp.local') return 'runtime-introspection-mcp';
   if (surfaceId === 'site-coherence' || surfaceId === 'site-coherence-mcp.local') return 'site-coherence-mcp';
   if (surfaceId === 'launcher' || surfaceId === 'launcher-mcp.local') return 'launcher-mcp';
+  if (surfaceId === 'mailbox' || surfaceId === 'mailbox-mcp.local') return 'mailbox-mcp';
+  if (surfaceId === 'graph-mail' || surfaceId === 'graph-mail-mcp.local') return 'graph-mail-mcp';
+  if (surfaceId === 'calendar' || surfaceId === 'calendar-mcp.local') return 'calendar-mcp';
+  if (surfaceId === 'site-loop' || surfaceId === 'site-loop-mcp.local') return 'site-loop-mcp';
+  if (surfaceId === 'worker-delegation' || surfaceId === 'worker-delegation-mcp.local') return 'worker-delegation-mcp';
+  if (surfaceId === 'delegated-task' || surfaceId === 'delegated-task-mcp.local') return 'delegated-task-mcp';
+  if (surfaceId === 'sop' || surfaceId === 'sop-mcp.local') return 'sop-mcp';
+  if (surfaceId === 'scheduler' || surfaceId === 'scheduler-mcp.local') return 'scheduler-mcp';
+  if (surfaceId === 'surface-feedback' || surfaceId === 'surface-feedback-mcp.local') return 'surface-feedback-mcp';
+  if (surfaceId === 'speech' || surfaceId === 'speech-mcp.local') return 'speech-mcp';
+  if (surfaceId === 'artifacts' || surfaceId === 'artifacts-mcp.local') return 'artifacts-mcp';
+  if (surfaceId === 'nars-session' || surfaceId === 'nars-session-mcp.local') return 'nars-session-mcp';
+  if (surfaceId === 'quota-meter' || surfaceId === 'quota-meter-mcp.local') return 'quota-meter-mcp';
+  if (surfaceId === 'operator-console-overlay' || surfaceId === 'operator-console-overlay-mcp.local') return 'operator-console-overlay-mcp';
+  if (surfaceId === 'browser-control' || surfaceId === 'browser-control-mcp.local') return 'browser-control-mcp';
+  if (surfaceId === 'cloudflare-carrier' || surfaceId === 'cloudflare-carrier-mcp.local') return 'cloudflare-carrier-mcp';
   return 'mcp-javascript-surface';
 }
 
@@ -1890,7 +1906,7 @@ function carrierLaunchCommand(
       && surfaceId === 'local-filesystem');
   const useNativeStructuredCommandApplet = selectedEngine === 'rust' && componentKind === 'structured-command-mcp';
   const useNativeLifecycle = selectedEngine === 'rust' && (componentKind === 'task-lifecycle-mcp' || componentKind === 'work-lifecycle-mcp');
-  const useNativeSharedSurface = selectedEngine === 'rust' && (surfaceId === 'catalog-observation' || surfaceId === 'operator-routing' || surfaceId === 'site-inbox' || surfaceId === 'site-lifecycle' || surfaceId === 'site-registry' || surfaceId === 'project-state' || surfaceId === 'runtime-introspection' || surfaceId === 'site-coherence' || surfaceId === 'launcher');
+  const useNativeSharedSurface = selectedEngine === 'rust' && (surfaceId === 'catalog-observation' || surfaceId === 'operator-routing' || surfaceId === 'site-inbox' || surfaceId === 'site-lifecycle' || surfaceId === 'site-registry' || surfaceId === 'project-state' || surfaceId === 'runtime-introspection' || surfaceId === 'site-coherence' || surfaceId === 'launcher' || surfaceId === 'mailbox' || surfaceId === 'graph-mail' || surfaceId === 'calendar' || surfaceId === 'site-loop' || surfaceId === 'worker-delegation' || surfaceId === 'delegated-task' || surfaceId === 'sop' || surfaceId === 'scheduler' || surfaceId === 'surface-feedback' || surfaceId === 'speech' || surfaceId === 'artifacts' || surfaceId === 'nars-session' || surfaceId === 'quota-meter' || surfaceId === 'operator-console-overlay' || surfaceId === 'browser-control' || surfaceId === 'cloudflare-carrier');
   const nativeApplet = useNativeFilesystemApplet ? 'filesystem' : useNativeStructuredCommandApplet ? 'structured-command' : null;
   const nativeSharedSurfaceEntrypoint = MCP_NATIVE_SHARED_SURFACES_ENTRYPOINT;
   const nativeLifecycleEntrypoint = componentKind === 'task-lifecycle-mcp' ? MCP_NATIVE_TASK_LIFECYCLE_ENTRYPOINT : MCP_NATIVE_WORK_LIFECYCLE_ENTRYPOINT;
