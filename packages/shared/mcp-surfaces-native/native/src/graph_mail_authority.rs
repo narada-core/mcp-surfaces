@@ -3,7 +3,7 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
@@ -11,6 +11,17 @@ const MAX_CONFIG_BYTES: u64 = 512 * 1024;
 const MAX_AUDIT_BYTES: usize = 64 * 1024;
 const DEFAULT_QUERY_TOP: u64 = 20;
 const DEFAULT_FOLDER_TOP: u64 = 50;
+const MAX_DOWNLOADED_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
+const ALLOWED_DOWNLOADED_ATTACHMENT_TYPES: &[&str] = &[
+    "application/pdf",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "text/csv",
+    "text/plain",
+    "image/png",
+    "image/jpeg",
+];
 
 /// Direct, bounded Microsoft Graph authority for the provider-facing part of
 /// graph-mail. Operations remain opt-in until the complete provider contract
@@ -36,6 +47,7 @@ pub fn supports(name: &str) -> bool {
             | "graph_mail_message_mark_read"
             | "graph_mail_attachment_list"
             | "graph_mail_attachment_get"
+            | "graph_mail_attachment_download_file"
             | "graph_mail_attachment_add"
             | "graph_mail_attachment_upload_session_create"
             | "graph_mail_attachment_delete"
@@ -61,6 +73,7 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<V
         "graph_mail_message_mark_read" => mark_read(&policy, args, root),
         "graph_mail_attachment_list" => attachment_list(&policy, args),
         "graph_mail_attachment_get" => attachment_get(&policy, args),
+        "graph_mail_attachment_download_file" => attachment_download_file(&policy, args, root),
         "graph_mail_attachment_add" => attachment_add(&policy, args),
         "graph_mail_attachment_upload_session_create" => attachment_upload_session_create(&policy, args),
         "graph_mail_attachment_delete" => attachment_delete(&policy, args),
@@ -83,6 +96,7 @@ struct Policy {
     allow_message_mark_read: bool,
     allow_send_draft: bool,
     send_approval_token: Option<String>,
+    allowed_attachment_roots: Vec<PathBuf>,
     organization_approval_token: Option<String>,
 }
 
@@ -125,6 +139,19 @@ impl Policy {
                 .and_then(Value::as_str)
                 .filter(|value| !value.trim().is_empty())
                 .map(ToOwned::to_owned),
+            allowed_attachment_roots: object
+                .get("allowed_attachment_roots")
+                .or_else(|| object.get("allowedAttachmentRoots"))
+                .and_then(Value::as_array)
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .filter(|value| !value.trim().is_empty())
+                        .map(|value| root.join(value))
+                        .collect()
+                })
+                .unwrap_or_default(),
             organization_approval_token,
         })
     }
@@ -316,6 +343,140 @@ fn attachment_get(policy: &Policy, args: &Map<String, Value>) -> Result<Value, V
         "schema":"narada.graph_mail_mcp.attachment.v1",
         "status":"ok",
         "attachment":attachment
+    }))
+}
+
+fn attachment_download_file(
+    policy: &Policy,
+    args: &Map<String, Value>,
+    root: &Path,
+) -> Result<Value, Value> {
+    let message_id = attachment_message_id(args)?;
+    let attachment_id = required_string(args, "attachment_id")?;
+    let destination = resolve_attachment_output_path(
+        root,
+        args,
+        &policy.allowed_attachment_roots,
+    )?;
+    let suffix = format!(
+        "messages/{}/attachments/{}",
+        encode_component(&message_id),
+        encode_component(&attachment_id)
+    );
+    let graph = policy
+        .adapter
+        .request("GET", mailbox(args), &suffix, &Map::new(), None)?;
+    let name = graph
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(&attachment_id)
+        .to_string();
+    let content_type = graph
+        .get("contentType")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| infer_content_type(&name));
+    if !ALLOWED_DOWNLOADED_ATTACHMENT_TYPES
+        .iter()
+        .any(|value| value.eq_ignore_ascii_case(&content_type))
+    {
+        return Err(unavailable(
+            "attachment_download_content_type_not_allowed",
+            &content_type,
+        ));
+    }
+    let content_base64 = graph
+        .get("contentBytes")
+        .and_then(Value::as_str)
+        .or_else(|| graph.get("content_base64").and_then(Value::as_str))
+        .ok_or_else(|| unavailable("attachment_download_content_missing", "contentBytes missing"))?;
+    let bytes = decode_base64(content_base64).map_err(|reason| unavailable(&reason, "invalid attachment content"))?;
+    if bytes.is_empty() {
+        return Err(unavailable(
+            "attachment_download_content_empty",
+            "attachment content is empty",
+        ));
+    }
+    if bytes.len() > MAX_DOWNLOADED_ATTACHMENT_BYTES {
+        return Err(unavailable(
+            "attachment_download_too_large",
+            &bytes.len().to_string(),
+        ));
+    }
+    if let Some(size) = graph.get("size").and_then(Value::as_u64) {
+        if size != bytes.len() as u64 {
+            return Err(unavailable(
+                "attachment_download_size_mismatch",
+                &format!("{size}:{}", bytes.len()),
+            ));
+        }
+    }
+    let digest = hex_lower(&Sha256::digest(&bytes));
+    if destination.exists() {
+        let existing = fs::read(&destination)
+            .map_err(|error| unavailable("attachment_download_read_failed", &error.to_string()))?;
+        if hex_lower(&Sha256::digest(&existing)) != digest {
+            return Err(unavailable(
+                "attachment_download_destination_conflict",
+                "existing destination has a different digest",
+            ));
+        }
+        return Ok(json!({
+            "schema":"narada.graph_mail_mcp.attachment_download_file.v1",
+            "status":"already_materialized",
+            "message_id":message_id,
+            "attachment_id":attachment_id,
+            "file_path":display_path(&destination),
+            "name":name,
+            "content_type":content_type,
+            "size":bytes.len(),
+            "sha256":digest
+        }));
+    }
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| unavailable("attachment_download_directory_failed", &error.to_string()))?;
+    }
+    let temporary = PathBuf::from(format!("{}.{}.tmp", destination.display(), std::process::id()));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(|error| unavailable("attachment_download_write_failed", &error.to_string()))?;
+    if let Err(error) = file.write_all(&bytes) {
+        let _ = fs::remove_file(&temporary);
+        return Err(unavailable("attachment_download_write_failed", &error.to_string()));
+    }
+    drop(file);
+    if let Err(error) = fs::rename(&temporary, &destination) {
+        let _ = fs::remove_file(&temporary);
+        return Err(unavailable("attachment_download_materialize_failed", &error.to_string()));
+    }
+    record_audit(
+        root,
+        json!({
+            "event_kind":"attachment_download_file_completed",
+            "mailbox_id":mailbox_value(args),
+            "message_id":message_id,
+            "attachment_id":attachment_id,
+            "name":name,
+            "content_type":content_type,
+            "size":bytes.len(),
+            "sha256":digest
+        }),
+    )?;
+    Ok(json!({
+        "schema":"narada.graph_mail_mcp.attachment_download_file.v1",
+        "status":"materialized",
+        "message_id":message_id,
+        "attachment_id":attachment_id,
+        "file_path":display_path(&destination),
+        "name":name,
+        "content_type":content_type,
+        "size":bytes.len(),
+        "sha256":digest
     }))
 }
 
@@ -1007,6 +1168,172 @@ fn valid_base64(value: &str) -> bool {
 
 fn base64_decoded_size(value: &str) -> usize {
     value.len() / 4 * 3 - value.as_bytes().iter().rev().take_while(|byte| **byte == b'=').count()
+}
+
+fn decode_base64(value: &str) -> Result<Vec<u8>, &'static str> {
+    if !valid_base64(value) {
+        return Err("attachment_content_base64_invalid");
+    }
+    let mut output = Vec::with_capacity(base64_decoded_size(value));
+    let bytes = value.as_bytes();
+    for chunk in bytes.chunks(4) {
+        let a = base64_value(chunk[0]).ok_or("attachment_content_base64_invalid")?;
+        let b = base64_value(chunk[1]).ok_or("attachment_content_base64_invalid")?;
+        let c = if chunk[2] == b'=' { 0 } else { base64_value(chunk[2]).ok_or("attachment_content_base64_invalid")? };
+        let d = if chunk[3] == b'=' { 0 } else { base64_value(chunk[3]).ok_or("attachment_content_base64_invalid")? };
+        output.push((a << 2) | (b >> 4));
+        if chunk[2] != b'=' {
+            output.push((b << 4) | (c >> 2));
+        }
+        if chunk[3] != b'=' {
+            output.push((c << 6) | d);
+        }
+    }
+    Ok(output)
+}
+
+fn base64_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'A'..=b'Z' => Some(byte - b'A'),
+        b'a'..=b'z' => Some(byte - b'a' + 26),
+        b'0'..=b'9' => Some(byte - b'0' + 52),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
+    }
+}
+
+fn infer_content_type(file_name: &str) -> String {
+    let lower = file_name.to_ascii_lowercase();
+    if lower.ends_with(".pdf") {
+        "application/pdf".to_string()
+    } else if lower.ends_with(".pptx") {
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation".to_string()
+    } else if lower.ends_with(".docx") {
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document".to_string()
+    } else if lower.ends_with(".xlsx") {
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".to_string()
+    } else if lower.ends_with(".csv") {
+        "text/csv".to_string()
+    } else if lower.ends_with(".txt") {
+        "text/plain".to_string()
+    } else if lower.ends_with(".png") {
+        "image/png".to_string()
+    } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+        "image/jpeg".to_string()
+    } else {
+        "application/octet-stream".to_string()
+    }
+}
+
+fn resolve_attachment_output_path(
+    root: &Path,
+    args: &Map<String, Value>,
+    configured_roots: &[PathBuf],
+) -> Result<PathBuf, Value> {
+    let input = required_string(args, "file_path")?;
+    let candidate = root.join(&input);
+    let roots: Vec<PathBuf> = if configured_roots.is_empty() {
+        vec![root.to_path_buf()]
+    } else {
+        configured_roots.to_vec()
+    };
+    if !roots.iter().any(|parent| path_inside(&candidate, parent)) {
+        return Err(unavailable(
+            "attachment_file_path_not_allowed",
+            "destination is outside the configured attachment roots",
+        ));
+    }
+    if same_path(&candidate, root) {
+        return Err(unavailable(
+            "attachment_file_path_not_file",
+            "destination must be a file",
+        ));
+    }
+    let canonical_roots: Vec<PathBuf> = roots
+        .iter()
+        .map(|path| {
+            fs::canonicalize(path)
+                .map_err(|_| unavailable("attachment_file_root_missing", &path.to_string_lossy()))
+        })
+        .collect::<Result<_, _>>()?;
+    let existing = nearest_existing_path(&candidate)?;
+    let canonical_existing = fs::canonicalize(&existing)
+        .map_err(|error| unavailable("attachment_file_path_parent_missing", &error.to_string()))?;
+    if !canonical_roots
+        .iter()
+        .any(|parent| path_inside(&canonical_existing, parent))
+    {
+        return Err(unavailable(
+            "attachment_file_path_symlink_escape",
+            "destination parent escapes the configured attachment roots",
+        ));
+    }
+    if candidate.exists() {
+        let canonical_candidate = fs::canonicalize(&candidate)
+            .map_err(|error| unavailable("attachment_file_path_symlink_escape", &error.to_string()))?;
+        if !canonical_roots
+            .iter()
+            .any(|parent| path_inside(&canonical_candidate, parent))
+        {
+            return Err(unavailable(
+                "attachment_file_path_symlink_escape",
+                "destination escapes the configured attachment roots",
+            ));
+        }
+    }
+    Ok(candidate)
+}
+
+fn nearest_existing_path(candidate: &Path) -> Result<PathBuf, Value> {
+    let mut current = candidate.to_path_buf();
+    while !current.exists() {
+        let Some(parent) = current.parent() else {
+            return Err(unavailable(
+                "attachment_file_path_parent_missing",
+                "destination parent is missing",
+            ));
+        };
+        if parent == current {
+            return Err(unavailable(
+                "attachment_file_path_parent_missing",
+                "destination parent is missing",
+            ));
+        }
+        current = parent.to_path_buf();
+    }
+    Ok(current)
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    let left = left.to_string_lossy();
+    let right = right.to_string_lossy();
+    if cfg!(windows) {
+        left.eq_ignore_ascii_case(&right)
+    } else {
+        left == right
+    }
+}
+
+fn path_inside(child: &Path, parent: &Path) -> bool {
+    let child = child.to_string_lossy();
+    let parent = parent.to_string_lossy();
+    if cfg!(windows) {
+        let child = child.to_ascii_lowercase();
+        let parent = parent.to_ascii_lowercase();
+        child == parent || child.starts_with(&format!("{}\\", parent)) || child.starts_with(&format!("{}/", parent))
+    } else {
+        child == parent || child.starts_with(&format!("{}/", parent))
+    }
+}
+
+fn display_path(path: &Path) -> String {
+    let value = path.to_string_lossy().to_string();
+    if cfg!(windows) {
+        value.replace('/', "\\")
+    } else {
+        value
+    }
 }
 
 fn refused(root: &Path, event_kind: &str, reason: &str, extra: Value) -> Result<Value, Value> {
