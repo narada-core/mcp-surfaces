@@ -63,13 +63,34 @@ fn artifacts_call(name: &str, args: &Map<String, Value>, root: &Path) -> Result<
     match name {
         "artifacts_guidance" => Ok(guidance_result("artifacts", args)),
         "artifacts_doctor" => Ok(artifact_doctor(root)),
-        "artifact_message_part_create" => { let id = required(args, "artifact_id")?; Ok(json!({"schema":"narada.artifacts.message_part.v1","status":"ok","message_part":{"type":"artifact_ref","artifact_id":id,"kind":args.get("kind").cloned().unwrap_or(json!("file")),"title":args.get("title").cloned().unwrap_or(Value::Null),"render_hint":args.get("render_hint").cloned().unwrap_or(json!("inline"))},"native_read_only":true})) }
-        "artifact_list" | "artifact_read" => Err(authority_boundary("artifacts", name, "nars_artifact_read_authority_not_enabled_in_native_slice", "Use the owning NARS artifact endpoint or materialize a local artifact index.")),
+        "artifact_message_part_create" => { let id = required(args, "artifact_id")?; let part = artifact_message_part(&id, args.get("kind").cloned(), args.get("title").cloned(), args.get("render_hint").cloned()); Ok(json!({"schema":"narada.artifacts.message_part.v1","status":"ok","verification_status":"unverified","message_part":part.clone(),"assistant_content_parts":[part],"operator_message":format!("Artifact ready: {id}"),"recommended_verification":"Prefer artifact_read before emitting this part when a local NARS index is available.","native_read_only":true})) }
+        "artifact_list" => artifact_list(args, root),
+        "artifact_read" => artifact_read(args, root),
         "artifact_register_file" | "artifact_present" => Err(authority_boundary("artifacts", name, "nars_artifact_write_authority_not_enabled_in_native_slice", "Use the owning NARS artifact authority for registration or presentation.")),
         _ => Err(error("unknown_tool", &format!("unknown_tool:{name}"))),
     }
 }
-fn artifact_doctor(root: &Path) -> Value { let session_id=env::var("NARADA_SESSION_ID").ok().filter(|v|!v.trim().is_empty()).or_else(||env::var("NARADA_CARRIER_SESSION_ID").ok()); let paths=session_id.as_deref().map(|id|session_index_paths(root,id)).unwrap_or_default(); let existing=paths.iter().filter(|p|p.exists()).map(|p|p.to_string_lossy().to_string()).take(4).collect::<Vec<_>>(); json!({"schema":"narada.artifacts.doctor.v1","status":if existing.is_empty(){"not_configured"}else{"ok"},"server_name":"artifacts-mcp","site_root":root.to_string_lossy(),"session_id":session_id,"session_index_paths":paths.iter().map(|p|p.to_string_lossy().to_string()).collect::<Vec<_>>(),"existing_session_indexes":existing,"native_adapter":"local_contract","external_registration":"authority_boundary"}) }
+fn artifact_doctor(root: &Path) -> Value { let session_id=env::var("NARADA_SESSION_ID").ok().filter(|v|!v.trim().is_empty()).or_else(||env::var("NARADA_CARRIER_SESSION_ID").ok()); let paths=session_id.as_deref().map(|id|session_index_paths(root,id)).unwrap_or_default(); let artifact_paths=session_id.as_deref().map(|id|artifact_index_paths(root,id)).unwrap_or_default(); let existing=paths.iter().filter(|p|p.exists()).map(|p|p.to_string_lossy().to_string()).take(4).collect::<Vec<_>>(); let existing_artifact_indexes=artifact_paths.iter().filter(|p|p.exists()).map(|p|p.to_string_lossy().to_string()).take(4).collect::<Vec<_>>(); json!({"schema":"narada.artifacts.doctor.v1","status":if existing_artifact_indexes.is_empty(){"not_configured"}else{"ok"},"server_name":"artifacts-mcp","site_root":root.to_string_lossy(),"session_id":session_id,"session_index_paths":paths.iter().map(|p|p.to_string_lossy().to_string()).collect::<Vec<_>>(),"existing_session_indexes":existing,"artifact_index_paths":artifact_paths.iter().map(|p|p.to_string_lossy().to_string()).collect::<Vec<_>>(),"existing_artifact_indexes":existing_artifact_indexes,"native_adapter":"local_index_read","external_registration":"authority_boundary"}) }
+
+fn artifact_list(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let session_id = current_session_id(args).ok_or_else(|| error("nars_session_missing", "nars_session_missing"))?;
+    let (path, index) = read_artifact_index(root, &session_id)?;
+    Ok(json!({"schema":"narada.artifacts.list.v1","status":"ok","session_id":session_id,"index":index,"index_path":path.to_string_lossy(),"native_read_only":true}))
+}
+
+fn artifact_read(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let session_id = current_session_id(args).ok_or_else(|| error("nars_session_missing", "nars_session_missing"))?;
+    let artifact_id = required(args, "artifact_id")?;
+    let (_, index) = read_artifact_index(root, &session_id)?;
+    let artifact = index.get("artifacts").and_then(Value::as_array).and_then(|items| items.iter().find(|item| item.get("artifact_id").and_then(Value::as_str) == Some(artifact_id.as_str()))).cloned().ok_or_else(|| error("artifact_not_found", "artifact_not_found"))?;
+    let part = artifact_message_part(&artifact_id, artifact.get("kind").cloned(), artifact.get("title").cloned(), artifact.get("render_hint").cloned());
+    Ok(json!({"schema":"narada.artifacts.read.v1","status":"ok","artifact":artifact,"message_part":part.clone(),"assistant_content_parts":[part],"operator_message":format!("Artifact ready: {}", artifact.get("title").and_then(Value::as_str).unwrap_or(&artifact_id)),"native_read_only":true}))
+}
+
+fn current_session_id(args: &Map<String, Value>) -> Option<String> { args.get("session_id").and_then(Value::as_str).map(str::trim).filter(|value|!value.is_empty()).map(str::to_string).or_else(||env::var("NARADA_SESSION_ID").ok().filter(|value|!value.trim().is_empty())).or_else(||env::var("NARADA_CARRIER_SESSION_ID").ok().filter(|value|!value.trim().is_empty())) }
+fn artifact_index_paths(root: &Path, id: &str) -> Vec<PathBuf> { session_index_paths(root,id).into_iter().filter_map(|path|path.parent().map(|parent|parent.join("artifacts/index.json"))).collect() }
+fn read_artifact_index(root: &Path, id: &str) -> Result<(PathBuf, Value), Value> { if id.is_empty()||id.len()>160||!id.chars().all(|c|c.is_ascii_alphanumeric()||c=='-'||c=='_') { return Err(error("session_id_invalid", "session_id_invalid")); } for path in artifact_index_paths(root,id) { if path.exists() { return Ok((path.clone(), read_bounded_json(&path)?)); } } Err(error("artifact_index_not_found", "artifact_index_not_found")) }
+fn artifact_message_part(id: &str, kind: Option<Value>, title: Option<Value>, render_hint: Option<Value>) -> Value { json!({"type":"artifact_ref","artifact_id":id,"kind":kind.unwrap_or_else(||json!("file")),"title":title.unwrap_or(Value::Null),"render_hint":render_hint.unwrap_or_else(||json!("inline"))}) }
 
 fn nars_call(name: &str, args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     match name {
@@ -99,3 +120,25 @@ fn guidance_result(surface: &str, args: &Map<String, Value>) -> Value { json!({"
 fn authority_boundary(surface: &str, name: &str, reason: &str, remediation: &str) -> Value { json!({"schema":format!("narada.{surface}.authority_boundary.v1"),"status":"unavailable","tool_name":name,"reason":reason,"remediation":remediation}) }
 fn error(code: &str, message: &str) -> Value { json!({"schema":"narada.local_admin.error.v1","code":code,"message":message}) }
 fn tool(name: &str, description: &str, schema: Value, read_only: bool) -> Value { json!({"name":name,"description":description,"inputSchema":schema,"annotations":{"title":name,"readOnlyHint":read_only,"destructiveHint":!read_only,"idempotentHint":read_only,"openWorldHint":false},"outputSchema":{"type":"object","additionalProperties":true}}) }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn artifact_reads_use_the_local_bounded_index() {
+        let suffix = SystemTime::now().duration_since(UNIX_EPOCH).expect("clock").as_nanos();
+        let root = std::env::temp_dir().join(format!("narada-artifact-index-{suffix}"));
+        let index_path = root.join(".narada/crew/nars-sessions/session-1/artifacts/index.json");
+        fs::create_dir_all(index_path.parent().expect("parent")).expect("directory");
+        fs::write(&index_path, r#"{"schema":"narada.nars.artifact_index.v1","artifacts":[{"artifact_id":"artifact-1","kind":"markdown","title":"Read me","render_hint":"inline"}]}"#).expect("write");
+        let list = artifact_list(&Map::from_iter([(String::from("session_id"), json!("session-1"))]), &root).expect("list");
+        assert_eq!(list["status"], "ok");
+        assert_eq!(list["index"]["artifacts"][0]["artifact_id"], "artifact-1");
+        let read = artifact_read(&Map::from_iter([(String::from("session_id"), json!("session-1")), (String::from("artifact_id"), json!("artifact-1"))]), &root).expect("read");
+        assert_eq!(read["artifact"]["title"], "Read me");
+        assert_eq!(read["message_part"]["type"], "artifact_ref");
+        let _ = fs::remove_dir_all(root);
+    }
+}
