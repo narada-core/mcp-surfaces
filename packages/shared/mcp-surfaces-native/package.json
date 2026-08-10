@@ -5,7 +5,7 @@
   "description": "Shared Rust MCP surface executable.",
   "scripts": {
     "build:native": "node scripts/build-native.mjs",
-    "test:native": "pnpm run build:native",
+    "test:native": "pnpm run build:native && node scripts/verify-native-protocol.mjs",
     "build": "pnpm run build:native"
   },
   "naradaRuntimeArtifacts": {
