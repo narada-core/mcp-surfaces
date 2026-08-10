@@ -423,11 +423,17 @@ function runCloudflareParity() {
       id: 1,
       method: 'tools/call',
       params: { name: 'cloudflare_health', arguments: { health_file: healthFile } },
+    }, {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: { name: 'cloudflare_session_status', arguments: { session_file: join(root, 'missing-session.json') } },
     }];
     const bun = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', [bunEntrypoint, '--site-root', root], requests, workspaceRoot);
     const rust = runMailbox(executable, ['--surface-id', 'cloudflare-carrier', '--site-root', root], requests, workspaceRoot);
     assertSame('cloudflare.health', mailboxStructured(bun, 1, 'bun'), mailboxStructured(rust, 1, 'rust'));
-    return { status: 'passed', fixture: 'local_health_projection', compared: ['health'] };
+    assertSame('cloudflare.session_status', mailboxStructured(bun, 2, 'bun'), mailboxStructured(rust, 2, 'rust'));
+    return { status: 'passed', fixture: 'local_health_projection', compared: ['health', 'session_status'] };
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

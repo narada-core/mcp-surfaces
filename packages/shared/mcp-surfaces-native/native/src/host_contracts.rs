@@ -110,17 +110,17 @@ fn cloudflare_doctor(root: &Path) -> Value {
 fn cloudflare_session_status(args: &Map<String, Value>, root: &Path) -> Value {
     let (path, _) = cloudflare_path(args, "session_file", root, "CLOUDFLARE_SESSION_FILE", "cloudflare_session.json");
     let Some(metadata) = metadata(&path) else {
-        return json!({"status":"missing","session_file":path.to_string_lossy(),"has_cookie":false,"is_fresh":false,"native_read_only":true});
+        return json!({"status":"missing","session_file":path.to_string_lossy(),"has_cookie":false,"is_fresh":false});
     };
     let age_minutes = metadata.modified().ok().and_then(|modified| modified.elapsed().ok()).map(|age| age.as_secs() / 60);
     let is_fresh = age_minutes.map(|age| age < 60).unwrap_or(false);
     let value = match bounded_json(&path) {
         Ok(Some(value)) => value,
-        Ok(None) => return json!({"status":"missing","session_file":path.to_string_lossy(),"has_cookie":false,"is_fresh":false,"native_read_only":true}),
-        Err(_) => return json!({"status":"invalid_json","session_file":path.to_string_lossy(),"has_cookie":false,"is_fresh":false,"age_minutes":age_minutes,"native_read_only":true}),
+        Ok(None) => return json!({"status":"missing","session_file":path.to_string_lossy(),"has_cookie":false,"is_fresh":false}),
+        Err(_) => return json!({"status":"invalid_json","session_file":path.to_string_lossy(),"has_cookie":false,"is_fresh":false,"age_minutes":age_minutes}),
     };
     let has_cookie = value.get("cookie").and_then(Value::as_str).map(|cookie| !cookie.is_empty()).unwrap_or(false);
-    json!({"status":if has_cookie {"present"} else {"incomplete"},"session_file":path.to_string_lossy(),"has_cookie":has_cookie,"captured_at":value.get("captured_at").cloned().unwrap_or(Value::Null),"worker_url":value.get("worker_url").cloned().unwrap_or(Value::Null),"principal":value.get("principal").cloned().unwrap_or(Value::Null),"age_minutes":age_minutes,"is_fresh":is_fresh,"size_bytes":metadata.len(),"native_read_only":true})
+    json!({"status":if has_cookie {"present"} else {"incomplete"},"session_file":path.to_string_lossy(),"has_cookie":has_cookie,"captured_at":value.get("captured_at").cloned().unwrap_or(Value::Null),"worker_url":value.get("worker_url").cloned().unwrap_or(Value::Null),"principal":value.get("principal").cloned().unwrap_or(Value::Null),"age_minutes":age_minutes,"is_fresh":is_fresh,"size_bytes":metadata.len()})
 }
 
 fn cloudflare_health(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
