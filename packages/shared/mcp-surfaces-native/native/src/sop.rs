@@ -26,8 +26,8 @@ pub fn list_tools() -> Vec<Value> {
         ("sop_template_search", "Search local SOP registry templates by title or description.", json!({"type":"object","properties":{"query":{"type":"string"},"status":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":100,"default":50}},"required":["query"],"additionalProperties":false})),
         ("sop_run_status", "Get the durable status and step state for one SOP occurrence.", json!({"type":"object","properties":{"run_id":{"type":"string"}},"required":["run_id"],"additionalProperties":false})),
         ("sop_run_list", "List SOP runs with optional filters.", json!({"type":"object","properties":{"sop_id":{"type":"string"},"status":{"type":"string","enum":["pending","running","completed","failed","cancelled","awaiting_confirmation"]},"include_terminal":{"type":"boolean"},"limit":{"type":"integer","minimum":1,"maximum":200,"default":50}},"additionalProperties":false})),
-        ("sop_handoff_list", "List SOP handoffs from the owning SOP store.", json!({"type":"object","additionalProperties":true})),
-        ("sop_handoff_show", "Show one SOP handoff from the owning SOP store.", json!({"type":"object","additionalProperties":true})),
+        ("sop_handoff_list", "List durable SOP handoffs without exposing lease tokens.", json!({"type":"object","properties":{"run_id":{"type":"string"},"executor":{"type":"string","enum":["agent","operator"]},"status":{"type":"string","enum":["pending","leased","completed","failed","cancelled"]},"limit":{"type":"integer","minimum":1,"maximum":100,"default":50}},"additionalProperties":false})),
+        ("sop_handoff_show", "Show one durable SOP handoff without exposing its lease token.", json!({"type":"object","properties":{"handoff_id":{"type":"string"}},"required":["handoff_id"],"additionalProperties":false})),
         ("sop_action_list", "List SOP actions from the owning SOP store.", json!({"type":"object","additionalProperties":true})),
         ("sop_action_show", "Show one SOP action from the owning SOP store.", json!({"type":"object","additionalProperties":true})),
         ("sop_run_coverage_since", "Read SOP coverage evidence from the owning SOP store.", json!({"type":"object","additionalProperties":true})),
@@ -59,9 +59,11 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<V
         "sop_template_search" => template_search(args, root),
         "sop_template_list" => template_list(args, root),
         "sop_template_show" => template_show(args, root),
-        "sop_handoff_list" | "sop_handoff_show" | "sop_run_coverage_since" | "sop_run_events" | "sop_outbox_list" => Err(authority_boundary(name)),
+        "sop_run_coverage_since" | "sop_run_events" | "sop_outbox_list" => Err(authority_boundary(name)),
         "sop_run_status" => run_status(args, root),
         "sop_run_list" => run_list(args, root),
+        "sop_handoff_list" => handoff_list(args, root),
+        "sop_handoff_show" => handoff_show(args, root),
         "sop_action_list" => action_list(args, root),
         "sop_action_show" => action_show(args, root),
         name if MUTATING.contains(&name) => Err(authority_boundary(name)),
@@ -272,10 +274,48 @@ fn run_detail(value: Value) -> Value {
     })
 }
 
+fn handoff_list(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(50).clamp(1, 100);
+    let run_id = args.get("run_id").and_then(Value::as_str).filter(|value| !value.trim().is_empty());
+    let executor = args.get("executor").and_then(Value::as_str).filter(|value| !value.trim().is_empty());
+    let status = args.get("status").and_then(Value::as_str).filter(|value| !value.trim().is_empty());
+    if let Some(executor) = executor {
+        if !matches!(executor, "agent" | "operator") { return Err(error("sop_handoff_executor_invalid", &format!("sop_handoff_executor_invalid:{executor}"))); }
+    }
+    if let Some(status) = status {
+        if !matches!(status, "pending" | "leased" | "completed" | "failed" | "cancelled") { return Err(error("sop_handoff_status_invalid", &format!("sop_handoff_status_invalid:{status}"))); }
+    }
+    let mut sql = String::from("SELECT * FROM sop_handoffs");
+    let mut conditions = Vec::<&str>::new();
+    let mut values = Vec::<String>::new();
+    if let Some(run_id) = run_id { conditions.push("run_id = ?"); values.push(run_id.to_string()); }
+    if let Some(executor) = executor { conditions.push("executor = ?"); values.push(executor.to_string()); }
+    if let Some(status) = status { conditions.push("status = ?"); values.push(status.to_string()); }
+    if !conditions.is_empty() { sql.push_str(" WHERE "); sql.push_str(&conditions.join(" AND ")); }
+    sql.push_str(" ORDER BY created_at, handoff_id LIMIT ?");
+    values.push(limit.to_string());
+    let Some(connection) = open_db(root)? else { return Ok(json!({"schema":"narada.sop.handoff_list.v1","items":[],"count":0})); };
+    let mut statement = connection.prepare(&sql).map_err(|e| error("sop_handoff_query_failed", &e.to_string()))?;
+    let rows = statement.query_map(rusqlite::params_from_iter(values.iter()), row_value).map_err(|e| error("sop_handoff_query_failed", &e.to_string()))?;
+    let items = rows.take(100).map(|row| row.map(handoff_record).map_err(|e| error("sop_handoff_row_failed", &e.to_string()))).collect::<Result<Vec<_>, _>>()?;
+    Ok(json!({"schema":"narada.sop.handoff_list.v1","items":items,"count":items.len()}))
+}
+
+fn handoff_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let handoff_id = args.get("handoff_id").and_then(Value::as_str).filter(|value| !value.trim().is_empty()).ok_or_else(|| error("sop_handoff_id_required", "sop_handoff_id_required"))?;
+    let Some(connection) = open_db(root)? else { return Err(error("sop_handoff_not_found", &format!("sop_handoff_not_found:{handoff_id}"))); };
+    let row = connection.query_row("SELECT * FROM sop_handoffs WHERE handoff_id = ? LIMIT 1", params![handoff_id], row_value).optional().map_err(|e| error("sop_handoff_query_failed", &e.to_string()))?;
+    row.map(handoff_record).ok_or_else(|| error("sop_handoff_not_found", &format!("sop_handoff_not_found:{handoff_id}")))
+}
+
+fn handoff_record(value: Value) -> Value {
+    json!({"schema":"narada.sop.handoff.v1","handoff_id":member(&value,"handoff_id"),"run_id":member(&value,"run_id"),"step_id":member(&value,"step_id"),"occurrence_key":member(&value,"occurrence_key"),"sop_id":member(&value,"sop_id"),"sop_version":member(&value,"sop_version"),"executor":member(&value,"executor"),"title":member(&value,"title"),"instructions":member(&value,"instructions"),"input":member(&value,"input_json"),"input_ref":member(&value,"input_ref_json"),"result_schema":member(&value,"result_schema_json"),"request_fingerprint":member(&value,"request_fingerprint"),"status":member(&value,"status"),"lease_owner":member(&value,"lease_owner"),"lease_expires_at":member(&value,"lease_expires_at"),"attempt_count":member(&value,"attempt_count"),"last_error":member(&value,"last_error"),"completion_key":member(&value,"completion_key"),"completion_fingerprint":member(&value,"completion_fingerprint"),"principal":member(&value,"principal"),"result":member(&value,"result_json"),"result_ref":member(&value,"result_ref_json"),"error_message":member(&value,"error_message"),"created_at":member(&value,"created_at"),"updated_at":member(&value,"updated_at"),"completed_at":member(&value,"completed_at")})
+}
+
 fn doctor(root: &Path) -> Result<Value, Value> {
     let dirs = sops_dirs(root); let mut counts = Vec::new();
     for dir in &dirs { let count = fs::read_dir(dir).ok().map(|entries| entries.filter_map(Result::ok).filter(|entry| entry.path().file_name().and_then(|v|v.to_str()).map(|v|v.ends_with(".sop.yaml")).unwrap_or(false)).take(MAX_CANDIDATES).count()).unwrap_or(0); counts.push(json!({"path":dir.to_string_lossy(),"candidate_count":count})); }
-    Ok(json!({"schema":"narada.sop_mcp.doctor.v1","status":"ok","site_root":root.to_string_lossy(),"sops_dirs":counts,"native_adapter":"template_action_run_status_list_read","execution":"authority_boundary","server_name":SERVER_NAME}))
+    Ok(json!({"schema":"narada.sop_mcp.doctor.v1","status":"ok","site_root":root.to_string_lossy(),"sops_dirs":counts,"native_adapter":"template_action_run_status_handoff_list_read","execution":"authority_boundary","server_name":SERVER_NAME}))
 }
 
 fn candidate_entries(root: &Path) -> Vec<(String, PathBuf)> {
@@ -299,7 +339,7 @@ fn candidate_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value
     Ok(json!({"schema":"narada.sop_mcp.template_candidate.v1","status":"ok","sop_id":id,"path":path.to_string_lossy(),"raw_yaml":bounded,"truncated":truncated,"import_state":"unverified","native_read_only":true}))
 }
 
-fn authority_boundary(name: &str) -> Value { json!({"schema":"narada.sop_mcp.authority_boundary.v1","status":"unavailable","tool_name":name,"reason":"sop_registry_or_execution_not_enabled_in_native_template_slice","remediation":"Use the configured SOP authority for registry, run, handoff, action, and outbox operations."}) }
+fn authority_boundary(name: &str) -> Value { json!({"schema":"narada.sop_mcp.authority_boundary.v1","status":"unavailable","tool_name":name,"reason":"sop_registry_or_execution_not_enabled_in_native_read_slice","remediation":"Use the configured SOP authority for registry, run, handoff, action, and outbox operations outside the native read slice."}) }
 fn error(code: &str, message: &str) -> Value { json!({"schema":"narada.sop_mcp.error.v1","code":code,"message":message}) }
 fn tool(name: &str, description: &str, schema: Value, read_only: bool) -> Value { json!({"name":name,"description":description,"annotations":{"title":name,"readOnlyHint":read_only,"destructiveHint":!read_only,"idempotentHint":read_only,"openWorldHint":false},"inputSchema":schema,"outputSchema":{"type":"object","additionalProperties":true}}) }
 
@@ -372,6 +412,22 @@ mod tests {
         assert_eq!(status["step_states"][0]["status"], "running");
         assert_eq!(status["next_awaits_confirmation"], true);
         assert_eq!(status["next_step"]["instructions"], "approve now");
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn native_sop_handoff_reads_redact_lease_tokens() {
+        let root = std::env::temp_dir().join(format!("narada-sop-handoffs-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join(".sop")).expect("root");
+        let connection = Connection::open(db_path(&root)).expect("db");
+        connection.execute_batch("CREATE TABLE sop_handoffs (handoff_id TEXT, run_id TEXT, step_id TEXT, occurrence_key TEXT, sop_id TEXT, sop_version INTEGER, executor TEXT, title TEXT, instructions TEXT, input_json TEXT, input_ref_json TEXT, result_schema_json TEXT, request_fingerprint TEXT, status TEXT, lease_owner TEXT, lease_token TEXT, lease_expires_at TEXT, attempt_count INTEGER, last_error TEXT, completion_key TEXT, completion_fingerprint TEXT, principal TEXT, result_json TEXT, result_ref_json TEXT, error_message TEXT, created_at TEXT, updated_at TEXT, completed_at TEXT); INSERT INTO sop_handoffs VALUES ('handoff-1','run-1','step-1','occ-1','demo',1,'operator','Approve','approve now','{}',NULL,NULL,'request-fp','leased','consumer','secret-token','2026-01-01T01:00:00Z',1,NULL,NULL,NULL,NULL,'{}',NULL,NULL,'2026-01-01','2026-01-01',NULL);").expect("schema");
+        drop(connection);
+        let list = handoff_list(&json!({"status":"leased"}).as_object().unwrap(), &root).expect("list");
+        assert_eq!(list["count"], 1);
+        assert!(list["items"][0].get("lease_token").is_none());
+        let show = handoff_show(&json!({"handoff_id":"handoff-1"}).as_object().unwrap(), &root).expect("show");
+        assert_eq!(show["schema"], "narada.sop.handoff.v1");
+        assert!(show.get("lease_token").is_none());
         fs::remove_dir_all(root).expect("cleanup");
     }
 }
