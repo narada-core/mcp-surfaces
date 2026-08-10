@@ -4,7 +4,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const SERVER_NAME: &str = "narada-site-loop-mcp";
-const CONFIG_RELATIVE: &str = ".narada/capabilities/site-loop-config.json";
 const DB_RELATIVE: &str = ".ai/task-lifecycle.db";
 const MAX_TEXT_BYTES: u64 = 512_000;
 const READ_TOOLS: &[&str] = &[
@@ -114,7 +113,7 @@ fn guidance(args: &Map<String, Value>) -> Value {
     json!({"schema":"narada.mcp_surface.guidance.v0","status":"ok","surface_id":"site-loop","guidance_tool":"site_loop_guidance","purpose":"Inspect site-loop configuration, status, proof, and recovery posture.","requested":{"workflow":args.get("workflow").cloned().unwrap_or(Value::Null),"tool":args.get("tool").cloned().unwrap_or(Value::Null)},"first_use":["Call site_loop_doctor first.","Use site_loop_unified_status and site_loop_health before recovery.","Use site_loop_proof_status/readiness/coherence to distinguish freshness from coherence.","Keep scheduler, resident carrier, task lifecycle, and control mutations with their owning authorities."],"boundaries":["This native slice is read-only except for no local writes.","Configured commands are reported, never executed.","Resident launch and loop control remain explicit authority boundaries."]})
 }
 
-fn config_path(root: &Path) -> PathBuf { root.join(CONFIG_RELATIVE) }
+fn config_path(root: &Path) -> PathBuf { root.join(".narada").join("capabilities").join("site-loop-config.json") }
 fn db_path(root: &Path) -> PathBuf { root.join(DB_RELATIVE) }
 
 fn open_db(root: &Path) -> Result<Option<Connection>, Value> {
@@ -300,7 +299,7 @@ fn doctor(root: &Path) -> Result<Value, Value> {
 
 fn config_validate(root: &Path) -> Result<Value, Value> {
     let config = load_config(root)?;
-    let Some(value) = config else { return Ok(json!({"schema":"narada.site_loop.config_validation.v1","status":"invalid","valid":false,"config_path":config_path(root).to_string_lossy(),"errors":["config_missing"]})); };
+    let Some(value) = config else { return Ok(json!({"schema":"narada.site_loop.config_validation.v1","status":"invalid","valid":false,"site_root":root.to_string_lossy(),"path":config_path(root).to_string_lossy(),"schema_id":"narada:site-loop-config.v2.schema.json","config_schema":Value::Null,"loop_id":Value::Null,"site_id":Value::Null,"display_name":Value::Null,"config_path":config_path(root).to_string_lossy(),"errors":["config_missing"],"active_tools_refuse":true})); };
     let object = value.as_object();
     let mut errors = Vec::new();
     if object.is_none() { errors.push("config_object_required"); }
@@ -309,7 +308,8 @@ fn config_validate(root: &Path) -> Result<Value, Value> {
         if !object.contains_key(key) { errors.push(key); }
     }
     if object.get("schema").and_then(Value::as_str) != Some("narada.site_loop.config.v2") { errors.push("schema_must_be_narada.site_loop.config.v2"); }
-    Ok(json!({"schema":"narada.site_loop.config_validation.v1","status":if errors.is_empty(){"ok"}else{"invalid"},"valid":errors.is_empty(),"config_path":config_path(root).to_string_lossy(),"errors":errors}))
+    let valid = errors.is_empty();
+    Ok(json!({"schema":"narada.site_loop.config_validation.v1","status":if valid{"ok"}else{"invalid"},"valid":valid,"site_root":root.to_string_lossy(),"path":config_path(root).to_string_lossy(),"schema_id":"narada:site-loop-config.v2.schema.json","config_schema":object.get("schema").cloned().unwrap_or(Value::Null),"loop_id":object.get("loop_id").cloned().unwrap_or(Value::Null),"site_id":object.get("site_id").cloned().unwrap_or(Value::Null),"display_name":object.get("display_name").cloned().unwrap_or(Value::Null),"config_path":config_path(root).to_string_lossy(),"errors":errors,"active_tools_refuse":!valid}))
 }
 
 fn docs_list(root: &Path) -> Result<Value, Value> {

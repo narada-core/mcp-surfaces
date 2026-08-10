@@ -93,9 +93,32 @@ function runMailbox(command, args, requests, cwd) {
   });
   if (result.error) throw new Error('mailbox_parity_spawn_failed:' + command + ':' + result.error.message);
   if (result.status !== 0) throw new Error('mailbox_parity_exit:' + command + ':' + result.status + ':' + String(result.stderr).slice(0, 500));
-  const lines = String(result.stdout).trim().split(/\r?\n/).filter(Boolean);
-  if (lines.length !== requests.length) throw new Error('mailbox_parity_response_count:' + command + ':' + lines.length);
-  return lines.map((line) => JSON.parse(line));
+  const output = String(result.stdout);
+  const responses = /Content-Length:/i.test(output) ? parseFramedResponses(output) : output.trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+  if (responses.length !== requests.length) throw new Error('mailbox_parity_response_count:' + command + ':' + responses.length);
+  return responses;
+}
+
+function parseFramedResponses(output) {
+  const responses = [];
+  let remaining = output;
+  while (remaining.trim()) {
+    const crlfHeaderEnd = remaining.indexOf('\r\n\r\n');
+    const lfHeaderEnd = remaining.indexOf('\n\n');
+    const headerEnd = crlfHeaderEnd >= 0 && (lfHeaderEnd < 0 || crlfHeaderEnd <= lfHeaderEnd) ? crlfHeaderEnd : lfHeaderEnd;
+    if (headerEnd < 0) throw new Error('framed_response_header_incomplete');
+    const separatorLength = headerEnd === crlfHeaderEnd ? 4 : 2;
+    const header = remaining.slice(0, headerEnd);
+    const match = /Content-Length:\s*(\d+)/i.exec(header);
+    if (!match) throw new Error('framed_response_content_length_missing');
+    const length = Number(match[1]);
+    const bodyStart = headerEnd + separatorLength;
+    const bodyEnd = bodyStart + length;
+    if (remaining.length < bodyEnd) throw new Error('framed_response_body_incomplete');
+    responses.push(JSON.parse(remaining.slice(bodyStart, bodyEnd)));
+    remaining = remaining.slice(bodyEnd);
+  }
+  return responses;
 }
 
 function mailboxStructured(responses, id, command) {
@@ -267,10 +290,47 @@ function runSurfaceFeedbackParity() {
   }
 }
 
+function runSiteLoopParity() {
+  const workspaceRoot = resolve(packageRoot, '..', '..', '..');
+  const bunEntrypoint = join(workspaceRoot, 'packages', 'site-loop-mcp', 'src', 'site-loop-mcp-server.ts');
+  if (!existsSync(bunEntrypoint)) throw new Error('site_loop_parity_bun_entrypoint_missing:' + bunEntrypoint);
+  const root = mkdtempSync(join(tmpdir(), 'narada-site-loop-native-parity-'));
+  try {
+    const configDir = join(root, '.narada', 'capabilities');
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(join(configDir, 'site-loop-config.json'), JSON.stringify({
+      schema: 'narada.site_loop.config.v2',
+      loop_id: 'fixture.loop',
+      site_id: 'fixture-site',
+      display_name: 'Fixture Loop',
+      resident: { agent_id: 'fixture-agent', role: 'resident' },
+      scheduler: { default_task_name: 'Fixture-Loop' },
+      policy: {},
+      persistence: {
+        schema: 'narada.site_loop.persistence.v2',
+        evidence_root: '.ai/evidence',
+        raw_retention_days: 1,
+        summary_retention_days: 1,
+        inline_summary_bytes: 1024,
+        compression: 'gzip',
+      },
+    }), 'utf8');
+    const requests = [{ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'site_loop_config_validate', arguments: {} } }];
+    const bun = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', [bunEntrypoint, '--site-root', root], requests, workspaceRoot);
+    const rust = runMailbox(executable, ['--surface-id', 'site-loop', '--site-root', root], requests, workspaceRoot);
+    const comparable = (value) => Object.fromEntries(['schema', 'status', 'site_root', 'path', 'schema_id', 'config_schema', 'loop_id', 'site_id', 'display_name', 'errors', 'active_tools_refuse'].map((key) => [key, value?.[key]]));
+    assertSame('site_loop.config_validate', comparable(mailboxStructured(bun, 1, 'bun')), comparable(mailboxStructured(rust, 1, 'rust')));
+    return { status: 'passed', fixture: 'config_validation', compared: ['config_validate'] };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 const mailboxParity = runMailboxParity();
 const artifactsParity = runArtifactsParity();
 const sopParity = runSopParity();
 const surfaceFeedbackParity = runSurfaceFeedbackParity();
+const siteLoopParity = runSiteLoopParity();
 process.stdout.write(JSON.stringify({
   schema: 'narada.mcp_surfaces_native.protocol_parity.v1',
   status: 'passed',
@@ -282,4 +342,5 @@ process.stdout.write(JSON.stringify({
   artifacts_parity: artifactsParity,
   sop_parity: sopParity,
   surface_feedback_parity: surfaceFeedbackParity,
+  site_loop_parity: siteLoopParity,
 }) + '\n');
