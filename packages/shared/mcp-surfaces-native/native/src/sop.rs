@@ -2,6 +2,7 @@ use rusqlite::{params, types::ValueRef, Connection, OpenFlags, OptionalExtension
 use serde_json::{json, Map, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 const SERVER_NAME: &str = "sop-mcp";
 const DB_RELATIVE: &str = ".sop/sop.db";
@@ -30,7 +31,7 @@ pub fn list_tools() -> Vec<Value> {
         ("sop_handoff_show", "Show one durable SOP handoff without exposing its lease token.", json!({"type":"object","properties":{"handoff_id":{"type":"string"}},"required":["handoff_id"],"additionalProperties":false})),
         ("sop_action_list", "List SOP actions from the owning SOP store.", json!({"type":"object","additionalProperties":true})),
         ("sop_action_show", "Show one SOP action from the owning SOP store.", json!({"type":"object","additionalProperties":true})),
-        ("sop_run_coverage_since", "Read SOP coverage evidence from the owning SOP store.", json!({"type":"object","additionalProperties":true})),
+        ("sop_run_coverage_since", "List latest SOP run coverage since a supplied timestamp.", json!({"type":"object","properties":{"since":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":500,"default":200},"template_status":{"type":"string","enum":["draft","active","deprecated"],"default":"active"},"status":{"type":"string","enum":["pending","running","completed","failed","cancelled","awaiting_confirmation"]},"include_terminal":{"type":"boolean","default":true}},"required":["since"],"additionalProperties":false})),
         ("sop_run_events", "List bounded SOP run events in reverse insertion order.", json!({"type":"object","properties":{"run_id":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":500,"default":50},"offset":{"type":"integer","minimum":0,"maximum":100000,"default":0}},"required":["run_id"],"additionalProperties":false})),
         ("sop_outbox_list", "Read SOP outbox entries from the owning SOP store.", json!({"type":"object","additionalProperties":true})),
     ] {
@@ -59,10 +60,11 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<V
         "sop_template_search" => template_search(args, root),
         "sop_template_list" => template_list(args, root),
         "sop_template_show" => template_show(args, root),
-        "sop_run_coverage_since" | "sop_outbox_list" => Err(authority_boundary(name)),
+        "sop_outbox_list" => Err(authority_boundary(name)),
         "sop_run_status" => run_status(args, root),
         "sop_run_list" => run_list(args, root),
         "sop_run_events" => run_events(args, root),
+        "sop_run_coverage_since" => run_coverage_since(args, root),
         "sop_handoff_list" => handoff_list(args, root),
         "sop_handoff_show" => handoff_show(args, root),
         "sop_action_list" => action_list(args, root),
@@ -328,10 +330,52 @@ fn event_record(value: Value) -> Value {
     json!({"event_id":member(&value,"event_id"),"run_id":member(&value,"run_id"),"step_id":member(&value,"step_id"),"event_kind":member(&value,"event_kind"),"details":member(&value,"details_json"),"recorded_at":member(&value,"recorded_at")})
 }
 
+fn run_coverage_since(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let since = args.get("since").and_then(Value::as_str).map(str::trim).filter(|value| !value.is_empty()).ok_or_else(|| error("sop_requires_since", "sop_requires_since"))?;
+    let since_time = parse_timestamp(since).ok_or_else(|| error("sop_since_must_be_iso_timestamp", &format!("sop_since_must_be_iso_timestamp:{since}")))?;
+    let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(200).clamp(1, 500);
+    let template_status = args.get("template_status").and_then(Value::as_str).filter(|value| !value.trim().is_empty()).unwrap_or("active");
+    if !matches!(template_status, "draft" | "active" | "deprecated") { return Err(error("sop_template_status_unsupported", &format!("sop_template_status_unsupported:{template_status}"))); }
+    let run_status = args.get("status").and_then(Value::as_str).filter(|value| !value.trim().is_empty());
+    if let Some(status) = run_status {
+        if !RUN_STATUSES.contains(&status) { return Err(error("sop_run_status_unsupported", &format!("sop_run_status_unsupported:{status}"))); }
+    }
+    let include_terminal = args.get("include_terminal").and_then(Value::as_bool).unwrap_or(true);
+    let Some(connection) = open_db(root)? else { return Ok(json!({"schema":"narada.sop.run_coverage_since.v1","status":"missing","since":since,"template_status":template_status,"run_status":run_status,"include_terminal":include_terminal,"items":[],"count":0,"classification_counts":{}})); };
+    let mut template_statement = connection.prepare("SELECT t.* FROM sop_templates t JOIN (SELECT sop_id, MAX(version) AS mv FROM sop_templates GROUP BY sop_id) latest ON t.sop_id = latest.sop_id AND t.version = latest.mv WHERE t.status = ? ORDER BY t.updated_at DESC LIMIT ?").map_err(|e| error("sop_template_query_failed", &e.to_string()))?;
+    let templates = template_statement.query_map(params![template_status, limit], row_value).map_err(|e| error("sop_template_query_failed", &e.to_string()))?;
+    let mut items = Vec::new();
+    let mut run_statement = connection.prepare("SELECT * FROM sop_runs WHERE sop_id = ? AND sop_version = ? ORDER BY created_at DESC LIMIT 1").map_err(|e| error("sop_run_query_failed", &e.to_string()))?;
+    for template in templates.take(500) {
+        let template = template.map_err(|e| error("sop_template_row_failed", &e.to_string()))?;
+        let sop_id = member(&template, "sop_id");
+        let version = member(&template, "version");
+        let latest = run_statement.query_row(params![sop_id.as_str().unwrap_or_default(), version.as_i64().unwrap_or(0)], row_value).optional().map_err(|e| error("sop_run_query_failed", &e.to_string()))?;
+        let latest_run_at = latest.as_ref().map(|run| { let created = member(run, "created_at"); if created.is_null() { member(run, "updated_at") } else { created } });
+        let latest_run_time = latest_run_at.as_ref().and_then(Value::as_str).and_then(parse_timestamp);
+        let classification = match latest_run_time { None => if latest.is_some() { "stale" } else { "not_run" }, Some(value) if value >= since_time => "recent", Some(_) => "stale" };
+        let latest_status = latest.as_ref().map(|run| member(run, "status"));
+        if !include_terminal && latest_status.as_ref().and_then(Value::as_str).map(|value| matches!(value, "completed" | "failed" | "cancelled")).unwrap_or(false) { continue; }
+        if let Some(status) = run_status { if latest_status.as_ref().and_then(Value::as_str) != Some(status) { continue; } }
+        if classification == "recent" { continue; }
+        let latest_summary = latest.as_ref().map(|run| run_summary(run)).unwrap_or(Value::Null);
+        items.push(json!({"sop_id":sop_id,"version":version,"title":member(&template,"title"),"template_status":member(&template,"status"),"classification":classification,"stale":classification != "recent","latest_run_id":latest.as_ref().map(|run|member(run,"run_id")).unwrap_or(Value::Null),"latest_run_at":latest_run_at.unwrap_or(Value::Null),"latest_run_status":latest_status.unwrap_or(Value::Null),"latest_run":latest_summary}));
+    }
+    let mut classification_counts = Map::new();
+    for item in &items { let key = item.get("classification").and_then(Value::as_str).unwrap_or("unknown"); let current = classification_counts.get(key).and_then(Value::as_u64).unwrap_or(0); classification_counts.insert(key.to_string(), json!(current + 1)); }
+    Ok(json!({"schema":"narada.sop.run_coverage_since.v1","status":"ok","since":since,"template_status":template_status,"run_status":run_status,"include_terminal":include_terminal,"items":items,"count":items.len(),"classification_counts":classification_counts}))
+}
+
+fn parse_timestamp(value: &str) -> Option<OffsetDateTime> {
+    OffsetDateTime::parse(value, &Rfc3339).ok().or_else(|| {
+        if value.len() == 10 { OffsetDateTime::parse(&format!("{value}T00:00:00Z"), &Rfc3339).ok() } else { None }
+    })
+}
+
 fn doctor(root: &Path) -> Result<Value, Value> {
     let dirs = sops_dirs(root); let mut counts = Vec::new();
     for dir in &dirs { let count = fs::read_dir(dir).ok().map(|entries| entries.filter_map(Result::ok).filter(|entry| entry.path().file_name().and_then(|v|v.to_str()).map(|v|v.ends_with(".sop.yaml")).unwrap_or(false)).take(MAX_CANDIDATES).count()).unwrap_or(0); counts.push(json!({"path":dir.to_string_lossy(),"candidate_count":count})); }
-    Ok(json!({"schema":"narada.sop_mcp.doctor.v1","status":"ok","site_root":root.to_string_lossy(),"sops_dirs":counts,"native_adapter":"template_action_run_status_handoff_event_read","execution":"authority_boundary","server_name":SERVER_NAME}))
+    Ok(json!({"schema":"narada.sop_mcp.doctor.v1","status":"ok","site_root":root.to_string_lossy(),"sops_dirs":counts,"native_adapter":"template_action_run_status_handoff_event_coverage_read","execution":"authority_boundary","server_name":SERVER_NAME}))
 }
 
 fn candidate_entries(root: &Path) -> Vec<(String, PathBuf)> {
@@ -458,6 +502,19 @@ mod tests {
         assert_eq!(page["count"], 1);
         assert_eq!(page["items"][0]["event_id"], "event-2");
         assert_eq!(page["items"][0]["details"], json!({}));
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn native_sop_coverage_classifies_stale_templates() {
+        let root = std::env::temp_dir().join(format!("narada-sop-coverage-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join(".sop")).expect("root");
+        let connection = Connection::open(db_path(&root)).expect("db");
+        connection.execute_batch("CREATE TABLE sop_templates (sop_id TEXT, version INTEGER, title TEXT, status TEXT, updated_at TEXT); CREATE TABLE sop_runs (run_id TEXT, sop_id TEXT, sop_version INTEGER, sop_title TEXT, status TEXT, occurrence_key TEXT, parent_run_id TEXT, parent_step_id TEXT, created_at TEXT, updated_at TEXT, completed_at TEXT); INSERT INTO sop_templates VALUES ('demo',1,'Demo','active','2026-01-01T00:00:00Z'); INSERT INTO sop_runs VALUES ('run-1','demo',1,'Demo','running','occ-1',NULL,NULL,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',NULL);").expect("schema");
+        drop(connection);
+        let coverage = run_coverage_since(&json!({"since":"2026-02-01T00:00:00Z"}).as_object().unwrap(), &root).expect("coverage");
+        assert_eq!(coverage["count"], 1);
+        assert_eq!(coverage["items"][0]["classification"], "stale");
         fs::remove_dir_all(root).expect("cleanup");
     }
 }
