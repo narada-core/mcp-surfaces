@@ -12,6 +12,8 @@ mod simple_surfaces;
 mod runtime_introspection;
 mod launcher;
 mod calendar;
+mod authority;
+mod graph_authority;
 mod delegated_task;
 mod worker_delegation;
 mod local_admin;
