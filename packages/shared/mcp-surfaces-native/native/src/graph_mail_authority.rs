@@ -267,10 +267,7 @@ fn auth_device_code_start(
             }));
         }
     };
-    let endpoint = format!(
-        "https://login.microsoftonline.com/{}/oauth2/v2.0/devicecode",
-        encode_component(&tenant_id)
-    );
+    let endpoint = device_code_endpoint(&tenant_id, "devicecode");
     let (status, payload) = post_form(
         &endpoint,
         &[
@@ -356,10 +353,7 @@ fn auth_device_code_poll(
         return Ok(json!({"schema":"narada.graph_mail_mcp.device_code_poll.v1","status":"expired","flow_id":flow_id}));
     }
     let device_code = required_value_string(&flow, "device_code")?;
-    let endpoint = format!(
-        "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
-        encode_component(&tenant_id)
-    );
+    let endpoint = device_code_endpoint(&tenant_id, "token");
     let (status, payload) = post_form(
         &endpoint,
         &[
@@ -483,7 +477,9 @@ fn device_code_policy(
 }
 
 fn post_form(endpoint: &str, fields: &[(&str, &str)]) -> Result<(u16, Value), Value> {
-    if !endpoint.starts_with("https://login.microsoftonline.com/") {
+    let insecure_test = std::env::var("NARADA_GRAPH_MAIL_ALLOW_INSECURE_TEST").ok().as_deref() == Some("1")
+        && endpoint.starts_with("http://127.0.0.1:");
+    if !endpoint.starts_with("https://login.microsoftonline.com/") && !insecure_test {
         return Err(unavailable(
             "graph_auth_endpoint_not_allowed",
             "device-code authority requires login.microsoftonline.com",
@@ -506,6 +502,21 @@ fn post_form(endpoint: &str, fields: &[(&str, &str)]) -> Result<(u16, Value), Va
         Err(ureq::Error::Status(_, response)) => read_auth_response(response),
         Err(error) => Err(unavailable("graph_auth_request_failed", &error.to_string())),
     }
+}
+
+fn device_code_endpoint(tenant_id: &str, operation: &str) -> String {
+    if std::env::var("NARADA_GRAPH_MAIL_ALLOW_INSECURE_TEST").ok().as_deref() == Some("1") {
+        if let Ok(base) = std::env::var("NARADA_GRAPH_MAIL_DEVICE_CODE_ENDPOINT") {
+            if !base.trim().is_empty() {
+                return format!("{}/{}", base.trim_end_matches('/'), operation);
+            }
+        }
+    }
+    format!(
+        "https://login.microsoftonline.com/{}/oauth2/v2.0/{}",
+        encode_component(tenant_id),
+        operation
+    )
 }
 
 fn read_auth_response(response: ureq::Response) -> Result<(u16, Value), Value> {

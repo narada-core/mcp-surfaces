@@ -708,6 +708,7 @@ function replyDraftProperties() {
     mailbox_id: { type: 'string', default: 'me', description: 'Mailbox id or user principal. Defaults to the only allowed mailbox when policy has one, otherwise me.' },
     message_id: { type: 'string', description: 'Original message id.' },
     comment: { type: 'string', description: 'Optional reply comment.' },
+    comment_html: { type: 'string', description: 'Governed HTML reply body. Creates the Graph reply first, then preserves its generated quote while applying this HTML body.' },
     body_text: { type: 'string', description: 'Optional replacement body text.' },
     body_html: { type: 'string', description: 'Optional replacement body HTML.' },
   };
@@ -718,6 +719,7 @@ function replyAllToThreadProperties() {
     mailbox_id: { type: 'string', default: 'me', description: 'Mailbox id or user principal. Defaults to the only allowed mailbox when policy has one, otherwise me.' },
     conversation_id: { type: 'string', description: 'Conversation/thread id.' },
     comment: { type: 'string', description: 'Optional reply comment.' },
+    comment_html: { type: 'string', description: 'Governed HTML reply body. Creates the Graph reply first, then preserves its generated quote while applying this HTML body.' },
     body_text: { type: 'string', description: 'Optional replacement body text.' },
     body_html: { type: 'string', description: 'Optional replacement body HTML.' },
   };
@@ -1154,7 +1156,7 @@ async function graphMailAuthDeviceCodeStart(args: GraphMailRecord, state: GraphM
     recordGraphMailAudit(state.siteRoot, { event_kind: 'device_code_start_refused', reason: deviceAuth.reason });
     return { schema: 'narada.graph_mail_mcp.device_code_start.v1', status: 'refused', reason: deviceAuth.reason };
   }
-  const endpoint = `https://login.microsoftonline.com/${encodeURIComponent(deviceAuth.tenantId)}/oauth2/v2.0/devicecode`;
+  const endpoint = graphMailDeviceCodeEndpoint(deviceAuth.tenantId, 'devicecode');
   const body = new URLSearchParams({ client_id: deviceAuth.clientId, scope: deviceAuth.scope });
   const response = await state.fetchImpl(endpoint, { method: 'POST', body } as any);
   const text = typeof response.text === 'function' ? await response.text() : '';
@@ -1203,7 +1205,7 @@ async function graphMailAuthDeviceCodePoll(args: GraphMailRecord, state: GraphMa
   const deviceAuth = resolveDeviceCodePolicy(policy, state, { scope: flow.scope });
   if (deviceAuth.status !== 'allowed') return { schema: 'narada.graph_mail_mcp.device_code_poll.v1', status: 'refused', reason: deviceAuth.reason, flow_id: flowId };
   if (Date.now() >= flow.expires_at_ms) return { schema: 'narada.graph_mail_mcp.device_code_poll.v1', status: 'expired', flow_id: flowId };
-  const endpoint = `https://login.microsoftonline.com/${encodeURIComponent(flow.tenant_id)}/oauth2/v2.0/token`;
+  const endpoint = graphMailDeviceCodeEndpoint(flow.tenant_id, 'token');
   const body = new URLSearchParams({
     grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
     client_id: flow.client_id,
@@ -1558,12 +1560,66 @@ async function graphMailDraftCreate(args: GraphMailRecord, state: GraphMailServe
 async function graphMailDerivedDraftCreate(args: GraphMailRecord, state: GraphMailServerState, action: 'createReply' | 'createReplyAll' | 'createForward'): Promise<GraphMailRecord> {
   const { policy, accessToken, fetchImpl } = await clientParts(state);
   const messageId = requiredString(args, 'message_id');
+  if (typeof args.comment_html === 'string') {
+    if (action === 'createForward') throw new Error('comment_html_reply_only');
+    return graphMailHtmlReplyDraftCreate(args, state, action);
+  }
   const body = derivedDraftBody(args, action);
   const path = graphMailboxPath(args.mailbox_id, `messages/${encodeURIComponent(messageId)}/${action}`, policy);
   recordGraphMailAudit(state.siteRoot, { event_kind: `${action}_requested`, mailbox_id: args.mailbox_id ?? 'me', message_id: messageId });
   const graph = await graphRequest({ policy, accessToken, fetchImpl }, { method: 'POST', path, body });
   recordGraphMailAudit(state.siteRoot, { event_kind: `${action}_completed`, mailbox_id: args.mailbox_id ?? 'me', message_id: messageId, draft_id: asRecord(graph).id ?? null });
   return { schema: 'narada.graph_mail_mcp.draft.v1', status: 'created', draft: graph };
+}
+
+async function graphMailHtmlReplyDraftCreate(
+  args: GraphMailRecord,
+  state: GraphMailServerState,
+  action: 'createReply' | 'createReplyAll',
+): Promise<GraphMailRecord> {
+  const { policy, accessToken, fetchImpl } = await clientParts(state);
+  const messageId = requiredString(args, 'message_id');
+  const commentHtml = requiredString(args, 'comment_html');
+  if (typeof args.comment === 'string' || typeof args.body_text === 'string' || typeof args.body_html === 'string') {
+    throw new Error('comment_html_body_conflict: provide comment_html alone');
+  }
+  const mailboxId = args.mailbox_id ?? 'me';
+  const createPath = graphMailboxPath(mailboxId, `messages/${encodeURIComponent(messageId)}/${action}`, policy);
+  recordGraphMailAudit(state.siteRoot, {
+    event_kind: `${action}_html_requested`,
+    mailbox_id: mailboxId,
+    message_id: messageId,
+  });
+  // An empty create request asks Graph to materialize its normal reply/reply-all
+  // recipients and quoted history before we apply the authored HTML body.
+  const created = asRecord(await graphRequest({ policy, accessToken, fetchImpl }, { method: 'POST', path: createPath, body: {} }));
+  const draftId = requiredDraftId(created);
+  const draftPath = graphMailboxPath(mailboxId, `messages/${encodeURIComponent(draftId)}`, policy);
+  const observed = asRecord(await graphRequest({ policy, accessToken, fetchImpl }, { method: 'GET', path: draftPath }));
+  const quoteHtml = graphBodyAsHtml(observed.body ?? created.body);
+  if (!quoteHtml.trim()) throw new Error('graph_reply_html_quote_missing');
+  const composedHtml = `${commentHtml}<div data-narada-quoted-history="true">${quoteHtml}</div>`;
+  const patched = asRecord(await graphRequest({
+    policy,
+    accessToken,
+    fetchImpl,
+  }, { method: 'PATCH', path: draftPath, body: { body: { contentType: 'HTML', content: composedHtml } } }));
+  if (patched.isDraft === false) throw new Error('graph_reply_html_draft_not_unsent');
+  recordGraphMailAudit(state.siteRoot, {
+    event_kind: `${action}_html_completed`,
+    mailbox_id: mailboxId,
+    message_id: messageId,
+    draft_id: draftId,
+    quote_preserved: true,
+  });
+  return {
+    schema: 'narada.graph_mail_mcp.draft.v1',
+    status: 'created',
+    draft: patched,
+    reply_body_mode: 'comment_html',
+    quote_preserved: true,
+    unsent: patched.isDraft !== false,
+  };
 }
 
 async function graphMailReplyAllToLastInThreadDraftCreate(args: GraphMailRecord, state: GraphMailServerState): Promise<GraphMailRecord> {
@@ -2023,6 +2079,26 @@ function odataString(value: string): string {
   return value.replace(/'/g, "''");
 }
 
+function graphBodyAsHtml(value: unknown): string {
+  const body = asRecord(value);
+  const content = typeof body.content === 'string' ? body.content : '';
+  if (!content) return '';
+  if (String(body.contentType ?? '').toLowerCase() === 'html') return content;
+  return content
+    .split(/\r?\n/)
+    .map((line) => `<p>${escapeHtml(line)}</p>`)
+    .join('');
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 function derivedDraftBody(args: GraphMailRecord, action: 'createReply' | 'createReplyAll' | 'createForward'): GraphMailRecord {
   const message = messagePatchFromArgs(args);
   if (action === 'createForward' && Array.isArray(args.to_recipients)) message.toRecipients = recipients(args.to_recipients);
@@ -2214,6 +2290,14 @@ function resolveDeviceCodePolicy(
   if (!scope) return { status: 'refused', reason: 'device_code_scope_required' };
   if (!scopeAllowed(policy, scope)) return { status: 'refused', reason: 'device_code_scope_not_allowed' };
   return { status: 'allowed', tenantId, clientId, scope };
+}
+
+function graphMailDeviceCodeEndpoint(tenantId: string, operation: 'devicecode' | 'token'): string {
+  const testBase = process.env.NARADA_GRAPH_MAIL_DEVICE_CODE_ENDPOINT;
+  if (process.env.NARADA_GRAPH_MAIL_ALLOW_INSECURE_TEST === '1' && typeof testBase === 'string' && testBase.trim() !== '') {
+    return `${testBase.replace(/\/+$/, '')}/${operation}`;
+  }
+  return `https://login.microsoftonline.com/${encodeURIComponent(tenantId)}/oauth2/v2.0/${operation}`;
 }
 
 function scopeAllowed(policy: ReturnType<typeof loadGraphMailPolicy>, scope: string): boolean {

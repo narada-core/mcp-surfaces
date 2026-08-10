@@ -740,12 +740,17 @@ fn validate_upload_url(value: &str) -> Result<(), Value> {
             &MAX_URL_BYTES.to_string(),
         ));
     }
-    let Some(host_and_path) = value.strip_prefix("https://") else {
+    let insecure_test = std::env::var("NARADA_GRAPH_MAIL_ALLOW_INSECURE_TEST").ok().as_deref() == Some("1")
+        && value.starts_with("http://127.0.0.1:");
+    let Some(host_and_path) = value.strip_prefix(if insecure_test { "http://" } else { "https://" }) else {
         return Err(unavailable(
             "attachment_upload_url_must_be_https",
             "upload URL must use HTTPS",
         ));
     };
+    if insecure_test {
+        return Ok(());
+    }
     let host = host_and_path
         .split(['/', '?', '#'])
         .next()

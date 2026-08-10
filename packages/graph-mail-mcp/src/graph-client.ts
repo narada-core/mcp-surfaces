@@ -122,6 +122,9 @@ export function assertAttachmentUploadUrlAllowed(uploadUrl: string): URL {
   } catch {
     throw new Error('attachment_upload_url_invalid');
   }
+  if (process.env.NARADA_GRAPH_MAIL_ALLOW_INSECURE_TEST === '1' && url.protocol === 'http:' && url.hostname === '127.0.0.1') {
+    return url;
+  }
   if (url.protocol !== 'https:') {
     throw new Error('attachment_upload_url_must_be_https');
   }

@@ -1191,6 +1191,7 @@ import { spawn } from 'node:child_process';
 const [nativeExecutable, bunEntrypoint, bunCommand, bunRoot, rustRoot] = process.argv.slice(2);
 const requests = JSON.parse(process.env.NARADA_GRAPH_MAIL_FIXTURE_REQUESTS ?? '[]');
 const received = [];
+let fixturePort = 0;
 const server = createServer((request, response) => {
   const chunks = [];
   request.on('data', (chunk) => chunks.push(chunk));
@@ -1213,7 +1214,9 @@ const server = createServer((request, response) => {
     else if (request.method === 'GET' && url.includes('/mailFolders')) payload = { value: [{ id: 'folder-1', displayName: 'Inbox' }] };
     else if (request.method === 'POST' && url.endsWith('/mailFolders')) { status = 201; payload = { id: 'folder-2', displayName: 'Customers' }; }
     else if (request.method === 'POST' && url.includes('/move')) { status = 200; payload = { id: 'message-1', parentFolderId: 'folder-2' }; }
-    else if (request.method === 'POST' && url.includes('/createUploadSession')) { status = 201; payload = { uploadUrl: 'https://outlook.office.com/upload/fixture' }; }
+    else if (request.method === 'POST' && url.includes('/createUploadSession')) { status = 201; payload = { uploadUrl: 'http://127.0.0.1:' + fixturePort + '/upload/fixture' }; }
+    else if (request.method === 'POST' && url.endsWith('/devicecode')) { status = 200; payload = { device_code: 'device-code-fixture', user_code: 'USER-FIXTURE', verification_uri: 'http://127.0.0.1:' + fixturePort + '/verify', expires_in: 900, interval: 5, message: 'Use the fixture verification page.' }; }
+    else if (request.method === 'POST' && url.endsWith('/token')) { status = 200; payload = { access_token: 'delegated-fixture-token', expires_in: 3600, token_type: 'Bearer' }; }
     else if (request.method === 'POST' && url.includes('/attachments')) { status = 201; payload = { id: 'attachment-2', name: 'note.txt', contentType: 'text/plain' }; }
     else if (request.method === 'POST' && url.includes('/createReplyAll')) { status = 201; payload = { id: 'draft-thread', isDraft: true, subject: 'Re: Needle' }; }
     else if (request.method === 'POST' && url.includes('/createReply') && request.body?.comment === 'Thanks') { status = 201; payload = { id: 'draft-reply', isDraft: true, subject: 'Re: Needle' }; }
@@ -1227,6 +1230,7 @@ const server = createServer((request, response) => {
     else if (request.method === 'PATCH' && url.includes('/messages/draft-html')) { status = 200; payload = { id: 'draft-html', isDraft: true, subject: 'Re: Needle', body: request.body?.body ?? null }; }
     else if (request.method === 'PATCH' && url.includes('/messages/draft-1')) { status = 200; payload = { id: 'draft-1', isDraft: true, subject: 'Updated' }; }
     else if (request.method === 'PATCH') { status = 204; payload = null; }
+    else if (request.method === 'PUT' && url.includes('/upload/fixture')) { status = 201; payload = { id: 'attachment-uploaded', name: 'upload.txt', contentType: 'text/plain' }; }
     response.statusCode = status;
     if (payload === null) { response.end(); return; }
     response.setHeader('content-type', 'application/json');
@@ -1234,7 +1238,7 @@ const server = createServer((request, response) => {
   });
 });
 
-function run(command, args, env) {
+function run(command, args, env, requestList = requests) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { env, windowsHide: true });
     let stdout = '';
@@ -1249,20 +1253,41 @@ function run(command, args, env) {
       try { resolve(stdout.trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line))); }
       catch (error) { reject(new Error('graph_mail_fixture_child_output_invalid:' + error.message + ':' + stdout.slice(-1000))); }
     });
-    child.stdin.end(requests.map((request) => JSON.stringify(request)).join('\n') + '\n');
+    child.stdin.end(requestList.map((request) => JSON.stringify(request)).join('\n') + '\n');
   });
 }
 
 server.listen(0, '127.0.0.1', async () => {
   try {
     const port = server.address().port;
+    fixturePort = port;
     const config = JSON.stringify({ graph_base_url: 'http://127.0.0.1:' + port + '/v1.0', allowed_mailboxes: ['fixture@example.test'], allow_folder_create: true, allow_message_move: true, allow_message_mark_read: true, mailbox_organization_approval_token: 'org-fixture', allow_send_draft: true, send_approval_token: 'send-fixture', allow_device_code_auth: true, device_code_tenant_id: 'tenant-fixture', device_code_client_id: 'client-fixture', device_code_allowed_scopes: ['Mail.ReadWrite'] });
     for (const root of [bunRoot, rustRoot]) { mkdirSync(root + '/.ai', { recursive: true }); writeFileSync(root + '/.ai/graph-mail-mcp.json', config); }
-    const env = { ...process.env, GRAPH_ACCESS_TOKEN: 'fixture-token', NARADA_NATIVE_GRAPH_ALLOW_INSECURE_TEST: '1' };
+    const env = { ...process.env, GRAPH_ACCESS_TOKEN: 'fixture-token', NARADA_NATIVE_GRAPH_ALLOW_INSECURE_TEST: '1', NARADA_GRAPH_MAIL_ALLOW_INSECURE_TEST: '1', NARADA_GRAPH_MAIL_DEVICE_CODE_ENDPOINT: 'http://127.0.0.1:' + port + '/oauth2/v2.0' };
     for (const key of ['MS_GRAPH_ACCESS_TOKEN', 'GRAPH_TENANT_ID', 'GRAPH_CLIENT_ID', 'GRAPH_CLIENT_SECRET', 'GRAPH_TOKEN_ENDPOINT', 'NARADA_GRAPH_MAIL_AUTHORITY_ENTRYPOINT', 'NARADA_GRAPH_MAIL_AUTHORITY_ARGS']) delete env[key];
     const bun = await run(bunCommand, [bunEntrypoint, '--site-root', bunRoot], env);
     const rust = await run(nativeExecutable, ['--surface-id', 'graph-mail', '--native-authority', '--site-root', rustRoot], env);
-    server.close(() => process.stdout.write(JSON.stringify({ bun, rust, received }) + '\n'));
+    const uploadUrl = 'http://127.0.0.1:' + port + '/upload/fixture';
+    for (const uploadRoot of [bunRoot, rustRoot]) { mkdirSync(uploadRoot + '/uploads', { recursive: true }); writeFileSync(uploadRoot + '/uploads/input.txt', 'Hello', 'utf8'); }
+    const uploadRequests = [
+      { jsonrpc: '2.0', id: 30, method: 'tools/call', params: { name: 'graph_mail_attachment_upload_chunk', arguments: { mailbox_id: 'fixture@example.test', upload_url: uploadUrl, content_base64: 'SGVsbG8=', range_start: 0, range_end: 4, total_size: 5 } } },
+      { jsonrpc: '2.0', id: 31, method: 'tools/call', params: { name: 'graph_mail_attachment_upload_file', arguments: { mailbox_id: 'fixture@example.test', message_id: 'message-1', file_path: 'uploads/input.txt', name: 'upload.txt', content_type: 'text/plain', chunk_size: 327680 } } },
+    ];
+    const bunUpload = await run(bunCommand, [bunEntrypoint, '--site-root', bunRoot], env, uploadRequests);
+    const rustUpload = await run(nativeExecutable, ['--surface-id', 'graph-mail', '--native-authority', '--site-root', rustRoot], env, uploadRequests);
+    const authStartRequests = [{ jsonrpc: '2.0', id: 32, method: 'tools/call', params: { name: 'graph_mail_auth_device_code_start', arguments: { scope: 'Mail.ReadWrite' } } }];
+    const bunAuthStart = await run(bunCommand, [bunEntrypoint, '--site-root', bunRoot], env, authStartRequests);
+    const rustAuthStart = await run(nativeExecutable, ['--surface-id', 'graph-mail', '--native-authority', '--site-root', rustRoot], env, authStartRequests);
+    const structured = (responses, id) => responses.find((response) => response.id === id)?.result?.structuredContent;
+    const bunStartStructured = structured(bunAuthStart, 32);
+    const rustStartStructured = structured(rustAuthStart, 32);
+    if (!bunStartStructured || !rustStartStructured) throw new Error('auth_start_result_missing:' + JSON.stringify({ bun: bunAuthStart, rust: rustAuthStart }));
+    const bunFlowId = bunStartStructured.flow_id;
+    const rustFlowId = rustStartStructured.flow_id;
+    const authPollRequests = (flowId) => [{ jsonrpc: '2.0', id: 33, method: 'tools/call', params: { name: 'graph_mail_auth_device_code_poll', arguments: { flow_id: flowId } } }];
+    const bunAuthPoll = await run(bunCommand, [bunEntrypoint, '--site-root', bunRoot], env, authPollRequests(bunFlowId));
+    const rustAuthPoll = await run(nativeExecutable, ['--surface-id', 'graph-mail', '--native-authority', '--site-root', rustRoot], env, authPollRequests(rustFlowId));
+    server.close(() => process.stdout.write(JSON.stringify({ bun, rust, bunUpload, rustUpload, bunAuthStart, rustAuthStart, bunAuthPoll, rustAuthPoll, received }) + '\n'));
   } catch (error) {
     server.close(() => { process.stderr.write(String(error.stack ?? error) + '\n'); process.exit(1); });
   }
@@ -1290,16 +1315,22 @@ server.listen(0, '127.0.0.1', async () => {
     const rustDisposition = mailboxStructured(payload.rust, 27, 'rust');
     if (bunDisposition.count !== 1 || rustDisposition.count !== 1 || bunDisposition.items?.[0]?.disposition !== 'discarded' || rustDisposition.items?.[0]?.disposition !== 'discarded') throw new Error('graph_mail.native_graph.disposition_list_mismatch');
     if (mailboxStructured(payload.bun, 29, 'bun').count !== 0 || mailboxStructured(payload.rust, 29, 'rust').count !== 0) throw new Error('graph_mail.native_graph.disposition_ack_mismatch');
+    assertSame('graph_mail.native_graph.upload_chunk', mailboxStructured(payload.bunUpload, 30, 'bun'), mailboxStructured(payload.rustUpload, 30, 'rust'));
+    assertSame('graph_mail.native_graph.upload_file', mailboxStructured(payload.bunUpload, 31, 'bun'), mailboxStructured(payload.rustUpload, 31, 'rust'));
+    const normalizeAuthStart = (value) => { const copy = { ...value }; delete copy.flow_id; return copy; };
+    assertSame('graph_mail.native_graph.auth_device_code_start', normalizeAuthStart(mailboxStructured(payload.bunAuthStart, 32, 'bun')), normalizeAuthStart(mailboxStructured(payload.rustAuthStart, 32, 'rust')));
+    const normalizeAuthPoll = (value) => { const copy = { ...value }; delete copy.flow_id; delete copy.expires_at_ms; return copy; };
+    assertSame('graph_mail.native_graph.auth_device_code_poll', normalizeAuthPoll(mailboxStructured(payload.bunAuthPoll, 33, 'bun')), normalizeAuthPoll(mailboxStructured(payload.rustAuthPoll, 33, 'rust')));
     const normalizeDownload = (value, root) => ({ ...value, file_path: String(value.file_path).replace(root, '<fixture-root>') });
     assertSame('graph_mail.native_graph.21', normalizeDownload(mailboxStructured(payload.bun, 21, 'bun'), join(root, 'bun')), normalizeDownload(mailboxStructured(payload.rust, 21, 'rust'), join(root, 'rust')));
     const expectedMethods = ['GET', 'GET', 'GET', 'POST', 'POST', 'PATCH', 'GET', 'GET', 'GET', 'POST', 'DELETE', 'POST', 'POST', 'POST', 'PATCH', 'GET', 'DELETE', 'POST', 'POST', 'GET', 'PATCH', 'GET', 'POST', 'POST', 'GET', 'GET', 'POST', 'GET', 'DELETE'];
     assertSame('graph_mail.native_graph.bun_methods', payload.received.slice(0, expectedMethods.length).map((value) => value.method), expectedMethods);
     assertSame('graph_mail.native_graph.rust_methods', payload.received.slice(expectedMethods.length, expectedMethods.length * 2).map((value) => value.method), expectedMethods);
-    if (payload.received.some((value) => value.authorization !== 'Bearer fixture-token')) throw new Error('graph_mail_native_graph_fixture_authorization_mismatch');
+    if (payload.received.slice(0, expectedMethods.length * 2).some((value) => value.authorization !== 'Bearer fixture-token')) throw new Error('graph_mail_native_graph_fixture_authorization_mismatch');
     const auditPath = join(root, 'rust', '.ai', 'audit', 'graph-mail-mcp.jsonl');
     const auditKinds = readFileSync(auditPath, 'utf8').trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line).event_kind);
-    assertSame('graph_mail.native_graph.audit', auditKinds, ['folder_create_requested', 'folder_create_completed', 'message_move_requested', 'message_move_completed', 'message_mark_read_requested', 'message_mark_read_completed', 'draft_create_requested', 'draft_create_completed', 'createReply_requested', 'createReply_completed', 'createForward_requested', 'createForward_completed', 'draft_update_requested', 'draft_update_completed', 'draft_discard_requested', 'draft_discard_completed', 'draft_send_requested', 'draft_send_completed', 'createReply_html_requested', 'createReply_html_completed', 'createReplyAll_to_last_in_thread_requested', 'createReplyAll_to_last_in_thread_completed', 'attachment_download_file_completed', 'device_code_auth_cleared', 'ticket_draft_create_requested', 'ticket_draft_create_completed', 'ticket_draft_discard_requested', 'ticket_draft_discard_completed']);
-    return { status: 'passed', fixture: 'loopback_graph_mail_authority', compared: ['query', 'message_show', 'folder_list', 'folder_create', 'message_move', 'message_mark_read', 'attachment_list', 'attachment_get_metadata', 'attachment_get_content', 'attachment_add', 'attachment_delete', 'attachment_upload_session_create', 'attachment_download_file', 'draft_create', 'reply_draft_create', 'forward_draft_create', 'draft_update', 'draft_discard', 'draft_send', 'html_reply_draft_create', 'reply_all_to_last_in_thread_draft_create', 'auth_status', 'auth_clear', 'ticket_draft_upsert', 'ticket_draft_disposition_list', 'ticket_draft_discard', 'ticket_draft_disposition_ack', 'audit'] };
+    assertSame('graph_mail.native_graph.audit', auditKinds, ['folder_create_requested', 'folder_create_completed', 'message_move_requested', 'message_move_completed', 'message_mark_read_requested', 'message_mark_read_completed', 'draft_create_requested', 'draft_create_completed', 'createReply_requested', 'createReply_completed', 'createForward_requested', 'createForward_completed', 'draft_update_requested', 'draft_update_completed', 'draft_discard_requested', 'draft_discard_completed', 'draft_send_requested', 'draft_send_completed', 'createReply_html_requested', 'createReply_html_completed', 'createReplyAll_to_last_in_thread_requested', 'createReplyAll_to_last_in_thread_completed', 'attachment_download_file_completed', 'device_code_auth_cleared', 'ticket_draft_create_requested', 'ticket_draft_create_completed', 'ticket_draft_discard_requested', 'ticket_draft_discard_completed', 'attachment_upload_file_completed', 'device_code_start_completed', 'device_code_poll_completed']);
+    return { status: 'passed', fixture: 'loopback_graph_mail_authority', compared: ['query', 'message_show', 'folder_list', 'folder_create', 'message_move', 'message_mark_read', 'attachment_list', 'attachment_get_metadata', 'attachment_get_content', 'attachment_add', 'attachment_delete', 'attachment_upload_session_create', 'attachment_download_file', 'attachment_upload_chunk', 'attachment_upload_file', 'draft_create', 'reply_draft_create', 'forward_draft_create', 'draft_update', 'draft_discard', 'draft_send', 'html_reply_draft_create', 'reply_all_to_last_in_thread_draft_create', 'auth_status', 'auth_clear', 'auth_device_code_start', 'auth_device_code_poll', 'ticket_draft_upsert', 'ticket_draft_disposition_list', 'ticket_draft_discard', 'ticket_draft_disposition_ack', 'audit'] };
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
