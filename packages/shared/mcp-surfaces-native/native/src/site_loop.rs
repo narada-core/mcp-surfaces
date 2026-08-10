@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 const SERVER_NAME: &str = "narada-site-loop-mcp";
 const CONFIG_RELATIVE: &str = ".narada/capabilities/site-loop-config.json";
 const DB_RELATIVE: &str = ".ai/task-lifecycle.db";
+const MAX_TEXT_BYTES: u64 = 512_000;
 const READ_TOOLS: &[&str] = &[
     "site_loop_doctor", "site_docs_list", "site_docs_show", "site_test_list",
     "site_loop_config_validate", "site_loop_operator_affordances", "site_loop_status",
@@ -285,6 +286,7 @@ fn attention_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value
 fn load_config(root: &Path) -> Result<Option<Value>, Value> {
     let path = config_path(root);
     if !path.exists() { return Ok(None); }
+    if fs::metadata(&path).map_err(|e| error("site_loop_config_read_failed", &e.to_string()))?.len() > MAX_TEXT_BYTES { return Err(error("site_loop_config_too_large", "site_loop_config_too_large")); }
     let text = fs::read_to_string(&path).map_err(|e| error("site_loop_config_read_failed", &e.to_string()))?;
     let value = serde_json::from_str(&text).map_err(|e| error("site_loop_config_invalid_json", &e.to_string()))?;
     Ok(Some(value))
@@ -325,6 +327,7 @@ fn docs_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     if !allowed { return Err(error("doc_not_allowlisted", "doc_not_allowlisted")); }
     let path = root.join(requested);
     if path.components().any(|component| matches!(component, std::path::Component::ParentDir)) { return Err(error("doc_path_invalid", "doc_path_invalid")); }
+    if fs::metadata(&path).map_err(|_| error("doc_not_found", "doc_not_found"))?.len() > MAX_TEXT_BYTES { return Err(error("doc_too_large", "doc_too_large")); }
     let text = fs::read_to_string(&path).map_err(|_| error("doc_not_found", "doc_not_found"))?;
     let text = text.chars().take(20_000).collect::<String>();
     Ok(json!({"schema":"narada.site_loop.doc.v1","status":"ok","path":requested,"text":text,"truncated":text.chars().count() >= 20_000}))
@@ -391,6 +394,7 @@ fn output_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     let id = reference.strip_prefix("mcp_output:").ok_or_else(||error("output_ref_invalid","output_ref_invalid"))?;
     if id.is_empty() || id.len() > 80 || !id.chars().all(|c|c.is_ascii_alphanumeric() || c == '_' || c == '-') { return Err(error("output_ref_invalid","output_ref_invalid")); }
     let path = root.join(".ai/tmp/mcp-outputs/workspace").join(format!("{id}.json"));
+    if fs::metadata(&path).map_err(|_|error("output_ref_not_found","output_ref_not_found"))?.len() > MAX_TEXT_BYTES { return Err(error("output_ref_too_large","output_ref_too_large")); }
     let text = fs::read_to_string(&path).map_err(|_|error("output_ref_not_found","output_ref_not_found"))?;
     let record: Value = serde_json::from_str(&text).map_err(|e|error("output_ref_invalid_json",&e.to_string()))?;
     if record.get("schema").and_then(Value::as_str) != Some("narada.mcp_output_ref.v1") { return Err(error("output_ref_schema_unsupported","output_ref_schema_unsupported")); }

@@ -3,6 +3,7 @@ use std::fs;
 use std::path::Path;
 
 const SERVER_NAME: &str = "narada-calendar-mcp";
+const MAX_TEXT_BYTES: u64 = 512_000;
 
 // Calendar remains an explicit authority boundary.  This native module owns the
 // wire contract, local policy inspection, and output paging; the Graph adapter
@@ -66,6 +67,7 @@ fn doctor(root: &Path) -> Result<Value, Value> {
     let mut policy = Value::Object(Map::new());
     let mut policy_status = "missing";
     if path.exists() {
+        if fs::metadata(&path).map_err(|e| error("calendar_policy_read_failed", &e.to_string()))?.len() > MAX_TEXT_BYTES { return Err(error("calendar_policy_too_large", "calendar_policy_too_large")); }
         let text = fs::read_to_string(&path).map_err(|e| error("calendar_policy_read_failed", &e.to_string()))?;
         policy = serde_json::from_str(&text).map_err(|e| error("calendar_policy_invalid_json", &e.to_string()))?;
         policy_status = "loaded";
@@ -81,6 +83,7 @@ fn output_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     let id = reference.strip_prefix("mcp_output:").ok_or_else(|| error("output_ref_invalid", "output_ref_invalid"))?;
     if id.is_empty() || id.len() > 80 || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') { return Err(error("output_ref_invalid", "output_ref_invalid")); }
     let path = root.join(".ai/tmp/mcp-outputs/workspace").join(format!("{id}.json"));
+    if fs::metadata(&path).map_err(|_| error("output_ref_not_found", "output_ref_not_found"))?.len() > MAX_TEXT_BYTES { return Err(error("output_ref_too_large", "output_ref_too_large")); }
     let text = fs::read_to_string(&path).map_err(|_| error("output_ref_not_found", "output_ref_not_found"))?;
     let record: Value = serde_json::from_str(&text).map_err(|e| error("output_ref_invalid_json", &e.to_string()))?;
     if record.get("schema").and_then(Value::as_str) != Some("narada.mcp_output_ref.v1") { return Err(error("output_ref_schema_unsupported", "output_ref_schema_unsupported")); }
