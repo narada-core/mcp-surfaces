@@ -1176,6 +1176,11 @@ function runGraphMailNativeGraphParity() {
     { jsonrpc: '2.0', id: 22, method: 'tools/call', params: { name: 'graph_mail_auth_status', arguments: {} } },
     { jsonrpc: '2.0', id: 23, method: 'tools/call', params: { name: 'graph_mail_auth_clear', arguments: { confirm_clear: true } } },
     { jsonrpc: '2.0', id: 24, method: 'tools/call', params: { name: 'graph_mail_ticket_draft_upsert', arguments: { ticket_id: 'ticket-1', effect_claim_id: 'claim-1', draft_operation_key: 'ticket-op-1', draft_request_digest: createHash('sha256').update(JSON.stringify(stable({ source_id: 'source-1', mailbox_id: 'fixture@example.test', source_message_id: 'message-1', reply_mode: 'reply', body_text: 'Ticket body' }))).digest('hex'), draft_source_id: 'source-1', mailbox_id: 'fixture@example.test', source_message_id: 'message-1', reply_mode: 'reply', body_text: 'Ticket body', idempotency_key: 'ticket-idempotency-1' } } },
+    { jsonrpc: '2.0', id: 25, method: 'tools/call', params: { name: 'graph_mail_ticket_draft_disposition_list', arguments: { consumer_id: 'consumer-1' } } },
+    { jsonrpc: '2.0', id: 26, method: 'tools/call', params: { name: 'graph_mail_ticket_draft_discard', arguments: { ticket_id: 'ticket-1', effect_claim_id: 'claim-1', draft_operation_key: 'ticket-op-1', mailbox_id: 'fixture@example.test', draft_id: 'draft-html', idempotency_key: 'discard-idempotency-1', confirm_discard: true } } },
+    { jsonrpc: '2.0', id: 27, method: 'tools/call', params: { name: 'graph_mail_ticket_draft_disposition_list', arguments: { consumer_id: 'consumer-1' } } },
+    { jsonrpc: '2.0', id: 28, method: 'tools/call', params: { name: 'graph_mail_ticket_draft_disposition_ack', arguments: { observation_id: 'graph_draft_disposition_' + createHash('sha256').update('ticket-op-1\u0000discarded\u0000draft-html').digest('hex').slice(0, 32), consumer_id: 'consumer-1', reconciliation_ref: 'reconcile-1', reconciliation_receipt: { status: 'ok' } } } },
+    { jsonrpc: '2.0', id: 29, method: 'tools/call', params: { name: 'graph_mail_ticket_draft_disposition_list', arguments: { consumer_id: 'consumer-1' } } },
   ];
   const cleanEnv = { ...process.env, NARADA_GRAPH_MAIL_FIXTURE_REQUESTS: JSON.stringify(requests) };
   for (const key of ['MS_GRAPH_ACCESS_TOKEN', 'GRAPH_ACCESS_TOKEN', 'GRAPH_TENANT_ID', 'GRAPH_CLIENT_ID', 'GRAPH_CLIENT_SECRET', 'GRAPH_TOKEN_ENDPOINT', 'NARADA_NATIVE_GRAPH_MAIL_AUTHORITY', 'NARADA_NATIVE_GRAPH_ALLOW_INSECURE_TEST']) delete cleanEnv[key];
@@ -1201,7 +1206,8 @@ const server = createServer((request, response) => {
     else if (request.method === 'GET' && url.includes('/messages/message-1/attachments')) payload = { value: [{ id: 'attachment-1', name: 'note.txt', contentType: 'text/plain', contentBytes: 'SGVsbG8=', size: 5 }] };
     else if (request.method === 'GET' && url.includes('/messages/draft-1')) payload = { id: 'draft-1', isDraft: true, changeKey: 'ck-1', subject: 'Draft' };
     else if (request.method === 'GET' && url.includes('/messages/draft-html')) payload = { id: 'draft-html', isDraft: true, subject: 'Re: Needle', body: { contentType: 'HTML', content: '<p>Quoted history</p>' } };
-    else if (request.method === 'GET' && url.includes('singleValueExtendedProperties')) payload = { value: [] };
+    else if (request.method === 'GET' && url.includes('singleValueExtendedProperties') && (url.includes('isDraft%20eq%20true') || url.includes('isDraft+eq+true'))) payload = { value: [] };
+    else if (request.method === 'GET' && url.includes('singleValueExtendedProperties')) payload = { value: [{ id: 'draft-html', isDraft: true, changeKey: 'ck-ticket' }] };
     else if (request.method === 'GET' && url.includes('/messages/message-1')) payload = { id: 'message-1', subject: 'Needle' };
     else if (request.method === 'GET' && url.includes('/messages')) payload = { value: [{ id: 'message-1', subject: 'Needle' }] };
     else if (request.method === 'GET' && url.includes('/mailFolders')) payload = { value: [{ id: 'folder-1', displayName: 'Inbox' }] };
@@ -1217,6 +1223,7 @@ const server = createServer((request, response) => {
     else if (request.method === 'POST' && url.endsWith('/send')) { status = 202; payload = null; }
     else if (request.method === 'DELETE' && url.includes('/attachments/')) { status = 204; payload = null; }
     else if (request.method === 'DELETE' && url.includes('/messages/draft-1')) { status = 204; payload = null; }
+    else if (request.method === 'DELETE' && url.includes('/messages/draft-html')) { status = 204; payload = null; }
     else if (request.method === 'PATCH' && url.includes('/messages/draft-html')) { status = 200; payload = { id: 'draft-html', isDraft: true, subject: 'Re: Needle', body: request.body?.body ?? null }; }
     else if (request.method === 'PATCH' && url.includes('/messages/draft-1')) { status = 200; payload = { id: 'draft-1', isDraft: true, subject: 'Updated' }; }
     else if (request.method === 'PATCH') { status = 204; payload = null; }
@@ -1274,19 +1281,25 @@ server.listen(0, '127.0.0.1', async () => {
     if (result.error) throw new Error('graph_mail_native_graph_fixture_spawn_failed:' + result.error.message);
     if (result.status !== 0) throw new Error('graph_mail_native_graph_fixture_exit:' + result.status + ':' + String(result.stderr).slice(-1500));
     const payload = JSON.parse(String(result.stdout).trim());
-    for (const id of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 22, 23]) assertSame('graph_mail.native_graph.' + id, mailboxStructured(payload.bun, id, 'bun'), mailboxStructured(payload.rust, id, 'rust'));
+    for (const id of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 22, 23, 25, 28]) assertSame('graph_mail.native_graph.' + id, mailboxStructured(payload.bun, id, 'bun'), mailboxStructured(payload.rust, id, 'rust'));
     const normalizeTicket = (value) => { const copy = JSON.parse(JSON.stringify(value)); if (copy?.result) delete copy.result.completed_at; return copy; };
     assertSame('graph_mail.native_graph.24', normalizeTicket(mailboxStructured(payload.bun, 24, 'bun')), normalizeTicket(mailboxStructured(payload.rust, 24, 'rust')));
+    const normalizeDiscard = (value) => { const copy = JSON.parse(JSON.stringify(value)); if (copy?.disposition_receipt) { delete copy.disposition_receipt.observed_at; delete copy.disposition_receipt.receipt_sha256; } return copy; };
+    assertSame('graph_mail.native_graph.26', normalizeDiscard(mailboxStructured(payload.bun, 26, 'bun')), normalizeDiscard(mailboxStructured(payload.rust, 26, 'rust')));
+    const bunDisposition = mailboxStructured(payload.bun, 27, 'bun');
+    const rustDisposition = mailboxStructured(payload.rust, 27, 'rust');
+    if (bunDisposition.count !== 1 || rustDisposition.count !== 1 || bunDisposition.items?.[0]?.disposition !== 'discarded' || rustDisposition.items?.[0]?.disposition !== 'discarded') throw new Error('graph_mail.native_graph.disposition_list_mismatch');
+    if (mailboxStructured(payload.bun, 29, 'bun').count !== 0 || mailboxStructured(payload.rust, 29, 'rust').count !== 0) throw new Error('graph_mail.native_graph.disposition_ack_mismatch');
     const normalizeDownload = (value, root) => ({ ...value, file_path: String(value.file_path).replace(root, '<fixture-root>') });
     assertSame('graph_mail.native_graph.21', normalizeDownload(mailboxStructured(payload.bun, 21, 'bun'), join(root, 'bun')), normalizeDownload(mailboxStructured(payload.rust, 21, 'rust'), join(root, 'rust')));
-    const expectedMethods = ['GET', 'GET', 'GET', 'POST', 'POST', 'PATCH', 'GET', 'GET', 'GET', 'POST', 'DELETE', 'POST', 'POST', 'POST', 'PATCH', 'GET', 'DELETE', 'POST', 'POST', 'GET', 'PATCH', 'GET', 'POST', 'POST', 'GET', 'GET', 'POST'];
+    const expectedMethods = ['GET', 'GET', 'GET', 'POST', 'POST', 'PATCH', 'GET', 'GET', 'GET', 'POST', 'DELETE', 'POST', 'POST', 'POST', 'PATCH', 'GET', 'DELETE', 'POST', 'POST', 'GET', 'PATCH', 'GET', 'POST', 'POST', 'GET', 'GET', 'POST', 'GET', 'DELETE'];
     assertSame('graph_mail.native_graph.bun_methods', payload.received.slice(0, expectedMethods.length).map((value) => value.method), expectedMethods);
     assertSame('graph_mail.native_graph.rust_methods', payload.received.slice(expectedMethods.length, expectedMethods.length * 2).map((value) => value.method), expectedMethods);
     if (payload.received.some((value) => value.authorization !== 'Bearer fixture-token')) throw new Error('graph_mail_native_graph_fixture_authorization_mismatch');
     const auditPath = join(root, 'rust', '.ai', 'audit', 'graph-mail-mcp.jsonl');
     const auditKinds = readFileSync(auditPath, 'utf8').trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line).event_kind);
-    assertSame('graph_mail.native_graph.audit', auditKinds, ['folder_create_requested', 'folder_create_completed', 'message_move_requested', 'message_move_completed', 'message_mark_read_requested', 'message_mark_read_completed', 'draft_create_requested', 'draft_create_completed', 'createReply_requested', 'createReply_completed', 'createForward_requested', 'createForward_completed', 'draft_update_requested', 'draft_update_completed', 'draft_discard_requested', 'draft_discard_completed', 'draft_send_requested', 'draft_send_completed', 'createReply_html_requested', 'createReply_html_completed', 'createReplyAll_to_last_in_thread_requested', 'createReplyAll_to_last_in_thread_completed', 'attachment_download_file_completed', 'device_code_auth_cleared', 'ticket_draft_create_requested', 'ticket_draft_create_completed']);
-    return { status: 'passed', fixture: 'loopback_graph_mail_authority', compared: ['query', 'message_show', 'folder_list', 'folder_create', 'message_move', 'message_mark_read', 'attachment_list', 'attachment_get_metadata', 'attachment_get_content', 'attachment_add', 'attachment_delete', 'attachment_upload_session_create', 'attachment_download_file', 'draft_create', 'reply_draft_create', 'forward_draft_create', 'draft_update', 'draft_discard', 'draft_send', 'html_reply_draft_create', 'reply_all_to_last_in_thread_draft_create', 'auth_status', 'auth_clear', 'ticket_draft_upsert', 'audit'] };
+    assertSame('graph_mail.native_graph.audit', auditKinds, ['folder_create_requested', 'folder_create_completed', 'message_move_requested', 'message_move_completed', 'message_mark_read_requested', 'message_mark_read_completed', 'draft_create_requested', 'draft_create_completed', 'createReply_requested', 'createReply_completed', 'createForward_requested', 'createForward_completed', 'draft_update_requested', 'draft_update_completed', 'draft_discard_requested', 'draft_discard_completed', 'draft_send_requested', 'draft_send_completed', 'createReply_html_requested', 'createReply_html_completed', 'createReplyAll_to_last_in_thread_requested', 'createReplyAll_to_last_in_thread_completed', 'attachment_download_file_completed', 'device_code_auth_cleared', 'ticket_draft_create_requested', 'ticket_draft_create_completed', 'ticket_draft_discard_requested', 'ticket_draft_discard_completed']);
+    return { status: 'passed', fixture: 'loopback_graph_mail_authority', compared: ['query', 'message_show', 'folder_list', 'folder_create', 'message_move', 'message_mark_read', 'attachment_list', 'attachment_get_metadata', 'attachment_get_content', 'attachment_add', 'attachment_delete', 'attachment_upload_session_create', 'attachment_download_file', 'draft_create', 'reply_draft_create', 'forward_draft_create', 'draft_update', 'draft_discard', 'draft_send', 'html_reply_draft_create', 'reply_all_to_last_in_thread_draft_create', 'auth_status', 'auth_clear', 'ticket_draft_upsert', 'ticket_draft_disposition_list', 'ticket_draft_discard', 'ticket_draft_disposition_ack', 'audit'] };
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

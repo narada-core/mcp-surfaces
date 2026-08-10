@@ -71,6 +71,10 @@ pub fn supports(name: &str) -> bool {
             | "graph_mail_forward_draft_create"
             | "graph_mail_reply_all_to_last_in_thread_draft_create"
             | "graph_mail_ticket_draft_upsert"
+            | "graph_mail_ticket_draft_discard"
+            | "graph_mail_ticket_draft_disposition_scan"
+            | "graph_mail_ticket_draft_disposition_list"
+            | "graph_mail_ticket_draft_disposition_ack"
             | "graph_mail_draft_update"
             | "graph_mail_draft_discard"
             | "graph_mail_draft_send"
@@ -104,6 +108,10 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<V
         "graph_mail_forward_draft_create" => derived_draft_create(&policy, args, root, "createForward"),
         "graph_mail_reply_all_to_last_in_thread_draft_create" => reply_all_to_last_in_thread(&policy, args, root),
         "graph_mail_ticket_draft_upsert" => ticket_draft_upsert(&policy, args, root),
+        "graph_mail_ticket_draft_discard" => ticket_draft_discard(&policy, args, root),
+        "graph_mail_ticket_draft_disposition_scan" => ticket_disposition_scan(&policy, args, root),
+        "graph_mail_ticket_draft_disposition_list" => ticket_disposition_list(args, root),
+        "graph_mail_ticket_draft_disposition_ack" => ticket_disposition_ack(args, root),
         "graph_mail_draft_update" => draft_update(&policy, args, root),
         "graph_mail_draft_discard" => draft_discard(&policy, args, root),
         "graph_mail_draft_send" => draft_send(&policy, args, root),
@@ -1559,6 +1567,434 @@ fn ticket_draft_upsert(
     }
 }
 
+fn ticket_draft_discard(
+    policy: &Policy,
+    args: &Map<String, Value>,
+    root: &Path,
+) -> Result<Value, Value> {
+    if args.get("confirm_discard").and_then(Value::as_bool) != Some(true) {
+        return Err(unavailable(
+            "graph_ticket_draft_discard_confirmation_required",
+            "confirm_discard=true is required",
+        ));
+    }
+    let ticket_id = required_string(args, "ticket_id")?;
+    let effect_claim_id = required_string(args, "effect_claim_id")?;
+    let operation_key = required_string(args, "draft_operation_key")?;
+    let mailbox_id = required_string(args, "mailbox_id")?;
+    let draft_id = required_string(args, "draft_id")?;
+    let idempotency_key = required_string(args, "idempotency_key")?;
+    let request = json!({
+        "ticket_id":ticket_id,
+        "effect_claim_id":effect_claim_id,
+        "draft_operation_key":operation_key,
+        "mailbox_id":mailbox_id,
+        "draft_id":draft_id,
+        "idempotency_key":idempotency_key,
+        "confirm_discard":true
+    });
+    let request_digest = sha256_canonical(&request);
+    let connection = ticket_store(root)?;
+    connection
+        .execute_batch("BEGIN IMMEDIATE")
+        .map_err(|error| unavailable("graph_ticket_draft_transaction_failed", &error.to_string()))?;
+    let outcome = (|| {
+        let operation = find_ticket_operation(&connection, &operation_key)?
+            .ok_or_else(|| unavailable("graph_ticket_draft_operation_not_completed", &operation_key))?;
+        if operation.status != "completed" {
+            return Err(unavailable("graph_ticket_draft_operation_not_completed", &operation_key));
+        }
+        if operation.ticket_id != ticket_id
+            || operation.effect_claim_id != effect_claim_id
+            || operation.mailbox_id != mailbox_id
+            || operation.draft_id.as_deref() != Some(draft_id.as_str())
+        {
+            return Err(unavailable("graph_ticket_draft_discard_linkage_mismatch", &operation_key));
+        }
+        let now = now_rfc3339();
+        connection
+            .execute(
+                "insert into graph_ticket_draft_discard_intents(operation_key, idempotency_key, request_digest, status, verified_etag, verified_at, receipt_json, created_at, updated_at, completed_at) values (?1, ?2, ?3, 'pending', null, null, null, ?4, ?4, null) on conflict(operation_key) do nothing",
+                params![operation_key, idempotency_key, request_digest, now],
+            )
+            .map_err(|error| unavailable("graph_ticket_draft_discard_intent_failed", &error.to_string()))?;
+        let mut intent = find_discard_intent(&connection, &operation_key)?
+            .ok_or_else(|| unavailable("graph_ticket_draft_discard_intent_not_found", &operation_key))?;
+        if intent.idempotency_key != idempotency_key || intent.request_digest != request_digest {
+            return Err(unavailable("graph_ticket_draft_discard_idempotency_conflict", &operation_key));
+        }
+        if intent.status == "completed" {
+            let receipt = intent.receipt.take().ok_or_else(|| unavailable("graph_ticket_draft_discard_receipt_missing", &operation_key))?;
+            return Ok(json!({"schema":"narada.graph_mail.ticket_draft_discard.v1","status":"discarded","disposition_receipt":receipt,"idempotency_replayed_or_recovered":true}));
+        }
+        let messages = find_ticket_remote_messages(policy, &mailbox_id, &operation_key)?;
+        if messages.len() > 1 {
+            return Err(unavailable("graph_ticket_draft_discard_remote_identity_ambiguous", &operation_key));
+        }
+        let Some(observed) = messages.into_iter().next() else {
+            if intent.status != "verified" {
+                return Err(unavailable("graph_ticket_draft_discard_absence_not_evidence", &operation_key));
+            }
+            let receipt = ticket_discard_receipt(&operation, "operator_authorized_graph_absence_after_verified_discard", false, true);
+            complete_discard_intent(&connection, &operation_key, &receipt, &operation)?;
+            return Ok(json!({"schema":"narada.graph_mail.ticket_draft_discard.v1","status":"discarded","disposition_receipt":receipt,"idempotency_replayed_or_recovered":true}));
+        };
+        let observed_id = observed.get("id").and_then(Value::as_str).ok_or_else(|| unavailable("graph_ticket_draft_discard_remote_identity_missing", &operation_key))?;
+        if observed_id != draft_id {
+            return Err(unavailable("graph_ticket_draft_discard_remote_identity_mismatch", &operation_key));
+        }
+        if observed.get("isDraft").and_then(Value::as_bool) != Some(true) {
+            return Err(unavailable("graph_ticket_draft_discard_refused_not_draft", &operation_key));
+        }
+        let verifier = observed
+            .get("@odata.etag")
+            .and_then(Value::as_str)
+            .or_else(|| observed.get("changeKey").and_then(Value::as_str))
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| unavailable("graph_ticket_draft_discard_remote_verifier_missing", &operation_key))?;
+        connection
+            .execute(
+                "update graph_ticket_draft_discard_intents set status='verified', verified_etag=?1, verified_at=?2, updated_at=?2 where operation_key=?3 and status in ('pending','verified')",
+                params![verifier, now_rfc3339(), operation_key],
+            )
+            .map_err(|error| unavailable("graph_ticket_draft_discard_verify_failed", &error.to_string()))?;
+        record_audit(root, json!({"event_kind":"ticket_draft_discard_requested","ticket_id":ticket_id,"effect_claim_id":effect_claim_id,"draft_operation_key":operation_key,"mailbox_id":mailbox_id,"draft_id":draft_id}))?;
+        let mut headers = Map::new();
+        headers.insert("If-Match".to_string(), json!(verifier));
+        policy.adapter.request_with_headers(
+            "DELETE",
+            Some(&mailbox_id),
+            &format!("messages/{}", encode_component(&draft_id)),
+            &Map::new(),
+            None,
+            &headers,
+        )?;
+        record_audit(root, json!({"event_kind":"ticket_draft_discard_completed","ticket_id":ticket_id,"effect_claim_id":effect_claim_id,"draft_operation_key":operation_key,"mailbox_id":mailbox_id,"draft_id":draft_id}))?;
+        let receipt = ticket_discard_receipt(&operation, "operator_confirmed_graph_discard", true, false);
+        complete_discard_intent(&connection, &operation_key, &receipt, &operation)?;
+        Ok(json!({"schema":"narada.graph_mail.ticket_draft_discard.v1","status":"discarded","disposition_receipt":receipt,"idempotency_replayed_or_recovered":false}))
+    })();
+    match outcome {
+        Ok(value) => {
+            connection
+                .execute_batch("COMMIT")
+                .map_err(|error| unavailable("graph_ticket_draft_commit_failed", &error.to_string()))?;
+            Ok(value)
+        }
+        Err(error) => {
+            let _ = connection.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
+}
+
+#[derive(Clone)]
+struct DiscardIntent {
+    idempotency_key: String,
+    request_digest: String,
+    status: String,
+    receipt: Option<Value>,
+}
+
+fn find_discard_intent(connection: &Connection, operation_key: &str) -> Result<Option<DiscardIntent>, Value> {
+    connection
+        .query_row(
+            "select idempotency_key, request_digest, status, receipt_json from graph_ticket_draft_discard_intents where operation_key=?1",
+            params![operation_key],
+            |row| {
+                let receipt: Option<String> = row.get(3)?;
+                Ok(DiscardIntent {
+                    idempotency_key: row.get(0)?,
+                    request_digest: row.get(1)?,
+                    status: row.get(2)?,
+                    receipt: receipt.and_then(|value| serde_json::from_str(&value).ok()),
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| unavailable("graph_ticket_draft_discard_database_read_failed", &error.to_string()))
+}
+
+fn find_ticket_remote_messages(
+    policy: &Policy,
+    mailbox_id: &str,
+    operation_key: &str,
+) -> Result<Vec<Value>, Value> {
+    let property_id = TICKET_DRAFT_OPERATION_PROPERTY_ID.replace('\'', "''");
+    let property_value = operation_key.replace('\'', "''");
+    let mut query = Map::new();
+    query.insert(
+        "$filter".to_string(),
+        json!(format!("singleValueExtendedProperties/Any(ep: ep/id eq '{property_id}' and ep/value eq '{property_value}')")),
+    );
+    query.insert(
+        "$expand".to_string(),
+        json!(format!("singleValueExtendedProperties($filter=id eq '{property_id}')")),
+    );
+    query.insert(
+        "$select".to_string(),
+        json!("id,isDraft,changeKey,createdDateTime,lastModifiedDateTime,sentDateTime,parentFolderId"),
+    );
+    query.insert("$top".to_string(), json!(2));
+    let result = policy.adapter.request("GET", Some(mailbox_id), "messages", &query, None)?;
+    Ok(result
+        .get("value")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|value| value.get("id").and_then(Value::as_str).is_some())
+        .collect())
+}
+
+fn ticket_discard_receipt(
+    operation: &TicketOperation,
+    evidence_kind: &str,
+    graph_delete_confirmed: bool,
+    graph_absence_confirmed: bool,
+) -> Value {
+    let draft_id = operation.draft_id.clone().unwrap_or_default();
+    let observation_id = stable_disposition_observation_id(&operation.operation_key, "discarded", &draft_id);
+    let mut receipt = json!({
+        "schema":"narada.graph_mail.ticket_draft_disposition_receipt.v1",
+        "observation_id":observation_id,
+        "evidence_kind":evidence_kind,
+        "evidence_id":observation_id,
+        "disposition":"discarded",
+        "ticket_id":operation.ticket_id,
+        "effect_claim_id":operation.effect_claim_id,
+        "draft_operation_key":operation.operation_key,
+        "mailbox_id":operation.mailbox_id,
+        "draft_id":draft_id,
+        "observed_message_id":draft_id,
+        "is_draft":true,
+        "graph_delete_confirmed":graph_delete_confirmed,
+        "graph_absence_confirmed":graph_absence_confirmed,
+        "observed_at":now_rfc3339()
+    });
+    let digest = sha256_canonical(&receipt);
+    receipt.as_object_mut().unwrap().insert("receipt_sha256".to_string(), json!(digest));
+    receipt
+}
+
+fn complete_discard_intent(
+    connection: &Connection,
+    operation_key: &str,
+    receipt: &Value,
+    operation: &TicketOperation,
+) -> Result<(), Value> {
+    let receipt_json = canonical_json(receipt);
+    connection
+        .execute(
+            "insert into graph_ticket_draft_disposition_observations(observation_id, operation_key, ticket_id, mailbox_id, draft_id, disposition, evidence_kind, evidence_id, receipt_json, observed_at) values (?1, ?2, ?3, ?4, ?5, 'discarded', ?6, ?7, ?8, ?9) on conflict(operation_key) do nothing",
+            params![receipt.get("observation_id").and_then(Value::as_str).unwrap_or_default(), operation_key, operation.ticket_id, operation.mailbox_id, operation.draft_id.clone().unwrap_or_default(), receipt.get("evidence_kind").and_then(Value::as_str).unwrap_or_default(), receipt.get("evidence_id").and_then(Value::as_str).unwrap_or_default(), receipt_json, receipt.get("observed_at").and_then(Value::as_str).unwrap_or_default()],
+        )
+        .map_err(|error| unavailable("graph_ticket_draft_disposition_record_failed", &error.to_string()))?;
+    connection
+        .execute(
+            "update graph_ticket_draft_discard_intents set status='completed', receipt_json=?1, updated_at=?2, completed_at=?2 where operation_key=?3 and status in ('verified','pending')",
+            params![receipt_json, now_rfc3339(), operation_key],
+        )
+        .map_err(|error| unavailable("graph_ticket_draft_discard_completion_failed", &error.to_string()))?;
+    Ok(())
+}
+
+fn stable_disposition_observation_id(operation_key: &str, disposition: &str, observed_message_id: &str) -> String {
+    let input = format!("{operation_key}\0{disposition}\0{observed_message_id}");
+    format!("graph_draft_disposition_{}", &hex_lower(&Sha256::digest(input.as_bytes()))[..32])
+}
+
+fn ticket_disposition_scan(
+    policy: &Policy,
+    args: &Map<String, Value>,
+    root: &Path,
+) -> Result<Value, Value> {
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(5)
+        .clamp(1, 5);
+    let connection = ticket_store(root)?;
+    let mut statement = connection
+        .prepare(
+            "select operation_key from graph_ticket_draft_operations operation where operation.status='completed' and not exists (select 1 from graph_ticket_draft_disposition_observations observation where observation.operation_key=operation.operation_key) order by operation.completed_at asc, operation.operation_key asc limit ?1",
+        )
+        .map_err(|error| unavailable("graph_ticket_draft_scan_query_failed", &error.to_string()))?;
+    let keys = statement
+        .query_map(params![limit], |row| row.get::<_, String>(0))
+        .map_err(|error| unavailable("graph_ticket_draft_scan_query_failed", &error.to_string()))?
+        .filter_map(Result::ok)
+        .collect::<Vec<_>>();
+    drop(statement);
+    let mut errors = Vec::new();
+    let mut observations_recorded = 0u64;
+    let mut still_pending = 0u64;
+    for operation_key in &keys {
+        let result = (|| {
+            let operation = find_ticket_operation(&connection, operation_key)?
+                .ok_or_else(|| unavailable("graph_ticket_draft_operation_not_found", operation_key))?;
+            let messages = find_ticket_remote_messages(policy, &operation.mailbox_id, operation_key)?;
+            if messages.len() > 1 {
+                return Err(unavailable("graph_ticket_draft_disposition_remote_identity_ambiguous", operation_key));
+            }
+            let Some(observed) = messages.into_iter().next() else {
+                return Ok(false);
+            };
+            if observed.get("isDraft").and_then(Value::as_bool) != Some(false) {
+                return Ok(false);
+            }
+            let observed_id = observed
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| unavailable("graph_ticket_draft_disposition_message_id_missing", operation_key))?;
+            let observation_id = stable_disposition_observation_id(operation_key, "sent", observed_id);
+            let mut receipt = json!({
+                "schema":"narada.graph_mail.ticket_draft_disposition_receipt.v1",
+                "observation_id":observation_id,
+                "evidence_kind":"synchronized_graph_observation",
+                "evidence_id":observation_id,
+                "disposition":"sent",
+                "ticket_id":operation.ticket_id,
+                "effect_claim_id":operation.effect_claim_id,
+                "draft_operation_key":operation_key,
+                "mailbox_id":operation.mailbox_id,
+                "draft_id":operation.draft_id,
+                "observed_message_id":observed_id,
+                "is_draft":false,
+                "observed_at":now_rfc3339()
+            });
+            if let Some(value) = observed.get("@odata.etag").and_then(Value::as_str) {
+                receipt.as_object_mut().unwrap().insert("etag".to_string(), json!(value));
+            }
+            if let Some(value) = observed.get("changeKey").and_then(Value::as_str) {
+                receipt.as_object_mut().unwrap().insert("change_key".to_string(), json!(value));
+            }
+            if let Some(value) = observed.get("lastModifiedDateTime").and_then(Value::as_str) {
+                receipt.as_object_mut().unwrap().insert("last_modified_at".to_string(), json!(value));
+            }
+            let digest = sha256_canonical(&receipt);
+            receipt.as_object_mut().unwrap().insert("receipt_sha256".to_string(), json!(digest));
+            let recorded = insert_disposition_observation(&connection, &operation, &receipt)?;
+            connection
+                .execute(
+                    "insert into graph_ticket_draft_disposition_scan_state(operation_key, last_scanned_at, scan_count) values (?1, ?2, 1) on conflict(operation_key) do update set last_scanned_at=excluded.last_scanned_at, scan_count=graph_ticket_draft_disposition_scan_state.scan_count+1",
+                    params![operation_key, now_rfc3339()],
+                )
+                .map_err(|error| unavailable("graph_ticket_draft_scan_state_failed", &error.to_string()))?;
+            Ok(recorded)
+        })();
+        match result {
+            Ok(true) => observations_recorded += 1,
+            Ok(false) => {
+                still_pending += 1;
+                let _ = connection.execute(
+                    "insert into graph_ticket_draft_disposition_scan_state(operation_key, last_scanned_at, scan_count) values (?1, ?2, 1) on conflict(operation_key) do update set last_scanned_at=excluded.last_scanned_at, scan_count=graph_ticket_draft_disposition_scan_state.scan_count+1",
+                    params![operation_key, now_rfc3339()],
+                );
+            }
+            Err(error) => {
+                errors.push(json!({"operation_key":operation_key,"error":error}));
+                let _ = connection.execute(
+                    "insert into graph_ticket_draft_disposition_scan_state(operation_key, last_scanned_at, scan_count) values (?1, ?2, 1) on conflict(operation_key) do update set last_scanned_at=excluded.last_scanned_at, scan_count=graph_ticket_draft_disposition_scan_state.scan_count+1",
+                    params![operation_key, now_rfc3339()],
+                );
+            }
+        }
+    }
+    Ok(json!({
+        "schema":"narada.graph_mail.ticket_draft_disposition_scan.v1",
+        "status":if errors.is_empty() { "completed" } else { "completed_with_errors" },
+        "operations_scanned":keys.len(),
+        "observations_recorded":observations_recorded,
+        "still_pending":still_pending,
+        "errors":errors
+    }))
+}
+
+fn insert_disposition_observation(
+    connection: &Connection,
+    operation: &TicketOperation,
+    receipt: &Value,
+) -> Result<bool, Value> {
+    let receipt_json = canonical_json(receipt);
+    let result = connection
+        .execute(
+            "insert into graph_ticket_draft_disposition_observations(observation_id, operation_key, ticket_id, mailbox_id, draft_id, disposition, evidence_kind, evidence_id, receipt_json, observed_at) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) on conflict(operation_key) do nothing",
+            params![receipt.get("observation_id").and_then(Value::as_str).unwrap_or_default(), operation.operation_key, operation.ticket_id, operation.mailbox_id, operation.draft_id.clone().unwrap_or_default(), receipt.get("disposition").and_then(Value::as_str).unwrap_or_default(), receipt.get("evidence_kind").and_then(Value::as_str).unwrap_or_default(), receipt.get("evidence_id").and_then(Value::as_str).unwrap_or_default(), receipt_json, receipt.get("observed_at").and_then(Value::as_str).unwrap_or_default()],
+        )
+        .map_err(|error| unavailable("graph_ticket_draft_disposition_record_failed", &error.to_string()))?;
+    Ok(result == 1)
+}
+
+fn ticket_disposition_list(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let consumer_id = required_string(args, "consumer_id")?;
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(5)
+        .clamp(1, 5);
+    let connection = ticket_store(root)?;
+    let mut statement = connection
+        .prepare("select observation.receipt_json from graph_ticket_draft_disposition_observations observation where not exists (select 1 from graph_ticket_draft_disposition_receipts receipt where receipt.observation_id=observation.observation_id and receipt.consumer_id=?1) order by observation.observed_at asc, observation.observation_id asc limit ?2")
+        .map_err(|error| unavailable("graph_ticket_draft_disposition_list_failed", &error.to_string()))?;
+    let rows = statement
+        .query_map(params![consumer_id, limit], |row| row.get::<_, String>(0))
+        .map_err(|error| unavailable("graph_ticket_draft_disposition_list_failed", &error.to_string()))?;
+    let mut items = Vec::new();
+    for row in rows {
+        let text = row.map_err(|error| unavailable("graph_ticket_draft_disposition_list_failed", &error.to_string()))?;
+        if let Ok(value) = serde_json::from_str::<Value>(&text) {
+            items.push(value);
+        }
+    }
+    Ok(json!({
+        "schema":"narada.graph_mail.ticket_draft_disposition_list.v1",
+        "consumer_id":consumer_id,
+        "items":items,
+        "count":items.len()
+    }))
+}
+
+fn ticket_disposition_ack(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let observation_id = required_string(args, "observation_id")?;
+    let consumer_id = required_string(args, "consumer_id")?;
+    let reconciliation_ref = required_string(args, "reconciliation_ref")?;
+    let receipt = args
+        .get("reconciliation_receipt")
+        .cloned()
+        .filter(|value| value.is_object())
+        .unwrap_or_else(|| json!({}));
+    let receipt_json = canonical_json(&receipt);
+    let connection = ticket_store(root)?;
+    let changes = connection
+        .execute(
+            "insert into graph_ticket_draft_disposition_receipts(observation_id, consumer_id, reconciliation_ref, receipt_json, acknowledged_at) values (?1, ?2, ?3, ?4, ?5) on conflict(observation_id, consumer_id) do nothing",
+            params![observation_id, consumer_id, reconciliation_ref, receipt_json, now_rfc3339()],
+        )
+        .map_err(|error| unavailable("graph_ticket_draft_disposition_ack_failed", &error.to_string()))?;
+    let existing = connection
+        .query_row(
+            "select reconciliation_ref, receipt_json from graph_ticket_draft_disposition_receipts where observation_id=?1 and consumer_id=?2",
+            params![observation_id, consumer_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|error| unavailable("graph_ticket_draft_disposition_ack_failed", &error.to_string()))?;
+    let Some((stored_ref, stored_receipt)) = existing else {
+        return Err(unavailable("graph_ticket_draft_disposition_ack_not_found", &observation_id));
+    };
+    if stored_ref != reconciliation_ref || stored_receipt != receipt_json {
+        return Err(unavailable("graph_ticket_draft_disposition_ack_conflict", &observation_id));
+    }
+    Ok(json!({
+        "schema":"narada.graph_mail.ticket_draft_disposition_ack.v1",
+        "status":if changes == 1 { "acknowledged" } else { "already_acknowledged" },
+        "observation_id":observation_id,
+        "consumer_id":consumer_id,
+        "reconciliation_ref":reconciliation_ref
+    }))
+}
+
 #[derive(Clone)]
 struct TicketOperation {
     operation_key: String,
@@ -1585,7 +2021,7 @@ fn ticket_store(root: &Path) -> Result<Connection, Value> {
         .map_err(|error| unavailable("graph_ticket_draft_database_open_failed", &error.to_string()))?;
     connection
         .execute_batch(
-            "pragma busy_timeout = 30000; pragma foreign_keys = on; create table if not exists graph_ticket_draft_operations(operation_key text primary key, action_idempotency_key text not null unique, request_digest text not null, draft_request_digest text not null, ticket_id text not null, effect_claim_id text not null, mailbox_id text not null, source_message_id text not null, reply_mode text not null, status text not null, draft_id text, receipt_id text, draft_ref_json text, created_at text not null, updated_at text not null, completed_at text);",
+            "pragma busy_timeout = 30000; pragma foreign_keys = on; create table if not exists graph_ticket_draft_operations(operation_key text primary key, action_idempotency_key text not null unique, request_digest text not null, draft_request_digest text not null, ticket_id text not null, effect_claim_id text not null, mailbox_id text not null, source_message_id text not null, reply_mode text not null, status text not null, draft_id text, receipt_id text, draft_ref_json text, created_at text not null, updated_at text not null, completed_at text); create table if not exists graph_ticket_draft_disposition_scan_state(operation_key text primary key, last_scanned_at text not null, scan_count integer not null); create table if not exists graph_ticket_draft_disposition_observations(observation_id text primary key, operation_key text not null unique, ticket_id text not null, mailbox_id text not null, draft_id text not null, disposition text not null, evidence_kind text not null, evidence_id text not null unique, receipt_json text not null, observed_at text not null); create table if not exists graph_ticket_draft_disposition_receipts(observation_id text not null, consumer_id text not null, reconciliation_ref text not null, receipt_json text not null, acknowledged_at text not null, primary key(observation_id, consumer_id)); create table if not exists graph_ticket_draft_discard_intents(operation_key text primary key, idempotency_key text not null unique, request_digest text not null, status text not null, verified_etag text, verified_at text, receipt_json text, created_at text not null, updated_at text not null, completed_at text);",
         )
         .map_err(|error| unavailable("graph_ticket_draft_schema_failed", &error.to_string()))?;
     Ok(connection)
