@@ -13,6 +13,7 @@ mod runtime_introspection;
 mod launcher;
 mod calendar;
 mod site_coherence;
+mod site_loop;
 
 const LEGACY_PROTOCOL_VERSION: &str = "2024-11-05";
 const MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
@@ -139,6 +140,7 @@ fn handle_request(request: &Value, options: &Options) -> Option<Value> {
                 .map(|value| modern_result(value, options)),
             method if options.surface_id == "site-inbox" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => site_inbox::auxiliary(method, &params).map(|value| modern_result(value, options)),
             method if options.surface_id == "calendar" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => calendar::auxiliary(method, &params).map(|value| modern_result(value, options)),
+            method if options.surface_id == "site-loop" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => site_loop::auxiliary(method, &params).map(|value| modern_result(value, options)),
             "initialize" => Err(diagnostic(
                 "initialize_removed",
                 "The 2026-07-28 protocol has no initialize handshake.",
@@ -154,6 +156,7 @@ fn handle_request(request: &Value, options: &Options) -> Option<Value> {
         match method {
             method if options.surface_id == "site-inbox" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => site_inbox::auxiliary(method, &params),
             method if options.surface_id == "calendar" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => calendar::auxiliary(method, &params),
+            method if options.surface_id == "site-loop" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => site_loop::auxiliary(method, &params),
             "initialize" => Ok(initialize_result(options)),
             "tools/list" => Ok(json!({ "tools": list_tools(&options.surface_id) })),
             "tools/call" => call_tool(&options.surface_id, &params, options),
@@ -209,6 +212,7 @@ fn validate_modern_request(params: &Map<String, Value>) -> Result<(), Value> {
 fn server_name(options: &Options) -> String {
     match options.surface_id.as_str() {
         "site-inbox" => "narada-site-inbox-mcp".to_string(),
+        "site-loop" => "narada-site-loop-mcp".to_string(),
         "site-lifecycle" => "site-lifecycle-mcp".to_string(),
         "calendar" => "narada-calendar-mcp".to_string(),
         "site-registry" => "site-registry-mcp".to_string(),
@@ -221,6 +225,7 @@ fn server_name(options: &Options) -> String {
 }
 
 fn capabilities(surface_id: &str) -> Value {
+    if surface_id == "site-loop" { return json!({"tools":{},"prompts":{},"completions":{},"logging":{}}); }
     if surface_id == "calendar" { return json!({"tools":{},"prompts":{},"completions":{},"logging":{}}); }
     if surface_id == "site-inbox" { json!({"tools":{},"prompts":{},"completions":{},"logging":{}}) } else { json!({"tools":{}}) }
 }
@@ -260,6 +265,7 @@ fn list_tools(surface_id: &str) -> Vec<Value> {
     match surface_id {
         "site-inbox" => site_inbox::list_tools(),
         "calendar" => calendar::list_tools(),
+        "site-loop" => site_loop::list_tools(),
         "catalog-observation" => vec![
             guidance_tool("catalog-observation"),
             tool("catalog_observation_observe", "Observe a provider model catalog through the Narada-owned observation port.", json!({
@@ -332,6 +338,7 @@ fn call_tool(surface_id: &str, params: &Map<String, Value>, options: &Options) -
         ("operator-routing", "operator_route_request") => operator_route_request(&args, options),
         ("site-inbox", name) => site_inbox::call_tool(name, &args, &options.site_root),
         ("calendar", name) => calendar::call_tool(name, &args, &options.site_root),
+        ("site-loop", name) => site_loop::call_tool(name, &args, &options.site_root),
         ("site-lifecycle", name) | ("site-registry", name) | ("project-state", name) => {
             simple_surfaces::call_tool(surface_id, name, &args, &options.site_root)
         }
