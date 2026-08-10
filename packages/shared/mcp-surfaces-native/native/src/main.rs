@@ -621,6 +621,23 @@ mod tests {
     }
 
     #[test]
+    fn named_native_surface_catalogs_are_present() {
+        let surfaces = [
+            "site-inbox", "mailbox", "graph-mail", "calendar", "site-loop",
+            "site-lifecycle", "site-registry", "worker-delegation", "delegated-task",
+            "sop", "scheduler", "surface-feedback", "speech", "artifacts",
+            "nars-session", "quota-meter", "operator-console-overlay", "browser-control",
+            "cloudflare-carrier", "site-coherence", "catalog-observation", "runtime-introspection",
+            "project-state", "launcher", "operator-routing",
+        ];
+        for surface in surfaces {
+            let tools = list_tools(surface);
+            assert!(!tools.is_empty(), "missing native catalog for {surface}");
+            assert!(tools.iter().all(|tool| tool.get("name").and_then(Value::as_str).is_some()), "unnamed native tool for {surface}");
+        }
+    }
+
+    #[test]
     fn catalog_observation_requires_an_explicit_iso_instant() {
         let response = handle_request(
             &json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"catalog_observation_observe","arguments":{"provider_id":"inference-provider:test","observed_at":"not-an-instant"}}}),
