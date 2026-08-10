@@ -16,6 +16,7 @@ mod delegated_task;
 mod worker_delegation;
 mod local_admin;
 mod mailbox;
+mod host_contracts;
 mod site_coherence;
 mod site_loop;
 mod surface_feedback;
@@ -152,6 +153,7 @@ fn handle_request(request: &Value, options: &Options) -> Option<Value> {
             method if options.surface_id == "worker-delegation" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => worker_delegation::auxiliary(method, &params).map(|value| modern_result(value, options)),
             method if matches!(options.surface_id.as_str(), "artifacts" | "nars-session" | "quota-meter") && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => local_admin::auxiliary(&options.surface_id, method, &params).map(|value| modern_result(value, options)),
             method if options.surface_id == "mailbox" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => mailbox::auxiliary(method, &params).map(|value| modern_result(value, options)),
+            method if matches!(options.surface_id.as_str(), "browser-control" | "operator-console-overlay" | "cloudflare-carrier" | "speech" | "scheduler" | "graph-mail") && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => host_contracts::auxiliary(&options.surface_id, method, &params).map(|value| modern_result(value, options)),
             method if options.surface_id == "sop" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => sop::auxiliary(method, &params).map(|value| modern_result(value, options)),
             "initialize" => Err(diagnostic(
                 "initialize_removed",
@@ -173,6 +175,7 @@ fn handle_request(request: &Value, options: &Options) -> Option<Value> {
             method if options.surface_id == "worker-delegation" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => worker_delegation::auxiliary(method, &params),
             method if matches!(options.surface_id.as_str(), "artifacts" | "nars-session" | "quota-meter") && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => local_admin::auxiliary(&options.surface_id, method, &params),
             method if options.surface_id == "mailbox" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => mailbox::auxiliary(method, &params),
+            method if matches!(options.surface_id.as_str(), "browser-control" | "operator-console-overlay" | "cloudflare-carrier" | "speech" | "scheduler" | "graph-mail") && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => host_contracts::auxiliary(&options.surface_id, method, &params),
             method if options.surface_id == "surface-feedback" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => surface_feedback::auxiliary(method, &params),
             method if options.surface_id == "sop" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => sop::auxiliary(method, &params),
             "initialize" => Ok(initialize_result(options)),
@@ -234,6 +237,12 @@ fn server_name(options: &Options) -> String {
         "worker-delegation" => "worker-delegation-mcp".to_string(),
         "artifacts" => "artifacts-mcp".to_string(),
         "mailbox" => "mailbox-mcp".to_string(),
+        "browser-control" => "browser-control-mcp".to_string(),
+        "operator-console-overlay" => "operator-console-overlay-mcp".to_string(),
+        "cloudflare-carrier" => "cloudflare-carrier-mcp".to_string(),
+        "speech" => "speech-mcp".to_string(),
+        "scheduler" => "scheduler-mcp".to_string(),
+        "graph-mail" => "graph-mail-mcp".to_string(),
         "nars-session" => "nars-session-mcp".to_string(),
         "quota-meter" => "quota-meter-mcp".to_string(),
         "site-loop" => "narada-site-loop-mcp".to_string(),
@@ -256,6 +265,7 @@ fn capabilities(surface_id: &str) -> Value {
     if surface_id == "worker-delegation" { return json!({"tools":{},"prompts":{},"completions":{},"logging":{}}); }
     if matches!(surface_id, "artifacts" | "nars-session" | "quota-meter") { return json!({"tools":{},"prompts":{},"completions":{},"logging":{}}); }
     if surface_id == "mailbox" { return json!({"tools":{},"prompts":{},"completions":{},"logging":{}}); }
+    if matches!(surface_id, "browser-control" | "operator-console-overlay" | "cloudflare-carrier" | "speech" | "scheduler" | "graph-mail") { return json!({"tools":{},"prompts":{},"completions":{},"logging":{}}); }
     if surface_id == "site-loop" { return json!({"tools":{},"prompts":{},"completions":{},"logging":{}}); }
     if surface_id == "surface-feedback" { return json!({"tools":{},"prompts":{},"completions":{},"logging":{}}); }
     if surface_id == "calendar" { return json!({"tools":{},"prompts":{},"completions":{},"logging":{}}); }
@@ -299,6 +309,7 @@ fn list_tools(surface_id: &str) -> Vec<Value> {
         "worker-delegation" => worker_delegation::list_tools(),
         "artifacts" | "nars-session" | "quota-meter" => local_admin::list_tools(surface_id),
         "mailbox" => mailbox::list_tools(),
+        "browser-control" | "operator-console-overlay" | "cloudflare-carrier" | "speech" | "scheduler" | "graph-mail" => host_contracts::list_tools(surface_id),
         "site-inbox" => site_inbox::list_tools(),
         "calendar" => calendar::list_tools(),
         "site-loop" => site_loop::list_tools(),
@@ -377,6 +388,7 @@ fn call_tool(surface_id: &str, params: &Map<String, Value>, options: &Options) -
         ("worker-delegation", name) => worker_delegation::call_tool(name, &args, &options.site_root),
         ("artifacts", name) | ("nars-session", name) | ("quota-meter", name) => local_admin::call_tool(surface_id, name, &args, &options.site_root),
         ("mailbox", name) => mailbox::call_tool(name, &args, &options.site_root),
+        ("browser-control", name) | ("operator-console-overlay", name) | ("cloudflare-carrier", name) | ("speech", name) | ("scheduler", name) | ("graph-mail", name) => host_contracts::call_tool(surface_id, name, &args, &options.site_root),
         ("operator-routing", "operator_route_request") => operator_route_request(&args, options),
         ("site-inbox", name) => site_inbox::call_tool(name, &args, &options.site_root),
         ("calendar", name) => calendar::call_tool(name, &args, &options.site_root),
