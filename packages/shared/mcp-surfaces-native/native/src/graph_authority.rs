@@ -116,7 +116,11 @@ impl CalendarGraphAdapter {
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned);
         let environment = load_environment(root);
-        let auth = resolve_auth(&environment);
+        let auth = if relative_config_path == ".ai/graph-mail-mcp.json" {
+            resolve_auth_with_delegated_token(root, &environment)
+        } else {
+            resolve_auth(&environment)
+        };
         Ok(Self {
             base_url,
             allowed_mailboxes,
@@ -445,6 +449,45 @@ fn resolve_auth(environment: &HashMap<String, String>) -> GraphAuth {
         };
     }
     non_empty(environment, "MS_GRAPH_ACCESS_TOKEN")
+        .map(|value| GraphAuth::AccessToken(value.to_string()))
+        .unwrap_or(GraphAuth::Missing)
+}
+
+fn resolve_auth_with_delegated_token(
+    root: &Path,
+    environment: &HashMap<String, String>,
+) -> GraphAuth {
+    let configured = resolve_auth(environment);
+    if !matches!(configured, GraphAuth::Missing) {
+        return configured;
+    }
+    let path = root.join(".ai/runtime/graph-mail-mcp/delegated-token.json");
+    let Ok(metadata) = fs::metadata(&path) else {
+        return GraphAuth::Missing;
+    };
+    if metadata.len() > MAX_CONFIG_BYTES {
+        return GraphAuth::Missing;
+    }
+    let Ok(text) = fs::read_to_string(path) else {
+        return GraphAuth::Missing;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        return GraphAuth::Missing;
+    };
+    if value.get("schema").and_then(Value::as_str)
+        != Some("narada.graph_mail_mcp.delegated_token.v1")
+    {
+        return GraphAuth::Missing;
+    }
+    let expires_at_ms = value.get("expires_at_ms").and_then(Value::as_i64).unwrap_or(0);
+    let now_ms = (OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
+    if expires_at_ms <= now_ms + 60_000 {
+        return GraphAuth::Missing;
+    }
+    value
+        .get("access_token")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
         .map(|value| GraphAuth::AccessToken(value.to_string()))
         .unwrap_or(GraphAuth::Missing)
 }
