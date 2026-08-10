@@ -83,7 +83,8 @@ pub fn call_tool(surface_id: &str, name: &str, args: &Map<String, Value>, root: 
         ("speech", "speech_listen_status") => Ok(json!({"schema":"narada.speech.listen_status.v1","status":"not_active","active_sessions":[],"native_read_only":true})),
         ("speech", "speech_voices") => Err(boundary(surface_id, name, "speech_provider_authority_not_enabled_in_native_slice", "Use the registry-resolved speech adapter.")),
         ("scheduler", "scheduler_runtime_status") => Ok(json!({"schema":"narada.scheduler.runtime_status.v1","status":"authority_boundary","implementation":"rust-native-contract","native_task_scheduler":false,"native_read_only":true})),
-        ("graph-mail", "graph_mail_doctor") | ("graph-mail", "graph_mail_auth_status") => Ok(json!({"schema":"narada.graph_mail.authority_status.v1","status":"authority_boundary","credentials_present":false,"token_values_exposed":false,"native_read_only":true})),
+        ("graph-mail", "graph_mail_doctor") => Ok(graph_mail_doctor(root)),
+        ("graph-mail", "graph_mail_auth_status") => Ok(graph_mail_auth_status(root)),
         ("browser-control", "browser_control_session_inventory") => Ok(json!({"schema":"narada.browser_control.session_inventory.v1","status":"not_injected","sessions":[],"native_read_only":true})),
         _ => Err(boundary(surface_id, name, "external_or_host_authority_not_enabled_in_native_contract", "Use the configured owning surface authority for this operation.")),
     }
@@ -95,6 +96,22 @@ fn guidance_result(surface_id: &str, args: &Map<String, Value>) -> Value { json!
 fn description(surface_id: &str, name: &str) -> String { format!("Native {surface_id} contract for {name}; external authority remains explicit.") }
 fn operator_status(root: &Path) -> Value { let state_root=env::var("NARADA_WINDOW_SURFACE_OVERLAY_STATE_ROOT").ok().unwrap_or_else(||root.join(".narada/runtime/operator-console-overlay").to_string_lossy().to_string()); let state_path=Path::new(&state_root).join("overlay-state.json"); let metadata=metadata(&state_path); json!({"schema":"narada.operator_console_overlay.status.v1","status":if metadata.is_some(){"present"}else{"not_active"},"state_root_configured":true,"state_file_present":metadata.is_some(),"state_file":file_meta(metadata),"native_read_only":true}) }
 fn cloudflare_doctor(root: &Path) -> Value { json!({"schema":"narada.cloudflare_carrier.doctor.v1","status":"authority_boundary","site_root":root.to_string_lossy(),"session_file_configured":env::var("CLOUDFLARE_SESSION_FILE").ok().is_some(),"health_file_configured":env::var("CLOUDFLARE_HEALTH_FILE").ok().is_some(),"native_external_api":false,"native_read_only":true}) }
+fn graph_mail_doctor(root: &Path) -> Value {
+    let path = root.join(".ai/graph-mail-mcp.json");
+    let policy = read_json_file(&path);
+    let object = policy.as_object().cloned().unwrap_or_default();
+    let token_present = env::var("MS_GRAPH_ACCESS_TOKEN").ok().or_else(|| env::var("GRAPH_ACCESS_TOKEN").ok()).map(|value| !value.trim().is_empty()).unwrap_or(false);
+    json!({"schema":"narada.graph_mail_mcp.doctor.v1","status":"ok","site_root":root.to_string_lossy(),"graph_base_url":object.get("graph_base_url").cloned().unwrap_or_else(||json!("https://graph.microsoft.com/v1.0")),"has_access_token":token_present,"auth_mode":if token_present{"access_token"}else{"missing"},"allowed_mailboxes":object.get("allowed_mailboxes").or_else(||object.get("allowedMailboxes")).cloned().unwrap_or_else(||json!([])),"allowed_attachment_roots":object.get("allowed_attachment_roots").or_else(||object.get("allowedAttachmentRoots")).cloned().unwrap_or_else(||json!([])),"allow_device_code_auth":object.get("allow_device_code_auth").and_then(Value::as_bool).unwrap_or(false),"allow_send_draft":object.get("allow_send_draft").and_then(Value::as_bool).unwrap_or(false),"allow_folder_create":object.get("allow_folder_create").and_then(Value::as_bool).unwrap_or(false),"allow_message_move":object.get("allow_message_move").and_then(Value::as_bool).unwrap_or(false),"allow_message_mark_read":object.get("allow_message_mark_read").and_then(Value::as_bool).unwrap_or(false),"token_values_exposed":false,"native_read_only":true})
+}
+fn graph_mail_auth_status(root: &Path) -> Value {
+    let token_present = env::var("MS_GRAPH_ACCESS_TOKEN").ok().or_else(|| env::var("GRAPH_ACCESS_TOKEN").ok()).map(|value| !value.trim().is_empty()).unwrap_or(false);
+    json!({"schema":"narada.graph_mail_mcp.auth_status.v1","status":if token_present{"configured"}else{"missing"},"site_root":root.to_string_lossy(),"access_token_present":token_present,"token_values_exposed":false,"native_read_only":true})
+}
+fn read_json_file(path: &Path) -> Value {
+    let Ok(meta) = fs::metadata(path) else { return Value::Object(Map::new()); };
+    if !meta.is_file() || meta.len() > MAX_BYTES { return Value::Object(Map::new()); }
+    fs::read_to_string(path).ok().and_then(|text|serde_json::from_str(&text).ok()).unwrap_or_else(||Value::Object(Map::new()))
+}
 fn file_metadata_status(kind: &str, root: &Path, variable: &str) -> Value { let configured=env::var(variable).ok().filter(|v|!v.trim().is_empty()); let path=configured.as_deref().map(PathBuf::from).unwrap_or_else(||root.join(format!(".narada/runtime/cloudflare/{kind}.json"))); let meta=metadata(&path); json!({"schema":format!("narada.{kind}.v1"),"status":if meta.is_some(){"present"}else{"not_configured"},"configured":configured.is_some(),"file_present":meta.is_some(),"file":file_meta(meta),"native_read_only":true}) }
 fn metadata(path: &Path) -> Option<fs::Metadata> { fs::metadata(path).ok().filter(|m|m.is_file() && m.len() <= MAX_BYTES) }
 fn file_meta(meta: Option<fs::Metadata>) -> Value { meta.map(|m|json!({"bytes":m.len()})).unwrap_or(Value::Null) }
