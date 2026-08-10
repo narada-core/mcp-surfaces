@@ -549,6 +549,27 @@ function runOperatorOverlayParity() {
   }
 }
 
+function runBrowserControlParity() {
+  const workspaceRoot = resolve(packageRoot, '..', '..', '..');
+  const bunEntrypoint = join(workspaceRoot, 'packages', 'browser-control-mcp', 'src', 'main.ts');
+  if (!existsSync(bunEntrypoint)) throw new Error('browser_control_parity_bun_entrypoint_missing:' + bunEntrypoint);
+  const root = mkdtempSync(join(tmpdir(), 'narada-browser-control-native-parity-'));
+  try {
+    const requests = [{
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'browser_control_session_inventory', arguments: {} },
+    }];
+    const bun = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', [bunEntrypoint, '--site-root', root], requests, workspaceRoot);
+    const rust = runMailbox(executable, ['--surface-id', 'browser-control', '--site-root', root], requests, workspaceRoot);
+    assertSame('browser_control.session_inventory', mailboxStructured(bun, 1, 'bun'), mailboxStructured(rust, 1, 'rust'));
+    return { status: 'passed', fixture: 'no_attached_sessions', compared: ['session_inventory'] };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 const mailboxParity = runMailboxParity();
 const artifactsParity = runArtifactsParity();
 const sopParity = runSopParity();
@@ -558,6 +579,7 @@ const calendarParity = runCalendarParity();
 const cloudflareParity = runCloudflareParity();
 const graphMailParity = runGraphMailParity();
 const operatorOverlayParity = runOperatorOverlayParity();
+const browserControlParity = runBrowserControlParity();
 process.stdout.write(JSON.stringify({
   schema: 'narada.mcp_surfaces_native.protocol_parity.v1',
   status: 'passed',
@@ -574,4 +596,5 @@ process.stdout.write(JSON.stringify({
   cloudflare_parity: cloudflareParity,
   graph_mail_parity: graphMailParity,
   operator_overlay_parity: operatorOverlayParity,
+  browser_control_parity: browserControlParity,
 }) + '\n');

@@ -90,7 +90,7 @@ pub fn call_tool(surface_id: &str, name: &str, args: &Map<String, Value>, root: 
         ("scheduler", "scheduler_runtime_status") => Ok(json!({"schema":"narada.scheduler.runtime_status.v1","status":"authority_boundary","implementation":"rust-native-contract","native_task_scheduler":false,"native_read_only":true})),
         ("graph-mail", "graph_mail_doctor") => Ok(graph_mail_doctor(root)),
         ("graph-mail", "graph_mail_auth_status") => Ok(graph_mail_auth_status(root)),
-        ("browser-control", "browser_control_session_inventory") => Ok(json!({"schema":"narada.browser_control.session_inventory.v1","status":"not_injected","sessions":[],"native_read_only":true})),
+        ("browser-control", "browser_control_session_inventory") => Ok(browser_session_inventory(root)),
         _ => Err(boundary(surface_id, name, "external_or_host_authority_not_enabled_in_native_contract", "Use the configured owning surface authority for this operation.")),
     }
 }
@@ -102,6 +102,16 @@ fn description(surface_id: &str, name: &str) -> String { format!("Native {surfac
 fn operator_status(root: &Path) -> Value {
     let state_root = operator_state_root();
     operator_status_at(root, &state_root)
+}
+
+fn browser_session_inventory(root: &Path) -> Value {
+    json!({
+        "schema":"narada.browser_control.result.v1",
+        "status":"ok",
+        "site_root":root.to_string_lossy(),
+        "sessions":[],
+        "count":0,
+    })
 }
 
 fn operator_status_at(root: &Path, state_root: &Path) -> Value {
@@ -421,6 +431,17 @@ mod tests {
         assert_eq!(response["overlay"]["state"], "stopped");
         assert_eq!(response["overlay"]["document"]["title"], "Fixture");
         assert_eq!(response["overlay"]["action_state"]["status"], "succeeded");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn browser_session_inventory_is_empty_without_injection() {
+        let root = temp_root("browser");
+        let response = browser_session_inventory(&root);
+        assert_eq!(response["schema"], "narada.browser_control.result.v1");
+        assert_eq!(response["status"], "ok");
+        assert_eq!(response["count"], 0);
+        assert_eq!(response["sessions"].as_array().map(Vec::len), Some(0));
         let _ = fs::remove_dir_all(root);
     }
 }
