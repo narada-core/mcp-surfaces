@@ -12,6 +12,7 @@ mod simple_surfaces;
 mod runtime_introspection;
 mod launcher;
 mod calendar;
+mod delegated_task;
 mod site_coherence;
 mod site_loop;
 mod surface_feedback;
@@ -144,6 +145,7 @@ fn handle_request(request: &Value, options: &Options) -> Option<Value> {
             method if options.surface_id == "calendar" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => calendar::auxiliary(method, &params).map(|value| modern_result(value, options)),
             method if options.surface_id == "site-loop" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => site_loop::auxiliary(method, &params).map(|value| modern_result(value, options)),
             method if options.surface_id == "surface-feedback" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => surface_feedback::auxiliary(method, &params).map(|value| modern_result(value, options)),
+            method if options.surface_id == "delegated-task" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => delegated_task::auxiliary(method, &params).map(|value| modern_result(value, options)),
             method if options.surface_id == "sop" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => sop::auxiliary(method, &params).map(|value| modern_result(value, options)),
             "initialize" => Err(diagnostic(
                 "initialize_removed",
@@ -161,6 +163,7 @@ fn handle_request(request: &Value, options: &Options) -> Option<Value> {
             method if options.surface_id == "site-inbox" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => site_inbox::auxiliary(method, &params),
             method if options.surface_id == "calendar" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => calendar::auxiliary(method, &params),
             method if options.surface_id == "site-loop" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => site_loop::auxiliary(method, &params),
+            method if options.surface_id == "delegated-task" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => delegated_task::auxiliary(method, &params),
             method if options.surface_id == "surface-feedback" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => surface_feedback::auxiliary(method, &params),
             method if options.surface_id == "sop" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => sop::auxiliary(method, &params),
             "initialize" => Ok(initialize_result(options)),
@@ -218,6 +221,7 @@ fn validate_modern_request(params: &Map<String, Value>) -> Result<(), Value> {
 fn server_name(options: &Options) -> String {
     match options.surface_id.as_str() {
         "site-inbox" => "narada-site-inbox-mcp".to_string(),
+        "delegated-task" => "delegated-task-mcp".to_string(),
         "site-loop" => "narada-site-loop-mcp".to_string(),
         "surface-feedback" => "surface-feedback-mcp".to_string(),
         "sop" => "sop-mcp".to_string(),
@@ -234,6 +238,7 @@ fn server_name(options: &Options) -> String {
 
 fn capabilities(surface_id: &str) -> Value {
     if surface_id == "sop" { return json!({"tools":{},"prompts":{},"completions":{},"logging":{}}); }
+    if surface_id == "delegated-task" { return json!({"tools":{},"prompts":{},"completions":{},"logging":{}}); }
     if surface_id == "site-loop" { return json!({"tools":{},"prompts":{},"completions":{},"logging":{}}); }
     if surface_id == "surface-feedback" { return json!({"tools":{},"prompts":{},"completions":{},"logging":{}}); }
     if surface_id == "calendar" { return json!({"tools":{},"prompts":{},"completions":{},"logging":{}}); }
@@ -273,6 +278,7 @@ fn modern_result(value: Value, options: &Options) -> Value {
 }
 fn list_tools(surface_id: &str) -> Vec<Value> {
     match surface_id {
+        "delegated-task" => delegated_task::list_tools(),
         "site-inbox" => site_inbox::list_tools(),
         "calendar" => calendar::list_tools(),
         "site-loop" => site_loop::list_tools(),
@@ -347,6 +353,7 @@ fn call_tool(surface_id: &str, params: &Map<String, Value>, options: &Options) -
         ("catalog-observation", "catalog_observation_observe") => catalog_observation(&args),
         ("operator-routing", "operator_routing_guidance") => operator_guidance(&args),
         ("operator-routing", "operator_route_doctor") => operator_route_doctor(options),
+        ("delegated-task", name) => delegated_task::call_tool(name, &args, &options.site_root),
         ("operator-routing", "operator_route_request") => operator_route_request(&args, options),
         ("site-inbox", name) => site_inbox::call_tool(name, &args, &options.site_root),
         ("calendar", name) => calendar::call_tool(name, &args, &options.site_root),
