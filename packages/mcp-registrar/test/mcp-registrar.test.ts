@@ -1158,6 +1158,7 @@ try {
       ['project-state', ['--site-root', '{site_root}']],
       ['runtime-introspection', ['--site-root', '{site_root}']],
       ['site-coherence', ['--site-root', '{site_root}']],
+      ['launcher', ['--narada-root', '{site_root}']],
     ] as const) {
       const sharedBindConfig: any = buildSiteBindConfig(
         { site_id: 'shared-' + surfaceId, root, config_path: join(root, 'site.json'), surfaces: [] },
@@ -1169,6 +1170,7 @@ try {
           args: [...args],
           tools: [],
         },
+        surfaceId === 'launcher' ? 'stdio' : undefined,
       );
       const sharedServer: any = Object.values(sharedBindConfig.config.mcpServers as Record<string, any>).find((candidate: any) => candidate.surface_id === surfaceId);
       assert.ok(sharedServer);

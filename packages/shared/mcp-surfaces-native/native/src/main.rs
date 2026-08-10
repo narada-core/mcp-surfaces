@@ -10,6 +10,7 @@ use uuid::Uuid;
 mod site_inbox;
 mod simple_surfaces;
 mod runtime_introspection;
+mod launcher;
 mod site_coherence;
 
 const LEGACY_PROTOCOL_VERSION: &str = "2024-11-05";
@@ -19,6 +20,7 @@ const MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
 struct Options {
     surface_id: String,
     site_root: PathBuf,
+    registry_path: Option<PathBuf>,
     log_root: Option<PathBuf>,
 }
 
@@ -93,6 +95,7 @@ fn run() -> Result<(), String> {
 fn parse_options(args: Vec<String>) -> Result<Options, String> {
     let mut surface_id = None;
     let mut site_root = None;
+    let mut registry_path = None;
     let mut log_root = None;
     let mut index = 0;
     while index < args.len() {
@@ -101,14 +104,17 @@ fn parse_options(args: Vec<String>) -> Result<Options, String> {
         match key {
             "--surface-id" => surface_id = Some(value.clone()),
             "--site-root" => site_root = Some(PathBuf::from(value)),
+            "--narada-root" => site_root = Some(PathBuf::from(value)),
             "--log-root" => log_root = Some(PathBuf::from(value)),
+            "--registry-path" => registry_path = Some(PathBuf::from(value)),
+            "--projection-id" => { let _ = value; }
             _ => return Err(format!("native_surface_unknown_argument:{key}")),
         }
         index += 2;
     }
     let surface_id = surface_id.ok_or("native_surface_missing_surface_id")?;
     let site_root = site_root.unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    Ok(Options { surface_id, site_root, log_root })
+    Ok(Options { surface_id, site_root, registry_path, log_root })
 }
 
 fn handle_request(request: &Value, options: &Options) -> Option<Value> {
@@ -203,6 +209,7 @@ fn server_name(options: &Options) -> String {
         "site-lifecycle" => "site-lifecycle-mcp".to_string(),
         "site-registry" => "site-registry-mcp".to_string(),
         "project-state" => "project-state-mcp".to_string(),
+        "launcher" => "launcher-mcp".to_string(),
         "runtime-introspection" => "runtime-introspection-mcp".to_string(),
         "site-coherence" => "site-coherence-mcp".to_string(),
         _ => format!("{}-mcp", options.surface_id),
@@ -279,6 +286,7 @@ fn list_tools(surface_id: &str) -> Vec<Value> {
             }), false),
         ],
         "site-lifecycle" | "site-registry" | "project-state" => simple_surfaces::list_tools(surface_id),
+        "launcher" => launcher::list_tools(),
         "runtime-introspection" => runtime_introspection::list_tools(),
         "site-coherence" => site_coherence::list_tools(),
         _ => Vec::new(),
@@ -321,6 +329,7 @@ fn call_tool(surface_id: &str, params: &Map<String, Value>, options: &Options) -
             simple_surfaces::call_tool(surface_id, name, &args, &options.site_root)
         }
         ("runtime-introspection", name) => runtime_introspection::call_tool(name, &args, &options.site_root),
+        ("launcher", name) => launcher::call_tool(name, &args, &options.site_root, options.registry_path.as_deref()),
         ("site-coherence", name) => site_coherence::call_tool(name, &args, &options.site_root),
         (_, unknown) => return Err(diagnostic("unknown_tool", &format!("unknown_tool:{unknown}"), json!({ "tool_name": unknown }))),
     }?;
@@ -480,6 +489,7 @@ mod tests {
         Options {
             surface_id: "catalog-observation".to_string(),
             site_root: PathBuf::from("."),
+            registry_path: None,
             log_root: None,
         }
     }
@@ -519,6 +529,23 @@ mod tests {
             .filter_map(|tool| tool.get("name").and_then(Value::as_str))
             .collect::<Vec<_>>();
         assert_eq!(routing_names, vec!["operator_routing_guidance", "operator_route_doctor", "operator_route_request"]);
+        let launcher_tools = list_tools("launcher");
+        let launcher_names = launcher_tools
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            launcher_names,
+            vec![
+                "launcher_guidance",
+                "launcher_doctor",
+                "launcher_options_list",
+                "launcher_registry_list",
+                "launcher_plan",
+                "launcher_option_matrix",
+                "launcher_coherence_check"
+            ]
+        );
     }
 
     #[test]
@@ -536,6 +563,7 @@ mod tests {
         let options = Options {
             surface_id: "operator-routing".to_string(),
             site_root: root.clone(),
+            registry_path: None,
             log_root: Some(root.join("log")),
         };
         let params = json!({"name":"operator_route_request","arguments":{"transcript":"route this","target_runtime":"codex","request_id":"route-test"}});
