@@ -577,6 +577,87 @@ function runSopRunStatusParity() {
   }
 }
 
+function runSopHandoffParity() {
+  const workspaceRoot = resolve(packageRoot, '..', '..', '..');
+  const bunEntrypoint = join(workspaceRoot, 'packages', 'sop-mcp', 'dist', 'src', 'main.js');
+  if (!existsSync(bunEntrypoint)) throw new Error('sop_handoff_parity_bun_entrypoint_missing:' + bunEntrypoint);
+  const root = mkdtempSync(join(tmpdir(), 'narada-sop-handoff-native-parity-'));
+  const dbPath = join(root, '.sop', 'sop.db');
+  mkdirSync(dirname(dbPath), { recursive: true });
+  const db = new DatabaseSync(dbPath);
+  const canonical = (value) => {
+    if (Array.isArray(value)) return value.map(canonical);
+    if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right)).map(([key, entry]) => [key, canonical(entry)]));
+    return value;
+  };
+  const fingerprint = (value) => createHash('sha256').update(JSON.stringify(canonical(value)), 'utf8').digest('hex');
+  const deterministicId = (prefix, value) => `${prefix}${createHash('sha256').update(value, 'utf8').digest('hex').slice(0, 24)}`;
+  try {
+    db.exec(`CREATE TABLE sop_handoffs (
+      handoff_id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      step_id TEXT NOT NULL,
+      occurrence_key TEXT NOT NULL,
+      sop_id TEXT NOT NULL,
+      sop_version INTEGER NOT NULL,
+      executor TEXT NOT NULL,
+      title TEXT NOT NULL,
+      instructions TEXT NOT NULL,
+      input_json TEXT NOT NULL,
+      input_ref_json TEXT,
+      result_schema_json TEXT,
+      request_fingerprint TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      lease_owner TEXT,
+      lease_token TEXT,
+      lease_expires_at TEXT,
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      completion_key TEXT,
+      completion_fingerprint TEXT,
+      principal TEXT,
+      result_json TEXT NOT NULL DEFAULT '{}',
+      result_ref_json TEXT,
+      error_message TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      completed_at TEXT
+    )`);
+    const insert = db.prepare('INSERT INTO sop_handoffs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
+    const row = ({ runId, stepId, executor, status, createdAt, leaseOwner = null, leaseToken = null, leaseExpiresAt = null, attemptCount = 0 }) => {
+      const identity = `${runId}\0${stepId}`;
+      const input = {};
+      const resultSchema = null;
+      return [
+        deterministicId('soh_', identity), runId, stepId, deterministicId('sop_handoff_', identity), 'demo', 1,
+        executor, 'Approve', 'approve now', JSON.stringify(input), null, resultSchema, fingerprint({
+          run_id: runId, step_id: stepId, sop_id: 'demo', sop_version: 1, executor, title: 'Approve', instructions: 'approve now', input, input_ref: null, result_schema: resultSchema,
+        }), status, leaseOwner, leaseToken, leaseExpiresAt, attemptCount, null, null, null, null, '{}', null, null, createdAt, createdAt, null,
+      ];
+    };
+    insert.run(...row({ runId: 'run-1', stepId: 'step-1', executor: 'operator', status: 'pending', createdAt: '2026-01-01T00:00:00Z' }));
+    insert.run(...row({ runId: 'run-2', stepId: 'step-2', executor: 'agent', status: 'leased', leaseOwner: 'consumer-1', leaseToken: 'secret-token', leaseExpiresAt: '2099-01-01T00:00:00Z', attemptCount: 2, createdAt: '2026-01-02T00:00:00Z' }));
+  } finally {
+    db.close();
+  }
+  try {
+    const showId = deterministicId('soh_', 'run-2\0step-2');
+    const requests = [
+      { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'sop_handoff_list', arguments: { limit: 10 } } },
+      { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'sop_handoff_list', arguments: { executor: 'agent' } } },
+      { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'sop_handoff_list', arguments: { run_id: 'run-1' } } },
+      { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'sop_handoff_list', arguments: { status: 'pending' } } },
+      { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'sop_handoff_show', arguments: { handoff_id: showId } } },
+    ];
+    const bun = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'node', [bunEntrypoint, '--sop-root', root], requests, workspaceRoot);
+    const rust = runMailbox(executable, ['--surface-id', 'sop', '--site-root', root], requests, workspaceRoot);
+    for (const request of requests) assertSame(`sop.handoff.${request.id}`, mailboxStructured(bun, request.id, 'bun'), mailboxStructured(rust, request.id, 'rust'));
+    return { status: 'passed', fixture: 'durable_handoff_read_projection', compared: ['list', 'executor_filter', 'run_filter', 'status_filter', 'show'] };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 function runSurfaceFeedbackParity() {
   const workspaceRoot = resolve(packageRoot, '..', '..', '..');
   const bunEntrypoint = join(workspaceRoot, 'packages', 'surface-feedback-mcp', 'src', 'main.ts');
@@ -990,6 +1071,7 @@ const sopActionParity = runSopActionParity();
 const sopRunListParity = runSopRunListParity();
 const sopRunEventsParity = runSopRunEventsParity();
 const sopRunStatusParity = runSopRunStatusParity();
+const sopHandoffParity = runSopHandoffParity();
 const surfaceFeedbackParity = runSurfaceFeedbackParity();
 const siteLoopParity = runSiteLoopParity();
 const calendarParity = runCalendarParity();
@@ -1015,6 +1097,7 @@ process.stdout.write(JSON.stringify({
   sop_run_list_parity: sopRunListParity,
   sop_run_events_parity: sopRunEventsParity,
   sop_run_status_parity: sopRunStatusParity,
+  sop_handoff_parity: sopHandoffParity,
   surface_feedback_parity: surfaceFeedbackParity,
   site_loop_parity: siteLoopParity,
   calendar_parity: calendarParity,
