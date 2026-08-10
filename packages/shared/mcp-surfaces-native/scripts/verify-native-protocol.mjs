@@ -196,7 +196,25 @@ function runMailboxParity() {
   }
 }
 
+function runArtifactsParity() {
+  const workspaceRoot = resolve(packageRoot, '..', '..', '..');
+  const bunEntrypoint = join(workspaceRoot, 'packages', 'artifacts-mcp', 'src', 'main.ts');
+  if (!existsSync(bunEntrypoint)) throw new Error('artifacts_parity_bun_entrypoint_missing:' + bunEntrypoint);
+  const requests = [
+    { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05' } },
+    { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'artifact_message_part_create', arguments: { artifact_id: 'artifact-1', kind: 'markdown', title: 'Fixture artifact', render_hint: 'inline' } } },
+  ];
+  const bun = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', [bunEntrypoint, '--site-root', workspaceRoot], requests, workspaceRoot);
+  const rust = runMailbox(executable, ['--surface-id', 'artifacts', '--site-root', workspaceRoot], requests, workspaceRoot);
+  const bunResult = mailboxStructured(bun, 2, 'bun');
+  const rustResult = mailboxStructured(rust, 2, 'rust');
+  const comparable = (value) => Object.fromEntries(['schema', 'status', 'verification_status', 'message_part', 'assistant_content_parts', 'operator_message', 'recommended_verification'].map((key) => [key, value?.[key]]));
+  assertSame('artifacts.message_part_create', comparable(bunResult), comparable(rustResult));
+  return { status: 'passed', fixture: 'pure_message_part', compared: ['message_part', 'operator_message', 'recommendation'] };
+}
+
 const mailboxParity = runMailboxParity();
+const artifactsParity = runArtifactsParity();
 process.stdout.write(JSON.stringify({
   schema: 'narada.mcp_surfaces_native.protocol_parity.v1',
   status: 'passed',
@@ -205,4 +223,5 @@ process.stdout.write(JSON.stringify({
   modern: '2026-07-28',
   defaults_changed: false,
   mailbox_parity: mailboxParity,
+  artifacts_parity: artifactsParity,
 }) + '\n');

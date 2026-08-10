@@ -63,7 +63,7 @@ fn artifacts_call(name: &str, args: &Map<String, Value>, root: &Path) -> Result<
     match name {
         "artifacts_guidance" => Ok(guidance_result("artifacts", args)),
         "artifacts_doctor" => Ok(artifact_doctor(root)),
-        "artifact_message_part_create" => { let id = required(args, "artifact_id")?; let part = artifact_message_part(&id, args.get("kind").cloned(), args.get("title").cloned(), args.get("render_hint").cloned()); Ok(json!({"schema":"narada.artifacts.message_part.v1","status":"ok","verification_status":"unverified","message_part":part.clone(),"assistant_content_parts":[part],"operator_message":format!("Artifact ready: {id}"),"recommended_verification":"Prefer artifact_read before emitting this part when a local NARS index is available.","native_read_only":true})) }
+        "artifact_message_part_create" => { let id = required(args, "artifact_id")?; let part = artifact_message_part(&id, args.get("kind").cloned(), args.get("title").cloned(), args.get("render_hint").cloned()); let operator_title = part.get("title").and_then(Value::as_str).unwrap_or(&id); Ok(json!({"schema":"narada.artifacts.message_part.v1","status":"ok","verification_status":"unverified","message_part":part.clone(),"assistant_content_parts":[part],"operator_message":format!("Artifact ready: {operator_title}"),"recommended_verification":"Prefer artifact_read before emitting this part when a NARS endpoint is available.","native_read_only":true})) }
         "artifact_list" => artifact_list(args, root),
         "artifact_read" => artifact_read(args, root),
         "artifact_register_file" | "artifact_present" => Err(authority_boundary("artifacts", name, "nars_artifact_write_authority_not_enabled_in_native_slice", "Use the owning NARS artifact authority for registration or presentation.")),
@@ -90,7 +90,16 @@ fn artifact_read(args: &Map<String, Value>, root: &Path) -> Result<Value, Value>
 fn current_session_id(args: &Map<String, Value>) -> Option<String> { args.get("session_id").and_then(Value::as_str).map(str::trim).filter(|value|!value.is_empty()).map(str::to_string).or_else(||env::var("NARADA_SESSION_ID").ok().filter(|value|!value.trim().is_empty())).or_else(||env::var("NARADA_CARRIER_SESSION_ID").ok().filter(|value|!value.trim().is_empty())) }
 fn artifact_index_paths(root: &Path, id: &str) -> Vec<PathBuf> { session_index_paths(root,id).into_iter().filter_map(|path|path.parent().map(|parent|parent.join("artifacts/index.json"))).collect() }
 fn read_artifact_index(root: &Path, id: &str) -> Result<(PathBuf, Value), Value> { if id.is_empty()||id.len()>160||!id.chars().all(|c|c.is_ascii_alphanumeric()||c=='-'||c=='_') { return Err(error("session_id_invalid", "session_id_invalid")); } for path in artifact_index_paths(root,id) { if path.exists() { return Ok((path.clone(), read_bounded_json(&path)?)); } } Err(error("artifact_index_not_found", "artifact_index_not_found")) }
-fn artifact_message_part(id: &str, kind: Option<Value>, title: Option<Value>, render_hint: Option<Value>) -> Value { json!({"type":"artifact_ref","artifact_id":id,"kind":kind.unwrap_or_else(||json!("file")),"title":title.unwrap_or(Value::Null),"render_hint":render_hint.unwrap_or_else(||json!("inline"))}) }
+fn artifact_message_part(id: &str, kind: Option<Value>, title: Option<Value>, render_hint: Option<Value>) -> Value {
+    let mut part = Map::new();
+    part.insert("type".into(), json!("artifact_ref"));
+    part.insert("artifact_id".into(), json!(id));
+    if let Some(value) = kind.and_then(|value| value.as_str().map(str::trim).filter(|value| !value.is_empty()).map(|value| value.to_ascii_lowercase())) { part.insert("kind".into(), json!(value)); }
+    if let Some(value) = title.and_then(|value| value.as_str().map(str::trim).filter(|value| !value.is_empty()).map(str::to_string)) { part.insert("title".into(), json!(value)); }
+    let render_hint = render_hint.and_then(|value| value.as_str().map(str::trim).filter(|value| !value.is_empty()).map(|value| value.to_ascii_lowercase())).unwrap_or_else(|| "inline".into());
+    part.insert("render_hint".into(), json!(render_hint));
+    Value::Object(part)
+}
 
 fn nars_call(name: &str, args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     match name {
