@@ -44,6 +44,8 @@ pub fn supports(name: &str) -> bool {
         name,
         "graph_mail_query"
             | "graph_mail_message_show"
+            | "graph_mail_auth_status"
+            | "graph_mail_auth_clear"
             | "graph_mail_folder_list"
             | "graph_mail_folder_create"
             | "graph_mail_message_move"
@@ -72,6 +74,8 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<V
     match name {
         "graph_mail_query" => query(&policy, args),
         "graph_mail_message_show" => message_show(&policy, args),
+        "graph_mail_auth_status" => auth_status(&policy, root),
+        "graph_mail_auth_clear" => auth_clear(args, root),
         "graph_mail_folder_list" => folder_list(&policy, args),
         "graph_mail_folder_create" => folder_create(&policy, args, root),
         "graph_mail_message_move" => message_move(&policy, args, root),
@@ -104,6 +108,10 @@ struct Policy {
     allow_send_draft: bool,
     send_approval_token: Option<String>,
     allowed_attachment_roots: Vec<PathBuf>,
+    allow_device_code_auth: bool,
+    device_code_tenant_id: Option<String>,
+    device_code_client_id: Option<String>,
+    device_code_allowed_scopes: Vec<String>,
     organization_approval_token: Option<String>,
 }
 
@@ -159,6 +167,10 @@ impl Policy {
                         .collect()
                 })
                 .unwrap_or_default(),
+            allow_device_code_auth: bool_value(&object, "allow_device_code_auth", "allowDeviceCodeAuth"),
+            device_code_tenant_id: optional_config_string(&object, "device_code_tenant_id", "deviceCodeTenantId"),
+            device_code_client_id: optional_config_string(&object, "device_code_client_id", "deviceCodeClientId"),
+            device_code_allowed_scopes: string_array(&object, "device_code_allowed_scopes", "deviceCodeAllowedScopes"),
             organization_approval_token,
         })
     }
@@ -206,6 +218,82 @@ impl Policy {
         }
         Ok(())
     }
+}
+
+fn auth_status(policy: &Policy, root: &Path) -> Result<Value, Value> {
+    Ok(json!({
+        "schema":"narada.graph_mail_mcp.auth_status.v1",
+        "status":"ok",
+        "allow_device_code_auth":policy.allow_device_code_auth,
+        "device_code_tenant_configured":policy.device_code_tenant_id.is_some(),
+        "device_code_client_configured":policy.device_code_client_id.is_some(),
+        "device_code_allowed_scopes":policy.device_code_allowed_scopes,
+        "delegated_token":delegated_token_summary(root)
+    }))
+}
+
+fn auth_clear(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    if !confirmed(args, "confirm_clear", "confirmClear") {
+        return Ok(json!({
+            "schema":"narada.graph_mail_mcp.auth_clear.v1",
+            "status":"refused",
+            "reason":"confirm_clear_required"
+        }));
+    }
+    let path = delegated_token_path(root);
+    let mut removed = 0u64;
+    if path.exists() {
+        fs::remove_file(&path)
+            .map_err(|error| unavailable("graph_mail_auth_clear_failed", &error.to_string()))?;
+        removed = 1;
+    }
+    record_audit(root, json!({"event_kind":"device_code_auth_cleared","removed":removed}))?;
+    Ok(json!({
+        "schema":"narada.graph_mail_mcp.auth_clear.v1",
+        "status":"cleared",
+        "removed":removed
+    }))
+}
+
+fn delegated_token_path(root: &Path) -> PathBuf {
+    root.join(".ai/runtime/graph-mail-mcp/delegated-token.json")
+}
+
+fn delegated_token_summary(root: &Path) -> Value {
+    let path = delegated_token_path(root);
+    let Ok(metadata) = fs::metadata(&path) else {
+        return json!({"status":"missing","fresh":false});
+    };
+    if metadata.len() > MAX_CONFIG_BYTES {
+        return json!({"status":"invalid","fresh":false});
+    }
+    let Ok(text) = fs::read_to_string(&path) else {
+        return json!({"status":"invalid","fresh":false});
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        return json!({"status":"invalid","fresh":false});
+    };
+    let Some(object) = value.as_object() else {
+        return json!({"status":"invalid","fresh":false});
+    };
+    if object.get("schema").and_then(Value::as_str) != Some("narada.graph_mail_mcp.delegated_token.v1") {
+        return json!({"status":"invalid","fresh":false});
+    }
+    let expires_at_ms = object.get("expires_at_ms").and_then(Value::as_i64).unwrap_or(0);
+    let now_ms = (OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
+    let fresh = expires_at_ms > now_ms + 60_000;
+    let refreshable = object.get("refresh_token").and_then(Value::as_str).is_some();
+    json!({
+        "status":if fresh { "available" } else if refreshable { "refreshable" } else { "expired" },
+        "fresh":fresh,
+        "refreshable":refreshable,
+        "auth_mode":object.get("auth_mode").cloned().unwrap_or(Value::Null),
+        "tenant_id":object.get("tenant_id").cloned().unwrap_or(Value::Null),
+        "client_id":object.get("client_id").cloned().unwrap_or(Value::Null),
+        "scope":object.get("scope").cloned().unwrap_or(Value::Null),
+        "acquired_at":object.get("acquired_at").cloned().unwrap_or(Value::Null),
+        "expires_at_ms":expires_at_ms
+    })
 }
 
 fn query(policy: &Policy, args: &Map<String, Value>) -> Result<Value, Value> {
@@ -1583,6 +1671,33 @@ fn merge(left: Value, right: Value) -> Value {
 
 fn bool_value(object: &Map<String, Value>, snake: &str, camel: &str) -> bool {
     object.get(snake).and_then(Value::as_bool).unwrap_or(false) || object.get(camel).and_then(Value::as_bool).unwrap_or(false)
+}
+
+fn optional_config_string(object: &Map<String, Value>, snake: &str, camel: &str) -> Option<String> {
+    object
+        .get(snake)
+        .or_else(|| object.get(camel))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn string_array(object: &Map<String, Value>, snake: &str, camel: &str) -> Vec<String> {
+    object
+        .get(snake)
+        .or_else(|| object.get(camel))
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn confirmed(args: &Map<String, Value>, snake: &str, camel: &str) -> bool {
