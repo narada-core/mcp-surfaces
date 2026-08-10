@@ -1158,6 +1158,17 @@ function runGraphMailNativeGraphParity() {
     { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'graph_mail_folder_create', arguments: { mailbox_id: 'fixture@example.test', display_name: 'Customers', confirm_write: true, approval_token: 'org-fixture' } } },
     { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'graph_mail_message_move', arguments: { mailbox_id: 'fixture@example.test', message_id: 'message-1', destination_folder_id: 'folder-2', confirm_write: true, approval_token: 'org-fixture' } } },
     { jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'graph_mail_message_mark_read', arguments: { mailbox_id: 'fixture@example.test', message_id: 'message-1', idempotency_key: 'fixture-mark-read', confirm_write: true, approval_token: 'org-fixture' } } },
+    { jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'graph_mail_attachment_list', arguments: { mailbox_id: 'fixture@example.test', message_id: 'message-1', limit: 2 } } },
+    { jsonrpc: '2.0', id: 8, method: 'tools/call', params: { name: 'graph_mail_attachment_get', arguments: { mailbox_id: 'fixture@example.test', message_id: 'message-1', attachment_id: 'attachment-1' } } },
+    { jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'graph_mail_attachment_get', arguments: { mailbox_id: 'fixture@example.test', message_id: 'message-1', attachment_id: 'attachment-1', include_content: true } } },
+    { jsonrpc: '2.0', id: 10, method: 'tools/call', params: { name: 'graph_mail_attachment_add', arguments: { mailbox_id: 'fixture@example.test', message_id: 'message-1', name: 'note.txt', content_type: 'text/plain', content_base64: 'SGVsbG8=' } } },
+    { jsonrpc: '2.0', id: 11, method: 'tools/call', params: { name: 'graph_mail_attachment_delete', arguments: { mailbox_id: 'fixture@example.test', message_id: 'message-1', attachment_id: 'attachment-1' } } },
+    { jsonrpc: '2.0', id: 12, method: 'tools/call', params: { name: 'graph_mail_draft_create', arguments: { mailbox_id: 'fixture@example.test', subject: 'Draft', body_text: 'Hello', to_recipients: ['person@example.test'] } } },
+    { jsonrpc: '2.0', id: 13, method: 'tools/call', params: { name: 'graph_mail_reply_draft_create', arguments: { mailbox_id: 'fixture@example.test', message_id: 'message-1', comment: 'Thanks' } } },
+    { jsonrpc: '2.0', id: 14, method: 'tools/call', params: { name: 'graph_mail_forward_draft_create', arguments: { mailbox_id: 'fixture@example.test', message_id: 'message-1', comment: 'FYI', to_recipients: ['forward@example.test'] } } },
+    { jsonrpc: '2.0', id: 15, method: 'tools/call', params: { name: 'graph_mail_draft_update', arguments: { mailbox_id: 'fixture@example.test', draft_id: 'draft-1', subject: 'Updated' } } },
+    { jsonrpc: '2.0', id: 16, method: 'tools/call', params: { name: 'graph_mail_draft_discard', arguments: { mailbox_id: 'fixture@example.test', draft_id: 'draft-1' } } },
+    { jsonrpc: '2.0', id: 17, method: 'tools/call', params: { name: 'graph_mail_draft_send', arguments: { mailbox_id: 'fixture@example.test', draft_id: 'draft-1', confirm_send: true, approval_token: 'send-fixture' } } },
   ];
   const cleanEnv = { ...process.env, NARADA_GRAPH_MAIL_FIXTURE_REQUESTS: JSON.stringify(requests) };
   for (const key of ['MS_GRAPH_ACCESS_TOKEN', 'GRAPH_ACCESS_TOKEN', 'GRAPH_TENANT_ID', 'GRAPH_CLIENT_ID', 'GRAPH_CLIENT_SECRET', 'GRAPH_TOKEN_ENDPOINT', 'NARADA_NATIVE_GRAPH_MAIL_AUTHORITY', 'NARADA_NATIVE_GRAPH_ALLOW_INSECURE_TEST']) delete cleanEnv[key];
@@ -1179,11 +1190,22 @@ const server = createServer((request, response) => {
     const url = request.url ?? '';
     let status = 200;
     let payload = { value: [] };
-    if (request.method === 'GET' && url.includes('/messages/message-1')) payload = { id: 'message-1', subject: 'Needle' };
+    if (request.method === 'GET' && url.includes('/messages/message-1/attachments/attachment-1')) payload = { id: 'attachment-1', name: 'note.txt', contentType: 'text/plain', contentBytes: 'SGVsbG8=', size: 5 };
+    else if (request.method === 'GET' && url.includes('/messages/message-1/attachments')) payload = { value: [{ id: 'attachment-1', name: 'note.txt', contentType: 'text/plain', contentBytes: 'SGVsbG8=', size: 5 }] };
+    else if (request.method === 'GET' && url.includes('/messages/draft-1')) payload = { id: 'draft-1', isDraft: true, changeKey: 'ck-1', subject: 'Draft' };
+    else if (request.method === 'GET' && url.includes('/messages/message-1')) payload = { id: 'message-1', subject: 'Needle' };
     else if (request.method === 'GET' && url.includes('/messages')) payload = { value: [{ id: 'message-1', subject: 'Needle' }] };
     else if (request.method === 'GET' && url.includes('/mailFolders')) payload = { value: [{ id: 'folder-1', displayName: 'Inbox' }] };
     else if (request.method === 'POST' && url.endsWith('/mailFolders')) { status = 201; payload = { id: 'folder-2', displayName: 'Customers' }; }
     else if (request.method === 'POST' && url.includes('/move')) { status = 200; payload = { id: 'message-1', parentFolderId: 'folder-2' }; }
+    else if (request.method === 'POST' && url.includes('/attachments')) { status = 201; payload = { id: 'attachment-2', name: 'note.txt', contentType: 'text/plain' }; }
+    else if (request.method === 'POST' && url.includes('/createReply')) { status = 201; payload = { id: 'draft-reply', isDraft: true, subject: 'Re: Needle' }; }
+    else if (request.method === 'POST' && url.includes('/createForward')) { status = 201; payload = { id: 'draft-forward', isDraft: true, subject: 'Fwd: Needle' }; }
+    else if (request.method === 'POST' && url.endsWith('/messages')) { status = 201; payload = { id: 'draft-1', isDraft: true, subject: 'Draft' }; }
+    else if (request.method === 'POST' && url.endsWith('/send')) { status = 202; payload = null; }
+    else if (request.method === 'DELETE' && url.includes('/attachments/')) { status = 204; payload = null; }
+    else if (request.method === 'DELETE' && url.includes('/messages/draft-1')) { status = 204; payload = null; }
+    else if (request.method === 'PATCH' && url.includes('/messages/draft-1')) { status = 200; payload = { id: 'draft-1', isDraft: true, subject: 'Updated' }; }
     else if (request.method === 'PATCH') { status = 204; payload = null; }
     response.statusCode = status;
     if (payload === null) { response.end(); return; }
@@ -1214,7 +1236,7 @@ function run(command, args, env) {
 server.listen(0, '127.0.0.1', async () => {
   try {
     const port = server.address().port;
-    const config = JSON.stringify({ graph_base_url: 'http://127.0.0.1:' + port + '/v1.0', allowed_mailboxes: ['fixture@example.test'], allow_folder_create: true, allow_message_move: true, allow_message_mark_read: true, mailbox_organization_approval_token: 'org-fixture' });
+    const config = JSON.stringify({ graph_base_url: 'http://127.0.0.1:' + port + '/v1.0', allowed_mailboxes: ['fixture@example.test'], allow_folder_create: true, allow_message_move: true, allow_message_mark_read: true, mailbox_organization_approval_token: 'org-fixture', allow_send_draft: true, send_approval_token: 'send-fixture' });
     for (const root of [bunRoot, rustRoot]) { mkdirSync(root + '/.ai', { recursive: true }); writeFileSync(root + '/.ai/graph-mail-mcp.json', config); }
     const env = { ...process.env, GRAPH_ACCESS_TOKEN: 'fixture-token', NARADA_NATIVE_GRAPH_ALLOW_INSECURE_TEST: '1' };
     for (const key of ['MS_GRAPH_ACCESS_TOKEN', 'GRAPH_TENANT_ID', 'GRAPH_CLIENT_ID', 'GRAPH_CLIENT_SECRET', 'GRAPH_TOKEN_ENDPOINT', 'NARADA_GRAPH_MAIL_AUTHORITY_ENTRYPOINT', 'NARADA_GRAPH_MAIL_AUTHORITY_ARGS']) delete env[key];
@@ -1239,15 +1261,15 @@ server.listen(0, '127.0.0.1', async () => {
     if (result.error) throw new Error('graph_mail_native_graph_fixture_spawn_failed:' + result.error.message);
     if (result.status !== 0) throw new Error('graph_mail_native_graph_fixture_exit:' + result.status + ':' + String(result.stderr).slice(-1500));
     const payload = JSON.parse(String(result.stdout).trim());
-    for (const id of [1, 2, 3, 4, 5, 6]) assertSame('graph_mail.native_graph.' + id, mailboxStructured(payload.bun, id, 'bun'), mailboxStructured(payload.rust, id, 'rust'));
-    const expectedMethods = ['GET', 'GET', 'GET', 'POST', 'POST', 'PATCH'];
-    assertSame('graph_mail.native_graph.bun_methods', payload.received.slice(0, 6).map((value) => value.method), expectedMethods);
-    assertSame('graph_mail.native_graph.rust_methods', payload.received.slice(6, 12).map((value) => value.method), expectedMethods);
+    for (const id of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]) assertSame('graph_mail.native_graph.' + id, mailboxStructured(payload.bun, id, 'bun'), mailboxStructured(payload.rust, id, 'rust'));
+    const expectedMethods = ['GET', 'GET', 'GET', 'POST', 'POST', 'PATCH', 'GET', 'GET', 'GET', 'POST', 'DELETE', 'POST', 'POST', 'POST', 'PATCH', 'GET', 'DELETE', 'POST'];
+    assertSame('graph_mail.native_graph.bun_methods', payload.received.slice(0, expectedMethods.length).map((value) => value.method), expectedMethods);
+    assertSame('graph_mail.native_graph.rust_methods', payload.received.slice(expectedMethods.length, expectedMethods.length * 2).map((value) => value.method), expectedMethods);
     if (payload.received.some((value) => value.authorization !== 'Bearer fixture-token')) throw new Error('graph_mail_native_graph_fixture_authorization_mismatch');
     const auditPath = join(root, 'rust', '.ai', 'audit', 'graph-mail-mcp.jsonl');
     const auditKinds = readFileSync(auditPath, 'utf8').trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line).event_kind);
-    assertSame('graph_mail.native_graph.audit', auditKinds, ['folder_create_requested', 'folder_create_completed', 'message_move_requested', 'message_move_completed', 'message_mark_read_requested', 'message_mark_read_completed']);
-    return { status: 'passed', fixture: 'loopback_graph_mail_authority', compared: ['query', 'message_show', 'folder_list', 'folder_create', 'message_move', 'message_mark_read', 'audit'] };
+    assertSame('graph_mail.native_graph.audit', auditKinds, ['folder_create_requested', 'folder_create_completed', 'message_move_requested', 'message_move_completed', 'message_mark_read_requested', 'message_mark_read_completed', 'draft_create_requested', 'draft_create_completed', 'createReply_requested', 'createReply_completed', 'createForward_requested', 'createForward_completed', 'draft_update_requested', 'draft_update_completed', 'draft_discard_requested', 'draft_discard_completed', 'draft_send_requested', 'draft_send_completed']);
+    return { status: 'passed', fixture: 'loopback_graph_mail_authority', compared: ['query', 'message_show', 'folder_list', 'folder_create', 'message_move', 'message_mark_read', 'attachment_list', 'attachment_get_metadata', 'attachment_get_content', 'attachment_add', 'attachment_delete', 'draft_create', 'reply_draft_create', 'forward_draft_create', 'draft_update', 'draft_discard', 'draft_send', 'audit'] };
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

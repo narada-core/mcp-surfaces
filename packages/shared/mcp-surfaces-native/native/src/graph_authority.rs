@@ -153,6 +153,18 @@ impl CalendarGraphAdapter {
         query: &Map<String, Value>,
         body: Option<&Value>,
     ) -> Result<Value, Value> {
+        self.request_with_headers(method, mailbox_id, suffix, query, body, &Map::new())
+    }
+
+    pub fn request_with_headers(
+        &self,
+        method: &str,
+        mailbox_id: Option<&str>,
+        suffix: &str,
+        query: &Map<String, Value>,
+        body: Option<&Value>,
+        headers: &Map<String, Value>,
+    ) -> Result<Value, Value> {
         let method = method.to_ascii_uppercase();
         if !matches!(method.as_str(), "GET" | "POST" | "PATCH" | "DELETE") {
             return Err(unavailable("graph_method_not_allowed", &method));
@@ -168,6 +180,12 @@ impl CalendarGraphAdapter {
                 &format!("Bearer {}", self.auth.access_token()?),
             )
             .set("Accept", "application/json");
+        let mut request = request;
+        for (key, value) in headers {
+            if let Some(value) = value.as_str() {
+                request = request.set(key, value);
+            }
+        }
         let response = if let Some(body) = body {
             let encoded = serde_json::to_vec(body)
                 .map_err(|error| unavailable("graph_request_encode_failed", &error.to_string()))?;
