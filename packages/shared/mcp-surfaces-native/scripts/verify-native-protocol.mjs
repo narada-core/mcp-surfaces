@@ -475,6 +475,46 @@ function runSopRunListParity() {
   }
 }
 
+function runSopRunEventsParity() {
+  const workspaceRoot = resolve(packageRoot, '..', '..', '..');
+  const bunEntrypoint = join(workspaceRoot, 'packages', 'sop-mcp', 'dist', 'src', 'main.js');
+  if (!existsSync(bunEntrypoint)) throw new Error('sop_run_events_parity_bun_entrypoint_missing:' + bunEntrypoint);
+  const root = mkdtempSync(join(tmpdir(), 'narada-sop-run-events-native-parity-'));
+  const dbPath = join(root, '.sop', 'sop.db');
+  mkdirSync(dirname(dbPath), { recursive: true });
+  const db = new DatabaseSync(dbPath);
+  try {
+    db.exec(`CREATE TABLE sop_events (
+      event_id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      step_id TEXT NOT NULL,
+      event_kind TEXT NOT NULL,
+      details_json TEXT NOT NULL DEFAULT '{}',
+      recorded_at TEXT NOT NULL
+    )`);
+    const insert = db.prepare('INSERT INTO sop_events VALUES (?,?,?,?,?,?)');
+    insert.run('event-1', 'run-1', 'step-1', 'step_started', '{"a":1}', '2026-01-01T00:00:00Z');
+    insert.run('event-2', 'run-1', 'step-1', 'step_completed', '{"b":true}', '2026-01-01T00:01:00Z');
+    insert.run('event-3', 'run-2', '', 'run_started', '{}', '2026-01-02T00:00:00Z');
+  } finally {
+    db.close();
+  }
+  try {
+    const requests = [
+      { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'sop_run_events', arguments: { run_id: 'run-1' } } },
+      { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'sop_run_events', arguments: { run_id: 'run-1', limit: 1 } } },
+      { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'sop_run_events', arguments: { run_id: 'run-1', offset: 1 } } },
+    ];
+    const bun = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'node', [bunEntrypoint, '--sop-root', root], requests, workspaceRoot);
+    const rust = runMailbox(executable, ['--surface-id', 'sop', '--site-root', root], requests, workspaceRoot);
+    const comparable = (value) => ({ run_id: value?.run_id, count: value?.count, items: value?.items });
+    for (const request of requests) assertSame(`sop.run_events.${request.id}`, comparable(mailboxStructured(bun, request.id, 'bun')), comparable(mailboxStructured(rust, request.id, 'rust')));
+    return { status: 'passed', fixture: 'durable_run_events_projection', compared: ['all', 'limit', 'offset'] };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 function runSurfaceFeedbackParity() {
   const workspaceRoot = resolve(packageRoot, '..', '..', '..');
   const bunEntrypoint = join(workspaceRoot, 'packages', 'surface-feedback-mcp', 'src', 'main.ts');
@@ -886,6 +926,7 @@ const artifactsParity = runArtifactsParity();
 const sopParity = runSopParity();
 const sopActionParity = runSopActionParity();
 const sopRunListParity = runSopRunListParity();
+const sopRunEventsParity = runSopRunEventsParity();
 const surfaceFeedbackParity = runSurfaceFeedbackParity();
 const siteLoopParity = runSiteLoopParity();
 const calendarParity = runCalendarParity();
@@ -909,6 +950,7 @@ process.stdout.write(JSON.stringify({
   sop_parity: sopParity,
   sop_action_parity: sopActionParity,
   sop_run_list_parity: sopRunListParity,
+  sop_run_events_parity: sopRunEventsParity,
   surface_feedback_parity: surfaceFeedbackParity,
   site_loop_parity: siteLoopParity,
   calendar_parity: calendarParity,
