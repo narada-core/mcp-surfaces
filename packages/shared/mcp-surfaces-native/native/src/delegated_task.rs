@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 const SERVER_NAME: &str = "delegated-task-mcp";
 const MAX_ITEMS: usize = 200;
+const MAX_FILE_BYTES: u64 = 256_000;
 const MUTATING: &[&str] = &[
     "delegated_task_run", "delegated_task_advance", "delegated_task_cancel", "delegated_task_acknowledge", "delegated_task_parent_takeover",
 ];
@@ -69,7 +70,7 @@ fn task_root(root: &Path) -> PathBuf {
 fn tasks_dir(root: &Path) -> PathBuf { task_root(root).join("tasks") }
 fn safe_id(id: &str) -> Result<String, Value> { if id.is_empty() || id.len()>120 || !id.chars().all(|c|c.is_ascii_alphanumeric() || c=='-' || c=='_') { return Err(error("delegated_task_id_invalid","delegated_task_id_invalid")); } Ok(id.to_string()) }
 fn task_path(root: &Path, id: &str) -> Result<PathBuf, Value> { let id = safe_id(id)?; Ok(tasks_dir(root).join(id).join("task.json")) }
-fn read_task(root: &Path, id: &str) -> Result<Value, Value> { let path = task_path(root,id)?; let text = fs::read_to_string(&path).map_err(|_|error("delegated_task_not_found","delegated_task_not_found"))?; serde_json::from_str(&text).map_err(|e|error("delegated_task_invalid_json",&e.to_string())) }
+fn read_task(root: &Path, id: &str) -> Result<Value, Value> { let path = task_path(root,id)?; let size = fs::metadata(&path).map_err(|_|error("delegated_task_not_found","delegated_task_not_found"))?.len(); if size > MAX_FILE_BYTES { return Err(error("delegated_task_record_too_large","delegated_task_record_too_large")); } let text = fs::read_to_string(&path).map_err(|_|error("delegated_task_not_found","delegated_task_not_found"))?; serde_json::from_str(&text).map_err(|e|error("delegated_task_invalid_json",&e.to_string())) }
 fn task_id(args: &Map<String, Value>) -> Result<String, Value> { args.get("task_id").and_then(Value::as_str).filter(|v|!v.trim().is_empty()).map(|v|v.trim().to_string()).ok_or_else(||error("task_id_required","task_id_required")) }
 
 fn policy(root: &Path) -> Value { json!({"schema":"narada.delegated_task.policy.v1","status":"ok","server_name":SERVER_NAME,"task_root":task_root(root).to_string_lossy(),"site_root":root.to_string_lossy(),"allowed_roots":[root.to_string_lossy()],"list_defaults":{"view":"active_queue","site_scope":"current_site"},"workflow_engine":"native_read_slice","worker_execution":"authority_boundary","result_compaction":{"max_worker_refs":50,"max_list_items":200}}) }
@@ -84,7 +85,7 @@ fn task_status(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
 fn task_result(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> { let id=task_id(args)?; let task=read_task(root,&id)?; Ok(json!({"schema":"narada.delegated_task.result.v1","status":"ok","task_id":id,"task_status":task.get("status"),"result":task.get("result"),"summary":task.get("summary"),"native_read_only":true})) }
 fn task_summary(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> { let id=task_id(args)?; let task=read_task(root,&id)?; let result=task.get("result").and_then(Value::as_object).cloned().unwrap_or_default(); Ok(json!({"schema":"narada.delegated_task.summary.v1","status":"ok","task_id":id,"task_status":task.get("status"),"objective":task.get("objective"),"summary":task.get("summary"),"acceptance_verdict":result.get("acceptance_verdict").cloned().unwrap_or(Value::String("pending".into())),"residual_risks":result.get("residual_risks").cloned().unwrap_or_else(||json!([])),"progress":result.get("progress"),"native_read_only":true})) }
 fn task_wait(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> { let id=task_id(args)?; let task=read_task(root,&id)?; Ok(json!({"schema":"narada.delegated_task.wait.v1","status":"ok","task_id":id,"task_status":task.get("status"),"waited":false,"refresh_performed":false,"worker_execution":"authority_boundary","task":compact_task(&task),"native_read_only":true})) }
-fn task_events(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> { let id=task_id(args)?; let path=task_path(root,&id)?.with_file_name("events.jsonl"); let limit=args.get("limit").and_then(Value::as_u64).unwrap_or(50).clamp(1,100) as usize; let offset=args.get("offset").and_then(Value::as_u64).unwrap_or(0).min(10000) as usize; let mut events=Vec::new(); if let Ok(text)=fs::read_to_string(path) { for line in text.lines().skip(offset).take(limit) { if let Ok(value)=serde_json::from_str::<Value>(line) { events.push(value); } } } Ok(json!({"schema":"narada.delegated_task.events.v1","status":"ok","task_id":id,"offset":offset,"limit":limit,"count":events.len(),"events":events,"native_read_only":true})) }
+fn task_events(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> { let id=task_id(args)?; let path=task_path(root,&id)?.with_file_name("events.jsonl"); let limit=args.get("limit").and_then(Value::as_u64).unwrap_or(50).clamp(1,100) as usize; let offset=args.get("offset").and_then(Value::as_u64).unwrap_or(0).min(10000) as usize; let mut events=Vec::new(); if let Ok(metadata)=fs::metadata(&path) { if metadata.len() > MAX_FILE_BYTES { return Err(error("delegated_task_events_too_large","delegated_task_events_too_large")); } let text=fs::read_to_string(path).map_err(|_|error("delegated_task_events_read_failed","delegated_task_events_read_failed"))?; for line in text.lines().skip(offset).take(limit) { if let Ok(value)=serde_json::from_str::<Value>(line) { events.push(value); } } } Ok(json!({"schema":"narada.delegated_task.events.v1","status":"ok","task_id":id,"offset":offset,"limit":limit,"count":events.len(),"events":events,"native_read_only":true})) }
 
 fn id_schema(required: bool) -> Value { json!({"type":"object","properties":{"task_id":{"type":"string"},"refresh":{"type":"boolean","default":false}},"required":if required {json!(["task_id"])} else {json!([])},"additionalProperties":false}) }
 fn authority_boundary(name: &str) -> Value { json!({"schema":"narada.delegated_task.authority_boundary.v1","status":"unavailable","tool_name":name,"reason":"delegated_task_worker_authority_not_enabled_in_native_read_slice","remediation":"Use the configured delegated-task/worker authority for creation, execution, waiting, cancellation, acknowledgement, and takeover."}) }
@@ -92,4 +93,27 @@ fn error(code: &str, message: &str) -> Value { json!({"schema":"narada.delegated
 fn tool(name: &str, description: &str, schema: Value, read_only: bool) -> Value { json!({"name":name,"description":description,"annotations":{"title":name,"readOnlyHint":read_only,"destructiveHint":!read_only,"idempotentHint":read_only,"openWorldHint":false},"inputSchema":schema,"outputSchema":{"type":"object","additionalProperties":true}}) }
 
 #[cfg(test)]
-mod tests { use super::*; #[test] fn native_delegated_task_reads_durable_json_without_execution() { let root=std::env::temp_dir().join(format!("narada-delegated-task-{}",uuid::Uuid::new_v4())); fs::create_dir_all(root.join("tasks/task_a")).expect("root"); fs::write(root.join("tasks/task_a/task.json"),r#"{"task_id":"task_a","status":"completed","objective":"demo","updated_at":"2026-01-01T00:00:00Z","result":{"acceptance_verdict":"accepted"}}"#).expect("task"); let listed=tasks_list(&json!({"limit":1}).as_object().unwrap(),&root).expect("list"); assert_eq!(listed["count"],1); assert_eq!(task_status(&json!({"task_id":"task_a"}).as_object().unwrap(),&root).expect("status")["task_status"],"completed"); fs::remove_dir_all(root).expect("cleanup"); } }
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_delegated_task_reads_durable_json_without_execution() {
+        let root = std::env::temp_dir().join(format!("narada-delegated-task-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("tasks/task_a")).expect("root");
+        fs::write(root.join("tasks/task_a/task.json"), r#"{"task_id":"task_a","status":"completed","objective":"demo","updated_at":"2026-01-01T00:00:00Z","result":{"acceptance_verdict":"accepted"}}"#).expect("task");
+        let listed = tasks_list(&json!({"limit":1}).as_object().unwrap(), &root).expect("list");
+        assert_eq!(listed["count"], 1);
+        assert_eq!(task_status(&json!({"task_id":"task_a"}).as_object().unwrap(), &root).expect("status")["task_status"], "completed");
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn native_delegated_task_refuses_oversized_records() {
+        let root = std::env::temp_dir().join(format!("narada-delegated-task-large-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("tasks/task_a")).expect("root");
+        fs::write(root.join("tasks/task_a/task.json"), vec![b'x'; MAX_FILE_BYTES as usize + 1]).expect("task");
+        let error = task_status(&json!({"task_id":"task_a"}).as_object().unwrap(), &root).expect_err("oversized record must refuse");
+        assert_eq!(error["code"], "delegated_task_record_too_large");
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+}
