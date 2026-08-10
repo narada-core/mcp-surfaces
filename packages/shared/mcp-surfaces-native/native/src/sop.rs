@@ -33,7 +33,7 @@ pub fn list_tools() -> Vec<Value> {
         ("sop_action_show", "Show one SOP action from the owning SOP store.", json!({"type":"object","additionalProperties":true})),
         ("sop_run_coverage_since", "List latest SOP run coverage since a supplied timestamp.", json!({"type":"object","properties":{"since":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":500,"default":200},"template_status":{"type":"string","enum":["draft","active","deprecated"],"default":"active"},"status":{"type":"string","enum":["pending","running","completed","failed","cancelled","awaiting_confirmation"]},"include_terminal":{"type":"boolean","default":true}},"required":["since"],"additionalProperties":false})),
         ("sop_run_events", "List bounded SOP run events in reverse insertion order.", json!({"type":"object","properties":{"run_id":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":500,"default":50},"offset":{"type":"integer","minimum":0,"maximum":100000,"default":0}},"required":["run_id"],"additionalProperties":false})),
-        ("sop_outbox_list", "Read SOP outbox entries from the owning SOP store.", json!({"type":"object","additionalProperties":true})),
+        ("sop_outbox_list", "List unacknowledged SOP terminal events for a registered consumer.", json!({"type":"object","properties":{"consumer_id":{"type":"string"},"topic":{"type":"string","const":"sop.run.terminal.v1"},"limit":{"type":"integer","minimum":1,"maximum":500,"default":100}},"required":["consumer_id"],"additionalProperties":false})),
     ] {
         tools.push(tool(name, description, schema, true));
     }
@@ -60,7 +60,7 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<V
         "sop_template_search" => template_search(args, root),
         "sop_template_list" => template_list(args, root),
         "sop_template_show" => template_show(args, root),
-        "sop_outbox_list" => Err(authority_boundary(name)),
+        "sop_outbox_list" => outbox_list(args, root),
         "sop_run_status" => run_status(args, root),
         "sop_run_list" => run_list(args, root),
         "sop_run_events" => run_events(args, root),
@@ -372,10 +372,35 @@ fn parse_timestamp(value: &str) -> Option<OffsetDateTime> {
     })
 }
 
+fn outbox_list(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let consumer_id = args.get("consumer_id").and_then(Value::as_str).filter(|value| !value.trim().is_empty()).ok_or_else(|| error("sop_outbox_consumer_id_required", "sop_outbox_consumer_id_required"))?;
+    let topic = args.get("topic").and_then(Value::as_str).filter(|value| !value.trim().is_empty());
+    if let Some(topic) = topic {
+        if topic != "sop.run.terminal.v1" { return Err(error("sop_outbox_topic_unsupported", &format!("sop_outbox_topic_unsupported:{topic}"))); }
+    }
+    let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(100).clamp(1, 500);
+    let Some(connection) = open_db(root)? else { return Err(error("sop_outbox_consumer_not_registered", &format!("sop_outbox_consumer_not_registered:{consumer_id}"))); };
+    let registered: i64 = if let Some(topic) = topic {
+        connection.query_row("SELECT COUNT(*) FROM sop_outbox_consumer_requirements WHERE consumer_id = ? AND topic = ?", params![consumer_id, topic], |row| row.get(0))
+    } else {
+        connection.query_row("SELECT COUNT(*) FROM sop_outbox_consumer_requirements WHERE consumer_id = ?", params![consumer_id], |row| row.get(0))
+    }.map_err(|e| error("sop_outbox_consumer_query_failed", &e.to_string()))?;
+    if registered == 0 { return Err(error("sop_outbox_consumer_not_registered", &format!("sop_outbox_consumer_not_registered:{consumer_id}"))); }
+    let now = OffsetDateTime::now_utc().format(&Rfc3339).map_err(|e| error("sop_outbox_time_failed", &e.to_string()))?;
+    let mut statement = connection.prepare("SELECT outbox.* FROM sop_outbox outbox JOIN sop_outbox_consumer_requirements requirement ON requirement.topic = outbox.topic AND requirement.consumer_id = ? WHERE (? IS NULL OR requirement.topic = ?) AND outbox.created_at >= requirement.start_at AND outbox.available_at <= ? AND NOT EXISTS (SELECT 1 FROM sop_outbox_receipts receipt WHERE receipt.event_id = outbox.event_id AND receipt.consumer_id = ?) ORDER BY outbox.created_at, outbox.event_id LIMIT ?").map_err(|e| error("sop_outbox_query_failed", &e.to_string()))?;
+    let rows = statement.query_map(params![consumer_id, topic, topic, now, consumer_id, limit], row_value).map_err(|e| error("sop_outbox_query_failed", &e.to_string()))?;
+    let items = rows.take(500).map(|row| row.map(outbox_record).map_err(|e| error("sop_outbox_row_failed", &e.to_string()))).collect::<Result<Vec<_>, _>>()?;
+    Ok(json!({"schema":"narada.sop.outbox_list.v1","items":items,"count":items.len()}))
+}
+
+fn outbox_record(value: Value) -> Value {
+    json!({"schema":"narada.sop.outbox_event.v1","event_id":member(&value,"event_id"),"topic":member(&value,"topic"),"partition_key":member(&value,"partition_key"),"run_id":member(&value,"run_id"),"sop_id":member(&value,"sop_id"),"sop_version":member(&value,"sop_version"),"occurrence_key":member(&value,"occurrence_key"),"outcome":member(&value,"outcome"),"payload":member(&value,"payload_json"),"created_at":member(&value,"created_at"),"available_at":member(&value,"available_at"),"compacted_at":member(&value,"compacted_at")})
+}
+
 fn doctor(root: &Path) -> Result<Value, Value> {
     let dirs = sops_dirs(root); let mut counts = Vec::new();
     for dir in &dirs { let count = fs::read_dir(dir).ok().map(|entries| entries.filter_map(Result::ok).filter(|entry| entry.path().file_name().and_then(|v|v.to_str()).map(|v|v.ends_with(".sop.yaml")).unwrap_or(false)).take(MAX_CANDIDATES).count()).unwrap_or(0); counts.push(json!({"path":dir.to_string_lossy(),"candidate_count":count})); }
-    Ok(json!({"schema":"narada.sop_mcp.doctor.v1","status":"ok","site_root":root.to_string_lossy(),"sops_dirs":counts,"native_adapter":"template_action_run_status_handoff_event_coverage_read","execution":"authority_boundary","server_name":SERVER_NAME}))
+    Ok(json!({"schema":"narada.sop_mcp.doctor.v1","status":"ok","site_root":root.to_string_lossy(),"sops_dirs":counts,"native_adapter":"template_action_run_status_handoff_event_coverage_outbox_read","execution":"authority_boundary","server_name":SERVER_NAME}))
 }
 
 fn candidate_entries(root: &Path) -> Vec<(String, PathBuf)> {
@@ -515,6 +540,20 @@ mod tests {
         let coverage = run_coverage_since(&json!({"since":"2026-02-01T00:00:00Z"}).as_object().unwrap(), &root).expect("coverage");
         assert_eq!(coverage["count"], 1);
         assert_eq!(coverage["items"][0]["classification"], "stale");
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn native_sop_outbox_list_respects_consumer_start_and_receipts() {
+        let root = std::env::temp_dir().join(format!("narada-sop-outbox-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join(".sop")).expect("root");
+        let connection = Connection::open(db_path(&root)).expect("db");
+        connection.execute_batch("CREATE TABLE sop_outbox (event_id TEXT, topic TEXT, partition_key TEXT, run_id TEXT, sop_id TEXT, sop_version INTEGER, occurrence_key TEXT, outcome TEXT, payload_json TEXT, created_at TEXT, available_at TEXT, compacted_at TEXT); CREATE TABLE sop_outbox_consumer_requirements (topic TEXT, consumer_id TEXT, start_at TEXT, registered_at TEXT); CREATE TABLE sop_outbox_receipts (event_id TEXT, consumer_id TEXT, processed_at TEXT, receipt_json TEXT); INSERT INTO sop_outbox_consumer_requirements VALUES ('sop.run.terminal.v1','consumer-1','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'); INSERT INTO sop_outbox VALUES ('event-1','sop.run.terminal.v1','run-1','run-1','demo',1,'occ-1','completed','{\"status\":\"completed\"}','2026-01-02T00:00:00Z','2026-01-02T00:00:00Z',NULL); INSERT INTO sop_outbox VALUES ('event-2','sop.run.terminal.v1','run-2','run-2','demo',1,'occ-2','completed','{}','2026-01-03T00:00:00Z','2026-01-03T00:00:00Z',NULL); INSERT INTO sop_outbox_receipts VALUES ('event-2','consumer-1','2026-01-04T00:00:00Z','{}');").expect("schema");
+        drop(connection);
+        let page = outbox_list(&json!({"consumer_id":"consumer-1"}).as_object().unwrap(), &root).expect("outbox");
+        assert_eq!(page["count"], 1);
+        assert_eq!(page["items"][0]["event_id"], "event-1");
+        assert_eq!(page["items"][0]["payload"]["status"], "completed");
         fs::remove_dir_all(root).expect("cleanup");
     }
 }
