@@ -1,5 +1,6 @@
 use crate::graph_authority::CalendarGraphAdapter;
 use serde_json::{json, Map, Value};
+use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -18,6 +19,7 @@ const MAX_DOWNLOADED_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
 const ATTACHMENT_UPLOAD_CHUNK_GRANULARITY: u64 = 320 * 1024;
 const DEFAULT_ATTACHMENT_UPLOAD_CHUNK_SIZE: u64 = 10 * ATTACHMENT_UPLOAD_CHUNK_GRANULARITY;
 const MAX_ATTACHMENT_UPLOAD_FILE_BYTES: u64 = 512 * 1024 * 1024;
+const TICKET_DRAFT_OPERATION_PROPERTY_ID: &str = "String {d700a6f2-79ad-4f44-9df7-3e9b622f09f8} Name NaradaTicketDraftOperation";
 const ALLOWED_DOWNLOADED_ATTACHMENT_TYPES: &[&str] = &[
     "application/pdf",
     "application/vnd.openxmlformats-officedocument.presentationml.presentation",
@@ -68,6 +70,7 @@ pub fn supports(name: &str) -> bool {
             | "graph_mail_reply_all_draft_create"
             | "graph_mail_forward_draft_create"
             | "graph_mail_reply_all_to_last_in_thread_draft_create"
+            | "graph_mail_ticket_draft_upsert"
             | "graph_mail_draft_update"
             | "graph_mail_draft_discard"
             | "graph_mail_draft_send"
@@ -100,6 +103,7 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<V
         "graph_mail_reply_all_draft_create" => derived_draft_create(&policy, args, root, "createReplyAll"),
         "graph_mail_forward_draft_create" => derived_draft_create(&policy, args, root, "createForward"),
         "graph_mail_reply_all_to_last_in_thread_draft_create" => reply_all_to_last_in_thread(&policy, args, root),
+        "graph_mail_ticket_draft_upsert" => ticket_draft_upsert(&policy, args, root),
         "graph_mail_draft_update" => draft_update(&policy, args, root),
         "graph_mail_draft_discard" => draft_discard(&policy, args, root),
         "graph_mail_draft_send" => draft_send(&policy, args, root),
@@ -1370,6 +1374,410 @@ fn reply_all_to_last_in_thread(
     }))
 }
 
+fn ticket_draft_upsert(
+    policy: &Policy,
+    args: &Map<String, Value>,
+    root: &Path,
+) -> Result<Value, Value> {
+    let body_text = optional_string(args, "body_text");
+    let body_html = optional_string(args, "body_html");
+    if body_text.is_some() == body_html.is_some() {
+        return Err(unavailable(
+            "graph_ticket_draft_exactly_one_body_required",
+            "provide exactly one of body_text or body_html",
+        ));
+    }
+    let reply_mode = required_string(args, "reply_mode")?;
+    if reply_mode != "reply" && reply_mode != "reply_all" {
+        return Err(unavailable(
+            "graph_ticket_draft_reply_mode_invalid",
+            "reply_mode must be reply or reply_all",
+        ));
+    }
+    let operation_key = required_string(args, "draft_operation_key")?;
+    if operation_key.len() > 256
+        || operation_key.is_empty()
+        || !operation_key
+            .chars()
+            .all(|value| value.is_ascii_alphanumeric() || matches!(value, '.' | '_' | ':' | '-'))
+    {
+        return Err(unavailable(
+            "graph_ticket_draft_operation_key_invalid",
+            "operation key contains unsupported characters",
+        ));
+    }
+    let admitted_digest = required_string(args, "draft_request_digest")?.to_ascii_lowercase();
+    if admitted_digest.len() != 64 || !admitted_digest.chars().all(|value| value.is_ascii_hexdigit()) {
+        return Err(unavailable(
+            "graph_ticket_draft_request_digest_invalid",
+            "draft request digest must be 64 hexadecimal characters",
+        ));
+    }
+    let ticket_id = required_string(args, "ticket_id")?;
+    let effect_claim_id = required_string(args, "effect_claim_id")?;
+    let draft_source_id = required_string(args, "draft_source_id")?;
+    let mailbox_id = required_string(args, "mailbox_id")?;
+    let source_message_id = required_string(args, "source_message_id")?;
+    let idempotency_key = required_string(args, "idempotency_key")?;
+    let mut normalized = Map::new();
+    normalized.insert("ticket_id".to_string(), json!(ticket_id));
+    normalized.insert("effect_claim_id".to_string(), json!(effect_claim_id));
+    normalized.insert("draft_operation_key".to_string(), json!(operation_key));
+    normalized.insert("draft_request_digest".to_string(), json!(admitted_digest));
+    normalized.insert("draft_source_id".to_string(), json!(draft_source_id));
+    normalized.insert("mailbox_id".to_string(), json!(mailbox_id));
+    normalized.insert("source_message_id".to_string(), json!(source_message_id));
+    normalized.insert("reply_mode".to_string(), json!(reply_mode));
+    if let Some(value) = body_text.as_deref() {
+        normalized.insert("body_text".to_string(), json!(value));
+    }
+    if let Some(value) = body_html.as_deref() {
+        normalized.insert("body_html".to_string(), json!(value));
+    }
+    normalized.insert("idempotency_key".to_string(), json!(idempotency_key));
+    let mut draft_request = Map::new();
+    draft_request.insert("source_id".to_string(), json!(draft_source_id));
+    draft_request.insert("mailbox_id".to_string(), json!(mailbox_id));
+    draft_request.insert("source_message_id".to_string(), json!(source_message_id));
+    draft_request.insert("reply_mode".to_string(), json!(reply_mode));
+    if let Some(value) = body_text.as_deref() {
+        draft_request.insert("body_text".to_string(), json!(value));
+    }
+    if let Some(value) = body_html.as_deref() {
+        draft_request.insert("body_html".to_string(), json!(value));
+    }
+    let actual_digest = sha256_canonical(&Value::Object(draft_request));
+    if actual_digest != admitted_digest {
+        return Err(unavailable(
+            "graph_ticket_draft_request_digest_mismatch",
+            &format!("{admitted_digest}:{actual_digest}"),
+        ));
+    }
+    let request_digest = sha256_canonical(&Value::Object(normalized.clone()));
+    let connection = ticket_store(root)?;
+    connection
+        .execute_batch("BEGIN IMMEDIATE")
+        .map_err(|error| unavailable("graph_ticket_draft_transaction_failed", &error.to_string()))?;
+    let outcome = (|| {
+        let mut operation = find_ticket_operation(&connection, &operation_key)?;
+        let replayed = operation.is_some();
+        if let Some(existing) = operation.as_ref() {
+            assert_ticket_operation_matches(
+                existing,
+                &operation_key,
+                &request_digest,
+                &admitted_digest,
+                &ticket_id,
+                &effect_claim_id,
+                &mailbox_id,
+                &source_message_id,
+                &reply_mode,
+                &idempotency_key,
+            )?;
+            if existing.status == "completed" {
+                return ticket_domain_operation(existing, true);
+            }
+        } else {
+            let now = now_rfc3339();
+            connection
+                .execute(
+                    "insert into graph_ticket_draft_operations(operation_key, action_idempotency_key, request_digest, draft_request_digest, ticket_id, effect_claim_id, mailbox_id, source_message_id, reply_mode, status, draft_id, receipt_id, draft_ref_json, created_at, updated_at, completed_at) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'pending', null, null, null, ?10, ?10, null)",
+                    params![operation_key, idempotency_key, request_digest, admitted_digest, ticket_id, effect_claim_id, mailbox_id, source_message_id, reply_mode, now],
+                )
+                .map_err(|error| unavailable("graph_ticket_draft_insert_failed", &error.to_string()))?;
+            operation = find_ticket_operation(&connection, &operation_key)?;
+        }
+        let _existing = operation.ok_or_else(|| unavailable("graph_ticket_draft_operation_not_found", &operation_key))?;
+        let mut draft = find_ticket_remote_draft(policy, &mailbox_id, &operation_key)?;
+        let mut recovered = true;
+        if draft.is_none() {
+            recovered = false;
+            let mut message = Map::new();
+            if let Some(value) = normalized.get("body_text").and_then(Value::as_str) {
+                message.insert("body".to_string(), json!({"contentType":"Text","content":value}));
+            }
+            if let Some(value) = normalized.get("body_html").and_then(Value::as_str) {
+                message.insert("body".to_string(), json!({"contentType":"HTML","content":value}));
+            }
+            message.insert(
+                "singleValueExtendedProperties".to_string(),
+                json!([{"id":TICKET_DRAFT_OPERATION_PROPERTY_ID,"value":operation_key}]),
+            );
+            let action = if reply_mode == "reply" { "createReply" } else { "createReplyAll" };
+            let suffix = format!("messages/{}/{}", encode_component(&source_message_id), action);
+            record_audit(root, json!({
+                "event_kind":"ticket_draft_create_requested",
+                "ticket_id":ticket_id,
+                "effect_claim_id":effect_claim_id,
+                "draft_operation_key":operation_key,
+                "mailbox_id":mailbox_id,
+                "source_message_id":source_message_id,
+                "reply_mode":reply_mode,
+                "draft_request_digest":admitted_digest
+            }))?;
+            let created = policy.adapter.request(
+                "POST",
+                Some(&mailbox_id),
+                &suffix,
+                &Map::new(),
+                Some(&json!({"message":Value::Object(message)})),
+            )?;
+            if created.get("isDraft").and_then(Value::as_bool) == Some(false)
+                || created.get("id").and_then(Value::as_str).is_none()
+            {
+                return Err(unavailable("graph_ticket_draft_create_result_invalid", "Graph did not return an unsent draft"));
+            }
+            record_audit(root, json!({"event_kind":"ticket_draft_create_completed","ticket_id":ticket_id,"effect_claim_id":effect_claim_id,"draft_operation_key":operation_key,"draft_id":created.get("id").cloned().unwrap_or(Value::Null)}))?;
+            draft = Some(created);
+        }
+        let draft = draft.ok_or_else(|| unavailable("graph_ticket_draft_create_result_invalid", "draft missing"))?;
+        let draft_id = required_draft_id(&draft)?;
+        let draft_ref = ticket_draft_ref_value(&normalized, &draft, &draft_id);
+        let receipt_id = stable_receipt_id(&operation_key, &draft_id);
+        let completed_at = now_rfc3339();
+        connection
+            .execute(
+                "update graph_ticket_draft_operations set status='completed', draft_id=?1, receipt_id=?2, draft_ref_json=?3, updated_at=?4, completed_at=?4 where operation_key=?5 and status='pending'",
+                params![draft_id, receipt_id, canonical_json(&draft_ref), completed_at, operation_key],
+            )
+            .map_err(|error| unavailable("graph_ticket_draft_completion_failed", &error.to_string()))?;
+        let completed = find_ticket_operation(&connection, &operation_key)?
+            .ok_or_else(|| unavailable("graph_ticket_draft_operation_not_found", &operation_key))?;
+        ticket_domain_operation(&completed, replayed || recovered)
+    })();
+    match outcome {
+        Ok(value) => {
+            connection
+                .execute_batch("COMMIT")
+                .map_err(|error| unavailable("graph_ticket_draft_commit_failed", &error.to_string()))?;
+            Ok(value)
+        }
+        Err(error) => {
+            let _ = connection.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
+}
+
+#[derive(Clone)]
+struct TicketOperation {
+    operation_key: String,
+    action_idempotency_key: String,
+    request_digest: String,
+    draft_request_digest: String,
+    ticket_id: String,
+    effect_claim_id: String,
+    mailbox_id: String,
+    source_message_id: String,
+    reply_mode: String,
+    status: String,
+    draft_id: Option<String>,
+    receipt_id: Option<String>,
+    draft_ref: Option<Value>,
+    completed_at: Option<String>,
+}
+
+fn ticket_store(root: &Path) -> Result<Connection, Value> {
+    let directory = root.join(".narada/runtime/graph-mail-domain");
+    fs::create_dir_all(&directory)
+        .map_err(|error| unavailable("graph_ticket_draft_directory_failed", &error.to_string()))?;
+    let connection = Connection::open(directory.join("graph-mail-domain.db"))
+        .map_err(|error| unavailable("graph_ticket_draft_database_open_failed", &error.to_string()))?;
+    connection
+        .execute_batch(
+            "pragma busy_timeout = 30000; pragma foreign_keys = on; create table if not exists graph_ticket_draft_operations(operation_key text primary key, action_idempotency_key text not null unique, request_digest text not null, draft_request_digest text not null, ticket_id text not null, effect_claim_id text not null, mailbox_id text not null, source_message_id text not null, reply_mode text not null, status text not null, draft_id text, receipt_id text, draft_ref_json text, created_at text not null, updated_at text not null, completed_at text);",
+        )
+        .map_err(|error| unavailable("graph_ticket_draft_schema_failed", &error.to_string()))?;
+    Ok(connection)
+}
+
+fn find_ticket_operation(connection: &Connection, operation_key: &str) -> Result<Option<TicketOperation>, Value> {
+    connection
+        .query_row(
+            "select operation_key, action_idempotency_key, request_digest, draft_request_digest, ticket_id, effect_claim_id, mailbox_id, source_message_id, reply_mode, status, draft_id, receipt_id, draft_ref_json, completed_at from graph_ticket_draft_operations where operation_key=?1",
+            params![operation_key],
+            |row| {
+                let draft_ref: Option<String> = row.get(12)?;
+                Ok(TicketOperation {
+                    operation_key: row.get(0)?,
+                    action_idempotency_key: row.get(1)?,
+                    request_digest: row.get(2)?,
+                    draft_request_digest: row.get(3)?,
+                    ticket_id: row.get(4)?,
+                    effect_claim_id: row.get(5)?,
+                    mailbox_id: row.get(6)?,
+                    source_message_id: row.get(7)?,
+                    reply_mode: row.get(8)?,
+                    status: row.get(9)?,
+                    draft_id: row.get(10)?,
+                    receipt_id: row.get(11)?,
+                    draft_ref: draft_ref.and_then(|value| serde_json::from_str(&value).ok()),
+                    completed_at: row.get(13)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| unavailable("graph_ticket_draft_database_read_failed", &error.to_string()))
+}
+
+fn assert_ticket_operation_matches(
+    operation: &TicketOperation,
+    operation_key: &str,
+    request_digest: &str,
+    draft_request_digest: &str,
+    ticket_id: &str,
+    effect_claim_id: &str,
+    mailbox_id: &str,
+    source_message_id: &str,
+    reply_mode: &str,
+    idempotency_key: &str,
+) -> Result<(), Value> {
+    if operation.operation_key != operation_key
+        || operation.request_digest != request_digest
+        || operation.action_idempotency_key != idempotency_key
+        || operation.draft_request_digest != draft_request_digest
+        || operation.ticket_id != ticket_id
+        || operation.effect_claim_id != effect_claim_id
+        || operation.mailbox_id != mailbox_id
+        || operation.source_message_id != source_message_id
+        || operation.reply_mode != reply_mode
+    {
+        return Err(unavailable(
+            "graph_ticket_draft_idempotency_conflict",
+            operation_key,
+        ));
+    }
+    Ok(())
+}
+
+fn find_ticket_remote_draft(
+    policy: &Policy,
+    mailbox_id: &str,
+    operation_key: &str,
+) -> Result<Option<Value>, Value> {
+    let property_id = TICKET_DRAFT_OPERATION_PROPERTY_ID.replace('\'', "''");
+    let property_value = operation_key.replace('\'', "''");
+    let mut query = Map::new();
+    query.insert(
+        "$filter".to_string(),
+        json!(format!("isDraft eq true and singleValueExtendedProperties/Any(ep: ep/id eq '{property_id}' and ep/value eq '{property_value}')")),
+    );
+    query.insert(
+        "$expand".to_string(),
+        json!(format!("singleValueExtendedProperties($filter=id eq '{property_id}')")),
+    );
+    query.insert(
+        "$select".to_string(),
+        json!("id,conversationId,subject,isDraft,createdDateTime,lastModifiedDateTime"),
+    );
+    query.insert("$top".to_string(), json!(2));
+    let result = policy
+        .adapter
+        .request("GET", Some(mailbox_id), "messages", &query, None)?;
+    let drafts = result
+        .get("value")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|value| value.get("id").and_then(Value::as_str).is_some() && value.get("isDraft").and_then(Value::as_bool) != Some(false))
+        .collect::<Vec<_>>();
+    if drafts.len() > 1 {
+        return Err(unavailable(
+            "graph_ticket_draft_remote_identity_ambiguous",
+            operation_key,
+        ));
+    }
+    Ok(drafts.into_iter().next())
+}
+
+fn ticket_draft_ref_value(normalized: &Map<String, Value>, draft: &Value, draft_id: &str) -> Value {
+    let mut reference = Map::new();
+    reference.insert("schema".to_string(), json!("narada.graph_mail.ticket_draft_ref.v1"));
+    for key in [
+        "ticket_id",
+        "effect_claim_id",
+        "draft_operation_key",
+        "draft_request_digest",
+        "mailbox_id",
+        "source_message_id",
+        "reply_mode",
+    ] {
+        if let Some(value) = normalized.get(key) {
+            reference.insert(key.to_string(), value.clone());
+        }
+    }
+    reference.insert("draft_id".to_string(), json!(draft_id));
+    if let Some(value) = draft.get("conversationId").and_then(Value::as_str) {
+        reference.insert("conversation_id".to_string(), json!(value));
+    }
+    if let Some(value) = draft.get("@odata.etag").and_then(Value::as_str) {
+        reference.insert("etag".to_string(), json!(value));
+    }
+    Value::Object(reference)
+}
+
+fn stable_receipt_id(operation_key: &str, draft_id: &str) -> String {
+    let mut input = operation_key.as_bytes().to_vec();
+    input.push(0);
+    input.extend_from_slice(draft_id.as_bytes());
+    format!("graph_draft_receipt_{}", &hex_lower(&Sha256::digest(input))[..32])
+}
+
+fn ticket_domain_operation(operation: &TicketOperation, replayed_or_recovered: bool) -> Result<Value, Value> {
+    let (Some(draft_id), Some(receipt_id), Some(draft_ref), Some(completed_at)) = (
+        operation.draft_id.as_ref(),
+        operation.receipt_id.as_ref(),
+        operation.draft_ref.as_ref(),
+        operation.completed_at.as_ref(),
+    ) else {
+        return Err(unavailable("graph_ticket_draft_operation_incomplete", &operation.operation_key));
+    };
+    Ok(json!({
+        "schema":"narada.domain_operation.v1",
+        "operation_ref":format!("graph-mail-ticket-draft:{}", operation.operation_key),
+        "outcome":"completed",
+        "result":{
+            "schema":"narada.graph_mail.ticket_draft_receipt.v1",
+            "ticket_id":operation.ticket_id,
+            "effect_claim_id":operation.effect_claim_id,
+            "draft_operation_key":operation.operation_key,
+            "draft_request_digest":operation.draft_request_digest,
+            "receipt_id":receipt_id,
+            "draft_id":draft_id,
+            "draft_ref":draft_ref,
+            "idempotency_replayed_or_recovered":replayed_or_recovered,
+            "completed_at":completed_at
+        }
+    }))
+}
+
+fn canonical_json(value: &Value) -> String {
+    serde_json::to_string(&canonical_value(value)).unwrap_or_else(|_| "null".to_string())
+}
+
+fn canonical_value(value: &Value) -> Value {
+    match value {
+        Value::Array(values) => Value::Array(values.iter().map(canonical_value).collect()),
+        Value::Object(object) => {
+            let mut keys = object.keys().cloned().collect::<Vec<_>>();
+            keys.sort();
+            let mut output = Map::new();
+            for key in keys {
+                if let Some(value) = object.get(&key) {
+                    output.insert(key, canonical_value(value));
+                }
+            }
+            Value::Object(output)
+        }
+        other => other.clone(),
+    }
+}
+
+fn sha256_canonical(value: &Value) -> String {
+    hex_lower(&Sha256::digest(canonical_json(value).as_bytes()))
+}
+
 fn draft_update(
     policy: &Policy,
     args: &Map<String, Value>,
@@ -2072,7 +2480,7 @@ mod tests {
         assert!(supports("graph_mail_reply_all_to_last_in_thread_draft_create"));
         assert!(supports("graph_mail_attachment_upload_chunk"));
         assert!(supports("graph_mail_attachment_upload_file"));
-        assert!(!supports("graph_mail_ticket_draft_upsert"));
+        assert!(supports("graph_mail_ticket_draft_upsert"));
     }
 
     #[test]
