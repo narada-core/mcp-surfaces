@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -913,6 +913,120 @@ function runCalendarAuthorityBridge() {
   return { status: 'passed', fixture: 'opt_in_stdio_authority_bridge', compared: ['unconfigured_refusal', 'configured_forwarding'] };
 }
 
+function runCalendarNativeGraphParity() {
+  const workspaceRoot = resolve(packageRoot, '..', '..', '..');
+  const bunEntrypoint = join(workspaceRoot, 'packages', 'calendar-mcp', 'src', 'main.ts');
+  if (!existsSync(bunEntrypoint)) throw new Error('calendar_graph_parity_bun_entrypoint_missing:' + bunEntrypoint);
+  const root = mkdtempSync(join(tmpdir(), 'narada-calendar-native-graph-'));
+  const bunRoot = join(root, 'bun-site');
+  const rustRoot = join(root, 'rust-site');
+  const fixtureScript = join(root, 'calendar-graph-fixture.mjs');
+  const requests = [
+    { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'calendar_list', arguments: { limit: 3 } } },
+    { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'calendar_event_query', arguments: { start_datetime: '2026-06-25T10:00:00Z', end_datetime: '2026-06-25T11:00:00Z', select: 'id,subject,start,end', limit: 5 } } },
+    { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'calendar_event_show', arguments: { event_id: 'event-1' } } },
+    { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'calendar_event_create', arguments: { subject: 'Allowed write', start_datetime: '2026-06-25T10:00:00', end_datetime: '2026-06-25T11:00:00', time_zone: 'UTC', attendees: ['person@example.test'], location: 'Conference Room', confirm_write: true, approval_token: 'approve-1' } } },
+    { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'calendar_event_update', arguments: { event_id: 'event-1', subject: 'Updated write', confirm_write: true, approval_token: 'approve-1' } } },
+    { jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'calendar_event_delete', arguments: { event_id: 'event-1', confirm_write: true, approval_token: 'approve-1' } } },
+    { jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'calendar_event_create', arguments: { subject: 'Refused write', start_datetime: '2026-06-25T10:00:00', end_datetime: '2026-06-25T11:00:00', time_zone: 'UTC' } } },
+  ];
+  const cleanEnv = { ...process.env, NARADA_GRAPH_FIXTURE_REQUESTS: JSON.stringify(requests) };
+  for (const key of ['MS_GRAPH_ACCESS_TOKEN', 'GRAPH_ACCESS_TOKEN', 'GRAPH_TENANT_ID', 'GRAPH_CLIENT_ID', 'GRAPH_CLIENT_SECRET', 'GRAPH_TOKEN_ENDPOINT', 'NARADA_NATIVE_GRAPH_AUTHORITY', 'NARADA_NATIVE_GRAPH_ALLOW_INSECURE_TEST']) delete cleanEnv[key];
+  const fixture = String.raw`import { createServer } from 'node:http';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+
+const [nativeExecutable, bunEntrypoint, bunCommand, bunRoot, rustRoot] = process.argv.slice(2);
+const requests = JSON.parse(process.env.NARADA_GRAPH_FIXTURE_REQUESTS ?? '[]');
+const received = [];
+const server = createServer((request, response) => {
+  const chunks = [];
+  request.on('data', (chunk) => chunks.push(chunk));
+  request.on('end', () => {
+    const raw = Buffer.concat(chunks).toString('utf8');
+    let body = null;
+    try { body = raw ? JSON.parse(raw) : null; } catch { body = raw; }
+    received.push({ method: request.method, url: request.url, authorization: request.headers.authorization ?? null, body });
+    const url = request.url ?? '';
+    let status = 200;
+    let payload = { value: [] };
+    if (request.method === 'GET' && url.includes('/calendarView')) payload = { value: [{ id: 'event-1', subject: 'Planning' }] };
+    else if (request.method === 'GET' && url.includes('/events/')) payload = { id: 'event-1', subject: 'Planning' };
+    else if (request.method === 'GET' && url.includes('/calendars')) payload = { value: [{ id: 'calendar-1', name: 'Calendar' }] };
+    else if (request.method === 'POST') { status = 201; payload = { id: 'created-1', subject: 'Allowed write' }; }
+    else if (request.method === 'PATCH') payload = { id: 'event-1', subject: 'Updated write' };
+    else if (request.method === 'DELETE') { status = 204; payload = null; }
+    response.statusCode = status;
+    if (payload === null) { response.end(); return; }
+    const encoded = JSON.stringify(payload);
+    response.setHeader('content-type', 'application/json');
+    response.end(encoded);
+  });
+});
+
+function run(command, args, env) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { env, windowsHide: true });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    const timer = setTimeout(() => { child.kill(); reject(new Error('fixture_child_timeout:' + command)); }, 30000);
+    child.on('error', (error) => { clearTimeout(timer); reject(error); });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code !== 0) { reject(new Error('fixture_child_exit:' + command + ':' + code + ':' + stderr.slice(-1000))); return; }
+      try { resolve(stdout.trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line))); }
+      catch (error) { reject(new Error('fixture_child_output_invalid:' + command + ':' + error.message + ':' + stdout.slice(-1000))); }
+    });
+    child.stdin.end(requests.map((request) => JSON.stringify(request)).join('\n') + '\n');
+  });
+}
+
+server.listen(0, '127.0.0.1', async () => {
+  try {
+    const port = server.address().port;
+    const config = JSON.stringify({ graph_base_url: 'http://127.0.0.1:' + port + '/v1.0', allowed_mailboxes: ['fixture@example.test'], allow_event_writes: true, write_approval_token: 'approve-1' });
+    for (const root of [bunRoot, rustRoot]) { mkdirSync(root + '/.ai', { recursive: true }); writeFileSync(root + '/.ai/calendar-mcp.json', config); }
+    const env = { ...process.env, GRAPH_ACCESS_TOKEN: 'fixture-token', NARADA_NATIVE_GRAPH_AUTHORITY: '1', NARADA_NATIVE_GRAPH_ALLOW_INSECURE_TEST: '1' };
+    for (const key of ['MS_GRAPH_ACCESS_TOKEN', 'GRAPH_TENANT_ID', 'GRAPH_CLIENT_ID', 'GRAPH_CLIENT_SECRET', 'GRAPH_TOKEN_ENDPOINT', 'NARADA_CALENDAR_AUTHORITY_ENTRYPOINT', 'NARADA_CALENDAR_AUTHORITY_ARGS']) delete env[key];
+    const bun = await run(bunCommand, [bunEntrypoint, '--site-root', bunRoot], env);
+    const rust = await run(nativeExecutable, ['--surface-id', 'calendar', '--site-root', rustRoot], env);
+    server.close(() => process.stdout.write(JSON.stringify({ bun, rust, received }) + '\n'));
+  } catch (error) {
+    server.close(() => { process.stderr.write(String(error.stack ?? error) + '\n'); process.exit(1); });
+  }
+});
+`;
+  writeFileSync(fixtureScript, fixture, 'utf8');
+  try {
+    const result = spawnSync(process.execPath, [fixtureScript, executable, bunEntrypoint, process.env.NARADA_BUN_EXECUTABLE ?? 'bun', bunRoot, rustRoot], {
+      cwd: workspaceRoot,
+      env: cleanEnv,
+      encoding: 'utf8',
+      timeout: 90_000,
+      maxBuffer: 4 * 1024 * 1024,
+      windowsHide: true,
+    });
+    if (result.error) throw new Error('calendar_graph_fixture_spawn_failed:' + result.error.message);
+    if (result.status !== 0) throw new Error('calendar_graph_fixture_exit:' + result.status + ':' + String(result.stderr).slice(-1500));
+    const payload = JSON.parse(String(result.stdout).trim());
+    for (const id of [1, 2, 3, 4, 5, 6, 7]) {
+      assertSame('calendar.native_graph.' + id, mailboxStructured(payload.bun, id, 'bun'), mailboxStructured(payload.rust, id, 'rust'));
+    }
+    const expectedMethods = ['GET', 'GET', 'GET', 'POST', 'PATCH', 'DELETE'];
+    assertSame('calendar.native_graph.bun_methods', payload.received.slice(0, 6).map((value) => value.method), expectedMethods);
+    assertSame('calendar.native_graph.rust_methods', payload.received.slice(6, 12).map((value) => value.method), expectedMethods);
+    if (payload.received.some((value) => value.authorization !== 'Bearer fixture-token')) throw new Error('calendar_graph_fixture_authorization_mismatch');
+    const auditPath = join(rustRoot, '.ai', 'audit', 'calendar-mcp.jsonl');
+    const auditKinds = readFileSync(auditPath, 'utf8').trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line).event_kind);
+    assertSame('calendar.native_graph.audit', auditKinds, ['event_create_requested', 'event_create_completed', 'event_update_requested', 'event_update_completed', 'event_delete_requested', 'event_delete_completed', 'event_create_refused']);
+    return { status: 'passed', fixture: 'loopback_graph_authority', compared: ['calendar_list', 'calendar_event_query', 'calendar_event_show', 'calendar_event_create', 'calendar_event_update', 'calendar_event_delete', 'write_refusal', 'audit'] };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 function runCloudflareParity() {
   const workspaceRoot = resolve(packageRoot, '..', '..', '..');
   const bunEntrypoint = join(workspaceRoot, 'packages', 'cloudflare-carrier-mcp', 'src', 'main.ts');
@@ -1202,6 +1316,7 @@ const surfaceFeedbackParity = runSurfaceFeedbackParity();
 const siteLoopParity = runSiteLoopParity();
 const calendarParity = runCalendarParity();
 const calendarAuthorityBridge = runCalendarAuthorityBridge();
+const calendarNativeGraphParity = runCalendarNativeGraphParity();
 const cloudflareParity = runCloudflareParity();
 const graphMailParity = runGraphMailParity();
 const operatorOverlayParity = runOperatorOverlayParity();
@@ -1231,6 +1346,7 @@ process.stdout.write(JSON.stringify({
   site_loop_parity: siteLoopParity,
   calendar_parity: calendarParity,
   calendar_authority_bridge: calendarAuthorityBridge,
+  calendar_native_graph_parity: calendarNativeGraphParity,
   cloudflare_parity: cloudflareParity,
   graph_mail_parity: graphMailParity,
   operator_overlay_parity: operatorOverlayParity,

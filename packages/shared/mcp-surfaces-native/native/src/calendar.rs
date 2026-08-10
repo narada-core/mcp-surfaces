@@ -4,7 +4,7 @@ use std::fs;
 use std::path::Path;
 
 #[path = "calendar_provider.rs"]
-mod provider;
+pub(crate) mod provider;
 
 const SERVER_NAME: &str = "narada-calendar-mcp";
 const DEFAULT_GRAPH_BASE_URL: &str = "https://graph.microsoft.com/v1.0";
@@ -50,16 +50,29 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<V
         "calendar_guidance" => Ok(guidance(args)),
         "calendar_doctor" => doctor(root),
         "calendar_output_show" => output_show(args, root),
-        "calendar_list" | "calendar_event_query" | "calendar_event_show" | "calendar_event_create" | "calendar_event_update" | "calendar_event_delete" => authority_call(name, args),
+        "calendar_list" | "calendar_event_query" | "calendar_event_show" | "calendar_event_create" | "calendar_event_update" | "calendar_event_delete" => authority_call(name, args, root),
         _ => Err(error("unknown_tool", &format!("unknown_tool:{name}"))),
     }
 }
 
-fn authority_call(name: &str, args: &Map<String, Value>) -> Result<Value, Value> {
+fn authority_call(name: &str, args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    if native_graph_authority_enabled() {
+        return crate::graph_authority::call_calendar(name, args, root);
+    }
     if let Some(result) = crate::authority::call_if_configured("calendar", name, args) {
         return result;
     }
     Err(authority_boundary(name))
+}
+
+fn native_graph_authority_enabled() -> bool {
+    matches!(
+        std::env::var("NARADA_NATIVE_GRAPH_AUTHORITY")
+            .ok()
+            .as_deref()
+            .map(str::trim),
+        Some("1" | "true" | "yes")
+    )
 }
 
 fn guidance_tool() -> Value {
