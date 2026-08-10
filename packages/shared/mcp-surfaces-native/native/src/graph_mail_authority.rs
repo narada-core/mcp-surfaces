@@ -2,7 +2,7 @@ use crate::graph_authority::CalendarGraphAdapter;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
@@ -12,6 +12,9 @@ const MAX_AUDIT_BYTES: usize = 64 * 1024;
 const DEFAULT_QUERY_TOP: u64 = 20;
 const DEFAULT_FOLDER_TOP: u64 = 50;
 const MAX_DOWNLOADED_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
+const ATTACHMENT_UPLOAD_CHUNK_GRANULARITY: u64 = 320 * 1024;
+const DEFAULT_ATTACHMENT_UPLOAD_CHUNK_SIZE: u64 = 10 * ATTACHMENT_UPLOAD_CHUNK_GRANULARITY;
+const MAX_ATTACHMENT_UPLOAD_FILE_BYTES: u64 = 512 * 1024 * 1024;
 const ALLOWED_DOWNLOADED_ATTACHMENT_TYPES: &[&str] = &[
     "application/pdf",
     "application/vnd.openxmlformats-officedocument.presentationml.presentation",
@@ -50,6 +53,8 @@ pub fn supports(name: &str) -> bool {
             | "graph_mail_attachment_download_file"
             | "graph_mail_attachment_add"
             | "graph_mail_attachment_upload_session_create"
+            | "graph_mail_attachment_upload_chunk"
+            | "graph_mail_attachment_upload_file"
             | "graph_mail_attachment_delete"
             | "graph_mail_draft_create"
             | "graph_mail_reply_draft_create"
@@ -76,6 +81,8 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<V
         "graph_mail_attachment_download_file" => attachment_download_file(&policy, args, root),
         "graph_mail_attachment_add" => attachment_add(&policy, args),
         "graph_mail_attachment_upload_session_create" => attachment_upload_session_create(&policy, args),
+        "graph_mail_attachment_upload_chunk" => attachment_upload_chunk(&policy, args),
+        "graph_mail_attachment_upload_file" => attachment_upload_file(&policy, args, root),
         "graph_mail_attachment_delete" => attachment_delete(&policy, args),
         "graph_mail_draft_create" => draft_create(&policy, args, root),
         "graph_mail_reply_draft_create" => derived_draft_create(&policy, args, root, "createReply"),
@@ -580,6 +587,153 @@ fn attachment_upload_session_create(
         "schema":"narada.graph_mail_mcp.attachment_upload_session.v1",
         "status":"created",
         "upload_session":result
+    }))
+}
+
+fn attachment_upload_chunk(
+    policy: &Policy,
+    args: &Map<String, Value>,
+) -> Result<Value, Value> {
+    let upload_url = required_string(args, "upload_url")?;
+    let content_base64 = required_string(args, "content_base64")?;
+    let range_start = required_nonnegative_number(args, "range_start")?;
+    let range_end = required_nonnegative_number(args, "range_end")?;
+    let total_size = required_nonnegative_number(args, "total_size")?;
+    let bytes = decode_base64(&content_base64)
+        .map_err(|reason| unavailable(reason, "invalid upload chunk content"))?;
+    if range_end < range_start
+        || total_size <= range_end
+        || bytes.len() as u64 != range_end - range_start + 1
+    {
+        return Err(unavailable(
+            "attachment_upload_content_range_invalid",
+            "chunk byte count does not match Content-Range",
+        ));
+    }
+    let mut headers = Map::new();
+    headers.insert("Content-Length".to_string(), json!(bytes.len()));
+    headers.insert(
+        "Content-Range".to_string(),
+        json!(format!("bytes {range_start}-{range_end}/{total_size}")),
+    );
+    headers.insert(
+        "Content-Type".to_string(),
+        json!("application/octet-stream"),
+    );
+    let (status, result) = policy
+        .adapter
+        .request_upload_bytes("PUT", &upload_url, &bytes, &headers)?;
+    if status == 202 || status == 204 {
+        return Ok(json!({
+            "schema":"narada.graph_mail_mcp.attachment_upload_chunk.v1",
+            "status":"accepted",
+            "http_status":status
+        }));
+    }
+    Ok(json!({
+        "schema":"narada.graph_mail_mcp.attachment_upload_chunk.v1",
+        "status":"ok",
+        "http_status":status,
+        "result":result
+    }))
+}
+
+fn attachment_upload_file(
+    policy: &Policy,
+    args: &Map<String, Value>,
+    root: &Path,
+) -> Result<Value, Value> {
+    let file_path = resolve_attachment_input_path(root, args, &policy.allowed_attachment_roots)?;
+    let metadata = fs::metadata(&file_path)
+        .map_err(|error| unavailable("attachment_file_stat_failed", &error.to_string()))?;
+    let file_size = metadata.len();
+    if file_size == 0 {
+        return Err(unavailable("attachment_file_empty", "attachment file is empty"));
+    }
+    if file_size > MAX_ATTACHMENT_UPLOAD_FILE_BYTES {
+        return Err(unavailable(
+            "attachment_file_too_large",
+            &MAX_ATTACHMENT_UPLOAD_FILE_BYTES.to_string(),
+        ));
+    }
+    let attachment_name = optional_string(args, "name").or_else(|| {
+        file_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .map(ToOwned::to_owned)
+    }).ok_or_else(|| invalid("name"))?;
+    let content_type = optional_string(args, "content_type")
+        .unwrap_or_else(|| infer_content_type(&attachment_name));
+    let chunk_size = upload_chunk_size(args)?;
+    let mut session_args = args.clone();
+    session_args.insert("name".to_string(), json!(attachment_name));
+    session_args.insert("size".to_string(), json!(file_size));
+    session_args.insert("content_type".to_string(), json!(content_type));
+    let session = attachment_upload_session_create(policy, &session_args)?;
+    let upload_url = session
+        .get("upload_session")
+        .and_then(|value| value.get("uploadUrl"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| unavailable("attachment_upload_session_url_missing", "uploadUrl missing"))?;
+    let mut file = fs::File::open(&file_path)
+        .map_err(|error| unavailable("attachment_file_open_failed", &error.to_string()))?;
+    let mut buffer = vec![0u8; chunk_size as usize];
+    let mut offset = 0u64;
+    let mut chunk_count = 0u64;
+    let mut final_result = Value::Null;
+    let mut hash = Sha256::new();
+    while offset < file_size {
+        let remaining = file_size - offset;
+        let requested = remaining.min(chunk_size) as usize;
+        let mut read = 0usize;
+        while read < requested {
+            let count = file
+                .read(&mut buffer[read..requested])
+                .map_err(|error| unavailable("attachment_file_read_failed", &error.to_string()))?;
+            if count == 0 {
+                return Err(unavailable("attachment_file_read_failed", "unexpected end of file"));
+            }
+            read += count;
+        }
+        let bytes = &buffer[..read];
+        hash.update(bytes);
+        let range_end = offset + read as u64 - 1;
+        let mut headers = Map::new();
+        headers.insert("Content-Length".to_string(), json!(read));
+        headers.insert(
+            "Content-Range".to_string(),
+            json!(format!("bytes {offset}-{range_end}/{file_size}")),
+        );
+        headers.insert(
+            "Content-Type".to_string(),
+            json!("application/octet-stream"),
+        );
+        let (status, result) = policy
+            .adapter
+            .request_upload_bytes("PUT", upload_url, bytes, &headers)?;
+        if status != 202 && status != 204 {
+            final_result = result;
+        }
+        offset = range_end + 1;
+        chunk_count += 1;
+    }
+    let sha256 = hex_lower(&hash.finalize());
+    record_audit(
+        root,
+        json!({"event_kind":"attachment_upload_file_completed","mailbox_id":mailbox_value(args),"message_id":attachment_message_id(args)?,"name":attachment_name,"size":file_size,"sha256":sha256,"chunk_count":chunk_count}),
+    )?;
+    Ok(json!({
+        "schema":"narada.graph_mail_mcp.attachment_upload_file.v1",
+        "status":"uploaded",
+        "draft_id":optional_string(args, "draft_id"),
+        "message_id":attachment_message_id(args)?,
+        "name":attachment_name,
+        "content_type":content_type,
+        "size":file_size,
+        "chunk_size":chunk_size,
+        "chunk_count":chunk_count,
+        "sha256":sha256,
+        "attachment":final_result
     }))
 }
 
@@ -1285,6 +1439,74 @@ fn resolve_attachment_output_path(
     Ok(candidate)
 }
 
+fn resolve_attachment_input_path(
+    root: &Path,
+    args: &Map<String, Value>,
+    configured_roots: &[PathBuf],
+) -> Result<PathBuf, Value> {
+    let input = required_string(args, "file_path")?;
+    let candidate = root.join(&input);
+    let roots: Vec<PathBuf> = if configured_roots.is_empty() {
+        vec![root.to_path_buf()]
+    } else {
+        configured_roots.to_vec()
+    };
+    if !roots.iter().any(|parent| path_inside(&candidate, parent)) {
+        return Err(unavailable(
+            "attachment_file_path_not_allowed",
+            "file is outside the configured attachment roots",
+        ));
+    }
+    let canonical_candidate = fs::canonicalize(&candidate)
+        .map_err(|error| unavailable("attachment_file_path_not_allowed", &error.to_string()))?;
+    let canonical_roots: Vec<PathBuf> = roots
+        .iter()
+        .map(|path| {
+            fs::canonicalize(path)
+                .map_err(|_| unavailable("attachment_file_root_missing", &path.to_string_lossy()))
+        })
+        .collect::<Result<_, _>>()?;
+    if !canonical_roots
+        .iter()
+        .any(|parent| path_inside(&canonical_candidate, parent))
+    {
+        return Err(unavailable(
+            "attachment_file_path_symlink_escape",
+            "file escapes the configured attachment roots",
+        ));
+    }
+    if !fs::metadata(&canonical_candidate)
+        .map_err(|error| unavailable("attachment_file_stat_failed", &error.to_string()))?
+        .is_file()
+    {
+        return Err(unavailable(
+            "attachment_file_path_not_file",
+            "attachment path is not a file",
+        ));
+    }
+    Ok(canonical_candidate)
+}
+
+fn upload_chunk_size(args: &Map<String, Value>) -> Result<u64, Value> {
+    let size = args
+        .get("chunk_size")
+        .and_then(Value::as_u64)
+        .unwrap_or(DEFAULT_ATTACHMENT_UPLOAD_CHUNK_SIZE);
+    if !(ATTACHMENT_UPLOAD_CHUNK_GRANULARITY..=10 * 1024 * 1024).contains(&size) {
+        return Err(unavailable(
+            "attachment_upload_chunk_size_invalid",
+            "chunk size must be between 320 KiB and 10 MiB",
+        ));
+    }
+    if size % ATTACHMENT_UPLOAD_CHUNK_GRANULARITY != 0 {
+        return Err(unavailable(
+            "attachment_upload_chunk_size_must_be_multiple_of_320kib",
+            "chunk size must be a multiple of 320 KiB",
+        ));
+    }
+    Ok(size)
+}
+
 fn nearest_existing_path(candidate: &Path) -> Result<PathBuf, Value> {
     let mut current = candidate.to_path_buf();
     while !current.exists() {
@@ -1379,6 +1601,11 @@ fn required_positive_number(args: &Map<String, Value>, key: &str) -> Result<u64,
         .ok_or_else(|| invalid(key))?;
     Ok(value)
 }
+fn required_nonnegative_number(args: &Map<String, Value>, key: &str) -> Result<u64, Value> {
+    args.get(key)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| invalid(key))
+}
 fn bounded_top(value: Option<&Value>, fallback: u64) -> u64 { value.and_then(Value::as_u64).unwrap_or(fallback).clamp(1, 100) }
 
 fn encode_component(value: &str) -> String {
@@ -1407,7 +1634,14 @@ mod tests {
         assert!(supports("graph_mail_attachment_upload_session_create"));
         assert!(supports("graph_mail_draft_send"));
         assert!(supports("graph_mail_reply_all_to_last_in_thread_draft_create"));
-        assert!(!supports("graph_mail_attachment_upload_file"));
+        assert!(supports("graph_mail_attachment_upload_chunk"));
+        assert!(supports("graph_mail_attachment_upload_file"));
         assert!(!supports("graph_mail_ticket_draft_upsert"));
+    }
+
+    #[test]
+    fn bounded_base64_decoder_matches_attachment_bytes() {
+        assert_eq!(decode_base64("SGVsbG8=").unwrap(), b"Hello");
+        assert!(decode_base64("not-base64").is_err());
     }
 }

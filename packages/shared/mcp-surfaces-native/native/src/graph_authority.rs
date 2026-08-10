@@ -13,6 +13,7 @@ const DEFAULT_TOKEN_SCOPE: &str = "https://graph.microsoft.com/.default";
 const MAX_CONFIG_BYTES: u64 = 512 * 1024;
 const MAX_ENV_BYTES: u64 = 512 * 1024;
 const MAX_REQUEST_BYTES: usize = 512 * 1024;
+const MAX_UPLOAD_REQUEST_BYTES: usize = 10 * 1024 * 1024;
 const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_URL_BYTES: usize = 16 * 1024;
 const MAX_AUDIT_BYTES: usize = 64 * 1024;
@@ -206,6 +207,52 @@ impl CalendarGraphAdapter {
             Err(ureq::Error::Status(code, response)) => Err(http_error(code, response)),
             Err(error) => Err(unavailable("graph_request_failed", &error.to_string())),
         }
+    }
+
+    pub fn request_upload_bytes(
+        &self,
+        method: &str,
+        upload_url: &str,
+        body: &[u8],
+        headers: &Map<String, Value>,
+    ) -> Result<(u16, Value), Value> {
+        if method.to_ascii_uppercase() != "PUT" {
+            return Err(unavailable("graph_upload_method_not_allowed", method));
+        }
+        validate_upload_url(upload_url)?;
+        if body.len() > MAX_UPLOAD_REQUEST_BYTES {
+            return Err(unavailable(
+                "graph_upload_request_too_large",
+                &MAX_UPLOAD_REQUEST_BYTES.to_string(),
+            ));
+        }
+        let agent = ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(30))
+            .build();
+        let mut request = agent
+            .request("PUT", upload_url)
+            .set("Accept", "application/json");
+        for (key, value) in headers {
+            if let Some(value) = value.as_str() {
+                request = request.set(key, value);
+            }
+        }
+        let response = match request.send_bytes(body) {
+            Ok(response) => response,
+            Err(ureq::Error::Status(code, response)) => {
+                return Err(http_error(code, response));
+            }
+            Err(error) => return Err(unavailable("graph_upload_request_failed", &error.to_string())),
+        };
+        let status = response.status();
+        let (_, body) = read_response_body(response)?;
+        let value = if body.trim().is_empty() || status == 202 || status == 204 {
+            json!({"status":"accepted","http_status":status})
+        } else {
+            serde_json::from_str::<Value>(&body)
+                .unwrap_or_else(|_| json!({"status":"ok","text":body}))
+        };
+        Ok((status, value))
     }
 
     pub fn build_url(
@@ -643,6 +690,36 @@ fn validate_base_url(value: &str) -> Result<(), Value> {
     Ok(())
 }
 
+fn validate_upload_url(value: &str) -> Result<(), Value> {
+    if value.len() > MAX_URL_BYTES {
+        return Err(unavailable(
+            "attachment_upload_url_too_large",
+            &MAX_URL_BYTES.to_string(),
+        ));
+    }
+    let Some(host_and_path) = value.strip_prefix("https://") else {
+        return Err(unavailable(
+            "attachment_upload_url_must_be_https",
+            "upload URL must use HTTPS",
+        ));
+    };
+    let host = host_and_path
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !matches!(
+        host.as_str(),
+        "outlook.office.com" | "outlook.office365.com" | "graph.microsoft.com"
+    ) {
+        return Err(unavailable(
+            "attachment_upload_url_host_not_allowed",
+            &host,
+        ));
+    }
+    Ok(())
+}
+
 fn unavailable(reason: &str, detail: &str) -> Value {
     json!({
         "schema":"narada.graph_authority.error.v1",
@@ -667,6 +744,13 @@ mod tests {
     fn production_graph_base_is_restricted() {
         assert!(validate_base_url(DEFAULT_GRAPH_BASE_URL).is_ok());
         assert!(validate_base_url("http://example.invalid/v1.0").is_err());
+    }
+
+    #[test]
+    fn upload_host_allowlist_is_restricted() {
+        assert!(validate_upload_url("https://outlook.office.com/upload/fixture").is_ok());
+        assert!(validate_upload_url("https://evil.example/upload").is_err());
+        assert!(validate_upload_url("http://outlook.office.com/upload").is_err());
     }
 
     #[test]
