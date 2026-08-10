@@ -82,9 +82,10 @@ for (const surface of surfaces) {
   if (modernInitialize?.data?.code !== 'initialize_removed') throw new Error(`${surface}:modern_initialize_not_removed`);
 }
 
-function runMailbox(command, args, requests, cwd) {
+function runMailbox(command, args, requests, cwd, env = process.env) {
   const result = spawnSync(command, [...args], {
     cwd,
+    env,
     input: requests.map((request) => JSON.stringify(request)).join('\n') + '\n',
     encoding: 'utf8',
     timeout: 15_000,
@@ -326,11 +327,38 @@ function runSiteLoopParity() {
   }
 }
 
+function runCalendarParity() {
+  const workspaceRoot = resolve(packageRoot, '..', '..', '..');
+  const bunEntrypoint = join(workspaceRoot, 'packages', 'calendar-mcp', 'src', 'main.ts');
+  if (!existsSync(bunEntrypoint)) throw new Error('calendar_parity_bun_entrypoint_missing:' + bunEntrypoint);
+  const root = mkdtempSync(join(tmpdir(), 'narada-calendar-native-parity-'));
+  try {
+    const configDir = join(root, '.ai');
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(join(configDir, 'calendar-mcp.json'), JSON.stringify({
+      graph_base_url: 'https://graph.microsoft.com/v1.0///',
+      allowed_mailboxes: ['fixture@example.test', '', 42],
+      allow_event_writes: true,
+      write_approval_token: '',
+    }), 'utf8');
+    const requests = [{ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'calendar_doctor', arguments: {} } }];
+    const env = { ...process.env };
+    for (const key of ['MS_GRAPH_ACCESS_TOKEN', 'GRAPH_ACCESS_TOKEN', 'GRAPH_TENANT_ID', 'GRAPH_CLIENT_ID', 'GRAPH_CLIENT_SECRET', 'GRAPH_TOKEN_ENDPOINT']) delete env[key];
+    const bun = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', [bunEntrypoint, '--site-root', root], requests, workspaceRoot, env);
+    const rust = runMailbox(executable, ['--surface-id', 'calendar', '--site-root', root], requests, workspaceRoot, env);
+    assertSame('calendar.doctor', mailboxStructured(bun, 1, 'bun'), mailboxStructured(rust, 1, 'rust'));
+    return { status: 'passed', fixture: 'local_policy_posture', compared: ['doctor'] };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 const mailboxParity = runMailboxParity();
 const artifactsParity = runArtifactsParity();
 const sopParity = runSopParity();
 const surfaceFeedbackParity = runSurfaceFeedbackParity();
 const siteLoopParity = runSiteLoopParity();
+const calendarParity = runCalendarParity();
 process.stdout.write(JSON.stringify({
   schema: 'narada.mcp_surfaces_native.protocol_parity.v1',
   status: 'passed',
@@ -343,4 +371,5 @@ process.stdout.write(JSON.stringify({
   sop_parity: sopParity,
   surface_feedback_parity: surfaceFeedbackParity,
   site_loop_parity: siteLoopParity,
+  calendar_parity: calendarParity,
 }) + '\n');

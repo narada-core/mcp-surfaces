@@ -1,9 +1,10 @@
 use serde_json::{json, Map, Value};
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use crate::graph_authority::CalendarGraphAdapter;
 
 const SERVER_NAME: &str = "narada-calendar-mcp";
+const DEFAULT_GRAPH_BASE_URL: &str = "https://graph.microsoft.com/v1.0";
 const MAX_TEXT_BYTES: u64 = 512_000;
 
 // Calendar remains an explicit authority boundary.  This native module owns the
@@ -66,21 +67,90 @@ fn guidance(args: &Map<String, Value>) -> Value {
 fn doctor(root: &Path) -> Result<Value, Value> {
     let path = root.join(".ai/calendar-mcp.json");
     let mut policy = Value::Object(Map::new());
-    let mut policy_status = "missing";
     if path.exists() {
         if fs::metadata(&path).map_err(|e| error("calendar_policy_read_failed", &e.to_string()))?.len() > MAX_TEXT_BYTES { return Err(error("calendar_policy_too_large", "calendar_policy_too_large")); }
         let text = fs::read_to_string(&path).map_err(|e| error("calendar_policy_read_failed", &e.to_string()))?;
         policy = serde_json::from_str(&text).map_err(|e| error("calendar_policy_invalid_json", &e.to_string()))?;
-        policy_status = "loaded";
     }
     let object = policy.as_object().cloned().unwrap_or_default();
-    let allowed = object.get("allowed_mailboxes").or_else(|| object.get("allowedMailboxes")).cloned().unwrap_or_else(|| json!([]));
+    let allowed = object
+        .get("allowed_mailboxes")
+        .or_else(|| object.get("allowedMailboxes"))
+        .and_then(Value::as_array)
+        .map(|items| {
+            items.iter()
+                .filter_map(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     let writes = object.get("allow_event_writes").and_then(Value::as_bool).unwrap_or(false) || object.get("allowEventWrites").and_then(Value::as_bool).unwrap_or(false);
-    let adapter_status = match CalendarGraphAdapter::from_site_root(root) {
-        Ok(_) => json!({"kind":"rust_graph_http","status":"ready","credentials_present":true}),
-        Err(value) => json!({"kind":"rust_graph_http","status":"unavailable","reason":value.get("reason").cloned().unwrap_or(Value::Null)}),
-    };
-    Ok(json!({"schema":"narada.calendar_mcp.doctor.v1","status":"ok","site_root":root.to_string_lossy(),"policy_path":path.to_string_lossy(),"policy_status":policy_status,"graph_base_url":object.get("graph_base_url").cloned().unwrap_or_else(|| json!("https://graph.microsoft.com/v1.0")),"allowed_mailboxes":allowed,"allow_event_writes":writes,"write_approval_token_configured":object.get("write_approval_token").or_else(|| object.get("writeApprovalToken")).and_then(Value::as_str).is_some(),"native_adapter":"rust_graph_http","native_adapter_status":adapter_status,"server_name":SERVER_NAME}))
+    let graph_base_url = object
+        .get("graph_base_url")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.trim_end_matches('/').to_owned())
+        .unwrap_or_else(|| DEFAULT_GRAPH_BASE_URL.to_string());
+    let write_approval_token_configured = object
+        .get("write_approval_token")
+        .or_else(|| object.get("writeApprovalToken"))
+        .and_then(Value::as_str)
+        .map(|value| !value.is_empty())
+        .unwrap_or(false);
+    let (has_access_token, auth_mode) = auth_posture(root);
+    Ok(json!({"schema":"narada.calendar_mcp.doctor.v1","status":"ok","site_root":root.to_string_lossy(),"graph_base_url":graph_base_url,"has_access_token":has_access_token,"auth_mode":auth_mode,"allowed_mailboxes":allowed,"allow_event_writes":writes,"write_approval_token_configured":write_approval_token_configured,"server_name":SERVER_NAME}))
+}
+
+fn auth_posture(root: &Path) -> (bool, &'static str) {
+    let mut values = HashMap::new();
+    if let Some(parent) = root.parent() {
+        load_env_file(&mut values, &parent.join(".env"));
+    }
+    load_env_file(&mut values, &root.join(".env"));
+    for key in [
+        "MS_GRAPH_ACCESS_TOKEN",
+        "GRAPH_ACCESS_TOKEN",
+        "GRAPH_TENANT_ID",
+        "GRAPH_CLIENT_ID",
+        "GRAPH_CLIENT_SECRET",
+    ] {
+        if let Ok(value) = std::env::var(key) {
+            values.insert(key.to_string(), value);
+        }
+    }
+    let graph_access_token = non_empty_value(&values, "GRAPH_ACCESS_TOKEN");
+    let client_credentials = ["GRAPH_TENANT_ID", "GRAPH_CLIENT_ID", "GRAPH_CLIENT_SECRET"]
+        .iter()
+        .all(|key| non_empty_value(&values, key));
+    let ms_graph_access_token = non_empty_value(&values, "MS_GRAPH_ACCESS_TOKEN");
+    if graph_access_token || (!client_credentials && ms_graph_access_token) {
+        (true, "access_token")
+    } else if client_credentials {
+        (true, "client_credentials")
+    } else {
+        (false, "missing")
+    }
+}
+
+fn load_env_file(values: &mut HashMap<String, String>, path: &Path) {
+    let Ok(metadata) = fs::metadata(path) else { return };
+    if metadata.len() > MAX_TEXT_BYTES { return; }
+    let Ok(text) = fs::read_to_string(path) else { return };
+    for line in text.lines() {
+        let Some((key, raw_value)) = line.split_once('=') else { continue };
+        let key = key.trim();
+        if key.is_empty() || key.starts_with('#') { continue; }
+        let mut value = raw_value.trim().to_string();
+        if value.len() >= 2 && ((value.starts_with('"') && value.ends_with('"')) || (value.starts_with('\'') && value.ends_with('\''))) {
+            value = value[1..value.len() - 1].to_string();
+        }
+        values.insert(key.to_string(), value);
+    }
+}
+
+fn non_empty_value(values: &HashMap<String, String>, key: &str) -> bool {
+    values.get(key).is_some_and(|value| !value.trim().is_empty())
 }
 
 fn output_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
@@ -134,7 +204,8 @@ mod tests {
         let tools = list_tools();
         assert!(tools.iter().any(|tool| tool["name"] == "calendar_event_query"));
         let doctor = call_tool("calendar_doctor", &Map::new(), &root).expect("doctor");
-        assert_eq!(doctor["native_adapter"], "rust_graph_http");
+        assert_eq!(doctor["has_access_token"], false);
+        assert_eq!(doctor["auth_mode"], "missing");
         let refusal = call_tool("calendar_event_query", &Map::new(), &root).expect_err("boundary");
         assert_eq!(refusal["status"], "unavailable");
         fs::remove_dir_all(root).expect("cleanup");
