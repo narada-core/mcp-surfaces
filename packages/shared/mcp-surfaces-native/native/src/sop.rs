@@ -1,8 +1,10 @@
+use rusqlite::{params, types::ValueRef, Connection, OpenFlags, OptionalExtension};
 use serde_json::{json, Map, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 const SERVER_NAME: &str = "sop-mcp";
+const DB_RELATIVE: &str = ".sop/sop.db";
 const MAX_CANDIDATES: usize = 100;
 const MAX_TEMPLATE_CHARS: usize = 32_000;
 const MUTATING: &[&str] = &[
@@ -17,9 +19,9 @@ pub fn list_tools() -> Vec<Value> {
         ("sop_doctor", "Inspect configured SOP directories and native read posture.", json!({"type":"object","properties":{},"additionalProperties":false})),
         ("sop_template_candidate_list", "List bounded SOP YAML template candidates from configured directories.", json!({"type":"object","properties":{"limit":{"type":"integer","minimum":1,"maximum":100,"default":50}},"additionalProperties":false})),
         ("sop_template_candidate_show", "Show one bounded SOP YAML template candidate.", json!({"type":"object","properties":{"sop_id":{"type":"string"}},"required":["sop_id"],"additionalProperties":false})),
-        ("sop_template_list", "List imported SOP templates when a native registry is available.", json!({"type":"object","properties":{"limit":{"type":"integer","minimum":1,"maximum":100,"default":50}},"additionalProperties":false})),
-        ("sop_template_show", "Show one imported SOP template when a native registry is available.", json!({"type":"object","properties":{"sop_id":{"type":"string"}},"required":["sop_id"],"additionalProperties":false})),
-        ("sop_template_search", "Search bounded SOP template candidates by text.", json!({"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":100,"default":50}},"required":["query"],"additionalProperties":false})),
+        ("sop_template_list", "List imported SOP templates from the local SOP registry.", json!({"type":"object","properties":{"status":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":100,"default":50}},"additionalProperties":false})),
+        ("sop_template_show", "Show one imported SOP template from the local SOP registry.", json!({"type":"object","properties":{"sop_id":{"type":"string"},"version":{"type":"integer","minimum":1}},"required":["sop_id"],"additionalProperties":false})),
+        ("sop_template_search", "Search local SOP registry templates by title or description.", json!({"type":"object","properties":{"query":{"type":"string"},"status":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":100,"default":50}},"required":["query"],"additionalProperties":false})),
         ("sop_run_status", "Read one SOP run from the owning SOP store.", json!({"type":"object","additionalProperties":true})),
         ("sop_run_list", "List SOP runs from the owning SOP store.", json!({"type":"object","additionalProperties":true})),
         ("sop_handoff_list", "List SOP handoffs from the owning SOP store.", json!({"type":"object","additionalProperties":true})),
@@ -52,8 +54,10 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<V
         "sop_doctor" => doctor(root),
         "sop_template_candidate_list" => candidate_list(args, root),
         "sop_template_candidate_show" => candidate_show(args, root),
-        "sop_template_search" => candidate_search(args, root),
-        "sop_template_list" | "sop_template_show" | "sop_run_status" | "sop_run_list" | "sop_handoff_list" | "sop_handoff_show" | "sop_action_list" | "sop_action_show" | "sop_run_coverage_since" | "sop_run_events" | "sop_outbox_list" => Err(authority_boundary(name)),
+        "sop_template_search" => template_search(args, root),
+        "sop_template_list" => template_list(args, root),
+        "sop_template_show" => template_show(args, root),
+        "sop_run_status" | "sop_run_list" | "sop_handoff_list" | "sop_handoff_show" | "sop_action_list" | "sop_action_show" | "sop_run_coverage_since" | "sop_run_events" | "sop_outbox_list" => Err(authority_boundary(name)),
         name if MUTATING.contains(&name) => Err(authority_boundary(name)),
         _ => Err(error("unknown_tool", &format!("unknown_tool:{name}"))),
     }
@@ -67,6 +71,86 @@ fn sops_dirs(root: &Path) -> Vec<PathBuf> {
     if let Some(value) = std::env::var_os("NARADA_SOPS_DIR") { dirs.push(PathBuf::from(value)); }
     dirs.push(root.join("sops")); dirs.push(root.join(".ai/sops"));
     dirs.into_iter().filter(|path| path.is_dir()).take(10).collect()
+}
+
+fn db_path(root: &Path) -> PathBuf { root.join(DB_RELATIVE) }
+
+fn open_db(root: &Path) -> Result<Option<Connection>, Value> {
+    let path = db_path(root);
+    if !path.exists() { return Ok(None); }
+    Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map(Some)
+        .map_err(|e| error("sop_registry_open_failed", &e.to_string()))
+}
+
+fn row_value(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+    let mut object = Map::new();
+    for index in 0..row.as_ref().column_count() {
+        let name = row.as_ref().column_name(index).unwrap_or("column").to_string();
+        let value = match row.get_ref(index)? {
+            ValueRef::Null => Value::Null,
+            ValueRef::Integer(value) => json!(value),
+            ValueRef::Real(value) => json!(value),
+            ValueRef::Text(value) => {
+                let text = String::from_utf8_lossy(value).to_string();
+                if name.ends_with("_json") { serde_json::from_str(&text).unwrap_or(Value::String(text)) } else { Value::String(text) }
+            }
+            ValueRef::Blob(value) => json!({"byte_length": value.len()}),
+        };
+        object.insert(name, value);
+    }
+    Ok(Value::Object(object))
+}
+
+fn member(value: &Value, name: &str) -> Value { value.as_object().and_then(|object| object.get(name)).cloned().unwrap_or(Value::Null) }
+
+fn template_summary(value: Value) -> Value {
+    let step_count = member(&value, "steps_json").as_array().map(|steps| steps.len()).unwrap_or(0);
+    json!({"schema":"narada.sop.template_summary.v2","sop_id":member(&value,"sop_id"),"version":member(&value,"version"),"title":member(&value,"title"),"status":member(&value,"status"),"description":member(&value,"description"),"trigger_kind":member(&value,"trigger_kind"),"step_count":step_count,"updated_at":member(&value,"updated_at")})
+}
+
+fn template_record(value: Value) -> Value {
+    json!({"schema":"narada.sop.template.v2","render_mode":"summary_text_with_full_structured_content","full_step_definitions_path":"structuredContent.steps","sop_id":member(&value,"sop_id"),"version":member(&value,"version"),"title":member(&value,"title"),"status":member(&value,"status"),"description":member(&value,"description"),"steps":member(&value,"steps_json"),"trigger_kind":member(&value,"trigger_kind"),"input_schema":member(&value,"input_schema_json"),"output":member(&value,"output_mapping_json"),"output_ref":member(&value,"output_ref_mapping_json"),"output_schema":member(&value,"output_schema_json"),"acceptance_criteria":member(&value,"acceptance_criteria_json"),"evidence_requirements":member(&value,"evidence_requirements_json"),"created_at":member(&value,"created_at"),"updated_at":member(&value,"updated_at"),"native_hydration":"bounded_sqlite_read"})
+}
+
+fn template_list(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(50).clamp(1, 100);
+    let status = args.get("status").and_then(Value::as_str);
+    let Some(connection) = open_db(root)? else { return Ok(json!({"schema":"narada.sop.template_list.v2","status":"missing","items":[],"count":0,"db_path":db_path(root).to_string_lossy()})); };
+    let mut items = Vec::new();
+    if let Some(status) = status {
+        let mut statement = connection.prepare("SELECT t.* FROM sop_templates t JOIN (SELECT sop_id, MAX(version) AS mv FROM sop_templates GROUP BY sop_id) latest ON t.sop_id = latest.sop_id AND t.version = latest.mv WHERE t.status = ? ORDER BY t.updated_at DESC LIMIT ?").map_err(|e| error("sop_template_query_failed", &e.to_string()))?;
+        let rows = statement.query_map(params![status, limit], row_value).map_err(|e| error("sop_template_query_failed", &e.to_string()))?;
+        for row in rows.take(100) { items.push(template_summary(row.map_err(|e| error("sop_template_row_failed", &e.to_string()))?)); }
+    } else {
+        let mut statement = connection.prepare("SELECT t.* FROM sop_templates t JOIN (SELECT sop_id, MAX(version) AS mv FROM sop_templates GROUP BY sop_id) latest ON t.sop_id = latest.sop_id AND t.version = latest.mv ORDER BY t.updated_at DESC LIMIT ?").map_err(|e| error("sop_template_query_failed", &e.to_string()))?;
+        let rows = statement.query_map(params![limit], row_value).map_err(|e| error("sop_template_query_failed", &e.to_string()))?;
+        for row in rows.take(100) { items.push(template_summary(row.map_err(|e| error("sop_template_row_failed", &e.to_string()))?)); }
+    }
+    Ok(json!({"schema":"narada.sop.template_list.v2","status":"ok","items":items,"count":items.len(),"db_path":db_path(root).to_string_lossy()}))
+}
+
+fn template_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let sop_id = args.get("sop_id").and_then(Value::as_str).filter(|value| !value.is_empty()).ok_or_else(|| error("sop_id_required", "sop_id_required"))?;
+    let Some(connection) = open_db(root)? else { return Err(error("sop_not_found", "sop_not_found")); };
+    let row = if let Some(version) = args.get("version").and_then(Value::as_i64) {
+        connection.query_row("SELECT * FROM sop_templates WHERE sop_id = ? AND version = ? LIMIT 1", params![sop_id, version], row_value).optional().map_err(|e| error("sop_template_query_failed", &e.to_string()))?
+    } else {
+        connection.query_row("SELECT * FROM sop_templates WHERE sop_id = ? ORDER BY version DESC LIMIT 1", params![sop_id], row_value).optional().map_err(|e| error("sop_template_query_failed", &e.to_string()))?
+    };
+    row.map(|value| template_record(value)).ok_or_else(|| error("sop_not_found", "sop_not_found"))
+}
+
+fn template_search(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let query = args.get("query").and_then(Value::as_str).filter(|value| !value.trim().is_empty()).ok_or_else(|| error("query_required", "query_required"))?.to_string();
+    let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(50).clamp(1, 100);
+    let like = format!("%{query}%");
+    let Some(connection) = open_db(root)? else { return Ok(json!({"schema":"narada.sop.template_search.v2","status":"missing","query":query,"items":[],"count":0,"db_path":db_path(root).to_string_lossy()})); };
+    let mut statement = connection.prepare("SELECT t.* FROM sop_templates t JOIN (SELECT sop_id, MAX(version) AS mv FROM sop_templates GROUP BY sop_id) latest ON t.sop_id = latest.sop_id AND t.version = latest.mv WHERE (t.title LIKE ? OR t.description LIKE ?) ORDER BY t.updated_at DESC LIMIT ?").map_err(|e| error("sop_template_query_failed", &e.to_string()))?;
+    let rows = statement.query_map(params![like, like, limit], row_value).map_err(|e| error("sop_template_query_failed", &e.to_string()))?;
+    let mut items = Vec::new();
+    for row in rows.take(100) { items.push(template_summary(row.map_err(|e| error("sop_template_row_failed", &e.to_string()))?)); }
+    Ok(json!({"schema":"narada.sop.template_search.v2","status":"ok","query":query,"items":items,"count":items.len(),"db_path":db_path(root).to_string_lossy()}))
 }
 
 fn doctor(root: &Path) -> Result<Value, Value> {
@@ -95,12 +179,6 @@ fn candidate_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value
     Ok(json!({"schema":"narada.sop_mcp.template_candidate.v1","status":"ok","sop_id":id,"path":path.to_string_lossy(),"raw_yaml":bounded,"truncated":truncated,"import_state":"unverified","native_read_only":true}))
 }
 
-fn candidate_search(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
-    let query = args.get("query").and_then(Value::as_str).filter(|v|!v.trim().is_empty()).ok_or_else(||error("query_required","query_required"))?.to_ascii_lowercase(); let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(50).clamp(1,MAX_CANDIDATES as u64) as usize; let mut matches = Vec::new();
-    for (id,path) in candidate_entries(root) { if matches.len() >= limit { break; } if let Ok(text) = fs::read_to_string(&path) { if text.to_ascii_lowercase().contains(&query) || id.to_ascii_lowercase().contains(&query) { matches.push(json!({"sop_id":id,"path":path.to_string_lossy(),"match":"text"})); } } }
-    Ok(json!({"schema":"narada.sop_mcp.template_search.v1","status":"ok","query":query,"count":matches.len(),"matches":matches,"native_read_only":true}))
-}
-
 fn authority_boundary(name: &str) -> Value { json!({"schema":"narada.sop_mcp.authority_boundary.v1","status":"unavailable","tool_name":name,"reason":"sop_registry_or_execution_not_enabled_in_native_template_slice","remediation":"Use the configured SOP authority for registry, run, handoff, action, and outbox operations."}) }
 fn error(code: &str, message: &str) -> Value { json!({"schema":"narada.sop_mcp.error.v1","code":code,"message":message}) }
 fn tool(name: &str, description: &str, schema: Value, read_only: bool) -> Value { json!({"name":name,"description":description,"annotations":{"title":name,"readOnlyHint":read_only,"destructiveHint":!read_only,"idempotentHint":read_only,"openWorldHint":false},"inputSchema":schema,"outputSchema":{"type":"object","additionalProperties":true}}) }
@@ -113,6 +191,19 @@ mod tests {
         let root = std::env::temp_dir().join(format!("narada-sop-{}", uuid::Uuid::new_v4())); let dir = root.join("sops"); fs::create_dir_all(&dir).expect("dir"); fs::write(dir.join("demo.sop.yaml"), "schema: narada.sop.v1\nid: demo\n").expect("yaml");
         assert_eq!(candidate_list(&json!({"limit":1}).as_object().unwrap(), &root).expect("list")["count"], 1);
         assert!(candidate_show(&json!({"sop_id":"demo"}).as_object().unwrap(), &root).expect("show")["raw_yaml"].as_str().unwrap().contains("demo"));
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn native_sop_registry_reads_templates_without_execution() {
+        let root = std::env::temp_dir().join(format!("narada-sop-db-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join(".sop")).expect("root");
+        let connection = Connection::open(db_path(&root)).expect("db");
+        connection.execute_batch("CREATE TABLE sop_templates (sop_id TEXT, version INTEGER, title TEXT, status TEXT, description TEXT, steps_json TEXT, trigger_kind TEXT, input_schema_json TEXT, output_mapping_json TEXT, output_ref_mapping_json TEXT, output_schema_json TEXT, acceptance_criteria_json TEXT, evidence_requirements_json TEXT, created_at TEXT, updated_at TEXT); INSERT INTO sop_templates VALUES ('demo',1,'Demo','active','A demo','[{\"id\":\"step-1\"}]','manual',NULL,NULL,NULL,NULL,'[]','[]','2026-01-01','2026-01-01');").expect("schema");
+        drop(connection);
+        assert_eq!(template_list(&json!({"limit":1}).as_object().unwrap(), &root).expect("list")["count"], 1);
+        assert_eq!(template_show(&json!({"sop_id":"demo"}).as_object().unwrap(), &root).expect("show")["steps"][0]["id"], "step-1");
+        assert_eq!(template_search(&json!({"query":"Demo"}).as_object().unwrap(), &root).expect("search")["count"], 1);
         fs::remove_dir_all(root).expect("cleanup");
     }
 }
