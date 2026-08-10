@@ -493,6 +493,62 @@ function runGraphMailParity() {
   }
 }
 
+function runOperatorOverlayParity() {
+  const workspaceRoot = resolve(packageRoot, '..', '..', '..');
+  const bunEntrypoint = join(workspaceRoot, 'packages', 'operator-console-overlay-mcp', 'src', 'main.ts');
+  if (!existsSync(bunEntrypoint)) throw new Error('operator_overlay_parity_bun_entrypoint_missing:' + bunEntrypoint);
+  const naradaRoot = resolve(workspaceRoot, '..', 'narada');
+  const root = mkdtempSync(join(tmpdir(), 'narada-operator-overlay-native-parity-'));
+  try {
+    const stateRoot = join(root, 'overlay-state');
+    const stateDirectory = join(stateRoot, 'operator-console');
+    mkdirSync(stateDirectory, { recursive: true });
+    writeFileSync(join(stateDirectory, 'document.json'), JSON.stringify({
+      schema: 'narada.window_surface_overlay.document.v1',
+      id: 'operator-console',
+      title: 'Fixture overlay',
+      title_tone: 'default',
+      subtitle: null,
+      rows: [{ label: 'Status', value: 'ready', tone: 'success' }],
+      actions: [],
+      updated_at: '2026-01-01T00:00:00.000Z',
+    }), 'utf8');
+    writeFileSync(join(stateDirectory, 'action-state.json'), JSON.stringify({
+      schema: 'narada.window_surface_overlay.action_state.v1',
+      action_id: 'refresh',
+      request_id: 'fixture-request',
+      status: 'succeeded',
+      started_at: '2026-01-01T00:00:00.000Z',
+      finished_at: '2026-01-01T00:00:01.000Z',
+    }), 'utf8');
+    writeFileSync(join(stateDirectory, 'visibility.state.json'), JSON.stringify({
+      schema: 'narada.window_surface_overlay.visibility_state.v1',
+      state: 'visible',
+    }), 'utf8');
+    writeFileSync(join(stateRoot, 'surface.snapshot.json'), JSON.stringify({
+      schema: 'narada.window_surface_overlay.surface_snapshot.v1',
+      status: 'ready',
+    }), 'utf8');
+    writeFileSync(join(stateRoot, 'focus.owner.json'), JSON.stringify({
+      schema: 'narada.window_surface_overlay.focus_owner.v1',
+      owner: 'fixture',
+    }), 'utf8');
+    const requests = [{
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'operator_console_overlay_status', arguments: {} },
+    }];
+    const env = { ...process.env, NARADA_WINDOW_SURFACE_OVERLAY_STATE_ROOT: stateRoot };
+    const bun = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', [bunEntrypoint, '--narada-root', naradaRoot], requests, workspaceRoot, env);
+    const rust = runMailbox(executable, ['--surface-id', 'operator-console-overlay', '--site-root', naradaRoot], requests, workspaceRoot, env);
+    assertSame('operator_overlay.status', mailboxStructured(bun, 1, 'bun'), mailboxStructured(rust, 1, 'rust'));
+    return { status: 'passed', fixture: 'persisted_overlay_state', compared: ['status'] };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 const mailboxParity = runMailboxParity();
 const artifactsParity = runArtifactsParity();
 const sopParity = runSopParity();
@@ -501,6 +557,7 @@ const siteLoopParity = runSiteLoopParity();
 const calendarParity = runCalendarParity();
 const cloudflareParity = runCloudflareParity();
 const graphMailParity = runGraphMailParity();
+const operatorOverlayParity = runOperatorOverlayParity();
 process.stdout.write(JSON.stringify({
   schema: 'narada.mcp_surfaces_native.protocol_parity.v1',
   status: 'passed',
@@ -516,4 +573,5 @@ process.stdout.write(JSON.stringify({
   calendar_parity: calendarParity,
   cloudflare_parity: cloudflareParity,
   graph_mail_parity: graphMailParity,
+  operator_overlay_parity: operatorOverlayParity,
 }) + '\n');

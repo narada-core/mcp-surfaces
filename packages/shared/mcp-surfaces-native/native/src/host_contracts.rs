@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 const MAX_BYTES: u64 = 256_000;
 const DEFAULT_GRAPH_BASE_URL: &str = "https://graph.microsoft.com/v1.0";
@@ -98,7 +99,89 @@ fn entries(surface_id: &str) -> &'static [(&'static str, bool)] { match surface_
 fn guidance(surface_id: &str) -> Value { tool(&format!("{}_guidance", surface_id.replace('-', "_")), format!("Show model-facing operating guidance for {surface_id} MCP workflows."), true) }
 fn guidance_result(surface_id: &str, args: &Map<String, Value>) -> Value { json!({"schema":"narada.host_surface.guidance.v1","status":"ok","surface_id":surface_id,"requested":args,"native_contract":"status probes and explicit authority boundaries","native_read_only":true}) }
 fn description(surface_id: &str, name: &str) -> String { format!("Native {surface_id} contract for {name}; external authority remains explicit.") }
-fn operator_status(root: &Path) -> Value { let state_root=env::var("NARADA_WINDOW_SURFACE_OVERLAY_STATE_ROOT").ok().unwrap_or_else(||root.join(".narada/runtime/operator-console-overlay").to_string_lossy().to_string()); let state_path=Path::new(&state_root).join("overlay-state.json"); let metadata=metadata(&state_path); json!({"schema":"narada.operator_console_overlay.status.v1","status":if metadata.is_some(){"present"}else{"not_active"},"state_root_configured":true,"state_file_present":metadata.is_some(),"state_file":file_meta(metadata),"native_read_only":true}) }
+fn operator_status(root: &Path) -> Value {
+    let state_root = operator_state_root();
+    operator_status_at(root, &state_root)
+}
+
+fn operator_status_at(root: &Path, state_root: &Path) -> Value {
+    let state_directory = state_root.join("operator-console");
+    let pid_path = state_directory.join("overlay.pid");
+    let pid = fs::read_to_string(&pid_path)
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .filter(|value| *value > 0);
+    let running = pid.map(pid_is_running).unwrap_or(false);
+    let overlay = json!({
+        "schema":"narada.window_surface_overlay.result.v1",
+        "id":"operator-console",
+        "state":if running { "running" } else { "stopped" },
+        "pid":if running { pid.map(|value| json!(value)).unwrap_or(Value::Null) } else { Value::Null },
+        "state_directory":state_directory.to_string_lossy(),
+        "document_path":state_directory.join("document.json").to_string_lossy(),
+        "document":operator_json(&state_directory.join("document.json")),
+        "action_state":operator_json(&state_directory.join("action-state.json")),
+        "visibility_state":operator_json(&state_directory.join("visibility.state.json")),
+        "surface_snapshot":operator_json(&state_root.join("surface.snapshot.json")),
+        "focus_owner":operator_json(&state_root.join("focus.owner.json")),
+    });
+    json!({
+        "schema":"narada.operator_console_overlay.mcp_result.v1",
+        "status":"ok",
+        "operation":"status",
+        "command":"inspect",
+        "overlay_id":"operator-console",
+        "narada_root":root.to_string_lossy(),
+        "overlay":overlay,
+    })
+}
+
+fn operator_state_root() -> PathBuf {
+    if let Ok(value) = env::var("NARADA_WINDOW_SURFACE_OVERLAY_STATE_ROOT") {
+        if !value.trim().is_empty() { return PathBuf::from(value); }
+    }
+    let local_app_data = env::var("LOCALAPPDATA")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| env::var("USERPROFILE").ok().filter(|value| !value.trim().is_empty()).map(|value| PathBuf::from(value).join("AppData/Local")))
+        .or_else(|| env::var("HOME").ok().filter(|value| !value.trim().is_empty()).map(|value| PathBuf::from(value).join("AppData/Local")))
+        .unwrap_or_else(|| PathBuf::from("AppData/Local"));
+    local_app_data.join("Narada/window-surface-overlays")
+}
+
+fn operator_json(path: &Path) -> Value {
+    bounded_json(path).ok().flatten().unwrap_or(Value::Null)
+}
+
+fn pid_is_running(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        let filter = format!("PID eq {pid}");
+        let needle = format!("\"{pid}\"");
+        return Command::new("tasklist")
+            .args(["/FI", filter.as_str(), "/FO", "CSV", "/NH"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .map(|output| output.contains(&needle))
+            .unwrap_or(false);
+    }
+    #[cfg(unix)]
+    {
+        return Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = pid;
+        false
+    }
+}
 fn cloudflare_doctor(root: &Path) -> Value {
     let empty = Map::new();
     let repo_root = env::var("NARADA_ROOT").ok().filter(|value| !value.trim().is_empty()).map(PathBuf::from).unwrap_or_else(|| root.to_path_buf());
@@ -279,7 +362,6 @@ fn bounded_json(path: &Path) -> Result<Option<Value>, &'static str> {
     serde_json::from_slice(&bytes).map(Some).map_err(|_| "cloudflare evidence file is invalid JSON")
 }
 fn metadata(path: &Path) -> Option<fs::Metadata> { fs::metadata(path).ok().filter(|m|m.is_file() && m.len() <= MAX_BYTES) }
-fn file_meta(meta: Option<fs::Metadata>) -> Value { meta.map(|m|json!({"bytes":m.len()})).unwrap_or(Value::Null) }
 fn boundary(surface_id: &str, name: &str, reason: &str, remediation: &str) -> Value { json!({"schema":format!("narada.{surface_id}.authority_boundary.v1"),"status":"unavailable","tool_name":name,"reason":reason,"remediation":remediation}) }
 fn error(code: &str, message: &str) -> Value { json!({"schema":"narada.host_surface.error.v1","code":code,"message":message}) }
 fn tool(name: &str, description: String, read_only: bool) -> Value { json!({"name":name,"description":description,"inputSchema":{"type":"object","additionalProperties":true},"annotations":{"title":name,"readOnlyHint":read_only,"destructiveHint":!read_only,"idempotentHint":read_only,"openWorldHint":!read_only},"outputSchema":{"type":"object","additionalProperties":true}}) }
@@ -319,6 +401,26 @@ mod tests {
         assert_eq!(response["scheduler"]["task_state"], "Ready");
         assert_eq!(response["cloudflare"]["site_count"], 2);
         assert_eq!(response["alignment"]["state"], "aligned");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn operator_status_projects_persisted_overlay_state() {
+        let root = temp_root("operator");
+        let state_root = root.join("overlay-state");
+        let state_directory = state_root.join("operator-console");
+        fs::create_dir_all(&state_directory).expect("directory");
+        fs::write(state_directory.join("document.json"), r#"{"schema":"narada.window_surface_overlay.document.v1","id":"operator-console","title":"Fixture","title_tone":"default","subtitle":null,"rows":[],"actions":[],"updated_at":"2026-08-09T00:00:00Z"}"#).expect("document");
+        fs::write(state_directory.join("action-state.json"), r#"{"schema":"narada.window_surface_overlay.action_state.v1","action_id":"refresh","request_id":"request-1","status":"succeeded"}"#).expect("action");
+        fs::write(state_directory.join("visibility.state.json"), r#"{"schema":"narada.window_surface_overlay.visibility_state.v1","state":"visible"}"#).expect("visibility");
+        fs::write(state_root.join("surface.snapshot.json"), r#"{"schema":"narada.window_surface_overlay.surface_snapshot.v1","status":"ready"}"#).expect("snapshot");
+        fs::write(state_root.join("focus.owner.json"), r#"{"schema":"narada.window_surface_overlay.focus_owner.v1","owner":"fixture"}"#).expect("focus");
+        let response = operator_status_at(&root, &state_root);
+        assert_eq!(response["schema"], "narada.operator_console_overlay.mcp_result.v1");
+        assert_eq!(response["overlay"]["schema"], "narada.window_surface_overlay.result.v1");
+        assert_eq!(response["overlay"]["state"], "stopped");
+        assert_eq!(response["overlay"]["document"]["title"], "Fixture");
+        assert_eq!(response["overlay"]["action_state"]["status"], "succeeded");
         let _ = fs::remove_dir_all(root);
     }
 }
