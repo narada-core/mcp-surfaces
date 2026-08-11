@@ -159,6 +159,17 @@ fn dispatch(request: &Value) -> Value {
                     }
                     Err(message) => error(id, message),
                 }
+            } else if name == "registrar_carrier_validate" {
+                let args = request
+                    .pointer("/params/arguments")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
+                match carrier_validate(&contract, &args) {
+                    Ok(value) => {
+                        json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":serde_json::to_string_pretty(&value).unwrap()}],"structuredContent":value}})
+                    }
+                    Err(message) => error(id, message),
+                }
             } else {
                 error(
                     id,
@@ -168,6 +179,161 @@ fn dispatch(request: &Value) -> Value {
         }
         method => error(id, format!("unsupported_mcp_method:{method}")),
     }
+}
+
+fn carrier_validate(contract: &Value, args: &Value) -> Result<Value, String> {
+    let carrier_id = required_argument(args, "carrier_id", "registrar_requires_carrier_id")?;
+    let include_ok = args.get("include_ok").and_then(Value::as_bool) == Some(true);
+    let carriers = contract
+        .pointer("/read_models/registrar_carrier_list/items")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if !carriers
+        .iter()
+        .any(|candidate| candidate["carrier_id"] == carrier_id)
+    {
+        return Err(format!("registrar_unknown_carrier:{carrier_id}"));
+    }
+    let surface_catalog = contract
+        .pointer("/read_models/registrar_surface_list/items")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let servers = contract
+        .pointer(&format!(
+            "/read_models/registrar_carrier_validation_plans/{carrier_id}/servers"
+        ))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut findings = vec![];
+    let mut add = |severity: &str, code: &str, message: String, detail: Value| {
+        let mut finding = json!({"severity":severity,"code":code,"message":message});
+        if let Some(values) = detail.as_object() {
+            finding.as_object_mut().unwrap().extend(values.clone())
+        }
+        findings.push(finding)
+    };
+    let mut seen = std::collections::HashMap::<String, String>::new();
+    for server in &servers {
+        let key = server["server_key"].as_str().unwrap_or("");
+        let surface_id = server["surface_id"].as_str().unwrap_or(key);
+        let detail = merge_value(
+            json!({"server_key":key,"surface_id":surface_id}),
+            scope_finding_detail(server["narada_scope"].clone()),
+        );
+        if let Some(previous) = seen.insert(key.to_string(), surface_id.to_string()) {
+            add(
+                "error",
+                "registrar_duplicate_server_key",
+                format!("Server key '{key}' is produced by both '{previous}' and '{surface_id}'"),
+                detail.clone(),
+            );
+        } else if include_ok {
+            add(
+                "info",
+                "registrar_server_key_ok",
+                format!("Server key '{key}' resolved for surface '{surface_id}'"),
+                detail.clone(),
+            );
+        }
+    }
+    for server in &servers {
+        let key = server["server_key"].as_str().unwrap_or("");
+        let surface_id = server["surface_id"].as_str().unwrap_or(key);
+        let detail = merge_value(
+            json!({"server_key":key,"surface_id":surface_id}),
+            scope_finding_detail(server["narada_scope"].clone()),
+        );
+        let entrypoint = canonical_root(PathBuf::from(server["entrypoint"].as_str().unwrap_or("")));
+        if !entrypoint.exists() {
+            add(
+                "error",
+                "registrar_missing_entrypoint",
+                format!(
+                    "Entrypoint for '{key}' does not exist: {}",
+                    path_text(&entrypoint)
+                ),
+                merge_value(detail.clone(), json!({"entrypoint":path_text(&entrypoint)})),
+            );
+        } else if include_ok {
+            add(
+                "info",
+                "registrar_entrypoint_exists",
+                format!("Entrypoint for '{key}' exists: {}", path_text(&entrypoint)),
+                merge_value(detail.clone(), json!({"entrypoint":path_text(&entrypoint)})),
+            );
+        }
+        let known = surface_catalog
+            .iter()
+            .find(|surface| surface["id"] == surface_id);
+        add_runtime_preflight(
+            &mut add,
+            include_ok,
+            merge_value(detail.clone(), json!({"entrypoint":path_text(&entrypoint)})),
+            known,
+            server["uses_runtime_proxy"].as_bool() == Some(true),
+        );
+        let child_args = server["args"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        if [
+            "local-filesystem",
+            "git",
+            "structured-command",
+            "delegated-task",
+            "worker-delegation",
+        ]
+        .contains(&surface_id)
+        {
+            let roots = flag_values(&child_args, "--allowed-root");
+            if roots.is_empty() {
+                add("error", "registrar_missing_allowed_root", format!("Surface '{surface_id}' requires at least one --allowed-root but '{key}' has none"), detail.clone());
+            } else if include_ok {
+                add(
+                    "info",
+                    "registrar_allowed_root_ok",
+                    format!(
+                        "Surface '{surface_id}' on '{key}' has {} allowed root(s)",
+                        roots.len()
+                    ),
+                    merge_value(detail.clone(), json!({"allowed_roots":roots})),
+                );
+            }
+        }
+        if surface_id == "local-filesystem" || surface_id == "local-filesystem-mcp.local" {
+            if !child_args.contains(&"--output-root") {
+                add(
+                    "warning",
+                    "registrar_missing_output_root",
+                    format!("Filesystem surface '{key}' is missing --output-root"),
+                    detail.clone(),
+                );
+            } else if include_ok {
+                add(
+                    "info",
+                    "registrar_output_root_ok",
+                    format!("Filesystem surface '{key}' has --output-root"),
+                    detail.clone(),
+                );
+            }
+        }
+    }
+    let errors = findings
+        .iter()
+        .filter(|finding| finding["severity"] == "error")
+        .count();
+    let warnings = findings
+        .iter()
+        .filter(|finding| finding["severity"] == "warning")
+        .count();
+    Ok(
+        json!({"status":if errors>0{"invalid"}else if warnings>0{"valid_with_warnings"}else{"valid"},"carrier_id":carrier_id,"server_count":servers.len(),"errors":errors,"warnings":warnings,"findings":findings}),
+    )
 }
 fn site_list(contract: &Value) -> Value {
     let fallback = &contract["read_models"]["registrar_site_list_fallback"];
@@ -1411,6 +1577,27 @@ fn server_scope_detail(
     };
     let narada = json!({"injection_scope":injection,"authority_locus":authority,"mutation_locus":mutation,"restart_owner":restart,"bound_into_site":bound,"scope_source":source});
     json!({"injection_scope":injection,"authority_locus":authority,"mutation_locus":mutation,"restart_owner":restart,"bound_into_site":bound,"scope_source":source,"narada_scope":narada,"diagnostic_class":if injection=="host"{"host_injected_surface_missing_or_misconfigured_in_session"}else if injection=="user_site"{"user_site_injected_surface_missing_or_misconfigured_in_session"}else{"local_site_surface_missing_or_misconfigured"},"required_repair_locus":mutation})
+}
+
+fn scope_finding_detail(scope: Value) -> Value {
+    let injection = scope["injection_scope"].as_str().unwrap_or("local_site");
+    let diagnostic_class = if injection == "host" {
+        "host_injected_surface_missing_or_misconfigured_in_session"
+    } else if injection == "user_site" {
+        "user_site_injected_surface_missing_or_misconfigured_in_session"
+    } else {
+        "local_site_surface_missing_or_misconfigured"
+    };
+    let mut detail = scope.clone();
+    if let Some(object) = detail.as_object_mut() {
+        object.insert("narada_scope".into(), scope.clone());
+        object.insert("diagnostic_class".into(), json!(diagnostic_class));
+        object.insert(
+            "required_repair_locus".into(),
+            scope["mutation_locus"].clone(),
+        );
+    }
+    detail
 }
 fn add_runtime_preflight(
     add: &mut impl FnMut(&str, &str, String, Value),

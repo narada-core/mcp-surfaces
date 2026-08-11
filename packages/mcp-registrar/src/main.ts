@@ -4149,6 +4149,26 @@ function registrarCarrierList(_args: JsonRecord): JsonRecord {
   return { items: CARRIERS, count: CARRIERS.length };
 }
 
+export function nativeCarrierValidationPlans(): JsonRecord {
+  return Object.fromEntries(CARRIERS.map((carrier) => [carrier.carrier_id, {
+    servers: Object.entries(collectCarrierServers(carrier)).map(([server_key, server]) => {
+      const surface_id = server.kind === 'local'
+        ? (server.local as SiteLocalSurface).surface_id
+        : (server.surface as RegistrarSurfaceRecord).id;
+      const overridden = applySurfaceOverrides(carrier, server, surface_id);
+      const launch = carrierLaunchCommand(overridden, surface_id);
+      return {
+        server_key,
+        surface_id,
+        entrypoint: overridden.entrypoint,
+        args: overridden.args,
+        narada_scope: server.narada_scope,
+        uses_runtime_proxy: launch.uses_runtime_proxy,
+      };
+    }),
+  }]));
+}
+
 function registrarSurfaceUsage(args: JsonRecord): JsonRecord {
   const surfaceId = requiredString(args.surface_id, 'registrar_requires_surface_id');
   const isLocal = surfaceId.endsWith('.local');

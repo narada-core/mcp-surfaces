@@ -1,7 +1,7 @@
 import { writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { gzipSync } from 'node:zlib';
-import { createServerState, handleRequest, listTools } from '../src/main.js';
+import { createServerState, handleRequest, listTools, nativeCarrierValidationPlans } from '../src/main.js';
 import { buildGuidanceResult } from '../src/guidance.js';
 
 async function tool(name: string) {
@@ -28,6 +28,7 @@ const contract = JSON.stringify({
   read_models: {
     registrar_surface_list: await tool('registrar_surface_list'),
     registrar_carrier_list: await tool('registrar_carrier_list'),
+    registrar_carrier_validation_plans: nativeCarrierValidationPlans(),
     registrar_site_list_fallback: await fallbackSiteList(),
   },
 });
