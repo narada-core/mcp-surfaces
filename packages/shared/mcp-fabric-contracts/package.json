@@ -24,8 +24,7 @@
   ],
   "scripts": {
     "build": "tsc -b",
-    "build:postcompile": "pnpm run build:postcompile:bun",
-    "build:postcompile:bun": "bun dist/src/emit-json-schema.js",
+    "build:postcompile": "node dist/src/emit-json-schema.js",
     "build:postcompile:node": "node dist/src/emit-json-schema.js",
     "typecheck": "tsc -b --pretty false",
     "test": "pnpm run test:bun",

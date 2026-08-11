@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "build": "tsc -b && pnpm run build:native",
-    "build:native": "bun scripts/build-native.ts",
-    "build:native-dotnet": "bun scripts/build-native-dotnet.ts",
+    "build:native": "node --import tsx scripts/build-native.ts",
+    "build:native-dotnet": "node --import tsx scripts/build-native-dotnet.ts",
     "build:postcompile": "pnpm run build:native",
     "benchmark:runtime": "bun scripts/benchmark-native.ts",
     "benchmark:strong": "pnpm run build:native && bun scripts/build-native-dotnet.ts && bun scripts/benchmark-strong.ts",

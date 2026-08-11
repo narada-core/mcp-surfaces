@@ -20,8 +20,7 @@
   },
   "scripts": {
     "build": "tsc -b && pnpm run build:postcompile",
-    "build:postcompile": "pnpm run build:postcompile:bun",
-    "build:postcompile:bun": "bun ./dist/src/implementation-identity-manifest.js",
+    "build:postcompile": "node ./dist/src/implementation-identity-manifest.js",
     "build:postcompile:node": "node ./dist/src/implementation-identity-manifest.js",
     "typecheck": "tsc -b --pretty false",
     "test": "pnpm run test:bun",

@@ -4810,6 +4810,10 @@ function writeSiteSurfaceRegistry(site: SiteDef): JsonRecord {
   };
 }
 
+export function syncSiteSurfaceRegistryById(siteId: string): JsonRecord {
+  return writeSiteSurfaceRegistry(lookupSite(siteId));
+}
+
 function registrarSiteSurfaceRegistrySync(args: JsonRecord): JsonRecord {
   const siteId = requiredString(args.site_id, 'registrar_requires_site_id');
   const site = lookupSite(siteId);
