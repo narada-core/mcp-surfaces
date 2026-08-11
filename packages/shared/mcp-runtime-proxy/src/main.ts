@@ -1265,7 +1265,10 @@ function spawnProxyChild(options: ProxyOptions, supervisorPath: string | null): 
   const resolvedChildCommand = resolveChildCommand(options.childCommand);
   const spawnOptions: import('node:child_process').SpawnOptions = {
     stdio: ['pipe', 'pipe', 'pipe'],
-    env: process.env,
+    env: {
+      ...process.env,
+      ...(options.carrierId ? { NARADA_MATERIALIZED_CARRIER_ID: options.carrierId } : {}),
+    },
     shell: false,
     windowsHide: true,
   };

@@ -5,7 +5,7 @@
   "private": true,
   "description": "Standalone native authority for deterministic, transactional carrier materialization.",
   "scripts": {
-    "build:native": "cargo build --release --locked --manifest-path native/Cargo.toml",
+    "build:native": "cargo run --release --locked --manifest-path native/Cargo.toml -- publish --artifact-root dist/native",
     "test": "cargo test --locked --manifest-path native/Cargo.toml"
   },
   "files": [

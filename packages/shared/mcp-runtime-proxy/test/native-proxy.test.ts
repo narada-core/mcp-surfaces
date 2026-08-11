@@ -38,6 +38,7 @@ function writeManifest(paths: string[] = [childPath]): void {
 function commonArgs(diagnostics: string): string[] {
   return [
     '--surface-id', 'native-parity',
+    '--carrier-id', 'fixture-carrier',
     '--artifact-manifest', manifestPath,
     '--runtime-contract-version', String(MCP_RUNTIME_CONTRACT_VERSION),
     '--child-command', process.execPath,
@@ -179,7 +180,7 @@ writeFileSync(childPath, [
   "      ? { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'fixture', version: '1' } }",
   "      : request.method === 'tools/list'",
   "        ? { tools: [{ name: 'fixture_echo', description: 'Echo.', inputSchema: { type: 'object' } }] }",
-  "        : { content: [{ type: 'text', text: request.params.arguments.value }] };",
+  "        : { content: [{ type: 'text', text: `${request.params.arguments.value}:${process.env.NARADA_MATERIALIZED_CARRIER_ID ?? ''}` }] };",
   "    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }) + '\\n');",
   '  }',
   '});',
@@ -193,7 +194,7 @@ try {
     const byId = new Map(result.responses.map((response) => [response.id, response]));
     assert.equal(byId.get(1)?.result?.serverInfo?.name, 'fixture');
     assert.deepEqual(byId.get(2)?.result?.tools?.map((tool: JsonRecord) => tool.name), ['fixture_echo', 'mcp_runtime_proxy_status']);
-    assert.equal(byId.get(3)?.result?.content?.[0]?.text, 'ok');
+    assert.equal(byId.get(3)?.result?.content?.[0]?.text, 'ok:fixture-carrier');
     assert.equal(byId.get(4)?.result?.structuredContent?.runtime_freshness?.schema, 'narada.mcp_runtime_proxy.runtime_freshness.v2');
     assert.equal(byId.get(4)?.result?.structuredContent?.runtime_freshness?.reload_action?.kind, 'restart_carrier_bound_surface');
     assert.equal(byId.get(4)?.result?.structuredContent?.liveness?.observed_state, 'live');
@@ -205,7 +206,7 @@ try {
 
   const framed = await exchange('native', true);
   assert.equal(framed.responses.length, 4);
-  assert.equal(framed.responses.find((response) => response.id === 3)?.result?.content?.[0]?.text, 'ok');
+  assert.equal(framed.responses.find((response) => response.id === 3)?.result?.content?.[0]?.text, 'ok:fixture-carrier');
 
   const silentChildPath = join(root, 'silent-child.mjs');
   writeFileSync(silentChildPath, "process.stdin.resume();\n");

@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { writeRecoveryEvidence } from './carrier-recovery-evidence.mjs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -7,6 +7,45 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const workspaceRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const manifestPath = join(workspaceRoot, '.ai', 'runtime', 'workspace-artifact-manifest.json');
 const evidenceRoot = join(workspaceRoot, '.ai', 'runtime', 'carrier-materialization-recovery');
+const restartPressurePath = join(workspaceRoot, '.ai', 'runtime', 'carrier-restart-pressure.json');
+
+function readRestartPressure() {
+  if (!existsSync(restartPressurePath)) return { schema: 'narada.carrier_restart_pressure.v1', carriers: {} };
+  try {
+    const value = JSON.parse(readFileSync(restartPressurePath, 'utf8'));
+    return value?.schema === 'narada.carrier_restart_pressure.v1' && value.carriers && typeof value.carriers === 'object'
+      ? value
+      : { schema: 'narada.carrier_restart_pressure.v1', carriers: {} };
+  } catch {
+    throw new Error('carrier_restart_pressure_unreadable:' + restartPressurePath);
+  }
+}
+
+function writeRestartPressure(value) {
+  mkdirSync(dirname(restartPressurePath), { recursive: true });
+  const temporary = restartPressurePath + '.tmp-' + process.pid;
+  writeFileSync(temporary, JSON.stringify(value, null, 2) + '\n', 'utf8');
+  renameSync(temporary, restartPressurePath);
+}
+
+const acknowledgeCarrierIndex = process.argv.indexOf('--ack-carrier');
+if (acknowledgeCarrierIndex >= 0) {
+  const carrierId = process.argv[acknowledgeCarrierIndex + 1]?.trim();
+  if (!carrierId) throw new Error('carrier_restart_ack_carrier_id_required');
+  const pressure = readRestartPressure();
+  const acknowledged = pressure.carriers[carrierId] ?? null;
+  const expectedRefIndex = process.argv.indexOf('--expected-pressure-ref');
+  const expectedRef = expectedRefIndex >= 0 ? process.argv[expectedRefIndex + 1]?.trim() : null;
+  if (acknowledged && (!expectedRef || acknowledged.evidence_ref !== expectedRef)) {
+    process.stdout.write(JSON.stringify({ schema: 'narada.carrier_restart_acknowledgement.v1', status: 'stale_ack_refused', carrier_id: carrierId, expected_pressure_ref: expectedRef, current_pressure: acknowledged, remaining_carrier_ids: Object.keys(pressure.carriers).sort() }) + '\n');
+    process.exit(2);
+  }
+  delete pressure.carriers[carrierId];
+  pressure.updated_at = new Date().toISOString();
+  writeRestartPressure(pressure);
+  process.stdout.write(JSON.stringify({ schema: 'narada.carrier_restart_acknowledgement.v1', status: acknowledged ? 'acknowledged' : 'already_current', carrier_id: carrierId, acknowledged_pressure: acknowledged, remaining_carrier_ids: Object.keys(pressure.carriers).sort() }) + '\n');
+  process.exit(0);
+}
 
 function packageManager() {
   const npmExecPath = process.env.npm_execpath?.trim();
@@ -78,6 +117,7 @@ const inspectionAfter = materializationRequired ? registrar.inspectAllCarrierMat
 if (inspectionAfter.status !== 'current') throw new Error('carrier_recovery_materialization_did_not_converge:' + JSON.stringify(inspectionAfter.stale_carrier_ids));
 
 const completedAt = new Date().toISOString();
+const staleCarrierIds = Array.isArray(inspectionBefore.stale_carrier_ids) ? inspectionBefore.stale_carrier_ids : [];
 const evidence = writeRecoveryEvidence({
   workspaceRoot,
   evidenceRoot,
@@ -94,8 +134,22 @@ const evidence = writeRecoveryEvidence({
     inspection_before: inspectionBefore,
     inspection_after: inspectionAfter,
   },
+  pin: materializationRequired,
 });
-const staleCarrierIds = Array.isArray(inspectionBefore.stale_carrier_ids) ? inspectionBefore.stale_carrier_ids : [];
+const pressure = readRestartPressure();
+if (materializationRequired) {
+  for (const carrierId of staleCarrierIds) {
+    pressure.carriers[carrierId] = {
+      carrier_id: carrierId,
+      materialized_at: completedAt,
+      evidence_ref: evidence.ref,
+      latest_materialization_ref: evidence.latest_materialization?.ref ?? null,
+    };
+  }
+  pressure.updated_at = completedAt;
+  writeRestartPressure(pressure);
+}
+const restartCarrierIds = Object.keys(pressure.carriers).sort();
 const reasonCodes = [...new Set(before.reasons.map((reason) => String(reason.code ?? 'unknown')))].sort();
 process.stdout.write(JSON.stringify({
   schema: 'narada.carrier_materialization_recovery.v1',
@@ -110,7 +164,9 @@ process.stdout.write(JSON.stringify({
   affected_carrier_ids: staleCarrierIds,
   carrier_materialization_required: materializationRequired,
   all_carrier_materialization_performed: materializationRequired,
-  restart_required: materializationRequired,
-  restart_carrier_ids: materializationRequired ? staleCarrierIds : [],
+  restart_required: restartCarrierIds.length > 0,
+  restart_carrier_ids: restartCarrierIds,
+  restart_pressure_path: restartPressurePath,
+  restart_pressure: pressure.carriers,
   evidence,
 }) + '\n');

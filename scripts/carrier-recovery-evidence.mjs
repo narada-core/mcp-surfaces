@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, join, relative } from 'node:path';
 
 export const DEFAULT_RECOVERY_EVIDENCE_MAX_FILES = 64;
@@ -14,7 +14,7 @@ export function recoveryEvidenceMaxFiles(value = process.env.NARADA_MCP_RECOVERY
   return parsed;
 }
 
-export function writeRecoveryEvidence({ workspaceRoot, evidenceRoot, value, maxFiles = recoveryEvidenceMaxFiles(), now = () => new Date() }) {
+export function writeRecoveryEvidence({ workspaceRoot, evidenceRoot, value, maxFiles = recoveryEvidenceMaxFiles(), now = () => new Date(), pin = false }) {
   const content = JSON.stringify(value, null, 2) + '\n';
   const sha256 = createHash('sha256').update(content, 'utf8').digest('hex');
   const timestamp = now().toISOString().replace(/\D/g, '');
@@ -35,6 +35,20 @@ export function writeRecoveryEvidence({ workspaceRoot, evidenceRoot, value, maxF
     }
   }
 
+  let pinned = null;
+  if (pin) {
+    const pinnedPath = join(evidenceRoot, 'latest-materialization.json');
+    const pinnedTemporary = pinnedPath + '.tmp-' + process.pid;
+    copyFileSync(path, pinnedTemporary);
+    renameSync(pinnedTemporary, pinnedPath);
+    pinned = {
+      ref: 'carrier-materialization-recovery:latest-materialization',
+      path: pinnedPath,
+      relative_path: relative(workspaceRoot, pinnedPath).replace(/\\/g, '/'),
+      sha256,
+    };
+  }
+
   const currentName = basename(path);
   const retained = readdirSync(evidenceRoot)
     .filter((name) => EVIDENCE_FILE_PATTERN.test(name))
@@ -53,10 +67,11 @@ export function writeRecoveryEvidence({ workspaceRoot, evidenceRoot, value, maxF
     relative_path: relative(workspaceRoot, path).replace(/\\/g, '/'),
     sha256,
     retention: {
-      policy: 'current_then_newest_files',
+      policy: 'current_then_newest_files_with_latest_materialization_pin',
       max_files: maxFiles,
       retained_count: Math.min(retained.length, maxFiles),
       pruned_count: pruned.length,
     },
+    ...(pinned ? { latest_materialization: pinned } : {}),
   };
 }

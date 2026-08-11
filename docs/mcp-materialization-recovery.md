@@ -95,19 +95,30 @@ invokes transactional `--materialize-all` only when at least one projection
 differs. A current workspace is a true no-op. Standard output is a compact
 operator summary. The complete inspection and materialization record is written
 atomically under `.ai/runtime/carrier-materialization-recovery/`; the summary
-returns its evidence reference and SHA-256. The directory retains the current
-write plus the newest 63 remaining
-evidence files by default and prunes older current and legacy-format records
-after each write. Set `NARADA_MCP_RECOVERY_EVIDENCE_MAX_FILES` to an integer
-from 1 through 10000 for an explicit local retention bound.
+returns its evidence reference and SHA-256. The directory retains the current write plus the newest 63 remaining evidence
+files by default and prunes older current and legacy-format records after each
+write. A successful mutating recovery is also atomically pinned as
+`latest-materialization.json`; rolling no-op evidence cannot evict it. Set
+`NARADA_MCP_RECOVERY_EVIDENCE_MAX_FILES` to an integer from 1 through 10000 for
+an explicit local retention bound.
+
+Materialization records durable per-carrier restart pressure in
+`.ai/runtime/carrier-restart-pressure.json`. Later no-op checks continue to
+report `restart_required` until a successful governed successor acknowledges
+the exact materialization evidence reference. Missing or stale references fail
+closed, so an old restart cannot clear pressure created by a newer generation.
 
 Project Site bootstrap can invoke this gate before its first write. Workspace
 discovery prefers an explicit CLI root, `NARADA_MCP_WORKSPACE_ROOT`, or
 `NARADA_SRC_ROOT`; it then consults installed Codex, Kimi, and OpenCode carrier
 generation sidecars before trying bounded checkout conventions.
-`NARADA_CARRIER_HOME` overrides the shared user-home base used for those
-sidecars. Conflicting valid sidecars are refused rather than silently choosing
-one workspace. `NARADA_MCP_AUTO_DISCOVERY=0`
+All-carrier materialization also writes the canonical installed-carrier index at
+`~/.narada/carriers/installed-carriers.json` (override with
+`NARADA_INSTALLED_CARRIER_INDEX_PATH`). The index records each carrier's actual
+config and generation-sidecar path, so custom locations are discoverable
+without conventions. `NARADA_CARRIER_HOME` overrides the shared user-home base
+used for conventional sidecars. Conflicting valid sidecars or index entries are
+refused rather than silently choosing one workspace. `NARADA_MCP_AUTO_DISCOVERY=0`
 disables inferred candidates. A host with no installed/materialized MCP checkout
 reports recovery as unavailable rather than downloading or fabricating one.
 
@@ -122,7 +133,11 @@ requires the explicit `nars-successor-v1` adapter and restarts only the selected
 NARS-managed carrier session through the PC-owned successor/drain supervisor.
 It reports affected sibling carriers as outstanding; it cannot silently restart
 carrier sessions outside the command's authority or claim that a carrier
-restarted itself.
+restarted itself. The adapter verifies the durable NARS session record's
+`materialized_carrier_id` against `--carrier-id`; missing and cross-carrier
+bindings are refused. Materialized runtime proxies propagate their `--carrier-id`
+to child surfaces as `NARADA_MATERIALIZED_CARRIER_ID`; a launcher running in
+that surface chain passes the identity into the NARS session record.
 
 Native lifecycle executables are published into content-addressed
 `dist/native/versions/<fingerprint>/` directories with an atomically updated

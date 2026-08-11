@@ -873,6 +873,9 @@ fn run_proxy(args: &[String]) -> Result<(), String> {
         command.arg(child_entry);
     }
     command.args(&options.child_args);
+    if let Some(carrier_id) = options.carrier_id.as_deref() {
+        command.env("NARADA_MATERIALIZED_CARRIER_ID", carrier_id);
+    }
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

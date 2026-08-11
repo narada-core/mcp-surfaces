@@ -2800,7 +2800,7 @@ function runFreshRegistrarRequest(method: string, args: JsonRecord): Promise<Jso
   });
 }
 
-type PreparedCarrierMaterialization = {
+export type PreparedCarrierMaterialization = {
   carrier: CarrierDef;
   outputPath: string;
   injectionSummary: ReturnType<typeof carrierInjectionSummary>;
@@ -2832,6 +2832,28 @@ function prepareCarrierMaterialization(
   return { carrier, outputPath, injectionSummary, compilation, result, validation, generation };
 }
 
+export function installedCarrierIndexPath(homeDirectory = homedir()): string {
+  return resolve(process.env.NARADA_INSTALLED_CARRIER_INDEX_PATH?.trim() || join(homeDirectory, '.narada', 'carriers', 'installed-carriers.json'));
+}
+
+export function installedCarrierIndexDocument(prepared: PreparedCarrierMaterialization[]): JsonRecord {
+  return {
+    schema: 'narada.installed_carrier_index.v1',
+    workspace_root: MCP_WORKSPACE_ROOT,
+    artifact_manifest_path: MCP_WORKSPACE_ARTIFACT_MANIFEST,
+    carriers: prepared.map(({ carrier, outputPath, generation }) => ({
+      carrier_id: carrier.carrier_id,
+      carrier_kind: carrier.kind,
+      config_path: resolve(outputPath),
+      generation_sidecar_path: materializationSidecarPath(outputPath),
+      materialization_generation_fingerprint: generation.generation_fingerprint,
+    })),
+  };
+}
+
+function installedCarrierIndexFile(prepared: PreparedCarrierMaterialization[]): TransactionalFile {
+  return { path: installedCarrierIndexPath(), content: JSON.stringify(installedCarrierIndexDocument(prepared), null, 2) + '\n' };
+}
 function carrierMaterializationFiles(prepared: PreparedCarrierMaterialization): TransactionalFile[] {
   return [
     { path: prepared.outputPath, content: prepared.result.content },
@@ -2922,6 +2944,7 @@ async function registrarMaterializeAllFresh(args: JsonRecord): Promise<JsonRecor
   });
   const prepared = CARRIERS.map((carrier, index) => prepareCarrierMaterialization(carrier, outputPaths[index]!, undefined, false));
   const artifactFiles = prepared.flatMap(carrierMaterializationFiles);
+  if (outputDir === null) artifactFiles.push(installedCarrierIndexFile(prepared));
   const rollbackPaths = outputDir === null
     ? [
       ...artifactFiles.map((file) => file.path),
