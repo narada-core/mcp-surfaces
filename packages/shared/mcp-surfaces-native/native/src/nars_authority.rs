@@ -35,7 +35,7 @@ pub fn deliver(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     if idempotency_key.len() > 128 {
         return Err(error("idempotency_key_too_large", "idempotency_key exceeds 128 characters"));
     }
-    let health_response = health(&authority.event_endpoint)?;
+    let health_response = super::probe_health(&record);
     if !health_is_healthy(&health_response) {
         return Err(json!({
             "schema": "narada.nars_session_mcp.error.v1",
