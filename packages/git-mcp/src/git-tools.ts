@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, statSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { appendFileSync, existsSync, mkdirSync, rmSync, statSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 import {
   optionalBranchName,
   optionalRefName,
@@ -60,6 +60,7 @@ export async function callGitTool(name: string, args: Record<string, unknown>, s
   if (name === 'git_add') return gitAdd(args, state, runContext);
   if (name === 'git_unstage') return gitUnstage(args, state, runContext);
   if (name === 'git_commit') return gitCommit(args, state, runContext);
+  if (name === 'git_commit_paths') return gitCommitPaths(args, state, runContext);
   if (name === 'git_push') return gitPush(args, state, runContext);
   if (name === 'git_fetch') return gitFetch(args, state, runContext);
   if (name === 'git_rebase') return gitRebase(args, state, runContext);
@@ -1383,6 +1384,59 @@ async function preflightGitAddPaths(cwd: string, paths: string[], state: GitMcpS
     atomic: true,
     remediation: 'Remove ignored paths from the request or update the repository ignore policy; git_add does not force ignored files.',
   });
+}
+
+export async function gitCommitPaths(args: Record<string, unknown>, state: GitMcpState, context: GitRequestContext = {}) {
+  requireWriteMode(state.policy, 'git_commit_paths');
+  const cwd = resolveWorkingDirectory(args, state);
+  const message = requiredNonEmptyString(args.message, 'git_commit_paths_requires_message');
+  const body = optionalNonEmptyString(args.body);
+  const scopeLabel = optionalNonEmptyString(args.scope_label);
+  const requestedPaths = stringArray(args.paths);
+  if (requestedPaths.length === 0) throw diagnosticError('git_commit_paths_requires_paths');
+  const paths = await expandGitAddPaths(cwd, requestedPaths, state, context);
+  await preflightGitAddPaths(cwd, paths, state, context);
+  const before = await gitStatus({ working_directory: cwd }, state, context);
+  const stagedBefore = stringArray(before.staged).map(normalizeCommitScopePath).filter(Boolean);
+  const overlap = paths.filter((path) => stagedBefore.some((staged) => pathMatches(staged, path) || pathMatches(path, staged)));
+  if (overlap.length) throw diagnosticError('git_commit_paths_shared_index_overlap', 'git_commit_paths_shared_index_overlap', { paths: overlap, mutation_started: false, atomic: true });
+  const conflicts = stringArray(before.conflicts).map(normalizeCommitScopePath).filter(Boolean);
+  const requestedConflicts = paths.filter((path) => conflicts.some((item) => pathMatches(item, path) || pathMatches(path, item)));
+  if (requestedConflicts.length) throw diagnosticError('git_commit_paths_conflicts', 'git_commit_paths_conflicts', { conflict_paths: requestedConflicts, mutation_started: false, atomic: true });
+  const expectedHead = (await gitText(cwd, ['rev-parse', 'HEAD'], state.policy, 'git_commit_paths_head_unavailable', context)).trim();
+  const branchRef = (await gitText(cwd, ['symbolic-ref', '-q', 'HEAD'], state.policy, 'git_commit_paths_requires_attached_branch', context)).trim();
+  const isolatedIndex = await gitPath(cwd, `narada-indexes/${randomUUID()}.index`, state, context);
+  if (!isolatedIndex) throw diagnosticError('git_commit_paths_index_path_unavailable');
+  mkdirSync(dirname(isolatedIndex), { recursive: true });
+  const isolatedContext = { ...context, env: { ...(context.env ?? process.env), GIT_INDEX_FILE: isolatedIndex } };
+  let commit = '';
+  let committedPaths: string[] = [];
+  try {
+    ensureGitOk(await runGit(cwd, ['read-tree', expectedHead], state.policy, isolatedContext), 'git_commit_paths_read_tree_failed');
+    ensureGitOk(await runGit(cwd, ['add', '--', ...paths], state.policy, isolatedContext), 'git_commit_paths_add_failed');
+    const staged = await runGit(cwd, ['diff', '--cached', '--name-only', '-z'], state.policy, isolatedContext);
+    ensureGitOk(staged, 'git_commit_paths_diff_failed');
+    committedPaths = staged.output_text.split('\0').filter(Boolean).map((path) => path.replaceAll('\\', '/'));
+    if (!committedPaths.length) throw diagnosticError('git_commit_paths_requires_changes');
+    const tree = (await gitText(cwd, ['write-tree'], state.policy, 'git_commit_paths_write_tree_failed', isolatedContext)).trim();
+    const commitArgs = ['commit-tree', tree, '-p', expectedHead, '-m', message];
+    if (body) commitArgs.push('-m', body);
+    commit = (await gitText(cwd, commitArgs, state.policy, 'git_commit_paths_commit_tree_failed', isolatedContext)).trim();
+    const update = await runGit(cwd, ['update-ref', branchRef, commit, expectedHead], state.policy, context);
+    if (update.exit_code !== 0 || update.timed_out || update.cancelled) throw diagnosticError('git_commit_paths_head_changed', 'git_commit_paths_head_changed', { expected_head: expectedHead, candidate_commit: commit, mutation_started: false, atomic: true });
+    const reconciliation = await runGit(cwd, ['reset', 'HEAD', '--', ...committedPaths], state.policy, context);
+    if (reconciliation.exit_code !== 0 || reconciliation.timed_out || reconciliation.cancelled) {
+      const pending = { schema: 'narada.git.commit_paths.v1', status: 'committed_shared_index_reconciliation_required', working_directory: cwd, scope_label: scopeLabel, isolation: 'dedicated_temporary_index', expected_head: expectedHead, branch_ref: branchRef, commit, commit_ref: `git_commit:${commit}`, committed_files: committedPaths, committed_count: committedPaths.length, mutation_performed: true, verification_status: 'commit_ref_updated_reconciliation_pending', reconciliation: { status: 'pending', command: ['git', 'reset', 'HEAD', '--', ...committedPaths], exit_code: reconciliation.exit_code, output: reconciliation.output_text }, post_status: null, summary: 'commit published locally; shared-index reconciliation requires retry' };
+      audit(state, pending);
+      return pending;
+    }
+  } finally {
+    rmSync(isolatedIndex, { force: true });
+  }
+  const postStatus = await gitStatus({ working_directory: cwd }, state, context);
+  const payload = { schema: 'narada.git.commit_paths.v1', status: 'committed', working_directory: cwd, scope_label: scopeLabel, isolation: 'dedicated_temporary_index', expected_head: expectedHead, branch_ref: branchRef, commit, commit_ref: `git_commit:${commit}`, committed_files: committedPaths, committed_count: committedPaths.length, shared_index_preserved_paths: stringArray(postStatus.staged), ...verifiedMutationPostState(postStatus, { operation: 'commit_paths', commit, paths: committedPaths }), post_status: postStatus, summary: `committed ${committedPaths.length} explicit path${committedPaths.length === 1 ? '' : 's'} through an isolated index` };
+  audit(state, payload);
+  return payload;
 }
 
 export async function gitCommit(args: Record<string, unknown>, state: GitMcpState, context: GitRequestContext = {}) {

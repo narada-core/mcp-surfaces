@@ -223,6 +223,17 @@ export function listTools(mode: string = 'read'): Array<Record<string, any>> {
       }, ['paths']),
     },
     {
+      name: 'git_commit_paths',
+      description: 'Atomically commit only explicit paths through a dedicated temporary index. Unrelated shared-index entries are preserved, and concurrent HEAD movement is refused by an atomic ref compare-and-swap.',
+      inputSchema: objectSchema({
+        working_directory: { type: 'string', description: WORKING_DIRECTORY_DESCRIPTION },
+        paths: { type: 'array', items: { type: 'string' }, description: 'Exact files or directories to commit without staging them in the shared index.' },
+        message: { type: 'string' },
+        body: { type: 'string' },
+        scope_label: { type: 'string', description: 'Optional caller-supplied audit label for this mutation.' },
+      }, ['paths', 'message']),
+    },
+    {
       name: 'git_commit',
       description: 'Create a commit from already staged changes. Consume index_scope_ref for an atomic exact-index check; expected_staged_paths remains a compatibility guard.',
       inputSchema: objectSchema({

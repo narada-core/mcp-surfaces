@@ -36,7 +36,7 @@ type DependencyResolution = {
 };
 
 type ExternalWorkspacePackageProvenance = {
-  status: 'coherent' | 'unresolved';
+  status: 'coherent';
   workspace_patterns: string[];
   packages: Array<{
     name: string;
@@ -101,9 +101,14 @@ export function prepareWorkspaceBuild(workspaceRoot: string): WorkspaceBuildPrep
 
   const externalPackages = workspacePackages.filter((workspacePackage) => workspacePackage.workspace_scope === 'external');
   const dependencyResolutions = resolveExternalDependencies(workspacePackages, packageByName);
-  const unresolved = dependencyResolutions.filter((resolution) => resolution.status === 'unresolved');
+  const incoherent = dependencyResolutions.filter((resolution) => resolution.status !== 'resolved_to_declared_workspace_package');
+  if (incoherent.length > 0) {
+    throw new Error('external_workspace_package_provenance_unresolved:' + incoherent
+      .map((resolution) => resolution.consumer_package + '->' + resolution.dependency + '=' + resolution.status)
+      .join(','));
+  }
   const externalProvenance: ExternalWorkspacePackageProvenance = {
-    status: unresolved.length > 0 ? 'unresolved' : 'coherent',
+    status: 'coherent',
     workspace_patterns: unique(externalPackages.map((workspacePackage) => workspacePackage.workspace_pattern)).sort(),
     packages: externalPackages
       .map((workspacePackage) => ({
@@ -248,7 +253,13 @@ function resolveInstalledPackage(
   packageName: string,
 ): { manifest_path: string; package_root: string; realpath: string } | null {
   try {
-    const entrypoint = createRequire(consumerManifestPath).resolve(packageName);
+    const require = createRequire(consumerManifestPath);
+    let entrypoint: string;
+    try {
+      entrypoint = require.resolve(packageName + '/package.json');
+    } catch {
+      entrypoint = require.resolve(packageName);
+    }
     const realEntrypoint = realpathSync(entrypoint);
     let current = dirname(realEntrypoint);
     while (true) {

@@ -21,6 +21,7 @@ export {
   gitBeginWorkScope,
   gitChangedSummary,
   gitCommit,
+  gitCommitPaths,
   gitDiff,
   gitFetch,
   gitLog,

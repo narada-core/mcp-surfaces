@@ -23,6 +23,7 @@ Write mode admits mutation tools:
 
 - `git_add`
 - `git_unstage`
+- `git_commit_paths`
 - `git_commit`
 - `git_push`
 - `git_fetch`
@@ -42,6 +43,10 @@ Write mode admits mutation tools:
 - `git_workflow_record`
 
 Launch with write mode only for agents that are allowed to publish repository changes.
+
+## Concurrent-agent commits
+
+Prefer `git_commit_paths` when multiple agents can touch one worktree. The tool refuses requested paths already present in the shared index, commits only the validated expanded path set through `GIT_INDEX_FILE`, and uses compare-and-swap ref publication to reject concurrent `HEAD` movement. It does not make concurrent working-tree edits safe; agents must still avoid editing the same file or use separate worktrees for overlapping changes.
 
 ## Branch lifecycle
 
@@ -70,7 +75,8 @@ Write-mode tools:
 
 - `git_add`: stage explicit file paths.
 - `git_unstage`: remove explicit file paths from the index without changing the working tree.
-- `git_commit`: commit already staged changes.
+- `git_commit_paths`: preferred concurrent-agent commit path. It validates explicit paths, builds the commit through a dedicated temporary index, atomically advances the current branch only if `HEAD` is unchanged, and preserves unrelated shared-index entries. A post-commit index-reconciliation failure is returned as `committed_shared_index_reconciliation_required`, never as an ambiguous pre-commit failure.
+- `git_commit`: legacy staged-index commit. Use only when an explicitly reviewed shared-index workflow is required.
 - `git_push`: push current branch or explicit remote/branch; force push is not supported.
 - `git_fetch`: fetch one explicit branch from one configured remote; tags and arbitrary refspecs are not accepted.
 - `git_rebase`: rebase onto one explicit target with dirty-worktree guards and structured conflict results.

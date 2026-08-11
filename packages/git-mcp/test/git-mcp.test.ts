@@ -17,6 +17,7 @@ import {
   gitBeginWorkScope,
   gitChangedSummary,
   gitCommit,
+  gitCommitPaths,
   gitDiff,
   gitFetch,
   gitLog,
@@ -101,6 +102,7 @@ assert.deepEqual(toolNames.filter((tool: any) => tool.startsWith('git_')), [
   'git_branch_unset_upstream',
   'git_changed_summary',
   'git_commit',
+  'git_commit_paths',
   'git_diff',
   'git_fetch',
   'git_guidance',
@@ -177,6 +179,7 @@ assert.ok((guidanceContent.workflows.normal_publication as string[]).some((step:
 assert.deepEqual(guidanceContent.tool_inventory.write, [
   'git_add',
   'git_unstage',
+  'git_commit_paths',
   'git_commit',
   'git_push',
   'git_fetch',
@@ -320,6 +323,30 @@ assert.match(commitResult.commit, /^[0-9a-f]{40}$/);
 assert.equal((commitResult.verified_post_state as any).verification, 'verified');
 assert.equal(commitResult.verification_status, 'verified');
 assert.equal((commitResult.mutation_effect as any).operation, 'commit');
+
+const isolatedRepo = join(root, 'isolated-index-repo');
+git(root, ['init', '--initial-branch=main', isolatedRepo]);
+git(isolatedRepo, ['config', 'user.email', 'agent@example.test']);
+git(isolatedRepo, ['config', 'user.name', 'Agent Test']);
+writeFileSync(join(isolatedRepo, 'alpha.txt'), 'alpha base\n', 'utf8');
+writeFileSync(join(isolatedRepo, 'beta.txt'), 'beta base\n', 'utf8');
+git(isolatedRepo, ['add', '.']);
+git(isolatedRepo, ['commit', '-m', 'isolated base']);
+writeFileSync(join(isolatedRepo, 'alpha.txt'), 'alpha agent\n', 'utf8');
+writeFileSync(join(isolatedRepo, 'beta.txt'), 'beta other agent\n', 'utf8');
+git(isolatedRepo, ['add', 'beta.txt']);
+const isolatedCommit = await gitCommitPaths({
+  working_directory: isolatedRepo,
+  paths: ['alpha.txt'],
+  message: 'Commit alpha through isolated index',
+  scope_label: 'agent-alpha',
+}, state);
+assert.equal(isolatedCommit.isolation, 'dedicated_temporary_index');
+assert.deepEqual(isolatedCommit.committed_files, ['alpha.txt']);
+assert.deepEqual((isolatedCommit.post_status as any).staged, ['beta.txt']);
+assert.equal(git(isolatedRepo, ['show', '--format=', '--name-only', 'HEAD']).trim(), 'alpha.txt');
+assert.equal(git(isolatedRepo, ['show', 'HEAD:alpha.txt']).trim(), 'alpha agent');
+assert.equal(git(isolatedRepo, ['show', 'HEAD:beta.txt']).trim(), 'beta base');
 
 const scopedRepo = join(root, 'scoped-repo');
 git(root, ['init', '--initial-branch=main', scopedRepo]);
