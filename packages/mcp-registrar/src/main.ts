@@ -4169,6 +4169,34 @@ export function nativeCarrierValidationPlans(): JsonRecord {
   }]));
 }
 
+export function nativeCarrierProjectionPlans(): JsonRecord {
+  return Object.fromEntries(CARRIERS.map((carrier) => {
+    const compilation = compileCarrierRuntimeMaterializationPlan(carrier, carrier.config_path);
+    let generated: { content: string; structured: JsonRecord };
+    switch (carrier.kind) {
+      case 'opencode': generated = emitOpencodeConfig(carrier, carrier.config_path, compilation); break;
+      case 'kimi': generated = emitKimiConfig(carrier, carrier.config_path, compilation); break;
+      case 'codex': generated = emitCodexConfig(carrier, carrier.config_path, compilation); break;
+      default: throw diagnosticError('registrar_unknown_carrier_kind', `registrar_unknown_carrier_kind:${carrier.kind}`);
+    }
+    const materialization_validation = validateCarrierMaterialization(
+      carrier,
+      generated,
+      undefined,
+      runtimeMaterializationPlan,
+      compilation.plan,
+    ).validation;
+    return [carrier.carrier_id, {
+      kind: carrier.kind,
+      config_path: carrier.config_path,
+      generated_content: generated.content,
+      generated_structured: generated.structured,
+      runtime_contract_version: MCP_RUNTIME_CONTRACT_VERSION,
+      materialization_validation,
+    }];
+  }));
+}
+
 function registrarSurfaceUsage(args: JsonRecord): JsonRecord {
   const surfaceId = requiredString(args.surface_id, 'registrar_requires_surface_id');
   const isLocal = surfaceId.endsWith('.local');

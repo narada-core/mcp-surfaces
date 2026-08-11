@@ -1,4 +1,5 @@
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, Read, Write};
@@ -170,6 +171,17 @@ fn dispatch(request: &Value) -> Value {
                     }
                     Err(message) => error(id, message),
                 }
+            } else if name == "registrar_carrier_diff" {
+                let args = request
+                    .pointer("/params/arguments")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
+                match carrier_diff(&contract, &args) {
+                    Ok(value) => {
+                        json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":serde_json::to_string_pretty(&value).unwrap()}],"structuredContent":value}})
+                    }
+                    Err(message) => error(id, message),
+                }
             } else {
                 error(
                     id,
@@ -179,6 +191,174 @@ fn dispatch(request: &Value) -> Value {
         }
         method => error(id, format!("unsupported_mcp_method:{method}")),
     }
+}
+
+fn carrier_diff(contract: &Value, args: &Value) -> Result<Value, String> {
+    let carrier_id = required_argument(args, "carrier_id", "registrar_requires_carrier_id")?;
+    let plan = contract
+        .pointer(&format!(
+            "/read_models/registrar_carrier_projection_plans/{carrier_id}"
+        ))
+        .ok_or_else(|| format!("registrar_unknown_carrier:{carrier_id}"))?;
+    let config_path = plan["config_path"].as_str().unwrap_or("");
+    let generated_content = plan["generated_content"].as_str().unwrap_or("");
+    let generated_structured = &plan["generated_structured"];
+    let current_content = fs::read_to_string(config_path).ok();
+    let current_structured = current_content
+        .as_deref()
+        .and_then(|content| parse_carrier_config(plan["kind"].as_str().unwrap_or(""), content));
+    let generated_servers = carrier_servers(generated_structured);
+    let current_servers = current_structured
+        .as_ref()
+        .map(carrier_servers)
+        .unwrap_or_default();
+    let mut added = vec![];
+    let mut removed = vec![];
+    let mut changed = vec![];
+    let mut unchanged = vec![];
+    for (key, generated) in &generated_servers {
+        match current_servers.get(key) {
+            None => added.push(key.clone()),
+            Some(current) if canonical_json(generated) != canonical_json(current) => {
+                changed.push(key.clone())
+            }
+            Some(_) => unchanged.push(key.clone()),
+        }
+    }
+    for key in current_servers.keys() {
+        if !generated_servers.contains_key(key) {
+            removed.push(key.clone())
+        }
+    }
+    let current_exists = current_content.is_some();
+    let projection_changed = current_content.as_deref() != Some(generated_content);
+    let server_projection_changed = !added.is_empty() || !removed.is_empty() || !changed.is_empty();
+    let metadata_only = current_exists && projection_changed && !server_projection_changed;
+    let change_scopes = if !current_exists {
+        json!(["full_projection_missing"])
+    } else if !projection_changed {
+        json!([])
+    } else if server_projection_changed {
+        json!(["full_projection", "server_definitions"])
+    } else {
+        json!(["full_projection", "carrier_metadata_or_format"])
+    };
+    let result = json!({
+        "schema":"narada.registrar.carrier_projection_diff.v1",
+        "status":if !current_exists{"missing"}else if projection_changed{"diff"}else{"clean"},
+        "carrier_id":carrier_id,
+        "config_path":config_path,
+        "current_exists":current_exists,
+        "projection_changed":projection_changed,
+        "server_projection_changed":server_projection_changed,
+        "carrier_metadata_or_format_only":metadata_only,
+        "change_scopes":change_scopes,
+        "explanation_code":if !current_exists{"carrier_projection_missing"}else if !projection_changed{"carrier_projection_exact_match"}else if metadata_only{"carrier_metadata_or_format_changed_without_server_definition_change"}else{"carrier_server_definition_change"},
+        "generated_sha256":sha256_text(generated_content),
+        "current_sha256":current_content.as_deref().map(sha256_text),
+        "generated_byte_size":generated_content.len(),
+        "current_byte_size":current_content.as_ref().map(|value|value.len()),
+        "added":added,
+        "removed":removed,
+        "changed":changed,
+        "unchanged":unchanged,
+        "added_count":added.len(),
+        "removed_count":removed.len(),
+        "changed_count":changed.len(),
+        "server_changed_count":changed.len(),
+        "count_semantics":"added_removed_changed_counts_cover_server_definitions_only",
+        "server_changes":{"added":added,"removed":removed,"changed":changed,"unchanged":unchanged,"added_count":added.len(),"removed_count":removed.len(),"changed_count":changed.len()},
+        "runtime_contract_version":plan["runtime_contract_version"],
+        "materialization_validation":plan["materialization_validation"]
+    });
+    Ok(result)
+}
+
+fn sha256_text(text: &str) -> String {
+    format!("{:x}", Sha256::digest(text.as_bytes()))
+}
+
+fn carrier_servers(value: &Value) -> serde_json::Map<String, Value> {
+    value
+        .get("mcpServers")
+        .or_else(|| value.get("mcp"))
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn canonical_json(value: &Value) -> String {
+    match value {
+        Value::Array(values) => format!(
+            "[{}]",
+            values
+                .iter()
+                .map(canonical_json)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        Value::Object(values) => {
+            let mut keys = values.keys().collect::<Vec<_>>();
+            keys.sort();
+            format!(
+                "{{{}}}",
+                keys.into_iter()
+                    .map(|key| format!(
+                        "{}:{}",
+                        serde_json::to_string(key).unwrap(),
+                        canonical_json(&values[key])
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        }
+        _ => serde_json::to_string(value).unwrap(),
+    }
+}
+
+fn parse_carrier_config(kind: &str, content: &str) -> Option<Value> {
+    match kind {
+        "opencode" | "kimi" => parse_jsonc(content),
+        "codex" => Some(parse_codex_toml(content)),
+        _ => None,
+    }
+}
+
+fn parse_codex_toml(content: &str) -> Value {
+    let mut servers = serde_json::Map::new();
+    let mut current: Option<String> = None;
+    for raw in content.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with("[mcp_servers.") && line.ends_with(']') {
+            let key = &line[13..line.len() - 1];
+            if key.contains(".tools.") {
+                current = None;
+            } else {
+                current = Some(key.to_string());
+                servers.insert(key.to_string(), json!({}));
+            }
+            continue;
+        }
+        let Some(key) = current.as_ref() else {
+            continue;
+        };
+        let Some((field, raw_value)) = line.split_once('=') else {
+            continue;
+        };
+        let field = field.trim();
+        let raw_value = raw_value.trim();
+        let value =
+            serde_json::from_str(raw_value).unwrap_or_else(|_| json!(raw_value.trim_matches('"')));
+        servers
+            .get_mut(key)
+            .and_then(Value::as_object_mut)
+            .unwrap()
+            .insert(field.to_string(), value);
+    }
+    json!({"mcpServers":servers})
 }
 
 fn carrier_validate(contract: &Value, args: &Value) -> Result<Value, String> {
