@@ -1,10 +1,16 @@
 # MCP Telemetry Migration Plan
 
+Last reviewed: 2026-08-08
+Review revision: eeb464249eda123f844997481aaaf26d3b7a5880
+
+This document is a current posture and sequencing note. It does not create or
+close task records by itself.
+
 ## Current State
 
 Telemetry now has a documented target shape and a shared implementation package at `packages/shared/mcp-telemetry`.
 
-Implemented proving integrations:
+Implemented integrations:
 
 - `runtime-introspection-mcp`: read-only, metadata-only telemetry, disabled by default.
 - `calendar-mcp`: audited mutation surface, metadata-only telemetry, disabled by default, audit remains authoritative.
@@ -13,6 +19,16 @@ Shared packages:
 
 - `mcp-transport`: shared payload/output-ref helpers under `packages/shared/mcp-transport`.
 - `mcp-telemetry`: optional site-policy-gated telemetry helpers under `packages/shared/mcp-telemetry`.
+
+Current integrations also include graph-mail, structured-command, launcher,
+and site-coherence. These surfaces emit metadata-only records under the shared
+telemetry policy; domain audit records remain authoritative where mutations are
+involved.
+
+`mcp-loader-mcp` is present in the package inventory and `AGENTS.md`. Its
+runtime-observation records are a separate lifecycle evidence plane, not
+evidence that the loader is absent or that it must be silently folded into the
+optional telemetry event stream.
 
 ## Classification And Recommended Posture
 
@@ -42,7 +58,7 @@ Shared packages:
 | `site-lifecycle-mcp` | site lifecycle planning/config mutation | errors_only | site ids/actions only; no full configs | config redaction helper | 0.89 |
 | `operator-routing-mcp` | operator transcript routing | errors_only | route decision/status only; no transcript text by default | transcript redaction helper | 0.90 |
 | `artifacts-mcp` | artifact registration/reference | errors_only | artifact refs/kinds/status only; no content | artifact redaction helper | 0.94 |
-| `mcp-loader-mcp` | loader package present, not listed in AGENTS.md | classify before telemetry | unknown | package purpose review | 0.72 |
+| `mcp-loader-mcp` | loader/runtime lifecycle | runtime observation is implemented; optional telemetry remains a separate decision | lifecycle metadata only; no child payloads | explicit telemetry redaction review | 0.90 |
 
 ## Layout Cleanup
 
@@ -65,14 +81,22 @@ Remaining layout move:
 - Update workspace globs, root scripts, tsconfig references, package-local references, docs, and lockfile.
 - Risk: high churn and conflict risk while many surface tasks are open. Defer until telemetry package shape is reviewed.
 
-## High-Confidence Next Tasks
+## Superseded proposals
 
-Create follow-up tasks for:
+The following are historical sequencing proposals, not active task records and
+not permissions to create work under the old identifiers. Re-evaluate them
+against the current implementation before creating a new task:
 
-1. #1674 Graph-mail telemetry integration with strict mail/attachment redaction.
-2. #1675 Structured-command telemetry integration with command/output redaction.
-3. #1676 Launcher and site-coherence read-only telemetry integration.
-4. #1677 Shared redaction preset helpers in `mcp-telemetry` before broad migration.
-5. #1678 Investigate `mcp-loader-mcp` package purpose and AGENTS.md listing coherence.
+1. Reassess graph-mail telemetry redaction against the current integration.
+2. Reassess structured-command telemetry redaction against the current
+   integration.
+3. Reassess launcher and site-coherence telemetry coverage against current
+   evidence.
+4. Add shared redaction presets only where repeated policy is demonstrated.
+5. Decide separately whether loader lifecycle metadata should also emit
+   optional telemetry events.
 
-Do not yet create broad migration tasks for every surface. Several domains need redaction helpers first, and the `packages/surfaces/*` layout move should happen as a separate mechanical refactor after current shared-package changes are stable.
+Do not create broad migration tasks for every surface. Several domains still
+need domain-specific redaction decisions, and the packages/surfaces layout move
+should happen as a separate mechanical refactor after the shared-package shape
+is stable.

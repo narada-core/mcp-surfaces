@@ -23,7 +23,7 @@ The current runtime contract version is `6`.
 
 The canonical authority accepts only registry bindings admitted to the
 `native` runtime profile and requires one absolute native proxy executable for
-the whole carrier set. Bun and Node registrar commands remain compatibility
+the whole carrier set. The `bun` and `node-compat` registrar profiles remain compatibility
 tools, not alternate authorities. Runtime choices for individual child
 surfaces belong in the capability registry and implementation matrix; they are
 not inferred or silently rewritten during carrier publication.

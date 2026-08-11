@@ -3,9 +3,9 @@
 Status: implemented Narada-specific adapter target; runtime registration and
 site admission are explicit deployment steps.
 
-The canonical semantic contract is maintained in Narada proper:
-
-`<src-root>/narada/docs/architecture/nars-session-input-contract.md`
+The canonical semantic contract is maintained in Narada proper. See the
+[external NARS session input contract](cross-repository-contracts.md#contract-register)
+register for the source path, owner, and required external revision evidence.
 
 This document defines the MCP-facing boundary only.
 

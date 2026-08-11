@@ -4,6 +4,29 @@ This is the canonical inventory of end-to-end test gaps for the MCP surfaces
 repository. It records which real boundaries still need proof. Package test
 files and task records may link here, but they do not replace this inventory.
 
+## Review metadata
+
+Last reviewed: 2026-08-08
+Review revision: eeb464249eda123f844997481aaaf26d3b7a5880
+Evidence manifest: `docs/mcp-e2e-evidence/20260712-non-pc-host-batch.json`
+Evidence generated at: 2026-07-13
+Evidence freshness: historical, not a current pass
+
+External Narada and PC Site references in this register are governed by the
+[cross-repository contract register](cross-repository-contracts.md#contract-register);
+the external revision must be recorded before a new result can be called
+current.
+
+The committed manifest is the latest historical evidence artifact in this
+repository. It is an inventory of a prior bounded run, not proof that the
+current source revision passes. A source, dependency, carrier, or test change
+invalidates a current-pass claim.
+
+For a new pass, record the source revision, workspace/lockfile or artifact
+manifest fingerprint, result-artifact SHA-256, prerequisite/authority posture,
+cleanup result, and exact `not_run` or `passed` authority outcome. Do not
+replace historical evidence with a narrative execution note.
+
 ## Meaning Of Real E2E
 
 An E2E test must cross the boundary that production relies on. A test is not
@@ -65,10 +88,16 @@ An `A0` proof does not claim `A1` or `A2` authority. A `W1` proof may compose
 
 ## Current Evidence
 
+The rows below summarize the latest committed historical evidence and current
+test coverage. They do not assert that the current checkout has reproduced the
+recorded result. `Debt status` describes implementation/evidence debt;
+`Authority result` describes the authority actually exercised by the recorded
+run.
+
 | Surface | Existing test | Honest classification | What it does not prove |
 | --- | --- | --- | --- |
 | `site-loop-mcp` | [`test/site-loop-configured-surface-e2e.test.ts`](../packages/site-loop-mcp/test/site-loop-configured-surface-e2e.test.ts), [`test/site-loop-production-e2e.test.ts`](../packages/site-loop-mcp/test/site-loop-production-e2e.test.ts) | B1 configured-surface MCP proof plus opt-in production scheduler/resident/recovery proof | The default configured-surface test does not claim production authority; the production test is `not_run` without an explicitly admitted site root, scheduler, and live resident carrier |
-| `delegated-task-mcp` | [`test/site-fabric-worker-e2e.test.ts`](../packages/delegated-task-mcp/test/site-fabric-worker-e2e.test.ts), `test/live-worker-integration.test.ts`, Narada `packages/agent-web-ui/test/live-delegated-task-launcher-e2e.mjs` | B1-B3 Site-fabric delegation proof plus W1 launcher-to-carrier workflow through the actual launcher, NARS carrier, `nars-session-mcp`, delegated-task child, worker carrier, and controlled provider; verifies task/event persistence, review acceptance, binding evidence, negative admission, durable worker artifacts, and cleanup | External provider service behavior remains separate; both controlled tests use a bounded local HTTP provider fixture (A0) |
+| `delegated-task-mcp` | [`test/site-fabric-worker-e2e.test.ts`](../packages/delegated-task-mcp/test/site-fabric-worker-e2e.test.ts), `test/live-worker-integration.test.ts`, external `NARADA_REPO_ROOT/packages/agent-web-ui/test/live-delegated-task-launcher-e2e.mjs` | B1-B3 Site-fabric delegation proof plus W1 launcher-to-carrier workflow through the actual launcher, NARS carrier, `nars-session-mcp`, delegated-task child, worker carrier, and controlled provider; verifies task/event persistence, review acceptance, binding evidence, negative admission, durable worker artifacts, and cleanup | External provider service behavior remains separate; both controlled tests use a bounded local HTTP provider fixture (A0); external path ownership is defined in the [cross-repository contract register](cross-repository-contracts.md#contract-register) |
 | `worker-delegation-mcp` | [`test/live-edit-e2e.test.ts`](../packages/worker-delegation-mcp/test/live-edit-e2e.test.ts), [`test/site-fabric-provider-e2e.test.ts`](../packages/worker-delegation-mcp/test/site-fabric-provider-e2e.test.ts), [`test/real-carrier-e2e.test.ts`](../packages/worker-delegation-mcp/test/real-carrier-e2e.test.ts) | B1-B3 edit and Site-fabric proofs plus B4 real `narada-agent-runtime-server` carrier execution through the built MCP child; verifies provider request, model/reasoning binding, lifecycle events, durable run artifacts, refusal, and cleanup | External provider service behavior; the B4 test deliberately uses a bounded local HTTP fixture authority (A0) |
 | `surface-feedback-mcp` | [`test/site-fabric-feedback-e2e.test.ts`](../packages/surface-feedback-mcp/test/site-fabric-feedback-e2e.test.ts), `test/surface-feedback-task-lifecycle-integration.test.ts` | B1-B3 nested child handoff, durable feedback/task state, and idempotent conversion | External User Site authority remains separate |
 | `task-lifecycle-mcp` | [`test/site-fabric-lifecycle-e2e.test.ts`](../packages/task-lifecycle-mcp/test/site-fabric-lifecycle-e2e.test.ts), `stdio-smoke.test.ts`, `protocol-smoke.test.ts`, `inbox-bridge.test.ts` | B1-B3 Site-fabric carrier lifecycle with SQLite and Markdown closure evidence | A carrier-launched production Site session and external delivery |
@@ -157,7 +186,7 @@ live external-provider authority.
 | P0 | `mcp-registrar` | Registry-to-live-surface conformance | [`test/site-fabric-loader-e2e.test.ts`](../packages/mcp-registrar/test/site-fabric-loader-e2e.test.ts), [`test/site-fabric-catalog-e2e.test.ts`](../packages/mcp-registrar/test/site-fabric-catalog-e2e.test.ts), and `test/mcp-registrar.test.ts` prove live child handoff, the complete 26-entry catalog sweep, and drift checks | complete | passed |
 | P0 | `mcp-loader-mcp` | Runtime attachment workflow | [`test/site-fabric-loader-e2e.test.ts`](../packages/mcp-registrar/test/site-fabric-loader-e2e.test.ts) plus `test/mcp-loader-mcp.test.ts` attach/call/status/detach and replace/drift behavior through real children | complete | passed |
 | P0 | `launcher-mcp` | Launcher-to-carrier inheritance | [`test/pc-host-launcher-lifecycle-e2e.test.ts`](../packages/launcher-mcp/test/pc-host-launcher-lifecycle-e2e.test.ts) starts the canonical launcher twice with explicit launch-session bindings, drives each session through `nars-session-mcp`, verifies Site-local MCP tool inheritance, runtime/MCP ownership evidence, hidden child posture, restart isolation, and descendant teardown; run only with `NARADA_E2E_PC_HOST_AUTHORITY=1` | complete | passed |
-| P0 | `delegated-task-mcp` | Real worker runtime and launcher workflow | [`test/site-fabric-worker-e2e.test.ts`](../packages/delegated-task-mcp/test/site-fabric-worker-e2e.test.ts) proves the B1-B3 Site-fabric boundary; Narada `packages/agent-web-ui/test/live-delegated-task-launcher-e2e.mjs` proves the W1 launcher/carrier/Site-fabric/delegated-task/worker/artifact workflow with a controlled provider (A0) | complete | passed |
+| P0 | `delegated-task-mcp` | Real worker runtime and launcher workflow | [`test/site-fabric-worker-e2e.test.ts`](../packages/delegated-task-mcp/test/site-fabric-worker-e2e.test.ts) proves the B1-B3 Site-fabric boundary; external `NARADA_REPO_ROOT/packages/agent-web-ui/test/live-delegated-task-launcher-e2e.mjs` proves the W1 launcher/carrier/Site-fabric/delegated-task/worker/artifact workflow with a controlled provider (A0); see the [cross-repository contract register](cross-repository-contracts.md#contract-register) | complete | passed |
 | P0 | `worker-delegation-mcp` | Provider/cognition binding and real carrier | [`test/site-fabric-provider-e2e.test.ts`](../packages/worker-delegation-mcp/test/site-fabric-provider-e2e.test.ts) proves controlled provider binding; [`test/real-carrier-e2e.test.ts`](../packages/worker-delegation-mcp/test/real-carrier-e2e.test.ts) proves B4 execution through the production NARS carrier and durable artifacts with a controlled provider (A0) | complete | passed |
 | P0 | `worker-delegation-mcp` | External provider authority | [`test/external-provider-e2e.test.ts`](../packages/worker-delegation-mcp/test/external-provider-e2e.test.ts) executes the real child and records the controlled provider prerequisites; the current authority result is `not_run` because no A1/A2 provider authority was supplied | complete | not_run |
 | P1 | `local-filesystem-mcp` | Real governed filesystem child | [`test/site-fabric-filesystem-e2e.test.ts`](../packages/local-filesystem-mcp/test/site-fabric-filesystem-e2e.test.ts) proves child read/write/range/stat/glob, allowed-root refusal, bounded line windows, and deterministic blocked-read timeout handling | complete | passed |

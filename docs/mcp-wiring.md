@@ -11,6 +11,8 @@ This repository ships standalone MCP surfaces. A surface can run without Narada,
 
 ```powershell
 pnpm --filter @narada-core/local-filesystem-mcp build
+bun <installed-package>/dist/src/main.js --mode read --allowed-root <your-workspace-root>
+# Compatibility path:
 node <installed-package>/dist/src/main.js --mode read --allowed-root <your-workspace-root>
 ```
 
@@ -19,6 +21,32 @@ node <installed-package>/dist/src/main.js --mode read --allowed-root <your-works
 Carrier-native config files are host/user-site bootstrap profiles. Each Site binding declares `loading_mode: "static"` or `"progressive"`. Static bindings materialize their selected surfaces directly. Progressive bindings materialize only an explicit bootstrap allowlist; the built-in Codex, opencode, and Kimi profiles start with `agent-context`, `mcp-registrar`, `mcp-loader`, and `local-filesystem`, while all other admitted surfaces remain available through the loader. Local Site surfaces are never inferred from the current directory or from an unchosen Site; Narada launch/session materialization and the Site fabric remain the authority that binds them.
 
 The registrar emits carrier-specific config, not one universal file.
+
+## Build and materialize before wiring
+
+Build the workspace and materialize every carrier from one coherent generation:
+
+```powershell
+pnpm build
+pnpm materialize:carrier -- --materialize-all
+```
+
+The default `NARADA_RUNTIME_PROFILE` is `native`. The supported profiles are
+`native`, `bun`, and `node-compat`; select one before building when a different
+runtime plan is intentional:
+
+```powershell
+$env:NARADA_RUNTIME_PROFILE = 'bun' # or 'native' or 'node-compat'
+pnpm build
+pnpm materialize:carrier -- --materialize-all
+```
+
+The registrar selects the executable, runtime proxy, entrypoint, arguments,
+contract version, and carrier-specific projection. Do not copy a direct
+`node dist/src/main.js` command into a carrier config as a substitute for
+materialization. Follow the [materialization recovery
+runbook](mcp-materialization-recovery.md) when a carrier reports stale
+generation or workspace-preflight evidence.
 
 ### Progressive loading
 
@@ -48,10 +76,14 @@ apps = false
 enabled = false
 
 [mcp_servers.narada-andrey-user-local-filesystem]
-command = "node"
-args = ["<installed-package>/dist/src/main.js", "--mode", "read", "--allowed-root", "<your-workspace-root>"]
+command = "<registrar-selected runtime command>"
+args = ["<registrar-selected runtime arguments>"]
 approval_mode = "approve"
 ```
+
+The command and arguments above are schematic. The registrar-generated Codex
+projection may use the native proxy, Bun, or the Node compatibility path
+depending on the selected runtime profile.
 
 Set `NARADA_CODEX_ENABLED_PLUGINS` and/or
 `NARADA_CODEX_DISABLED_PLUGINS` to semicolon- or newline-separated exact
@@ -74,7 +106,7 @@ Generated shape:
   "mcp": {
     "narada-andrey-user-local-filesystem": {
       "type": "local",
-      "command": ["node", "<installed-package>/dist/src/main.js", "--mode", "read", "--allowed-root", "<your-workspace-root>"],
+      "command": ["<registrar-selected runtime command>", "<registrar-selected runtime arguments>"],
       "enabled": true
     }
   }
@@ -90,16 +122,26 @@ Generated shape:
   "mcpServers": {
     "narada-andrey-user-local-filesystem": {
       "transport": "stdio",
-      "command": "node",
-      "args": ["<installed-package>/dist/src/main.js", "--mode", "read", "--allowed-root", "<your-workspace-root>"],
+      "command": "<registrar-selected runtime command>",
+      "args": ["<registrar-selected runtime arguments>"],
       "approval_mode": "approve"
     }
   }
 }
 ```
 
+These carrier examples describe projection shape, not a hand-authored
+configuration. The generated file and its generation sidecar are authoritative.
+
 ## Where The Truth Lives
 
+- docs/mcp-injection-scopes.md explains host, user-site, and local-site ownership.
+- docs/mcp-materialization-recovery.md is the canonical build, materialize,
+  restart, and stale-generation recovery procedure.
+- docs/package-inventory.md is the package/README inventory checked by the
+  documentation gate.
+- packages/mcp-registrar/README.md explains the registrar tools.
+- packages/local-filesystem-mcp/README.md explains standalone usage.
 - `docs/mcp-injection-scopes.md` explains host, user-site, and local-site ownership.
 - `packages/mcp-registrar/README.md` explains the registrar tools.
 - `packages/local-filesystem-mcp/README.md` explains standalone usage.

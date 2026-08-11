@@ -286,6 +286,24 @@ Do not create tasks that merely say "clean up" or "improve ergonomics" without t
 
 These candidates are intentionally phrased as task payload material. Before creating them, check for duplicate open work by title and surface.
 
+## Baseline versus residual
+
+`Ready Task Candidates` is a residual-work register, not a release checklist.
+Implemented behavior is recorded separately so a completed feature is not
+recreated as an open design gap.
+
+Implemented baseline reviewed on 2026-08-08:
+
+- `task_lifecycle_submit_work` provides the compound task-lifecycle submission
+  path while preserving primitive evidence, role gates, changed-file checks,
+  recovery truthfulness, and review obligations.
+- The implementation is in
+  `packages/task-lifecycle-mcp/src/task-lifecycle/task-mcp-server.ts` and is
+  covered by the task-lifecycle package tests.
+
+The candidates that follow are residual only unless their heading or evidence
+explicitly says otherwise.
+
 ### Worker delegation strict policy/input hardening
 
 - Target invariant: typed inputs, policy readback, precise refusal.
@@ -310,14 +328,6 @@ These candidates are intentionally phrased as task payload material. Before crea
 - Public behavior: package bin mapping and real invocation argv/schema behavior must be covered by a smoke path; fixture tests must assert prompt construction evidence instead of allowing fallback branches.
 - Tests: `pnpm test:worker-delegation`; add a packaged-bin smoke test and, where real Codex cannot be required in CI, a clearly named optional/manual real-Codex compatibility smoke.
 
-### Task lifecycle compound work submission helper
-
-- Target invariant: ergonomic composition without authority collapse.
-- Current gap: normal task completion still requires many primitive calls and manual task-file edits, which creates friction and repeated evidence mistakes.
-- Surface: `task-lifecycle-mcp`.
-- Public behavior: add a compound helper that can claim with explicit authority, write execution/verification notes, prove criteria, admit evidence, and submit a report while emitting the same primitive evidence records. It must not bypass role gates, changed-file evidence, recovery truthfulness, or review obligations.
-- Tests: `pnpm test:task-lifecycle`; include happy path, role authority required, scaffold-placeholder rejection, changed-file/no-files-changed validation, and recovery-truthfulness-triggered work.
-
 ### Graph mail first-class attachment lifecycle
 
 - Target invariant: bounded execution, observation/evidence separation, no command workaround for governed mail effects.
@@ -339,8 +349,11 @@ The reference implementation uses Zod at the transport boundary for scope, page,
 ## Fabric V2 Native Descriptors and Runtime Observation
 Every registered surface resolves from a package-owned `SurfaceDescriptorV2`. The package's actual `tools/list` registry is the input to descriptor emission, so schemas, guidance identity, effects, projection authority, runtime requirements, and lifecycle requirements cannot silently diverge in the registrar.
 The registrar does not retain a legacy catalog or compatibility adapter in the
-production path. Native descriptors are the sole source for registered surface
-identity, live tool contracts, effects, projections, and lifecycle semantics.
+production path. Native descriptors are the authored/catalog authority for
+registered surface identity, live tool contracts, effects, projections, and
+lifecycle semantics. Loader fallback entries are compatibility projections only:
+they must resolve to the same built entrypoint, arguments, and live tool
+contract, and cannot become a second authority or silently diverge.
 Carrier and Site materialization embeds the selected native descriptor plus its descriptor and tool-contract digests in `surface_projection`. This gives the loader a declared contract it can compare with fresh child `tools/list` output.
 Projection selection remains explicit: a surface with multiple projections requires `projection_id` or a runtime context that selects exactly one; current directory and server-name heuristics are not valid selectors.
 Runtime observations use `RuntimeObservationV2`. A generation record reports logical connection identity, generation state, heartbeat, lease expiry, freshness, health, descriptor/tool digests, and lifecycle-specific recovery actions. Atomic runtime records belong under the configured runtime-state root; a generic observation sink may emit events without taking Narada persistence authority.

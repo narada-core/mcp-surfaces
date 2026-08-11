@@ -2,6 +2,33 @@
 
 Scope: current `packages/worker-delegation-mcp` implementation and tests for `target.md`.
 
+## Review metadata
+
+Last reviewed: 2026-08-08
+Review revision: eeb464249eda123f844997481aaaf26d3b7a5880
+
+Finding numbers are stable IDs (`WD-01` through `WD-12`). `resolved` means
+the implementation and a focused regression test now cover the original
+condition. `open` means the documented gap remains. `accepted limitation`
+means the behavior is deliberate first-version scope, not an accidental
+fallback. This register is an implementation review; it is not a claim that
+every open item has been fixed.
+
+| ID | Finding | Status | Current evidence |
+| --- | --- | --- | --- |
+| WD-01 | Fake Codex runtime in successful tests | open | Optional real-carrier coverage exists; the default fixture remains a fixture. |
+| WD-02 | Protocol smoke bypasses packaged bin | open | Package-bin smoke coverage remains a separate gap. |
+| WD-03 | Hand-written partial TOML parser | open | Parser replacement or explicitly bounded syntax contract is still required. |
+| WD-04 | Silent malformed trusted-root lines | open | Policy parsing still needs strict malformed-input diagnostics. |
+| WD-05 | Missing worker output misclassified | resolved | Output-contract mapping and regression coverage preserve an explicit absent-file condition. |
+| WD-06 | Fallback empty normalized fields | open | Invalid output still needs a fully typed non-worker-authored result shape. |
+| WD-07 | Non-object config coerced to empty object | open | Strict schema rejection remains required. |
+| WD-08 | Truthy coercion of skip-git flag | open | Boolean input validation remains required. |
+| WD-09 | Generic CLI flags accept missing values | open | Startup argument validation remains incomplete. |
+| WD-10 | Output-reference failures genericized | resolved | MCP output-reference failures now map to a typed materialization error. |
+| WD-11 | Unasserted fixture fallback branch | open | Prompt/output evidence assertion remains required. |
+| WD-12 | Missing-executable fixture only | open | Post-spawn runtime-startup failure coverage remains required. |
+
 ## Findings
 
 1. Successful worker execution tests use a fake Codex runtime.
@@ -28,11 +55,16 @@ Scope: current `packages/worker-delegation-mcp` implementation and tests for `ta
 
    Why this is a defect: trusted roots are part of execution policy. Silent skipping can turn malformed trust configuration into missing roots without a precise configuration error, which is fallback behavior in policy loading.
 
-5. Missing worker output is materialized as an object that the parser later reports as `invalid_shape`.
+5. Missing worker output must remain an explicit absent-output condition.
 
-   Evidence: `packages/worker-delegation-mcp/src/worker-tools.ts` writes `{ absent: true, reason: "worker_runtime_did_not_produce_last_message" }` when `last_message.json` is absent, then `parseLastMessage` reports it as `invalid_shape` because it lacks `summary`, `deliverables`, `open_questions`, and `next_actions`.
+   Status: resolved on review revision
+   `eeb464249eda123f844997481aaaf26d3b7a5880`.
 
-   Why this is a defect: the run record preserves the absence marker, but the normalized error path loses that domain-specific reason and reports a schema failure instead of a distinct absent-output condition.
+   Evidence: `packages/worker-delegation-mcp/src/output-contract.ts` maps a
+   missing output file to the typed absent state, and
+   `packages/worker-delegation-mcp/test/worker-delegation-mcp.test.ts` asserts
+   the absent-output response. The implementation no longer relies on
+   `invalid_shape` to describe a missing file.
 
 6. Failed worker results still use fallback empty normalized fields.
 
@@ -58,11 +90,15 @@ Scope: current `packages/worker-delegation-mcp` implementation and tests for `ta
 
    Why this is a defect: malformed startup invocations can be accepted and then defaulted or ignored downstream. For example, `--config` with no value is not loaded because policy loading only reads it when it is a string.
 
-10. Output-reference read failures fall through to `worker_unhandled_error`.
+10. Output-reference read failures must remain typed materialization failures.
 
-    Evidence: `packages/worker-delegation-mcp/src/output-ref.ts` validates only the `worker_output:` prefix, then calls `readFileSync` directly. Missing files, path resolution failures, or read errors are not converted to `worker_output_materialization_failed`.
+    Status: resolved on review revision
+    `eeb464249eda123f844997481aaaf26d3b7a5880`.
 
-    Why this is a defect: `worker_output_show` has a domain-specific error code. Falling through to the generic unhandled-error path is a fallback error model.
+    Evidence: `packages/worker-delegation-mcp/src/mcp-server.ts` maps output
+    reference read and materialization failures to
+    `worker_output_materialization_failed`; focused worker-output tests cover
+    missing or unreadable references.
 
 11. The main successful test fixture contains a fallback branch that is not asserted.
 

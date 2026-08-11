@@ -10,6 +10,21 @@ The dedicated Rust `@narada-core/pc-site-runtime-observer` process is the only w
 
 Normal sampling is every 10 seconds. A lifecycle change selects one-second sampling for 60 seconds. Raw samples remain for seven days and one-minute rollups for 90 days; incidents remain until explicit review. Imported source segments are retained as additional evidence rather than automatically deleted.
 
+## Ownership and capability
+
+| Layer | Owns | Does not own |
+| --- | --- | --- |
+| `@narada-core/mcp-runtime-observation` in this repository | Sanitized JSONL emission, source identity, lifecycle metadata, and best-effort delivery | The observer SQLite schema, memory sampling authority, incident review, or restart |
+| MCP surface/loader/carrier runtimes | Emitting their own bounded ownership and lifecycle records | Reading arbitrary observer databases or making memory-based lifecycle decisions |
+| Narada proper PC Site runtime observer | The canonical `observations.db`, process sampling, descendant discovery, detectors, attribution, and incident evidence | Domain tool authorization or arbitrary process control |
+| `runtime-introspection-mcp` in this repository | Server-bound read-only queries and bounded evidence projections | Writing observations, changing incident state, restarting or replacing runtimes |
+| Carrier/runtime supervisor | The lifecycle actuator named by an admitted recovery action | Treating an observation report as implicit restart permission |
+
+The Rust PC Site observer and its SQLite owner are an external Narada proper
+contract, not a second implementation hidden in this repository. The
+cross-repository ownership and revision policy is recorded in
+`docs/cross-repository-contracts.md`.
+
 ## Detection and attribution
 
 Process private-memory growth requires at least six samples spanning one minute, growth of at least `max(32 MiB, 20% baseline)`, at least 1 MiB/min over 15 minutes, and three consecutive qualifying evaluations. Worker heap growth uses `max(16 MiB, 25% baseline)`, 0.5 MiB/min over ten minutes, and the same confirmation rule. Separate detectors cover post-release residual memory, handle growth of 256, and thread growth of eight.

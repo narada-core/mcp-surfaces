@@ -1,34 +1,22 @@
-# MJS File Inventory
+# MJS file inventory
 
-Generated for `<src-root>\mcp-surfaces` on 2026-06-02.
+This register was reviewed on 2026-08-08 against revision
+eeb464249eda123f844997481aaaf26d3b7a5880. It describes the current
+`mcp-surfaces` repository, not external Narada or Site repositories.
 
-## Current filesystem
+## Current repository state
 
-No `.mjs` files were found in the current workspace scan.
+No `.mjs` files are present in the repository scan, and Git reports no
+deleted tracked `.mjs` paths.
 
-Command used:
+Commands:
 
 ```powershell
 rg --files -uu -g '*.mjs'
+git ls-files --deleted -- '*.mjs'
 ```
 
-## Tracked `.mjs` files currently deleted
-
-These `.mjs` paths are still tracked by Git but are currently marked deleted in the working tree:
-
-| Status | Path |
-| --- | --- |
-| Deleted | `packages/local-filesystem-mcp/src/main.mjs` |
-| Deleted | `packages/local-filesystem-mcp/src/policy.mjs` |
-| Deleted | `packages/local-filesystem-mcp/test/local-filesystem-mcp.test.mjs` |
-| Deleted | `packages/shared/mcp-transport/src/mcp-payload-file.mjs` |
-| Deleted | `packages/shared/mcp-transport/test/mcp-payload-file.test.mjs` |
-| Deleted | `packages/structured-command-mcp/src/main.mjs` |
-| Deleted | `packages/structured-command-mcp/src/policy.mjs` |
-| Deleted | `packages/structured-command-mcp/test/structured-command-mcp.test.mjs` |
-
-Command used:
-
-```powershell
-git status --short -- *.mjs
-```
+Both commands are expected to produce no paths for this repository. If a
+future migration introduces an `.mjs` file, update this register in the same
+change and record whether the file is authored source, generated output, or an
+external-repository reference.
