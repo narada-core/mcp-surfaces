@@ -4811,7 +4811,44 @@ function writeSiteSurfaceRegistry(site: SiteDef): JsonRecord {
 }
 
 export function syncSiteSurfaceRegistryById(siteId: string): JsonRecord {
-  return writeSiteSurfaceRegistry(lookupSite(siteId));
+  return (syncSiteSurfaceRegistriesById([siteId]).sites as JsonRecord[])[0];
+}
+
+export function syncSiteSurfaceRegistriesById(siteIds: string[]): JsonRecord {
+  const uniqueIds = [...new Set(siteIds)];
+  if (uniqueIds.length !== siteIds.length || uniqueIds.length === 0) {
+    throw diagnosticError('registrar_site_registry_batch_invalid', 'Site registry batch must contain unique Site IDs.', {
+      site_ids: siteIds,
+    });
+  }
+  const publications = uniqueIds.map((siteId) => {
+    const site = lookupSite(siteId);
+    const registry = buildSiteSurfaceRegistry(site);
+    const dir = join(siteCapabilityRoot(site), 'capabilities');
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, 'mcp-surfaces.json');
+    const surfaces = Array.isArray(registry.surfaces) ? registry.surfaces : [];
+    return {
+      path,
+      content: JSON.stringify(registry, null, 2) + '\n',
+      result: {
+        status: 'synced',
+        site_id: site.site_id,
+        path,
+        surface_count: surfaces.length,
+        tool_count: surfaces.reduce((sum, surface) => {
+          const tools = asRecord(surface).registered_live_tools;
+          return sum + (Array.isArray(tools) ? tools.length : 0);
+        }, 0),
+      },
+    };
+  });
+  transactionalWriteFiles(publications.map(({ path, content }) => ({ path, content })));
+  return {
+    status: 'synced',
+    site_count: publications.length,
+    sites: publications.map(({ result }) => result),
+  };
 }
 
 function registrarSiteSurfaceRegistrySync(args: JsonRecord): JsonRecord {

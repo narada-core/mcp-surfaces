@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { nativeArtifactRoot, preserveLegacyNativeArtifact, publishImmutableNativeArtifacts, resolveNativeArtifact } from '../src/native-artifact.js';
 import { fileURLToPath } from 'node:url';
@@ -71,7 +71,23 @@ if (process.platform === 'win32') {
   }
 }
 
+const pointerPath = join(outputRoot, 'current.json');
+const previousPointer = existsSync(pointerPath) ? readFileSync(pointerPath) : null;
 const pointer = publishImmutableNativeArtifacts({ packageRoot, artifacts: publishArtifacts });
+const workspaceRoot = resolve(packageRoot, '..', '..', '..');
+const registrySync = spawnSync(process.execPath, [
+  '--import', 'tsx', join(workspaceRoot, 'scripts', 'sync-declared-site-registries.ts'),
+], {
+  cwd: workspaceRoot,
+  stdio: 'inherit',
+  windowsHide: true,
+});
+if (registrySync.error || registrySync.status !== 0) {
+  if (previousPointer === null) unlinkSync(pointerPath);
+  else writeFileSync(pointerPath, previousPointer);
+  if (registrySync.error) throw registrySync.error;
+  throw new Error(`mcp_runtime_proxy_site_registry_sync_failed:${registrySync.status ?? 'signal'}`);
+}
 for (const artifact of artifacts) {
   preserveLegacyNativeArtifact(artifact.source, join(outputRoot, artifact.name));
 }
@@ -92,7 +108,7 @@ process.stdout.write(JSON.stringify({
   executable: currentExecutable,
   executables: currentExecutables,
   legacy_executables: executableNames.map((name) => join(outputRoot, name)),
-  pointer_path: join(outputRoot, 'current.json'),
+  pointer_path: pointerPath,
   build_fingerprint: pointer.build_fingerprint,
   versioned_directory: join(outputRoot, 'versions', pointer.build_fingerprint),
   boa_fixture: { ...boaBuild, executable: currentBoaExecutable },

@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
-import { syncSiteSurfaceRegistryById } from '../packages/mcp-registrar/dist/src/main.js';
+import { syncSiteSurfaceRegistriesById } from '../packages/mcp-registrar/dist/src/main.js';
 
 type CarrierContract = {
   schema: string;
@@ -18,12 +18,15 @@ if (contract.schema !== 'narada.native_carrier_contract.v2' || !Array.isArray(co
   throw new Error(`site_registry_sync_contract_invalid:${contractPath}`);
 }
 const seen = new Set<string>();
-const results = contract.sites.map((site) => {
+for (const site of contract.sites) {
   if (!site.site_id || seen.has(site.site_id) || !isAbsolute(site.registry_path)) {
     throw new Error(`site_registry_sync_site_invalid:${site.site_id || 'missing'}`);
   }
   seen.add(site.site_id);
-  const result = syncSiteSurfaceRegistryById(site.site_id);
+}
+const publication = syncSiteSurfaceRegistriesById(contract.sites.map((site) => site.site_id));
+const results = (publication.sites as Array<Record<string, unknown>>).map((result, index) => {
+  const site = contract.sites[index];
   const actual = resolve(String(result.path ?? ''));
   if (actual.toLowerCase() !== resolve(site.registry_path).toLowerCase()) {
     throw new Error(`site_registry_sync_path_mismatch:${site.site_id}:${actual}`);
