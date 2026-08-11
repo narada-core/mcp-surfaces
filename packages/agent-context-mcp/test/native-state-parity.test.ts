@@ -35,6 +35,14 @@ try {
     const currentRust = await rustClient.call('agent_context_rehydrate', { agent_id: 'parity.builder' });
     assert.deepEqual(normalize(currentRust, rust), normalize(currentTs, ts), 'current checkpoint projection');
 
+    const exportArgs = { agent_id: 'parity.builder', path: '.ai/continuations/parity.md' };
+    const exportTs = await tsClient.call('agent_context_continuation_export', exportArgs);
+    const exportRust = await rustClient.call('agent_context_continuation_export', exportArgs);
+    assert.deepEqual(normalize(exportRust, rust), normalize(exportTs, ts), 'continuation export projection');
+    const readTs = await tsClient.call('agent_context_continuation_read', { agent_id: 'parity.builder' });
+    const readRust = await rustClient.call('agent_context_continuation_read', { agent_id: 'parity.builder' });
+    assert.deepEqual(normalize(readRust, rust), normalize(readTs, ts), 'continuation artifact readback');
+
     const secondArgs = { ...checkpointArgs, active_task: { task: 43 }, continuation: null };
     await tsClient.call('agent_context_checkpoint', secondArgs);
     await rustClient.call('agent_context_checkpoint', secondArgs);
@@ -94,11 +102,15 @@ function client(executable: string, args: string[], fixtureValue: ReturnType<typ
 
 function normalize(value: unknown, fixtureValue: ReturnType<typeof fixture>): unknown {
   if (Array.isArray(value)) return value.map((entry) => normalize(entry, fixtureValue));
-  if (!value || typeof value !== 'object') return typeof value === 'string' ? value.replaceAll(fixtureValue.root, '<site>').replaceAll(fixtureValue.db, '<db>') : value;
+  if (!value || typeof value !== 'object') return typeof value === 'string'
+    ? value.replaceAll(fixtureValue.root, '<site>').replaceAll(fixtureValue.db, '<db>')
+      .replace(/chk_[a-f0-9]{32}/g, '<checkpoint_id>').replace(/[a-f0-9]{64}/g, '<sha256>')
+      .replace(/20\d\d-\d\d-\d\dT\d\d:\d\d:\d\d\.\d\d\dZ/g, '<timestamp>')
+    : value;
   const result: Record<string, unknown> = {};
   for (const [key, entry] of Object.entries(value)) {
     if (['checkpoint_id', 'archived_prior', 'content_hash'].includes(key)) result[key] = entry == null ? null : `<${key}>`;
-    else if (['checkpoint_at'].includes(key)) result[key] = '<timestamp>';
+    else if (['checkpoint_at', 'created_at'].includes(key)) result[key] = '<timestamp>';
     else if (key === 'source_checkpoint_ref') result[key] = '<checkpoint-ref>';
     else result[key] = normalize(entry, fixtureValue);
   }
