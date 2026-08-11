@@ -42,13 +42,18 @@ function taskExecutabilityFollowUp(request: Record<string, unknown> | null, stat
 
 export function assertExecutionBindingScope(binding: ExecutionBinding, siteRoot: string): void {
   const currentSiteRoot = resolve(siteRoot);
-  if (binding.site_root && resolve(binding.site_root) !== currentSiteRoot) {
+  const bindingSiteRoot = binding.site_root ? resolve(binding.site_root) : currentSiteRoot;
+  const containedSiteRoot = resolve(currentSiteRoot, '.narada');
+  const containedSiteDeclared = bindingSiteRoot === containedSiteRoot
+    && existsSync(resolve(currentSiteRoot, '.git'))
+    && existsSync(resolve(containedSiteRoot, 'config.json'));
+  if (bindingSiteRoot !== currentSiteRoot && !containedSiteDeclared) {
     throw new Error('task_lifecycle_execution_binding_site_root_mismatch');
   }
-  if (!executionRootAuthorizedForSite(binding.workspace_root, currentSiteRoot)) {
+  if (!executionRootAuthorizedForSite(binding.workspace_root, bindingSiteRoot)) {
     throw new Error('task_lifecycle_execution_binding_workspace_outside_site_root');
   }
-  if (binding.repository_root && !executionRootAuthorizedForSite(binding.repository_root, currentSiteRoot)) {
+  if (binding.repository_root && !executionRootAuthorizedForSite(binding.repository_root, bindingSiteRoot)) {
     throw new Error('task_lifecycle_execution_binding_repository_outside_site_root');
   }
 }

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -179,4 +179,26 @@ test('Agent Context adapter revisions are independent of object insertion order'
   const firstRole = first.find((entry) => entry.entry_kind === 'role_binding');
   const secondRole = second.find((entry) => entry.entry_kind === 'role_binding');
   assert.equal(firstRole?.revision, secondRole?.revision);
+});
+
+test('contained project Site law is projected from .narada when workspace AGENTS.md is absent', () => {
+  const siteRoot = mkdtempSync(join(tmpdir(), 'orientation-contained-site-'));
+  const governanceRoot = join(siteRoot, '.narada');
+  mkdirSync(governanceRoot, { recursive: true });
+  writeFileSync(join(governanceRoot, 'config.json'), JSON.stringify({ site_id: 'cintamani', site_root: governanceRoot }));
+  writeFileSync(join(governanceRoot, 'AGENTS.md'), '# Contained project law\n', 'utf8');
+  try {
+    const projections = buildAgentContextOrientationProjections({
+      siteRoot,
+      siteId: 'narada.test',
+      admissionReceipt: admission({ valid_until: null }),
+      observedAt: '2026-08-08T11:00:00.000Z',
+    });
+    const law = projections.find((entry) => entry.entry_kind === 'site_law');
+    assert.equal(law?.projection_status, 'available');
+    assert.equal((law?.payload as any).site_relative_path, '.narada/AGENTS.md');
+    assert.equal(law?.artifact_ref, 'site-file:.narada/AGENTS.md');
+  } finally {
+    rmSync(siteRoot, { recursive: true, force: true });
+  }
 });

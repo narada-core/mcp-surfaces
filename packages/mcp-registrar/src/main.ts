@@ -119,6 +119,13 @@ const PROGRESSIVE_BOOTSTRAP_SURFACES = [
   'local-filesystem',
 ] as const;
 
+// These governance surfaces must remain reachable when the dynamic loader transport
+// is unavailable; otherwise the failure cannot be recorded or repaired as governed work.
+const PROGRESSIVE_SURVIVAL_SURFACES = [
+  'task-lifecycle',
+  'surface-feedback',
+] as const;
+
 const DEFAULT_SURFACE_REPLACEMENTS: Readonly<Record<string, readonly string[]>> = {
   'task-lifecycle': ['work-lifecycle'],
 };
@@ -1898,7 +1905,12 @@ export function sharedSurfaceIdsForBinding(binding: SiteBinding, site?: SiteDef)
       }
     }).map((surface) => surface.id)
     : binding.surfaces.filter((surfaceId) => !surfaceId.endsWith('.local') && isEnabled(surfaceId));
-  if (binding.loading_mode === 'progressive') return Array.from(new Set(explicit));
+  if (binding.loading_mode === 'progressive') {
+    return Array.from(new Set([
+      ...explicit,
+      ...PROGRESSIVE_SURVIVAL_SURFACES.filter(isEnabled),
+    ]));
+  }
   const ids = new Set(explicit);
   for (const surface of SURFACES) {
     if (isEnabled(surface.id) && automaticProjectionForBinding(surface, binding)) ids.add(surface.id);
@@ -1950,7 +1962,9 @@ function carrierInjectionSummary(carrier: CarrierDef): JsonRecord {
     loading_mode: binding.loading_mode ?? 'static',
     bootstrap_surface_ids: binding.surfaces === 'all'
       ? 'all'
-      : [...binding.surfaces],
+      : binding.loading_mode === 'progressive'
+        ? Array.from(new Set([...binding.surfaces, ...PROGRESSIVE_SURVIVAL_SURFACES]))
+        : [...binding.surfaces],
   }));
   const servers = Object.entries(collectCarrierServers(carrier)).map(([serverKey, server]) => {
     const surfaceId = server.kind === 'local' ? (server.local as SiteLocalSurface).surface_id : (server.surface as RegistrarSurfaceRecord).id;

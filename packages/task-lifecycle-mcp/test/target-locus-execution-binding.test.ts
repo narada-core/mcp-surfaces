@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from '@narada-core/sqlite';
@@ -75,6 +75,7 @@ try {
   const projectSiteRoot = join(projectRoot, '.narada');
   mkdirSync(join(projectRoot, '.git'), { recursive: true });
   mkdirSync(projectSiteRoot, { recursive: true });
+  writeFileSync(join(projectSiteRoot, 'config.json'), JSON.stringify({ site_id: 'project', site_root: projectSiteRoot }));
   const projectBinding = normalizeExecutionBinding({
     workspace_root: projectRoot,
     repository_root: projectRoot,
@@ -83,6 +84,7 @@ try {
     correlation_key: 'project-site-parent-repository',
   });
   assert.doesNotThrow(() => assertExecutionBindingScope(projectBinding, projectSiteRoot));
+  assert.doesNotThrow(() => assertExecutionBindingScope(projectBinding, projectRoot));
   assert.throws(
     () => assertExecutionBindingScope({ ...projectBinding, repository_root: tmpdir() }, projectSiteRoot),
     /repository_outside_site_root/,

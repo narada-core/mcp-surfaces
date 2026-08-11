@@ -1009,7 +1009,7 @@ try {
     prefix: 'fixture',
     loading_mode: 'progressive',
   });
-  assert.deepEqual(progressiveBootstrap, ['agent-context', 'mcp-registrar', 'mcp-loader', 'local-filesystem']);
+  assert.deepEqual(progressiveBootstrap, ['agent-context', 'mcp-registrar', 'mcp-loader', 'local-filesystem', 'task-lifecycle', 'surface-feedback']);
   assert.deepEqual(
     appendLoaderAllowedSiteRoots(
       ['--allowed-site-root', 'C:\\workspace\\narada.sonar'],
@@ -1032,12 +1032,12 @@ try {
   const kimiMaterialization: any = (matData.carriers as Array<Record<string, any>>).find((carrier) => carrier.carrier_id === 'kimi-andrey');
   assert.ok(kimiMaterialization);
   assert.ok(kimiMaterialization.byte_size > 0);
-  assert.deepEqual((kimiMaterialization.injection_scopes as Record<string, any>).counts, { host: 0, user_site: 2, local_site: 2 });
+  assert.deepEqual((kimiMaterialization.injection_scopes as Record<string, any>).counts, { host: 0, user_site: 3, local_site: 3 });
   const materializedBinding: any = ((kimiMaterialization.injection_scopes as Record<string, any>).bindings as Array<Record<string, any>>).find((binding) => binding.site_id === 'andrey-user');
   assert.equal(materializedBinding.loading_mode, 'progressive');
-  assert.deepEqual(materializedBinding.bootstrap_surface_ids, ['agent-context', 'local-filesystem', 'mcp-registrar', 'mcp-loader']);
+  assert.deepEqual(materializedBinding.bootstrap_surface_ids, ['agent-context', 'local-filesystem', 'mcp-registrar', 'mcp-loader', 'task-lifecycle', 'surface-feedback']);
   const materializedSurfaceIds: any = ((kimiMaterialization.injection_scopes as Record<string, any>).servers as Array<Record<string, any>>).map((server) => server.surface_id).sort();
-  assert.deepEqual(materializedSurfaceIds, ['agent-context', 'local-filesystem', 'mcp-loader', 'mcp-registrar']);
+  assert.deepEqual(materializedSurfaceIds, ['agent-context', 'local-filesystem', 'mcp-loader', 'mcp-registrar', 'surface-feedback', 'task-lifecycle']);
   const materializedPath: any = join(root, 'mcp.json');
   assert.equal((matData.carriers as Array<Record<string, any>>).some((carrier) => carrier.output_path === materializedPath), true);
   const materializedConfig: any = JSON.parse(readFileSync(materializedPath, 'utf8')) as Record<string, any>;
@@ -1518,10 +1518,10 @@ try {
     assert.match(content, /local-filesystem/);
     assert.match(content, /agent-context/);
     assert.match(content, /mcp-registrar/);
-    assert.doesNotMatch(content, /surface-feedback/);
-    assert.doesNotMatch(content, /--feedback-root/);
-    assert.doesNotMatch(content, /--canonical-feedback-root/);
-    assert.doesNotMatch(content, /--task-lifecycle-root/);
+    assert.match(content, /surface-feedback/);
+    assert.match(content, /--feedback-root/);
+    assert.match(content, /--canonical-feedback-root/);
+    assert.match(content, /--task-lifecycle-root/);
     assert.match(content, /--site-id/);
     assert.doesNotMatch(content, /--owned-surface-id/);
     if (carrierId === 'codex-andrey') {

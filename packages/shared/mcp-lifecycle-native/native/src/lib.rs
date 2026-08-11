@@ -3803,20 +3803,28 @@ fn path_within_root(candidate: &str, root: &Path) -> bool {
 }
 fn validate_execution_binding_scope(binding: &Value, site_root: &Path) -> Result<(), String> {
     let Some(binding) = binding.as_object() else { return Err("execution_binding_invalid".to_string()); };
+    let binding_site_root = binding.get("site_root").and_then(Value::as_str)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| site_root.to_path_buf());
     let current_root = normalized_path_string(site_root);
-    if let Some(value) = binding.get("site_root").and_then(Value::as_str) {
-        if normalized_path_string(Path::new(value)) != current_root {
-            return Err("task_lifecycle_execution_binding_site_root_mismatch".to_string());
-        }
+    let binding_root = normalized_path_string(&binding_site_root);
+    let contained_site_root = site_root.join(".narada");
+    let contained_site_declared = binding_root == normalized_path_string(&contained_site_root)
+        && site_root.join(".git").exists()
+        && contained_site_root.join("config.json").exists();
+    if binding_root != current_root && !contained_site_declared {
+        return Err("task_lifecycle_execution_binding_site_root_mismatch".to_string());
     }
+
     let workspace = binding.get("workspace_root").and_then(Value::as_str).ok_or("execution_binding_workspace_root_required")?;
-    let site_is_narada = site_root.file_name().and_then(|value| value.to_str()).is_some_and(|value| value.eq_ignore_ascii_case(".narada"));
-    let workspace_authorized = path_within_root(workspace, site_root)
-        || (site_is_narada && normalized_path_string(Path::new(workspace)) == normalized_path_string(site_root.parent().unwrap_or(site_root)) && site_root.parent().is_some_and(|value| value.join(".git").exists()));
+    let authority_root = binding_site_root.as_path();
+    let site_is_narada = authority_root.file_name().and_then(|value| value.to_str()).is_some_and(|value| value.eq_ignore_ascii_case(".narada"));
+    let workspace_authorized = path_within_root(workspace, authority_root)
+        || (site_is_narada && normalized_path_string(Path::new(workspace)) == normalized_path_string(authority_root.parent().unwrap_or(authority_root)) && authority_root.parent().is_some_and(|value| value.join(".git").exists()));
     if !workspace_authorized { return Err("task_lifecycle_execution_binding_workspace_outside_site_root".to_string()); }
     if let Some(repository) = binding.get("repository_root").and_then(Value::as_str) {
-        if !path_within_root(repository, site_root)
-            && !(site_is_narada && normalized_path_string(Path::new(repository)) == normalized_path_string(site_root.parent().unwrap_or(site_root)) && site_root.parent().is_some_and(|value| value.join(".git").exists()))
+        if !path_within_root(repository, authority_root)
+            && !(site_is_narada && normalized_path_string(Path::new(repository)) == normalized_path_string(authority_root.parent().unwrap_or(authority_root)) && authority_root.parent().is_some_and(|value| value.join(".git").exists()))
         {
             return Err("task_lifecycle_execution_binding_repository_outside_site_root".to_string());
         }

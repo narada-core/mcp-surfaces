@@ -47,6 +47,7 @@ import {
   assertAdmissionMatchesAgentContext,
   compileAgentContextOrientation,
   orientationEvidenceFromEnvironment,
+  resolveAgentContextLawPath,
 } from './orientation-manifest.js';
 import { continuationProjectionState } from './continuation-projection.js';
 
@@ -434,7 +435,7 @@ function assertSiteRoot() {
   if (!pathWithin(siteRoot, dbPath)) {
     throw new Error(`agent_context_db_path_outside_site_root: db_path=${dbPath}; bound_site_root=${siteRoot}`);
   }
-  const agPath = join(siteRoot, 'AGENTS.md');
+  const agPath = resolveAgentContextLawPath(siteRoot).path;
   if (!existsSync(agPath)) {
     throw new Error(`agent_context_missing_agents_md: ${agPath}`);
   }

@@ -235,6 +235,27 @@ function projection(
   };
 }
 
+export function resolveAgentContextLawPath(siteRoot: string): {
+  path: string;
+  siteRelativePath: string;
+  source: 'site_root' | 'contained_governance_root';
+} {
+  const direct = join(siteRoot, 'AGENTS.md');
+  if (existsSync(direct)) {
+    return { path: direct, siteRelativePath: 'AGENTS.md', source: 'site_root' };
+  }
+  const contained = join(siteRoot, '.narada', 'AGENTS.md');
+  const containedConfig = join(siteRoot, '.narada', 'config.json');
+  if (existsSync(contained) && existsSync(containedConfig)) {
+    return {
+      path: contained,
+      siteRelativePath: '.narada/AGENTS.md',
+      source: 'contained_governance_root',
+    };
+  }
+  return { path: direct, siteRelativePath: 'AGENTS.md', source: 'site_root' };
+}
+
 export interface AgentContextOrientationProjectionInput {
   siteRoot: string;
   siteId: string;
@@ -313,14 +334,16 @@ export function buildAgentContextOrientationProjections(
     }));
   }
 
-  const agentsPath = join(input.siteRoot, 'AGENTS.md');
+  const lawLocation = resolveAgentContextLawPath(input.siteRoot);
+  const agentsPath = lawLocation.path;
+  const lawArtifactRef = `site-file:${lawLocation.siteRelativePath}`;
   let requiredReads: UnknownRecord[] = [];
   let requiredReadPageCount: any = 0;
   if (existsSync(agentsPath)) {
     const law = readFileSync(agentsPath, 'utf8');
     requiredReadPageCount += assertOrientationRequiredReadSourceBound(
       law,
-      'site-file:AGENTS.md',
+      lawArtifactRef,
     ).page_count;
     const revision = sha256(law);
     const lineCount = Math.max(1, law.split(/\r?\n/).length);
@@ -330,7 +353,7 @@ export function buildAgentContextOrientationProjections(
       required: true,
       source: {
         source_authority_ref: 'site-law:' + admission.coordinate.site_ref,
-        artifact_ref: 'site-file:AGENTS.md',
+        artifact_ref: lawArtifactRef,
         revision,
       },
       tool: {
@@ -359,7 +382,7 @@ export function buildAgentContextOrientationProjections(
       compartment: 'law_and_constraints',
       entry_kind: 'site_law',
       source_authority_ref: 'site-law:' + admission.coordinate.site_ref,
-      artifact_ref: 'site-file:AGENTS.md',
+      artifact_ref: lawArtifactRef,
       revision,
       observed_at: observedAt,
       valid_until: null,
@@ -368,7 +391,7 @@ export function buildAgentContextOrientationProjections(
       revalidation_rule: 'on_sha256_change',
       evidence_refs: ['sha256:' + revision],
       payload: {
-        site_relative_path: 'AGENTS.md',
+        site_relative_path: lawLocation.siteRelativePath,
         sha256: revision,
         content_included: false,
         read_required: true,
@@ -382,7 +405,7 @@ export function buildAgentContextOrientationProjections(
       compartment: 'law_and_constraints',
       entry_kind: 'site_law',
       source_authority_ref: 'site-law:' + admission.coordinate.site_ref,
-      artifact_ref: 'site-file:AGENTS.md',
+      artifact_ref: lawArtifactRef,
       revision: 'unavailable',
       observed_at: observedAt,
       valid_until: null,
@@ -391,7 +414,7 @@ export function buildAgentContextOrientationProjections(
       revalidation_rule: 'before_orientation_delivery',
       evidence_refs: [],
       payload: {
-        site_relative_path: 'AGENTS.md',
+        site_relative_path: lawLocation.siteRelativePath,
         missing: true,
       },
       rendered_text: null,
