@@ -29,6 +29,9 @@
   },
   "scripts": {
     "build": "tsc -b",
+    "build:native:catalog": "node --import tsx scripts/emit-native-tool-catalog.ts",
+    "build:native": "pnpm run build:native:catalog && cargo build --release --locked --manifest-path native/Cargo.toml",
+    "test:native:contract": "pnpm run build:native && pnpm build && node dist/test/native-tool-catalog-parity.test.js",
     "typecheck": "tsc -b --pretty false",
     "test": "pnpm run test:bun",
     "test:bun": "pnpm --filter @narada-core/sqlite build && pnpm --filter @narada-core/mcp-runtime-proxy build && pnpm build && node dist/test/surface-definition-purity.test.js && bun dist/test/agent-context-mcp.test.js && bun test dist/test/continuation-projection.test.js && bun test dist/test/orientation-manifest.test.js && bun test dist/test/orientation-ceremony.test.js && bun test dist/test/carrier-orientation-e2e.test.js && bun dist/test/protocol-smoke.test.js && bun dist/test/site-fabric-agent-context-e2e.test.js && bun dist/test/session-start-roster.test.js && bun dist/test/session-start-migrations.test.js",
@@ -43,6 +46,7 @@
   "files": [
     "dist/",
     "migrations/",
+    "native/",
     "README.md"
   ],
   "devDependencies": {

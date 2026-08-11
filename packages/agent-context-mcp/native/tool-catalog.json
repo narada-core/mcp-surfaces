@@ -1,0 +1,2849 @@
+{
+  "schema": "narada.agent_context.native_tool_catalog.v1",
+  "projections": {
+    "occupant": [
+      {
+        "name": "agent_orientation_read",
+        "description": "Receive the bounded Carrier-entry orientation. Call with {} first, then replay only the exact opaque continuation returned in next_call until status=ready. The Carrier retains receipts, hashes, page coordinates, and completion evidence.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "continuation": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Opaque continuation returned by the preceding next_call. Do not inspect or alter it."
+            }
+          },
+          "additionalProperties": false
+        },
+        "outputSchema": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "annotations": {
+          "title": "agent_orientation_read",
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "mcp_output_show",
+        "description": "Read a materialized Agent Context MCP output ref with offset/limit paging.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": "string"
+            },
+            "output_ref": {
+              "type": "string"
+            },
+            "offset": {
+              "type": "integer"
+            },
+            "limit": {
+              "type": "integer"
+            }
+          }
+        },
+        "annotations": {
+          "title": "mcp_output_show",
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false
+        },
+        "outputSchema": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    ],
+    "admin": [
+      {
+        "name": "agent_orientation_read",
+        "description": "Receive the exact Carrier-entry Orientation Brief and its next_call. Call with no arguments first, then follow next_call exactly; required-read pages persist server-owned completion evidence and selections inspect exact entry snapshots.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "step_id": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Optional exact pending step_id returned by required_read_progress or next_call."
+            },
+            "offset": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Exact UTF-8 byte offset returned by the preceding next_call. Use 0 for the first page."
+            },
+            "selection": {
+              "type": "string",
+              "enum": [
+                "continuity",
+                "work"
+              ],
+              "description": "Inspect the exact continuity or work artifact selected by this admitted manifest."
+            }
+          },
+          "additionalProperties": false
+        },
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "schema": {
+                  "type": "string",
+                  "const": "narada.agent_context.orientation_entry_packet.v2"
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "orientation_required",
+                    "acknowledged"
+                  ]
+                },
+                "source_mutation": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "ordinary_work_gate": {
+                  "type": "string",
+                  "enum": [
+                    "acknowledgement_required",
+                    "open"
+                  ]
+                },
+                "orientation_brief": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "schema": {
+                      "type": "string",
+                      "const": "narada.orientation_brief.v1"
+                    },
+                    "brief_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "brief_digest": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "generated_at": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "coordinate": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "authority_scope": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "site_ref": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "carrier_session_id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "authority_epoch": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "authority_scope",
+                        "site_ref",
+                        "carrier_session_id",
+                        "authority_epoch"
+                      ]
+                    },
+                    "admission_receipt_ref": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "agent_identity": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "source_authority_ref": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "artifact_ref": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "revision": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "local_agent_id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "canonical_agent_id": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "required": [
+                        "source_authority_ref",
+                        "artifact_ref",
+                        "revision",
+                        "local_agent_id",
+                        "canonical_agent_id"
+                      ]
+                    },
+                    "carrier_kind": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "readiness": {
+                      "type": "string",
+                      "enum": [
+                        "ready",
+                        "degraded",
+                        "blocked"
+                      ]
+                    },
+                    "entry_state": {
+                      "type": "string",
+                      "const": "orientation_required"
+                    },
+                    "action_admission": {
+                      "type": "string",
+                      "const": "separate_required"
+                    },
+                    "manifest_ref": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "source_authority_ref": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "artifact_ref": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "revision": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "manifest_id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "manifest_digest": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "required": [
+                        "source_authority_ref",
+                        "artifact_ref",
+                        "revision",
+                        "manifest_id",
+                        "manifest_digest"
+                      ]
+                    },
+                    "role_binding": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "additionalProperties": true
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "continuity_selection": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "mode": {
+                          "type": "string",
+                          "enum": [
+                            "exact",
+                            "omitted"
+                          ]
+                        },
+                        "source_authority_ref": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "artifact_ref": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "revision": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "reason_code": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "summary": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "additionalProperties": true
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "inspection_call": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "additionalProperties": false,
+                              "properties": {
+                                "surface_id": {
+                                  "type": "string",
+                                  "minLength": 1
+                                },
+                                "tool": {
+                                  "type": "string",
+                                  "minLength": 1
+                                },
+                                "arguments": {
+                                  "type": "object",
+                                  "additionalProperties": true
+                                }
+                              },
+                              "required": [
+                                "surface_id",
+                                "tool",
+                                "arguments"
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "mode",
+                        "source_authority_ref",
+                        "artifact_ref",
+                        "revision",
+                        "reason_code",
+                        "summary",
+                        "inspection_call"
+                      ]
+                    },
+                    "work_selection": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "mode": {
+                          "type": "string",
+                          "enum": [
+                            "exact",
+                            "omitted"
+                          ]
+                        },
+                        "source_authority_ref": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "artifact_ref": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "revision": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "reason_code": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "summary": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "additionalProperties": true
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "inspection_call": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "additionalProperties": false,
+                              "properties": {
+                                "surface_id": {
+                                  "type": "string",
+                                  "minLength": 1
+                                },
+                                "tool": {
+                                  "type": "string",
+                                  "minLength": 1
+                                },
+                                "arguments": {
+                                  "type": "object",
+                                  "additionalProperties": true
+                                }
+                              },
+                              "required": [
+                                "surface_id",
+                                "tool",
+                                "arguments"
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "mode",
+                        "source_authority_ref",
+                        "artifact_ref",
+                        "revision",
+                        "reason_code",
+                        "summary",
+                        "inspection_call"
+                      ]
+                    },
+                    "required_reads": {
+                      "type": "array",
+                      "minItems": 1,
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "step_id": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "ordinal": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 9007199254740991
+                          },
+                          "required": {
+                            "type": "boolean",
+                            "const": true
+                          },
+                          "source": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                              "source_authority_ref": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "artifact_ref": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "revision": {
+                                "type": "string",
+                                "minLength": 1
+                              }
+                            },
+                            "required": [
+                              "source_authority_ref",
+                              "artifact_ref",
+                              "revision"
+                            ]
+                          },
+                          "tool": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                              "name": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "arguments": {
+                                "type": "object",
+                                "additionalProperties": true
+                              }
+                            },
+                            "required": [
+                              "name",
+                              "arguments"
+                            ]
+                          },
+                          "completion": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                              "kind": {
+                                "type": "string",
+                                "const": "tool_result_fields"
+                              },
+                              "expected_result": {
+                                "type": "object",
+                                "additionalProperties": true
+                              },
+                              "evidence_fields": {
+                                "type": "array",
+                                "minItems": 1,
+                                "items": {
+                                  "type": "string",
+                                  "minLength": 1
+                                }
+                              }
+                            },
+                            "required": [
+                              "kind",
+                              "expected_result",
+                              "evidence_fields"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "step_id",
+                          "ordinal",
+                          "required",
+                          "source",
+                          "tool",
+                          "completion"
+                        ]
+                      }
+                    },
+                    "residual_codes": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "negative_claims": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "inline_bytes": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991
+                    },
+                    "max_inline_bytes": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "schema",
+                    "brief_id",
+                    "brief_digest",
+                    "generated_at",
+                    "coordinate",
+                    "admission_receipt_ref",
+                    "agent_identity",
+                    "carrier_kind",
+                    "readiness",
+                    "entry_state",
+                    "action_admission",
+                    "manifest_ref",
+                    "role_binding",
+                    "continuity_selection",
+                    "work_selection",
+                    "required_reads",
+                    "residual_codes",
+                    "negative_claims",
+                    "inline_bytes",
+                    "max_inline_bytes"
+                  ]
+                },
+                "manifest_ref": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "source_authority_ref": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "artifact_ref": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "revision": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "manifest_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "manifest_digest": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "source_authority_ref",
+                    "artifact_ref",
+                    "revision",
+                    "manifest_id",
+                    "manifest_digest"
+                  ]
+                },
+                "delivery_receipt_ref": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "acknowledgement_ref": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "required_read_progress": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "total": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "completed": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "pending": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "completed_step_ids": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "pending_step_ids": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "completion_refs": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "active_step_id": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "next_byte_offset": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "total",
+                    "completed",
+                    "pending",
+                    "completed_step_ids",
+                    "pending_step_ids",
+                    "completion_refs",
+                    "active_step_id",
+                    "next_byte_offset"
+                  ]
+                },
+                "next_call": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "tool": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "arguments": {
+                          "type": "object",
+                          "additionalProperties": true
+                        }
+                      },
+                      "required": [
+                        "tool",
+                        "arguments"
+                      ]
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "schema",
+                "status",
+                "source_mutation",
+                "ordinary_work_gate",
+                "orientation_brief",
+                "manifest_ref",
+                "delivery_receipt_ref",
+                "acknowledgement_ref",
+                "required_read_progress",
+                "next_call"
+              ]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "schema": {
+                  "type": "string",
+                  "const": "narada.agent_context.orientation_required_read.v1"
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "page_emitted",
+                    "page_already_emitted",
+                    "completed",
+                    "already_completed"
+                  ]
+                },
+                "source_mutation": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "local_persistence": {
+                  "type": "boolean",
+                  "const": true
+                },
+                "ordinary_work_gate": {
+                  "type": "string",
+                  "const": "acknowledgement_required"
+                },
+                "step_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "source": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "content": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "page": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "result_evidence": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "completion_ref": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "required_read_progress": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "total": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "completed": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "pending": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "completed_step_ids": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "pending_step_ids": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "completion_refs": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "active_step_id": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "next_byte_offset": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "total",
+                    "completed",
+                    "pending",
+                    "completed_step_ids",
+                    "pending_step_ids",
+                    "completion_refs",
+                    "active_step_id",
+                    "next_byte_offset"
+                  ]
+                },
+                "next_call": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "tool": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "arguments": {
+                          "type": "object",
+                          "additionalProperties": true
+                        }
+                      },
+                      "required": [
+                        "tool",
+                        "arguments"
+                      ]
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "schema",
+                "status",
+                "source_mutation",
+                "local_persistence",
+                "ordinary_work_gate",
+                "step_id",
+                "source",
+                "content",
+                "page",
+                "result_evidence",
+                "completion_ref",
+                "required_read_progress",
+                "next_call"
+              ]
+            },
+            {
+              "type": "object",
+              "additionalProperties": true,
+              "properties": {
+                "schema": {
+                  "type": "string",
+                  "const": "narada.agent_context.orientation_selection_read.v1"
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "exact",
+                    "omitted"
+                  ]
+                },
+                "source_mutation": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "ordinary_work_gate": {
+                  "type": "string",
+                  "enum": [
+                    "acknowledgement_required",
+                    "open"
+                  ]
+                },
+                "selection_kind": {
+                  "type": "string",
+                  "enum": [
+                    "continuity",
+                    "work"
+                  ]
+                },
+                "manifest_ref": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "source_authority_ref": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "artifact_ref": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "revision": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "manifest_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "manifest_digest": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "source_authority_ref",
+                    "artifact_ref",
+                    "revision",
+                    "manifest_id",
+                    "manifest_digest"
+                  ]
+                }
+              },
+              "required": [
+                "schema",
+                "status",
+                "source_mutation",
+                "ordinary_work_gate",
+                "selection_kind",
+                "manifest_ref",
+                "selection",
+                "projection"
+              ]
+            }
+          ]
+        },
+        "annotations": {
+          "title": "agent_orientation_read",
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "agent_orientation_acknowledge",
+        "description": "Open the orientation gate after Agent Context has recorded every exact required read. No hashes, timestamps, or evidence payloads are accepted from the occupant.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        },
+        "outputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "schema": {
+              "type": "string",
+              "const": "narada.agent_context.orientation_acknowledgement_record.v1"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "acknowledged",
+                "already_acknowledged"
+              ]
+            },
+            "source_mutation": {
+              "type": "boolean",
+              "const": false
+            },
+            "local_persistence": {
+              "type": "boolean",
+              "const": true
+            },
+            "ordinary_work_gate": {
+              "type": "string",
+              "const": "open"
+            },
+            "acknowledgement": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "schema": {
+                  "type": "string",
+                  "const": "narada.carrier_session.orientation_acknowledgement.v1"
+                },
+                "acknowledgement_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "status": {
+                  "type": "string",
+                  "const": "acknowledged"
+                },
+                "coordinate": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "authority_scope": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "site_ref": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "carrier_session_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "authority_epoch": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "authority_scope",
+                    "site_ref",
+                    "carrier_session_id",
+                    "authority_epoch"
+                  ]
+                },
+                "admission_receipt_ref": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "delivery_receipt_ref": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "manifest_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "manifest_digest": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "brief_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "brief_digest": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "acknowledged_at": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "required_read_completions": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "step_id": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "tool_name": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "arguments": {
+                        "type": "object",
+                        "additionalProperties": true
+                      },
+                      "result_evidence": {
+                        "type": "object",
+                        "additionalProperties": true
+                      },
+                      "completed_at": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "evidence_refs": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      }
+                    },
+                    "required": [
+                      "step_id",
+                      "tool_name",
+                      "arguments",
+                      "result_evidence",
+                      "completed_at",
+                      "evidence_refs"
+                    ]
+                  }
+                },
+                "acknowledgement_semantics": {
+                  "type": "string",
+                  "const": "receipt_and_required_reads_not_comprehension"
+                },
+                "action_admission": {
+                  "type": "string",
+                  "const": "separate_required"
+                },
+                "authority_readback_ref": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "evidence_refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              },
+              "required": [
+                "schema",
+                "acknowledgement_id",
+                "status",
+                "coordinate",
+                "admission_receipt_ref",
+                "delivery_receipt_ref",
+                "manifest_id",
+                "manifest_digest",
+                "brief_id",
+                "brief_digest",
+                "acknowledged_at",
+                "required_read_completions",
+                "acknowledgement_semantics",
+                "action_admission",
+                "authority_readback_ref",
+                "evidence_refs"
+              ]
+            }
+          },
+          "required": [
+            "schema",
+            "status",
+            "source_mutation",
+            "local_persistence",
+            "ordinary_work_gate",
+            "acknowledgement"
+          ]
+        },
+        "annotations": {
+          "title": "agent_orientation_acknowledge",
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "agent_context_guidance",
+        "description": "Show model-facing operating guidance for agent-context MCP workflows.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "workflow": {
+              "type": "string",
+              "description": "Optional workflow name or area to focus guidance on."
+            },
+            "tool": {
+              "type": "string",
+              "description": "Optional tool name for tool-specific guidance."
+            }
+          },
+          "additionalProperties": false
+        },
+        "annotations": {
+          "title": "agent_context_guidance",
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false
+        },
+        "outputSchema": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      {
+        "name": "agent_context_doctor",
+        "description": "Check site-local agent-context DB readiness and schema presence.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {}
+        },
+        "annotations": {
+          "title": "agent_context_doctor",
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        },
+        "outputSchema": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      {
+        "name": "agent_context_whoami",
+        "description": "Resolve the exact admitted Agent/Carrier Session binding from an owner-issued admission receipt. Historical recency is never identity evidence.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "hint": {
+              "type": "string"
+            },
+            "admission_receipt": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "schema": {
+                  "type": "string",
+                  "const": "narada.carrier_session.admission_receipt.v0"
+                },
+                "receipt_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "decision": {
+                  "type": "string",
+                  "enum": [
+                    "admitted",
+                    "refused"
+                  ]
+                },
+                "state": {
+                  "type": "string",
+                  "enum": [
+                    "starting",
+                    "refused"
+                  ]
+                },
+                "coordinate": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "authority_scope": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "site_ref": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "carrier_session_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "authority_epoch": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "authority_scope",
+                    "site_ref",
+                    "carrier_session_id",
+                    "authority_epoch"
+                  ]
+                },
+                "agent_identity": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "source_authority_ref": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "artifact_ref": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "revision": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "local_agent_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "canonical_agent_id": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "source_authority_ref",
+                    "artifact_ref",
+                    "revision",
+                    "local_agent_id",
+                    "canonical_agent_id"
+                  ]
+                },
+                "carrier_kind": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "admission_policy": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "source_authority_ref": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "artifact_ref": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "revision": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "source_authority_ref",
+                    "artifact_ref",
+                    "revision"
+                  ]
+                },
+                "issued_at": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "valid_until": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "authority_readback_ref": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "evidence_refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "reason_codes": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              },
+              "required": [
+                "schema",
+                "receipt_id",
+                "decision",
+                "state",
+                "coordinate",
+                "agent_identity",
+                "carrier_kind",
+                "admission_policy",
+                "issued_at",
+                "valid_until",
+                "authority_readback_ref",
+                "evidence_refs",
+                "reason_codes"
+              ]
+            }
+          }
+        },
+        "annotations": {
+          "title": "agent_context_whoami",
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        },
+        "outputSchema": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      {
+        "name": "agent_context_start_session",
+        "description": "Compile and retain an Orientation Manifest against an exact owner-issued Carrier Session admission receipt; the start event is only a downstream trace.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "identity": {
+              "type": "string"
+            },
+            "runtime": {
+              "type": "string"
+            },
+            "cwd": {
+              "type": "string"
+            },
+            "dry_run": {
+              "type": "boolean"
+            },
+            "admission_receipt": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "schema": {
+                  "type": "string",
+                  "const": "narada.carrier_session.admission_receipt.v0"
+                },
+                "receipt_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "decision": {
+                  "type": "string",
+                  "enum": [
+                    "admitted",
+                    "refused"
+                  ]
+                },
+                "state": {
+                  "type": "string",
+                  "enum": [
+                    "starting",
+                    "refused"
+                  ]
+                },
+                "coordinate": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "authority_scope": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "site_ref": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "carrier_session_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "authority_epoch": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "authority_scope",
+                    "site_ref",
+                    "carrier_session_id",
+                    "authority_epoch"
+                  ]
+                },
+                "agent_identity": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "source_authority_ref": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "artifact_ref": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "revision": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "local_agent_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "canonical_agent_id": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "source_authority_ref",
+                    "artifact_ref",
+                    "revision",
+                    "local_agent_id",
+                    "canonical_agent_id"
+                  ]
+                },
+                "carrier_kind": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "admission_policy": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "source_authority_ref": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "artifact_ref": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "revision": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "source_authority_ref",
+                    "artifact_ref",
+                    "revision"
+                  ]
+                },
+                "issued_at": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "valid_until": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "authority_readback_ref": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "evidence_refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "reason_codes": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              },
+              "required": [
+                "schema",
+                "receipt_id",
+                "decision",
+                "state",
+                "coordinate",
+                "agent_identity",
+                "carrier_kind",
+                "admission_policy",
+                "issued_at",
+                "valid_until",
+                "authority_readback_ref",
+                "evidence_refs",
+                "reason_codes"
+              ]
+            },
+            "activation_receipt": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "schema": {
+                  "type": "string",
+                  "const": "narada.carrier_session.activation_receipt.v0"
+                },
+                "receipt_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "decision": {
+                  "type": "string",
+                  "enum": [
+                    "activated",
+                    "refused"
+                  ]
+                },
+                "state": {
+                  "type": "string",
+                  "enum": [
+                    "active",
+                    "starting"
+                  ]
+                },
+                "coordinate": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "authority_scope": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "site_ref": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "carrier_session_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "authority_epoch": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "authority_scope",
+                    "site_ref",
+                    "carrier_session_id",
+                    "authority_epoch"
+                  ]
+                },
+                "admission_receipt_ref": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "runtime_binding": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "source_authority_ref": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "artifact_ref": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "revision": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "owning_site_ref": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "observed_at": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "required": [
+                        "source_authority_ref",
+                        "artifact_ref",
+                        "revision",
+                        "owning_site_ref",
+                        "observed_at"
+                      ]
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "issued_at": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "authority_readback_ref": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "evidence_refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "reason_codes": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              },
+              "required": [
+                "schema",
+                "receipt_id",
+                "decision",
+                "state",
+                "coordinate",
+                "admission_receipt_ref",
+                "runtime_binding",
+                "issued_at",
+                "authority_readback_ref",
+                "evidence_refs",
+                "reason_codes"
+              ]
+            },
+            "generated_at": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "identity"
+          ]
+        },
+        "annotations": {
+          "title": "agent_context_start_session",
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false
+        },
+        "outputSchema": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      {
+        "name": "agent_context_checkpoint",
+        "description": "Write a durable site-local agent checkpoint, optionally carrying canonical continuation state and linking an exact portable continuation artifact.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "agent_id": {
+              "type": "string"
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "active_task": {
+              "type": "object"
+            },
+            "files_touched": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "key_decisions": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "open_questions": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "git_head": {
+              "type": "string"
+            },
+            "last_workboard_check_at": {
+              "type": "string"
+            },
+            "next_intended_action": {
+              "type": "object"
+            },
+            "authority_basis": {
+              "type": "object"
+            },
+            "continuation_blockers": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "evidence_refs": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "worktree_state": {
+              "type": "object"
+            },
+            "tactical_resume_notes": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "continuation_ref": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "schema": {
+                  "type": "string",
+                  "const": "narada.continuation.handoff.v1"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "sha256": {
+                  "type": "string"
+                },
+                "created_at": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "schema",
+                "path",
+                "sha256",
+                "created_at"
+              ]
+            },
+            "continuation": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "schema": {
+                  "type": "string",
+                  "const": "narada.continuation.v1"
+                },
+                "continuation_id": {
+                  "type": "string"
+                },
+                "objective": {
+                  "type": "string"
+                },
+                "current_state": {
+                  "type": "string"
+                },
+                "completed_work": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "decisions": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "evidence_refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "open_blockers": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "next_action": {
+                  "type": "string"
+                },
+                "canonical_sources": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "constraints": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "resume_mode": {
+                  "type": "string",
+                  "enum": [
+                    "fresh_session",
+                    "same_session"
+                  ]
+                },
+                "created_at": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "schema",
+                "objective",
+                "current_state"
+              ]
+            }
+          }
+        },
+        "annotations": {
+          "title": "agent_context_checkpoint",
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false
+        },
+        "outputSchema": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      {
+        "name": "agent_context_rehydrate",
+        "description": "Retrieve the latest site-local checkpoint, an exact current or archived checkpoint, or bounded checkpoint history for an agent.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "agent_id": {
+              "type": "string"
+            },
+            "checkpoint_id": {
+              "type": "string",
+              "description": "Optional exact checkpoint ID. Searches current and archived checkpoints scoped to this agent."
+            },
+            "history": {
+              "type": "boolean"
+            },
+            "limit": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "agent_id"
+          ]
+        },
+        "annotations": {
+          "title": "agent_context_rehydrate",
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        },
+        "outputSchema": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      {
+        "name": "agent_context_continuation_export",
+        "description": "Render the latest canonical continuation as a bounded Site-local Markdown projection and attach its verified reference.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "agent_id": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string",
+              "description": "Optional Site-relative path under .ai/continuations ending in .md."
+            },
+            "overwrite": {
+              "type": "boolean",
+              "description": "Allow replacing an existing projection at the explicit path."
+            }
+          },
+          "required": [
+            "agent_id"
+          ]
+        },
+        "annotations": {
+          "title": "agent_context_continuation_export",
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false
+        },
+        "outputSchema": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      {
+        "name": "agent_context_continuation_read",
+        "description": "Read the latest or explicitly selected continuation and verify its portable Markdown projection against the checkpoint reference and canonical content hash.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "agent_id": {
+              "type": "string"
+            },
+            "checkpoint_id": {
+              "type": "string",
+              "description": "Optional exact checkpoint ID. Searches current and archived checkpoints scoped to this agent."
+            }
+          },
+          "required": [
+            "agent_id"
+          ]
+        },
+        "annotations": {
+          "title": "agent_context_continuation_read",
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false
+        },
+        "outputSchema": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      {
+        "name": "agent_context_hydrate_current",
+        "description": "Compile a read-only diagnostic Orientation Manifest candidate for the exact admitted Carrier Session, optionally including one explicitly selected checkpoint. It does not replace the admitted generation.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "checkpoint_id": {
+              "type": "string",
+              "description": "Optional exact checkpoint ID. Omission means continuity is omitted, never latest."
+            },
+            "admission_receipt": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "schema": {
+                  "type": "string",
+                  "const": "narada.carrier_session.admission_receipt.v0"
+                },
+                "receipt_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "decision": {
+                  "type": "string",
+                  "enum": [
+                    "admitted",
+                    "refused"
+                  ]
+                },
+                "state": {
+                  "type": "string",
+                  "enum": [
+                    "starting",
+                    "refused"
+                  ]
+                },
+                "coordinate": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "authority_scope": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "site_ref": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "carrier_session_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "authority_epoch": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "authority_scope",
+                    "site_ref",
+                    "carrier_session_id",
+                    "authority_epoch"
+                  ]
+                },
+                "agent_identity": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "source_authority_ref": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "artifact_ref": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "revision": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "local_agent_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "canonical_agent_id": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "source_authority_ref",
+                    "artifact_ref",
+                    "revision",
+                    "local_agent_id",
+                    "canonical_agent_id"
+                  ]
+                },
+                "carrier_kind": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "admission_policy": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "source_authority_ref": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "artifact_ref": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "revision": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "source_authority_ref",
+                    "artifact_ref",
+                    "revision"
+                  ]
+                },
+                "issued_at": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "valid_until": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "authority_readback_ref": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "evidence_refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "reason_codes": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              },
+              "required": [
+                "schema",
+                "receipt_id",
+                "decision",
+                "state",
+                "coordinate",
+                "agent_identity",
+                "carrier_kind",
+                "admission_policy",
+                "issued_at",
+                "valid_until",
+                "authority_readback_ref",
+                "evidence_refs",
+                "reason_codes"
+              ]
+            },
+            "activation_receipt": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "schema": {
+                  "type": "string",
+                  "const": "narada.carrier_session.activation_receipt.v0"
+                },
+                "receipt_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "decision": {
+                  "type": "string",
+                  "enum": [
+                    "activated",
+                    "refused"
+                  ]
+                },
+                "state": {
+                  "type": "string",
+                  "enum": [
+                    "active",
+                    "starting"
+                  ]
+                },
+                "coordinate": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "authority_scope": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "site_ref": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "carrier_session_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "authority_epoch": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "authority_scope",
+                    "site_ref",
+                    "carrier_session_id",
+                    "authority_epoch"
+                  ]
+                },
+                "admission_receipt_ref": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "runtime_binding": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "source_authority_ref": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "artifact_ref": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "revision": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "owning_site_ref": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "observed_at": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "required": [
+                        "source_authority_ref",
+                        "artifact_ref",
+                        "revision",
+                        "owning_site_ref",
+                        "observed_at"
+                      ]
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "issued_at": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "authority_readback_ref": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "evidence_refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "reason_codes": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              },
+              "required": [
+                "schema",
+                "receipt_id",
+                "decision",
+                "state",
+                "coordinate",
+                "admission_receipt_ref",
+                "runtime_binding",
+                "issued_at",
+                "authority_readback_ref",
+                "evidence_refs",
+                "reason_codes"
+              ]
+            },
+            "generated_at": {
+              "type": "string"
+            },
+            "output": {
+              "type": "string"
+            }
+          }
+        },
+        "annotations": {
+          "title": "agent_context_hydrate_current",
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        },
+        "outputSchema": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      {
+        "name": "agent_context_startup_sequence",
+        "description": "Read and deliver the exact immutable Orientation Manifest generation selected by the Carrier entry procedure. It never recompiles, selects latest, or mutates a checkpoint.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "manifest_id": {
+              "type": "string",
+              "description": "Optional exact manifest ID; must match NARADA_ORIENTATION_MANIFEST_ID when both are present."
+            },
+            "admission_receipt": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "schema": {
+                  "type": "string",
+                  "const": "narada.carrier_session.admission_receipt.v0"
+                },
+                "receipt_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "decision": {
+                  "type": "string",
+                  "enum": [
+                    "admitted",
+                    "refused"
+                  ]
+                },
+                "state": {
+                  "type": "string",
+                  "enum": [
+                    "starting",
+                    "refused"
+                  ]
+                },
+                "coordinate": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "authority_scope": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "site_ref": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "carrier_session_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "authority_epoch": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "authority_scope",
+                    "site_ref",
+                    "carrier_session_id",
+                    "authority_epoch"
+                  ]
+                },
+                "agent_identity": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "source_authority_ref": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "artifact_ref": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "revision": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "local_agent_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "canonical_agent_id": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "source_authority_ref",
+                    "artifact_ref",
+                    "revision",
+                    "local_agent_id",
+                    "canonical_agent_id"
+                  ]
+                },
+                "carrier_kind": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "admission_policy": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "source_authority_ref": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "artifact_ref": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "revision": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "source_authority_ref",
+                    "artifact_ref",
+                    "revision"
+                  ]
+                },
+                "issued_at": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "valid_until": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "authority_readback_ref": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "evidence_refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "reason_codes": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              },
+              "required": [
+                "schema",
+                "receipt_id",
+                "decision",
+                "state",
+                "coordinate",
+                "agent_identity",
+                "carrier_kind",
+                "admission_policy",
+                "issued_at",
+                "valid_until",
+                "authority_readback_ref",
+                "evidence_refs",
+                "reason_codes"
+              ]
+            },
+            "activation_receipt": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "schema": {
+                  "type": "string",
+                  "const": "narada.carrier_session.activation_receipt.v0"
+                },
+                "receipt_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "decision": {
+                  "type": "string",
+                  "enum": [
+                    "activated",
+                    "refused"
+                  ]
+                },
+                "state": {
+                  "type": "string",
+                  "enum": [
+                    "active",
+                    "starting"
+                  ]
+                },
+                "coordinate": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "authority_scope": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "site_ref": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "carrier_session_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "authority_epoch": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "authority_scope",
+                    "site_ref",
+                    "carrier_session_id",
+                    "authority_epoch"
+                  ]
+                },
+                "admission_receipt_ref": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "runtime_binding": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "source_authority_ref": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "artifact_ref": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "revision": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "owning_site_ref": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "observed_at": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "required": [
+                        "source_authority_ref",
+                        "artifact_ref",
+                        "revision",
+                        "owning_site_ref",
+                        "observed_at"
+                      ]
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "issued_at": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "authority_readback_ref": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "evidence_refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "reason_codes": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              },
+              "required": [
+                "schema",
+                "receipt_id",
+                "decision",
+                "state",
+                "coordinate",
+                "admission_receipt_ref",
+                "runtime_binding",
+                "issued_at",
+                "authority_readback_ref",
+                "evidence_refs",
+                "reason_codes"
+              ]
+            },
+            "output": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        "annotations": {
+          "title": "agent_context_startup_sequence",
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        },
+        "outputSchema": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      {
+        "name": "agent_context_list_sessions",
+        "description": "List site-local agent start sessions.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "identity": {
+              "type": "string"
+            },
+            "limit": {
+              "type": "integer"
+            }
+          }
+        },
+        "annotations": {
+          "title": "agent_context_list_sessions",
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        },
+        "outputSchema": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      {
+        "name": "mcp_output_show",
+        "description": "Read a materialized Agent Context MCP output ref with offset/limit paging.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": "string"
+            },
+            "output_ref": {
+              "type": "string"
+            },
+            "offset": {
+              "type": "integer"
+            },
+            "limit": {
+              "type": "integer"
+            }
+          }
+        },
+        "annotations": {
+          "title": "mcp_output_show",
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false
+        },
+        "outputSchema": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    ]
+  }
+}
