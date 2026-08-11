@@ -1,6 +1,7 @@
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime, UtcOffset};
@@ -43,6 +44,7 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<V
         "mailbox_outbox_list" => outbox_list(args, root),
         "mailbox_outbox_consumer_register" => outbox_consumer_register(args, root),
         "mailbox_outbox_ack" => outbox_ack(args, root),
+        "mailbox_reconcile_first_observations" => reconcile_first_observations(args, root),
         name if READ_NAMES.contains(&name) => Err(authority_boundary(name)),
         name if MUTATING_NAMES.contains(&name) => Err(authority_boundary(name)),
         _ => Err(error("unknown_tool", &format!("unknown_tool:{name}"))),
@@ -244,6 +246,56 @@ fn open_domain_db_write(root: &Path) -> Result<Connection, Value> {
 fn init_outbox_schema(db: &Connection) -> Result<(), Value> {
     db.execute_batch(
         r#"
+        CREATE TABLE IF NOT EXISTS mailbox_sync_generations(
+          generation_id TEXT PRIMARY KEY,
+          idempotency_key TEXT NOT NULL UNIQUE,
+          request_fingerprint TEXT NOT NULL,
+          scope_id TEXT NOT NULL,
+          config_fingerprint TEXT NOT NULL,
+          status TEXT NOT NULL CHECK(status IN ('accepted','staged','completed','failed')),
+          parent_cursor TEXT,
+          next_cursor TEXT,
+          batch_path TEXT,
+          batch_sha256 TEXT,
+          batch_record_count INTEGER NOT NULL DEFAULT 0,
+          staged_at TEXT,
+          receipt_json TEXT,
+          error_message TEXT,
+          lease_token TEXT,
+          lease_expires_at TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          completed_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS mailbox_sync_generation_records(
+          generation_id TEXT NOT NULL REFERENCES mailbox_sync_generations(generation_id),
+          record_id TEXT NOT NULL,
+          ordinal TEXT,
+          fact_id TEXT NOT NULL,
+          event_kind TEXT NOT NULL,
+          message_id TEXT,
+          mailbox_id TEXT,
+          conversation_id TEXT,
+          source_version TEXT,
+          application_status TEXT NOT NULL CHECK(application_status IN ('staged','already_applied','projected','not_applied','reconciled')),
+          PRIMARY KEY(generation_id, record_id)
+        );
+        CREATE TABLE IF NOT EXISTS mailbox_sync_scope_leases(
+          scope_id TEXT PRIMARY KEY,
+          generation_id TEXT NOT NULL REFERENCES mailbox_sync_generations(generation_id),
+          lease_token TEXT NOT NULL,
+          expires_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS mailbox_message_observations(
+          observation_id TEXT PRIMARY KEY,
+          mailbox_id TEXT NOT NULL,
+          message_id TEXT NOT NULL,
+          first_generation_id TEXT NOT NULL REFERENCES mailbox_sync_generations(generation_id),
+          first_fact_id TEXT NOT NULL,
+          observed_at TEXT NOT NULL,
+          UNIQUE(mailbox_id, message_id)
+        );
         CREATE TABLE IF NOT EXISTS mailbox_outbox(
           event_id TEXT PRIMARY KEY,
           scope_id TEXT NOT NULL,
@@ -272,10 +324,34 @@ fn init_outbox_schema(db: &Connection) -> Result<(), Value> {
           acknowledged_at TEXT NOT NULL,
           PRIMARY KEY(consumer_id, event_id)
         );
+        CREATE TABLE IF NOT EXISTS mailbox_admission_receipts(
+          admission_id TEXT PRIMARY KEY,
+          idempotency_key TEXT NOT NULL UNIQUE,
+          request_fingerprint TEXT NOT NULL,
+          scope_id TEXT NOT NULL,
+          fact_id TEXT NOT NULL,
+          policy_version TEXT NOT NULL,
+          decision_json TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS mailbox_reconciliation_operations(
+          operation_id TEXT PRIMARY KEY,
+          idempotency_key TEXT NOT NULL UNIQUE,
+          request_fingerprint TEXT NOT NULL,
+          scope_id TEXT NOT NULL,
+          generation_id TEXT NOT NULL REFERENCES mailbox_sync_generations(generation_id),
+          result_json TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
         CREATE INDEX IF NOT EXISTS mailbox_outbox_order_idx
           ON mailbox_outbox(occurred_at, event_id);
         CREATE INDEX IF NOT EXISTS mailbox_outbox_subscription_idx
           ON mailbox_outbox(scope_id, topic, occurred_at, event_id);
+        CREATE INDEX IF NOT EXISTS mailbox_generation_scope_idx
+          ON mailbox_sync_generations(scope_id, created_at);
+        CREATE UNIQUE INDEX IF NOT EXISTS mailbox_admission_scope_fact_idx
+          ON mailbox_admission_receipts(scope_id, fact_id);
+        PRAGMA user_version = 2;
         "#,
     )
     .map_err(|e| error("mailbox_domain_schema_failed", &e.to_string()))?;
@@ -561,6 +637,498 @@ fn outbox_ack(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
         Err(value) => Err(value),
     }
 }
+
+#[derive(Clone)]
+struct MailboxScope {
+    scope_id: String,
+    root_dir: PathBuf,
+    graph_mailbox_id: Option<String>,
+    admission: Value,
+}
+
+struct MailFact {
+    fact_id: String,
+    fact_type: String,
+    provenance: Value,
+    payload: Value,
+    created_at: String,
+}
+
+#[derive(Clone)]
+struct FirstObservationCandidate {
+    mailbox_id: String,
+    message_id: String,
+    fact_id: String,
+    conversation_id: Option<String>,
+}
+
+struct MailMetadata {
+    mailbox_id: String,
+    message_id: String,
+    conversation_id: Option<String>,
+    internet_message_id: Option<String>,
+    subject: Option<String>,
+}
+
+fn load_mailbox_scope(args: &Map<String, Value>, root: &Path) -> Result<MailboxScope, Value> {
+    let config_argument = args
+        .get("config_path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("config/config.json");
+    if config_argument.chars().count() > 1024 {
+        return Err(error("mailbox_string_argument_too_long", "mailbox_string_argument_too_long"));
+    }
+    let requested = args
+        .get("scope_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    if requested.as_ref().is_some_and(|value| value.chars().count() > 256) {
+        return Err(error("mailbox_string_argument_too_long", "mailbox_string_argument_too_long"));
+    }
+    let candidate = PathBuf::from(config_argument);
+    let config_path = if candidate.is_absolute() { candidate } else { root.join(candidate) };
+    let root_canonical = fs::canonicalize(root)
+        .map_err(|e| error("mailbox_site_root_invalid", &e.to_string()))?;
+    let config_canonical = fs::canonicalize(&config_path)
+        .map_err(|e| error("mailbox_config_read_failed", &e.to_string()))?;
+    if !config_canonical.starts_with(&root_canonical) {
+        return Err(error(
+            "mailbox_config_path_outside_site",
+            &format!("mailbox_config_path_outside_site:{}", config_path.to_string_lossy()),
+        ));
+    }
+    if fs::metadata(&config_canonical)
+        .map_err(|e| error("mailbox_config_read_failed", &e.to_string()))?
+        .len()
+        > MAX_BYTES
+    {
+        return Err(error("mailbox_config_too_large", "mailbox_config_too_large"));
+    }
+    let document: Value = serde_json::from_str(
+        &fs::read_to_string(&config_canonical)
+            .map_err(|e| error("mailbox_config_read_failed", &e.to_string()))?,
+    )
+    .map_err(|e| error("mailbox_config_invalid", &e.to_string()))?;
+    let scopes = document
+        .get("scopes")
+        .and_then(Value::as_array)
+        .ok_or_else(|| error("mailbox_config_scopes_invalid", "mailbox_config_scopes_invalid"))?;
+    let scope = if let Some(requested) = requested.as_deref() {
+        scopes.iter().find(|scope| {
+            scope.get("scope_id").and_then(Value::as_str) == Some(requested)
+        })
+    } else if scopes.len() == 1 {
+        scopes.first()
+    } else {
+        None
+    };
+    let scope = scope.ok_or_else(|| {
+        if let Some(requested) = requested.as_deref() {
+            error(
+                &format!("mailbox_scope_not_found:{requested}"),
+                &format!("mailbox_scope_not_found:{requested}"),
+            )
+        } else {
+            error("mailbox_scope_id_required", "mailbox_scope_id_required")
+        }
+    })?;
+    let scope_object = scope
+        .as_object()
+        .ok_or_else(|| error("mailbox_scope_invalid", "mailbox_scope_invalid"))?;
+    let scope_id = required_bounded(scope_object, "scope_id", "mailbox_scope_id_required", 256)?;
+    let scope_root = required_bounded(scope_object, "root_dir", "mailbox_scope_root_required", 1024)?;
+    let scope_root_candidate = PathBuf::from(scope_root);
+    let scope_root_path = if scope_root_candidate.is_absolute() {
+        scope_root_candidate
+    } else {
+        root.join(scope_root_candidate)
+    };
+    let scope_root_canonical = fs::canonicalize(&scope_root_path)
+        .map_err(|e| error("mailbox_scope_root_invalid", &e.to_string()))?;
+    if !scope_root_canonical.starts_with(&root_canonical) {
+        return Err(error(
+            "mailbox_scope_root_outside_site",
+            &format!("mailbox_scope_root_outside_site:{}", scope_root_path.to_string_lossy()),
+        ));
+    }
+    let graph = scope.get("graph").and_then(Value::as_object).or_else(|| {
+        scope
+            .get("sources")
+            .and_then(Value::as_array)
+            .and_then(|sources| {
+                sources.iter().find(|source| {
+                    source.get("type").and_then(Value::as_str) == Some("graph")
+                })
+            })
+            .and_then(Value::as_object)
+    });
+    let graph_mailbox_id = graph.and_then(|graph| {
+        graph
+            .get("mailbox_id")
+            .or_else(|| graph.get("user_id"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+    });
+    let admission = scope
+        .get("admission")
+        .and_then(|value| value.get("mail"))
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    Ok(MailboxScope {
+        scope_id,
+        root_dir: scope_root_canonical,
+        graph_mailbox_id,
+        admission,
+    })
+}
+
+fn load_mail_fact(scope: &MailboxScope, fact_id: &str) -> Result<MailFact, Value> {
+    let path = scope.root_dir.join(".narada/facts.db");
+    if !path.is_file() {
+        return Err(error(
+            &format!("mailbox_reconciliation_fact_db_missing:{}", path.to_string_lossy()),
+            &format!("mailbox_reconciliation_fact_db_missing:{}", path.to_string_lossy()),
+        ));
+    }
+    let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| error("mailbox_fact_store_open_failed", &e.to_string()))?;
+    let row: Option<(String, String, String, String)> = db
+        .query_row(
+            "SELECT fact_type,provenance_json,payload_json,created_at FROM facts WHERE fact_id=?",
+            params![fact_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(|e| error("mailbox_fact_query_failed", &e.to_string()))?;
+    let Some((fact_type, provenance_json, payload_json, created_at)) = row else {
+        return Err(error(
+            &format!("mailbox_reconciliation_fact_not_found:{fact_id}"),
+            &format!("mailbox_reconciliation_fact_not_found:{fact_id}"),
+        ));
+    };
+    let provenance = serde_json::from_str(&provenance_json)
+        .map_err(|e| error("mailbox_fact_provenance_invalid", &e.to_string()))?;
+    let payload = serde_json::from_str(&payload_json)
+        .map_err(|e| error("mailbox_fact_payload_invalid", &e.to_string()))?;
+    Ok(MailFact {
+        fact_id: fact_id.to_string(),
+        fact_type,
+        provenance,
+        payload,
+        created_at,
+    })
+}
+
+fn mail_metadata(fact: &MailFact) -> Result<MailMetadata, Value> {
+    let envelope = fact
+        .payload
+        .as_object()
+        .ok_or_else(|| error("mailbox_fact_payload_invalid", "mailbox_fact_payload_invalid"))?;
+    let event = envelope
+        .get("event")
+        .and_then(Value::as_object)
+        .ok_or_else(|| error("mailbox_fact_event_invalid", "mailbox_fact_event_invalid"))?;
+    let payload = event
+        .get("payload")
+        .and_then(Value::as_object);
+    let value = |key: &str| {
+        event
+            .get(key)
+            .or_else(|| payload.and_then(|payload| payload.get(key)))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+    };
+    let mailbox_id = value("mailbox_id")
+        .ok_or_else(|| error("mailbox_fact_mailbox_id_missing", "mailbox_fact_mailbox_id_missing"))?;
+    let message_id = value("message_id")
+        .ok_or_else(|| error("mailbox_fact_message_id_missing", "mailbox_fact_message_id_missing"))?;
+    Ok(MailMetadata {
+        mailbox_id,
+        message_id,
+        conversation_id: value("conversation_id"),
+        internet_message_id: payload
+            .and_then(|payload| payload.get("internet_message_id"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string),
+        subject: payload
+            .and_then(|payload| payload.get("subject"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.chars().take(500).collect()),
+    })
+}
+
+fn stable_id(prefix: &str, value: &str) -> String {
+    format!("{prefix}{}", &sha256_hex(value.as_bytes())[..40])
+}
+
+fn reconcile_first_observations(
+    args: &Map<String, Value>,
+    root: &Path,
+) -> Result<Value, Value> {
+    let idempotency_key = required_bounded(
+        args,
+        "idempotency_key",
+        "mailbox_reconciliation_idempotency_key_required",
+        512,
+    )?;
+    let generation_id = required_bounded(
+        args,
+        "generation_id",
+        "mailbox_reconciliation_generation_id_required",
+        128,
+    )?;
+    let scope = load_mailbox_scope(args, root)?;
+    let limit = bounded_integer(args.get("limit"), 100, 1, 100)? as usize;
+    let mut db = open_domain_db_write(root)?;
+    let mut observed = HashSet::new();
+    {
+        let mut statement = db
+            .prepare("SELECT mailbox_id,message_id FROM mailbox_message_observations WHERE mailbox_id=?")
+            .map_err(|e| error("mailbox_observation_query_failed", &e.to_string()))?;
+        let rows = statement
+            .query_map(params![scope.scope_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| error("mailbox_observation_query_failed", &e.to_string()))?;
+        for row in rows {
+            let (mailbox_id, message_id) =
+                row.map_err(|e| error("mailbox_observation_row_failed", &e.to_string()))?;
+            observed.insert(format!("{mailbox_id}\0{message_id}"));
+        }
+    }
+    let mut candidates = Vec::new();
+    let mut candidate_identities = HashSet::new();
+    {
+        let mut statement = db
+            .prepare("SELECT fact_id,event_kind,message_id,mailbox_id,conversation_id,application_status FROM mailbox_sync_generation_records WHERE generation_id=? ORDER BY rowid")
+            .map_err(|e| error("mailbox_generation_record_query_failed", &e.to_string()))?;
+        let rows = statement
+            .query_map(params![generation_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            })
+            .map_err(|e| error("mailbox_generation_record_query_failed", &e.to_string()))?;
+        for row in rows {
+            let (fact_id, event_kind, message_id, mailbox_id, conversation_id, application_status) =
+                row.map_err(|e| error("mailbox_generation_record_row_failed", &e.to_string()))?;
+            if application_status == "not_applied" || matches!(event_kind.as_str(), "delete" | "deleted") {
+                continue;
+            }
+            let (Some(message_id), Some(mailbox_id)) = (message_id, mailbox_id) else {
+                continue;
+            };
+            if mailbox_id != scope.scope_id {
+                let code = format!("mailbox_reconciliation_scope_mismatch:{mailbox_id}:{}", scope.scope_id);
+                return Err(error(&code, &code));
+            }
+            let identity = format!("{mailbox_id}\0{message_id}");
+            if !observed.contains(&identity) && candidate_identities.insert(identity) {
+                candidates.push(FirstObservationCandidate {
+                    mailbox_id,
+                    message_id,
+                    fact_id,
+                    conversation_id,
+                });
+            }
+        }
+    }
+    let unobserved_count = candidates.len();
+    candidates.truncate(limit);
+    for candidate in &mut candidates {
+        let fact = load_mail_fact(&scope, &candidate.fact_id).map_err(|value| {
+            let message = value
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("mailbox_reconciliation_fact_validation_failed");
+            error(
+                &format!("mailbox_reconciliation_fact_validation_failed:{message}"),
+                &format!("mailbox_reconciliation_fact_validation_failed:{message}"),
+            )
+        })?;
+        if fact.fact_type != "mail.message.discovered" {
+            let code = format!("mailbox_reconciliation_fact_type_invalid:{}", fact.fact_type);
+            return Err(error(
+                &format!("mailbox_reconciliation_fact_validation_failed:{code}"),
+                &format!("mailbox_reconciliation_fact_validation_failed:{code}"),
+            ));
+        }
+        let metadata = mail_metadata(&fact)?;
+        if metadata.mailbox_id != candidate.mailbox_id || metadata.message_id != candidate.message_id {
+            let code = format!("mailbox_reconciliation_fact_identity_mismatch:{}", candidate.fact_id);
+            return Err(error(
+                &format!("mailbox_reconciliation_fact_validation_failed:{code}"),
+                &format!("mailbox_reconciliation_fact_validation_failed:{code}"),
+            ));
+        }
+        if metadata.conversation_id.is_some() {
+            candidate.conversation_id = metadata.conversation_id;
+        }
+    }
+    let request_fingerprint = sha256_hex(
+        canonical_json(&json!({
+            "schema":"narada.mailbox.reconcile_first_observations_request.v1",
+            "scope_id":scope.scope_id,
+            "generation_id":generation_id,
+            "limit":limit
+        }))
+        .as_bytes(),
+    );
+    let operation_id = stable_id("mbr_", &idempotency_key);
+    let remaining_unobserved = unobserved_count.saturating_sub(candidates.len());
+    let has_more = unobserved_count > candidates.len();
+    let now = now_iso_millis();
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|e| error("mailbox_domain_transaction_failed", &e.to_string()))?;
+    let result = (|| {
+        let existing: Option<(String, String)> = tx
+            .query_row(
+                "SELECT request_fingerprint,result_json FROM mailbox_reconciliation_operations WHERE idempotency_key=?",
+                params![idempotency_key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|e| error("mailbox_reconciliation_query_failed", &e.to_string()))?;
+        if let Some((existing_fingerprint, existing_json)) = existing {
+            if existing_fingerprint != request_fingerprint {
+                let code = format!("mailbox_reconciliation_idempotency_conflict:{idempotency_key}");
+                return Err(error(&code, &code));
+            }
+            let mut replay = serde_json::from_str::<Value>(&existing_json)
+                .map_err(|e| error("mailbox_reconciliation_receipt_invalid", &e.to_string()))?;
+            if let Some(object) = replay.as_object_mut() {
+                object.insert("idempotency_replayed".to_string(), Value::Bool(true));
+            }
+            return Ok(json!({
+                "schema":"narada.domain_operation.v1",
+                "operation_ref":format!("mailbox-reconcile:{operation_id}"),
+                "outcome":"completed",
+                "result":replay
+            }));
+        }
+        let generation: Option<(String, String)> = tx
+            .query_row(
+                "SELECT scope_id,status FROM mailbox_sync_generations WHERE generation_id=?",
+                params![generation_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|e| error("mailbox_sync_generation_query_failed", &e.to_string()))?;
+        let Some((generation_scope, generation_status)) = generation else {
+            let code = format!("mailbox_sync_generation_not_found:{generation_id}");
+            return Err(error(&code, &code));
+        };
+        if generation_scope != scope.scope_id {
+            let code = format!(
+                "mailbox_reconciliation_scope_mismatch:{}:{generation_scope}",
+                scope.scope_id
+            );
+            return Err(error(&code, &code));
+        }
+        if generation_status != "completed" {
+            let code = format!("mailbox_reconciliation_generation_not_completed:{generation_status}");
+            return Err(error(&code, &code));
+        }
+        let mut observations_recorded = 0_i64;
+        let mut events_published = 0_i64;
+        let mut skipped_existing = 0_i64;
+        for candidate in &candidates {
+            let identity = format!("{}\0{}", candidate.mailbox_id, candidate.message_id);
+            let observation_id = stable_id("mobs_", &identity);
+            let observation_changes = tx
+                .execute(
+                    "INSERT OR IGNORE INTO mailbox_message_observations(observation_id,mailbox_id,message_id,first_generation_id,first_fact_id,observed_at) VALUES (?,?,?,?,?,?)",
+                    params![observation_id,candidate.mailbox_id,candidate.message_id,generation_id,candidate.fact_id,now],
+                )
+                .map_err(|e| error("mailbox_observation_insert_failed", &e.to_string()))?;
+            if observation_changes == 1 {
+                observations_recorded += 1;
+            } else {
+                skipped_existing += 1;
+            }
+            let event_id = stable_id("mbe_", &format!("first-observed\0{identity}"));
+            let mut payload = json!({
+                "schema":"narada.mailbox.message_first_observed.v1",
+                "generation_id":generation_id,
+                "observation_id":observation_id,
+                "mailbox_id":candidate.mailbox_id,
+                "message_id":candidate.message_id,
+                "fact_id":candidate.fact_id
+            });
+            if let Some(conversation_id) = &candidate.conversation_id {
+                payload
+                    .as_object_mut()
+                    .expect("payload object")
+                    .insert("conversation_id".to_string(), Value::String(conversation_id.clone()));
+            }
+            let event_changes = tx
+                .execute(
+                    "INSERT OR IGNORE INTO mailbox_outbox(event_id,scope_id,topic,aggregate_id,aggregate_revision,schema_version,causation_id,idempotency_key,partition_key,occurred_at,payload_json) VALUES (?,?,'mailbox.message.first_observed',?,1,1,?,?,?,?,?)",
+                    params![event_id,scope.scope_id,observation_id,generation_id,event_id,observation_id,now,serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string())],
+                )
+                .map_err(|e| error("mailbox_outbox_insert_failed", &e.to_string()))?;
+            if event_changes == 1 {
+                events_published += 1;
+            }
+        }
+        let receipt = json!({
+            "schema":"narada.mailbox.reconcile_first_observations_receipt.v1",
+            "operation_id":operation_id,
+            "scope_id":scope.scope_id,
+            "generation_id":generation_id,
+            "candidates_scanned":candidates.len(),
+            "observations_recorded":observations_recorded,
+            "events_published":events_published,
+            "skipped_existing":skipped_existing,
+            "remaining_unobserved":remaining_unobserved,
+            "has_more":has_more,
+            "status":"completed"
+        });
+        tx.execute(
+            "INSERT INTO mailbox_reconciliation_operations(operation_id,idempotency_key,request_fingerprint,scope_id,generation_id,result_json,created_at) VALUES (?,?,?,?,?,?,?)",
+            params![operation_id,idempotency_key,request_fingerprint,scope.scope_id,generation_id,serde_json::to_string(&receipt).unwrap_or_else(|_| "{}".to_string()),now],
+        )
+        .map_err(|e| error("mailbox_reconciliation_insert_failed", &e.to_string()))?;
+        let mut result = receipt;
+        result
+            .as_object_mut()
+            .expect("receipt object")
+            .insert("idempotency_replayed".to_string(), Value::Bool(false));
+        Ok(json!({
+            "schema":"narada.domain_operation.v1",
+            "operation_ref":format!("mailbox-reconcile:{operation_id}"),
+            "outcome":"completed",
+            "result":result
+        }))
+    })();
+    match result {
+        Ok(value) => {
+            tx.commit()
+                .map_err(|e| error("mailbox_domain_transaction_commit_failed", &e.to_string()))?;
+            Ok(value)
+        }
+        Err(value) => Err(value),
+    }
+}
+
 fn filter_message(v: &Value, args: &Map<String, Value>) -> bool {
     for (key, field) in [("mailbox_id", "mailbox_id"), ("folder", "folder"), ("thread_id", "thread_id")] {
         if let Some(filter) = args.get(key).and_then(Value::as_str) {
@@ -862,8 +1430,8 @@ mod tests {
         let root = std::env::temp_dir().join(format!("narada-mailbox-db-{}", uuid::Uuid::new_v4()));
         let db = open_domain_db_write(&root).expect("db");
         db.execute_batch(r##"
-            CREATE TABLE mailbox_sync_generations (generation_id TEXT,idempotency_key TEXT,scope_id TEXT,config_fingerprint TEXT,status TEXT,parent_cursor TEXT,next_cursor TEXT,batch_sha256 TEXT,batch_record_count INTEGER,staged_at TEXT,error_message TEXT,created_at TEXT,updated_at TEXT,completed_at TEXT);
-            INSERT INTO mailbox_sync_generations VALUES ('g1','k1','scope','cfg','completed',NULL,NULL,'hash',1,NULL,NULL,'2026-01-01','2026-01-01','2026-01-01');
+            INSERT INTO mailbox_sync_generations(generation_id,idempotency_key,request_fingerprint,scope_id,config_fingerprint,status,batch_record_count,created_at,updated_at,completed_at)
+            VALUES ('g1','k1','request','scope','cfg','completed',1,'2026-01-01','2026-01-01','2026-01-01');
             INSERT INTO mailbox_outbox(event_id,scope_id,topic,aggregate_id,aggregate_revision,schema_version,causation_id,idempotency_key,partition_key,occurred_at,payload_json)
             VALUES ('e1','scope','topic','a1',1,1,'c','k','p','2026-01-01T00:00:00.000Z','{"value":1}');
         "##).expect("schema");
@@ -912,6 +1480,74 @@ mod tests {
         )
         .expect_err("ack conflict");
         assert_eq!(ack_conflict["code"], "mailbox_outbox_ack_conflict:c1:e1");
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn native_mailbox_reconciliation_publishes_first_observation_once() {
+        let root = std::env::temp_dir().join(format!("narada-mailbox-reconcile-{}", uuid::Uuid::new_v4()));
+        let scope_root = root.join(".narada/runtime/mailboxes/support");
+        fs::create_dir_all(scope_root.join(".narada")).expect("scope root");
+        fs::create_dir_all(root.join("config")).expect("config root");
+        fs::write(
+            root.join("config/config.json"),
+            serde_json::to_vec(&json!({
+                "scopes":[{
+                    "scope_id":"support",
+                    "root_dir":".narada/runtime/mailboxes/support",
+                    "sources":[{"type":"graph"}],
+                    "graph":{"user_id":"support@example.test","prefer_immutable_ids":true},
+                    "scope":{"included_container_refs":["inbox"],"included_item_kinds":["message"]},
+                    "normalize":{"attachment_policy":"metadata_only","body_policy":"text_only","include_headers":false,"tombstones_enabled":true},
+                    "runtime":{"polling_interval_ms":60000,"acquire_lock_timeout_ms":1000,"cleanup_tmp_on_startup":true,"rebuild_views_after_sync":false,"rebuild_search_after_sync":false}
+                }]
+            }))
+            .expect("config json"),
+        )
+        .expect("config");
+        let domain = open_domain_db_write(&root).expect("domain");
+        domain.execute(
+            "INSERT INTO mailbox_sync_generations(generation_id,idempotency_key,request_fingerprint,scope_id,config_fingerprint,status,batch_record_count,created_at,updated_at,completed_at) VALUES (?,?,?,?,?,'completed',1,?,?,?)",
+            params!["g1","sync-key","request","support","config","2026-01-01","2026-01-01","2026-01-01"],
+        ).expect("generation");
+        domain.execute(
+            "INSERT INTO mailbox_sync_generation_records(generation_id,record_id,fact_id,event_kind,message_id,mailbox_id,conversation_id,source_version,application_status) VALUES (?,?,?,?,?,?,?,?,?)",
+            params!["g1","record-1","fact-1","upsert","message-1","support","conversation-1","v1","projected"],
+        ).expect("record");
+        drop(domain);
+        let facts = Connection::open(scope_root.join(".narada/facts.db")).expect("facts");
+        facts.execute_batch("CREATE TABLE facts(fact_id TEXT PRIMARY KEY,fact_type TEXT NOT NULL,source_id TEXT NOT NULL,source_record_id TEXT NOT NULL,source_version TEXT,source_cursor TEXT,provenance_json TEXT NOT NULL,payload_json TEXT NOT NULL,created_at TEXT NOT NULL,admitted_at TEXT);").expect("fact schema");
+        let payload = json!({
+            "record_id":"record-1",
+            "ordinal":"2026-01-01T00:00:00.000Z",
+            "event":{
+                "mailbox_id":"support",
+                "message_id":"message-1",
+                "event_kind":"upsert",
+                "payload":{"mailbox_id":"support","message_id":"message-1","conversation_id":"conversation-1"}
+            }
+        });
+        facts.execute(
+            "INSERT INTO facts(fact_id,fact_type,source_id,source_record_id,source_version,provenance_json,payload_json,created_at) VALUES (?,?,?,?,?,?,?,?)",
+            params!["fact-1","mail.message.discovered","support","record-1","v1",r#"{"source_id":"support","source_record_id":"record-1","source_version":"v1","source_cursor":"cursor-1","observed_at":"2026-01-01T00:00:00.000Z"}"#,serde_json::to_string(&payload).unwrap(),"2026-01-01T00:00:00.000Z"],
+        ).expect("fact");
+        drop(facts);
+        let args = json!({"idempotency_key":"reconcile-1","generation_id":"g1","scope_id":"support"});
+        let first = reconcile_first_observations(args.as_object().unwrap(), &root).expect("reconcile");
+        assert_eq!(first["result"]["observations_recorded"], 1);
+        assert_eq!(first["result"]["events_published"], 1);
+        assert_eq!(first["result"]["idempotency_replayed"], false);
+        let replay = reconcile_first_observations(args.as_object().unwrap(), &root).expect("replay");
+        assert_eq!(replay["result"]["idempotency_replayed"], true);
+        assert_eq!(replay["result"]["events_published"], 1);
+        let db = open_domain_db(&root).expect("open").expect("db");
+        let count: i64 = db.query_row(
+            "SELECT COUNT(*) FROM mailbox_outbox WHERE topic='mailbox.message.first_observed'",
+            [],
+            |row| row.get(0),
+        ).expect("event count");
+        assert_eq!(count, 1);
+        drop(db);
         fs::remove_dir_all(root).expect("cleanup");
     }
 }

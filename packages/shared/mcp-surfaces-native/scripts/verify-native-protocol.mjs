@@ -314,6 +314,120 @@ function runMailboxOutboxMutationParity() {
   }
 }
 
+function seedMailboxReconciliation(root) {
+  seedMailboxOutbox(root);
+  const scopeRoot = join(root, '.narada', 'runtime', 'mailboxes', 'support');
+  mkdirSync(join(root, 'config'), { recursive: true });
+  mkdirSync(join(scopeRoot, '.narada'), { recursive: true });
+  writeFileSync(join(root, 'config', 'config.json'), JSON.stringify({
+    root_dir: '.narada/runtime/mailboxes/support',
+    scopes: [{
+      scope_id: 'support',
+      root_dir: '.narada/runtime/mailboxes/support',
+      sources: [{ type: 'graph' }],
+      graph: { user_id: 'support@example.test', prefer_immutable_ids: true },
+      scope: { included_container_refs: ['inbox'], included_item_kinds: ['message'] },
+      normalize: { attachment_policy: 'metadata_only', body_policy: 'text_only', include_headers: false, tombstones_enabled: true },
+      runtime: { polling_interval_ms: 60000, acquire_lock_timeout_ms: 1000, cleanup_tmp_on_startup: true, rebuild_views_after_sync: false, rebuild_search_after_sync: false },
+    }],
+  }), 'utf8');
+  const domainPath = join(root, '.narada', 'runtime', 'mailbox-domain', 'mailbox-domain.db');
+  const domain = new DatabaseSync(domainPath);
+  try {
+    domain.exec(`
+      create table mailbox_sync_generations(
+        generation_id text primary key,idempotency_key text not null unique,request_fingerprint text not null,
+        scope_id text not null,config_fingerprint text not null,status text not null,parent_cursor text,next_cursor text,
+        batch_path text,batch_sha256 text,batch_record_count integer not null default 0,staged_at text,receipt_json text,
+        error_message text,lease_token text,lease_expires_at text,created_at text not null,updated_at text not null,completed_at text
+      );
+      create table mailbox_sync_generation_records(
+        generation_id text not null references mailbox_sync_generations(generation_id),record_id text not null,ordinal text,
+        fact_id text not null,event_kind text not null,message_id text,mailbox_id text,conversation_id text,source_version text,
+        application_status text not null,primary key(generation_id,record_id)
+      );
+      create table mailbox_sync_scope_leases(scope_id text primary key,generation_id text not null,lease_token text not null,expires_at text not null,updated_at text not null);
+      create table mailbox_message_observations(
+        observation_id text primary key,mailbox_id text not null,message_id text not null,first_generation_id text not null,
+        first_fact_id text not null,observed_at text not null,unique(mailbox_id,message_id)
+      );
+      create table mailbox_admission_receipts(
+        admission_id text primary key,idempotency_key text not null unique,request_fingerprint text not null,scope_id text not null,
+        fact_id text not null,policy_version text not null,decision_json text not null,created_at text not null
+      );
+      create table mailbox_reconciliation_operations(
+        operation_id text primary key,idempotency_key text not null unique,request_fingerprint text not null,scope_id text not null,
+        generation_id text not null,result_json text not null,created_at text not null
+      );
+    `);
+    domain.prepare(`
+      insert into mailbox_sync_generations(
+        generation_id,idempotency_key,request_fingerprint,scope_id,config_fingerprint,status,batch_record_count,created_at,updated_at,completed_at
+      ) values (?,?,?,?,?,'completed',1,?,?,?)
+    `).run('generation-1', 'sync-key-1', 'request-1', 'support', 'config-1', '2026-08-01T00:00:00.000Z', '2026-08-01T00:00:00.000Z', '2026-08-01T00:00:00.000Z');
+    domain.prepare(`
+      insert into mailbox_sync_generation_records(
+        generation_id,record_id,fact_id,event_kind,message_id,mailbox_id,conversation_id,source_version,application_status
+      ) values (?,?,?,?,?,?,?,?,?)
+    `).run('generation-1', 'record-1', 'fact-1', 'upsert', 'message-1', 'support', 'conversation-1', 'v1', 'projected');
+  } finally {
+    domain.close();
+  }
+  const facts = new DatabaseSync(join(scopeRoot, '.narada', 'facts.db'));
+  try {
+    facts.exec(`
+      create table facts(
+        fact_id text primary key,fact_type text not null,source_id text not null,source_record_id text not null,
+        source_version text,source_cursor text,provenance_json text not null,payload_json text not null,
+        created_at text not null,admitted_at text
+      );
+    `);
+    const provenance = { source_id: 'support', source_record_id: 'record-1', source_version: 'v1', source_cursor: 'cursor-1', observed_at: '2026-08-01T00:00:00.000Z' };
+    const payload = {
+      record_id: 'record-1', ordinal: '2026-08-01T00:00:00.000Z',
+      event: { mailbox_id: 'support', message_id: 'message-1', event_kind: 'upsert', payload: { mailbox_id: 'support', message_id: 'message-1', conversation_id: 'conversation-1' } },
+    };
+    facts.prepare(`
+      insert into facts(fact_id,fact_type,source_id,source_record_id,source_version,source_cursor,provenance_json,payload_json,created_at)
+      values (?,?,?,?,?,?,?,?,?)
+    `).run('fact-1', 'mail.message.discovered', 'support', 'record-1', 'v1', 'cursor-1', JSON.stringify(provenance), JSON.stringify(payload), '2026-08-01T00:00:00.000Z');
+  } finally {
+    facts.close();
+  }
+}
+
+function runMailboxReconciliationParity() {
+  const workspaceRoot = resolve(packageRoot, '..', '..', '..');
+  const naradaRoot = resolve(workspaceRoot, '..', 'narada');
+  const bunEntrypoint = join(workspaceRoot, 'packages', 'mailbox-mcp', 'src', 'main.ts');
+  const bunRoot = mkdtempSync(join(tmpdir(), 'narada-mailbox-reconcile-bun-'));
+  const rustRoot = mkdtempSync(join(tmpdir(), 'narada-mailbox-reconcile-rust-'));
+  try {
+    seedMailboxReconciliation(bunRoot);
+    seedMailboxReconciliation(rustRoot);
+    const requests = [
+      { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'mailbox_reconcile_first_observations', arguments: { idempotency_key: 'reconcile-1', generation_id: 'generation-1', scope_id: 'support', limit: 10 } } },
+      { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'mailbox_reconcile_first_observations', arguments: { idempotency_key: 'reconcile-1', generation_id: 'generation-1', scope_id: 'support', limit: 10 } } },
+      { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'mailbox_outbox_consumer_register', arguments: { consumer_id: 'consumer-1', scope_id: 'support', topics: ['mailbox.message.first_observed'], start_at: '2026-01-01T00:00:00.000Z' } } },
+      { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'mailbox_outbox_list', arguments: { consumer_id: 'consumer-1', limit: 10 } } },
+    ];
+    const bun = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', [bunEntrypoint, '--site-root', bunRoot, '--control-plane-root', naradaRoot], requests, workspaceRoot);
+    const rust = runMailbox(executable, ['--surface-id', 'mailbox', '--site-root', rustRoot], requests, workspaceRoot);
+    assertSame('mailbox.reconcile.first', mailboxStructured(bun, 1, 'bun'), mailboxStructured(rust, 1, 'rust'));
+    assertSame('mailbox.reconcile.replay', mailboxStructured(bun, 2, 'bun'), mailboxStructured(rust, 2, 'rust'));
+    const bunPage = mailboxStructured(bun, 4, 'bun');
+    const rustPage = mailboxStructured(rust, 4, 'rust');
+    assertSame('mailbox.reconcile.outbox.count', bunPage.count, rustPage.count);
+    for (const field of ['schema', 'event_id', 'scope_id', 'topic', 'aggregate_id', 'aggregate_revision', 'schema_version', 'causation_id', 'idempotency_key', 'partition_key', 'payload']) {
+      assertSame('mailbox.reconcile.outbox.' + field, bunPage.items?.[0]?.[field], rustPage.items?.[0]?.[field]);
+    }
+    return { status: 'passed', fixture: 'immutable_fact_reconciliation', compared: ['first_observation', 'idempotent_replay', 'outbox_event'] };
+  } finally {
+    rmSync(bunRoot, { recursive: true, force: true });
+    rmSync(rustRoot, { recursive: true, force: true });
+  }
+}
+
 function runDelegatedTaskParity() {
   const workspaceRoot = resolve(packageRoot, '..', '..', '..');
   const bunEntrypoint = join(workspaceRoot, 'packages', 'delegated-task-mcp', 'src', 'main.ts');
@@ -1693,6 +1807,7 @@ function runSchedulerParity() {
 
 const mailboxParity = runMailboxParity();
 const mailboxOutboxMutationParity = runMailboxOutboxMutationParity();
+const mailboxReconciliationParity = runMailboxReconciliationParity();
 const delegatedTaskParity = runDelegatedTaskParity();
 const workerDelegationParity = runWorkerDelegationParity();
 const artifactsParity = runArtifactsParity();
@@ -1726,6 +1841,7 @@ process.stdout.write(JSON.stringify({
   defaults_changed: false,
   mailbox_parity: mailboxParity,
   mailbox_outbox_mutation_parity: mailboxOutboxMutationParity,
+  mailbox_reconciliation_parity: mailboxReconciliationParity,
   delegated_task_parity: delegatedTaskParity,
   worker_delegation_parity: workerDelegationParity,
   artifacts_parity: artifactsParity,
