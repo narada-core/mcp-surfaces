@@ -90,8 +90,9 @@ payload reference, and refusal conventions shared across surfaces.
 See `docs/mcp-telemetry-target-shape.md` for the optional telemetry target
 shape, persistence contract, and shared package factorization.
 
-See `docs/rust-surface-portfolio.md` for the Rust/JavaScript/dual-runtime
-surface decisions, evidence ledger, and implementation order.
+See `docs/rust-surface-portfolio.md` for the current native Rust defaults,
+explicit Bun/Node rollback profiles, development-tooling distinction,
+evidence ledger, and runtime-drift verification rules.
 
 See `docs/agent-ergonomics-surfaces.md` for the boundary between mechanical MCP
 evidence, multi-repository Git summaries, and agent completion audits.
