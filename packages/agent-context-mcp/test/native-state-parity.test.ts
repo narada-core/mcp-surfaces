@@ -93,11 +93,26 @@ try {
     const tsOccupant = client(process.execPath, [tsEntrypoint, '--site-root', ts.root, '--site-id', 'parity', '--tool-projection', 'occupant'], ts, tsOrientation);
     const rustOccupant = client(rustEntrypoint, ['--site-root', rust.root, '--site-id', 'parity', '--tool-projection', 'occupant'], rust, rustOrientation);
     try {
+      const rustEntry = await rustOccupant.call('agent_orientation_read', {});
+      const tsEntry = await tsOccupant.call('agent_orientation_read', {});
       assert.deepEqual(
-        normalize(await rustOccupant.call('agent_orientation_read', {}), rust),
-        normalize(await tsOccupant.call('agent_orientation_read', {}), ts),
+        normalize(rustEntry, rust), normalize(tsEntry, ts),
         'initial occupant orientation projection and continuation binding',
       );
+      let rustMaterial: any = rustEntry;
+      let tsMaterial: any = tsEntry;
+      let pages = 0;
+      while (rustMaterial.next_call && pages < 20) {
+        rustMaterial = await rustOccupant.call('agent_orientation_read', rustMaterial.next_call.arguments);
+        tsMaterial = await tsOccupant.call('agent_orientation_read', tsMaterial.next_call.arguments);
+        assert.deepEqual(normalize(rustMaterial, rust), normalize(tsMaterial, ts), `required-read material page ${pages + 1}`);
+        pages += 1;
+        if (rustMaterial.material?.page?.eof === true) break;
+      }
+      assert.ok(pages > 1, 'fixture must exercise multi-page orientation reads');
+      const rustReady = await rustOccupant.call('agent_orientation_read', rustMaterial.next_call.arguments);
+      const tsReady = await tsOccupant.call('agent_orientation_read', tsMaterial.next_call.arguments);
+      assert.deepEqual(normalize(rustReady, rust), normalize(tsReady, ts), 'acknowledgement and ready gate projection');
     } finally { await Promise.all([tsOccupant.stop(), rustOccupant.stop()]); }
   } finally {
     await Promise.all([tsClient.stop(), rustClient.stop()]);
@@ -164,6 +179,7 @@ function normalize(value: unknown, fixtureValue: ReturnType<typeof fixture>): un
       .replace(/chk_[a-f0-9]{32}/g, '<checkpoint_id>').replace(/[a-f0-9]{64}/g, '<sha256>')
       .replace(/mcp_output:o_[a-f0-9]{24}/g, '<output_ref>').replace(/o_[a-f0-9]{24}\.json/g, '<output_id>.json')
       .replace(/mcp_output%3Ao_[a-f0-9]{24}/g, '<encoded_output_ref>')
+      .replace(/orientation-ack:carrier-parity:1:[a-f0-9]{16}/g, '<orientation_ack>')
       .replace(/20\d\d-\d\d-\d\dT\d\d:\d\d:\d\d\.\d\d\dZ/g, '<timestamp>')
     : value;
   const result: Record<string, unknown> = {};
@@ -201,13 +217,23 @@ function prepareOrientation(fixtureValue: ReturnType<typeof fixture>) {
     carrier_kind: 'codex', admission_policy: { source_authority_ref: 'site-law:parity', artifact_ref: 'carrier-policy:parity', revision: '1' },
     issued_at: '2026-08-11T00:00:00.000Z', valid_until: null, authority_readback_ref: 'carrier-session-authority:carrier-parity', evidence_refs: [], reason_codes: [],
   };
+  writeFileSync(join(fixtureValue.root, 'AGENTS.md'), ['# Parity fixture', '', ...Array.from({ length: 180 }, (_, index) => `Rule ${index + 1}: preserve exact authority and evidence boundaries.`), ''].join('\n'));
   const started: any = materializeAgentSessionStart({ siteRoot: fixtureValue.root, siteId: 'parity', identity: 'parity.builder', runtime: 'codex', dbPath: fixtureValue.db, carrierSessionId, admissionReceipt: admission, generatedAt: '2026-08-11T00:00:00.000Z' });
   const delivery: any = issueCarrierSessionOrientationDeliveryReceipt({ admissionReceipt: admission, brief: started.orientation_brief, deliveredAt: '2026-08-11T00:00:00.000Z' });
   recordOrientationDeliveryReceipt({ siteRoot: fixtureValue.root, dbPath: fixtureValue.db, admissionReceipt: admission, brief: started.orientation_brief, deliveryReceipt: delivery });
+  const entryRoot = join(fixtureValue.root, '.ai', 'runtime', 'orientation-entry', carrierSessionId);
+  const entryFile = join(entryRoot, 'entry.json');
+  mkdirSync(entryRoot, { recursive: true });
+  writeFileSync(entryFile, JSON.stringify({
+    schema: 'narada.carrier_entry.orientation_packet.v1', ordinary_work_gate: 'acknowledgement_required',
+    acknowledgement_projection: { schema: 'narada.carrier_entry.orientation_acknowledgement_projection_ref.v1', relative_path: 'acknowledgement.json', posture: 'derived_readback_of_canonical_acknowledgement' },
+    orientation_brief: started.orientation_brief, delivery_receipt: delivery,
+  }, null, 2));
   return {
     NARADA_AGENT_ID: 'parity.builder', NARADA_CARRIER_SESSION_ID: carrierSessionId,
     NARADA_CARRIER_SESSION_ADMISSION_RECEIPT: JSON.stringify(admission),
     NARADA_ORIENTATION_MANIFEST_ID: started.orientation_manifest.manifest_id,
     NARADA_ORIENTATION_DELIVERY_RECEIPT: JSON.stringify(delivery),
+    NARADA_ORIENTATION_ENTRY_FILE: entryFile,
   };
 }
