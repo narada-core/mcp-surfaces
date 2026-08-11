@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join, relative, resolve } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { writeRecoveryEvidence } from './carrier-recovery-evidence.mjs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const workspaceRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -55,28 +55,6 @@ async function workspaceIsStale() {
   return { stale: reasons.length > 0, reasons };
 }
 
-function writeEvidence(value) {
-  const content = JSON.stringify(value, null, 2) + '\n';
-  const sha256 = createHash('sha256').update(content, 'utf8').digest('hex');
-  const id = new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14) + '-' + sha256.slice(0, 16);
-  const path = join(evidenceRoot, id + '.json');
-  const temporary = path + '.tmp-' + process.pid;
-  mkdirSync(evidenceRoot, { recursive: true });
-  writeFileSync(temporary, content, 'utf8');
-  try {
-    renameSync(temporary, path);
-  } finally {
-    if (existsSync(temporary)) rmSync(temporary, { force: true });
-  }
-  return {
-    schema: 'narada.carrier_materialization_recovery.evidence_ref.v1',
-    ref: 'carrier-materialization-recovery:' + id,
-    path,
-    relative_path: relative(workspaceRoot, path).replace(/\\/g, '/'),
-    sha256,
-  };
-}
-
 const startedAt = new Date().toISOString();
 const before = await workspaceIsStale();
 let buildPerformed = false;
@@ -100,18 +78,22 @@ const inspectionAfter = materializationRequired ? registrar.inspectAllCarrierMat
 if (inspectionAfter.status !== 'current') throw new Error('carrier_recovery_materialization_did_not_converge:' + JSON.stringify(inspectionAfter.stale_carrier_ids));
 
 const completedAt = new Date().toISOString();
-const evidence = writeEvidence({
-  schema: 'narada.carrier_materialization_recovery.evidence.v1',
-  started_at: startedAt,
-  completed_at: completedAt,
-  workspace_root: workspaceRoot,
-  workspace_before: before,
-  workspace_after_build: afterBuild,
-  build_performed: buildPerformed,
-  materialization_required: materializationRequired,
-  materialization_performed: materializationRequired,
-  inspection_before: inspectionBefore,
-  inspection_after: inspectionAfter,
+const evidence = writeRecoveryEvidence({
+  workspaceRoot,
+  evidenceRoot,
+  value: {
+    schema: 'narada.carrier_materialization_recovery.evidence.v1',
+    started_at: startedAt,
+    completed_at: completedAt,
+    workspace_root: workspaceRoot,
+    workspace_before: before,
+    workspace_after_build: afterBuild,
+    build_performed: buildPerformed,
+    materialization_required: materializationRequired,
+    materialization_performed: materializationRequired,
+    inspection_before: inspectionBefore,
+    inspection_after: inspectionAfter,
+  },
 });
 const staleCarrierIds = Array.isArray(inspectionBefore.stale_carrier_ids) ? inspectionBefore.stale_carrier_ids : [];
 const reasonCodes = [...new Set(before.reasons.map((reason) => String(reason.code ?? 'unknown')))].sort();

@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { test } from 'node:test';
 import {
   MCP_RUNTIME_CONTRACT_VERSION,
@@ -471,6 +471,39 @@ test('runtime profiles compile carrier plans with matrix-selected engines', asyn
         assert.equal(nativeLoader?.child_applet, undefined);
       }
     }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+test('carrier recovery evidence retention bounds current and legacy artifacts', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'narada-recovery-evidence-contract-'));
+  const evidenceRoot = join(root, '.ai', 'runtime', 'carrier-materialization-recovery');
+  try {
+    mkdirSync(evidenceRoot, { recursive: true });
+    const legacyPath = join(evidenceRoot, '20260811120000-aaaaaaaaaaaaaaaa.json');
+    writeFileSync(legacyPath, '{}\n', 'utf8');
+    const evidenceModule = await import(pathToFileURL(join(workspaceRoot, 'scripts', 'carrier-recovery-evidence.mjs')).href + '?contract=' + Date.now()) as {
+      writeRecoveryEvidence(args: { workspaceRoot: string; evidenceRoot: string; value: unknown; maxFiles: number; now?: () => Date }): {
+        path: string;
+        retention: { max_files: number; retained_count: number; pruned_count: number };
+      };
+    };
+    const refs = Array.from({ length: 4 }, (_, sequence) => evidenceModule.writeRecoveryEvidence({
+      workspaceRoot: root,
+      evidenceRoot,
+      value: { sequence },
+      maxFiles: 2,
+    }));
+    assert.equal(readdirSync(evidenceRoot).filter((name) => name.endsWith('.json')).length, 2);
+    assert.equal(existsSync(legacyPath), false);
+    assert.equal(existsSync(refs[0].path), false);
+    assert.equal(existsSync(refs[3].path), true);
+    assert.deepEqual(refs[3].retention, { policy: 'current_then_newest_files', max_files: 2, retained_count: 2, pruned_count: 1 });
+    const fixedNow = () => new Date('2026-08-11T12:34:56.789Z');
+    const duplicateA = evidenceModule.writeRecoveryEvidence({ workspaceRoot: root, evidenceRoot, value: { duplicate: true }, maxFiles: 2, now: fixedNow });
+    const duplicateB = evidenceModule.writeRecoveryEvidence({ workspaceRoot: root, evidenceRoot, value: { duplicate: true }, maxFiles: 2, now: fixedNow });
+    assert.equal(duplicateB.path, duplicateA.path);
+    assert.equal(existsSync(duplicateA.path), true);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

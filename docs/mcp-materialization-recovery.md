@@ -95,25 +95,34 @@ invokes transactional `--materialize-all` only when at least one projection
 differs. A current workspace is a true no-op. Standard output is a compact
 operator summary. The complete inspection and materialization record is written
 atomically under `.ai/runtime/carrier-materialization-recovery/`; the summary
-returns its evidence reference and SHA-256.
+returns its evidence reference and SHA-256. The directory retains the current
+write plus the newest 63 remaining
+evidence files by default and prunes older current and legacy-format records
+after each write. Set `NARADA_MCP_RECOVERY_EVIDENCE_MAX_FILES` to an integer
+from 1 through 10000 for an explicit local retention bound.
 
 Project Site bootstrap can invoke this gate before its first write. Workspace
 discovery prefers an explicit CLI root, `NARADA_MCP_WORKSPACE_ROOT`, or
-`NARADA_SRC_ROOT`; it then consults the installed Codex carrier generation
-sidecar before trying bounded checkout conventions. `NARADA_MCP_AUTO_DISCOVERY=0`
+`NARADA_SRC_ROOT`; it then consults installed Codex, Kimi, and OpenCode carrier
+generation sidecars before trying bounded checkout conventions.
+`NARADA_CARRIER_HOME` overrides the shared user-home base used for those
+sidecars. Conflicting valid sidecars are refused rather than silently choosing
+one workspace. `NARADA_MCP_AUTO_DISCOVERY=0`
 disables inferred candidates. A host with no installed/materialized MCP checkout
 reports recovery as unavailable rather than downloading or fabricating one.
 
 For a composed recovery plus controlled activation of one managed carrier, use:
 
 ```powershell
-narada carrier recover --carrier-id <carrier-id> --site-root <site-root> --site-id <site-id> --carrier-session-id <session-id> --operation-id <operation-id> --requested-by <principal> --expected-state-json <json> --reason <reason> --mutating-authorized <token>
+narada carrier recover --carrier-id <carrier-id> --lifecycle-adapter nars-successor-v1 --site-root <site-root> --site-id <site-id> --carrier-session-id <session-id> --operation-id <operation-id> --requested-by <principal> --expected-state-json <json> --reason <reason> --mutating-authorized <token>
 ```
 
 Materialization still converges every registered carrier. The lifecycle phase
-restarts only the selected carrier through the PC-owned successor/drain
-supervisor and reports affected sibling carriers as outstanding; it cannot
-silently restart carrier sessions outside the command's authority.
+requires the explicit `nars-successor-v1` adapter and restarts only the selected
+NARS-managed carrier session through the PC-owned successor/drain supervisor.
+It reports affected sibling carriers as outstanding; it cannot silently restart
+carrier sessions outside the command's authority or claim that a carrier
+restarted itself.
 
 Native lifecycle executables are published into content-addressed
 `dist/native/versions/<fingerprint>/` directories with an atomically updated
