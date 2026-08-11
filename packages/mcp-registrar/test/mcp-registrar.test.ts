@@ -1540,6 +1540,9 @@ try {
   const surfaceRegistry: any = buildSiteSurfaceRegistry({ site_id: 'narada-sonar', root: aggregateSiteRoot, config_path: join(aggregateSiteRoot, 'site.json'), surfaces: [] });
   assert.equal(surfaceRegistry.artifact_role, 'site_capability_surface_registry_not_mcp_client_config');
   assertOutputReaderClosure(surfaceRegistry, 'aggregate surface registry');
+  const artifactsRegistry: any = (surfaceRegistry.surfaces as Array<Record<string, any>>).find((surface) => surface.catalog_surface_id === 'artifacts');
+  assert.ok(artifactsRegistry);
+  assert.equal(artifactsRegistry.runtime_binding.runtime_kind, 'rust-stdio');
   const inboxRegistry: any = (surfaceRegistry.surfaces as Array<Record<string, any>>).find((surface) => surface.server_name === 'narada-sonar-inbox');
   assert.ok(inboxRegistry);
   assert.equal(inboxRegistry.surface_type, 'mcp_surface');

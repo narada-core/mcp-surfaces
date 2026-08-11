@@ -3915,7 +3915,7 @@ type SiteSurfaceRegistrySurface = {
   display_name: string;
   server_name: string;
   runtime_binding: {
-    runtime_kind: 'node-stdio' | 'bun-stdio';
+    runtime_kind: 'node-stdio' | 'bun-stdio' | 'rust-stdio';
     proxy_implementation: RuntimeProxyImplementation | null;
     entrypoint: string;
     owner_site_id: string;
@@ -3939,6 +3939,13 @@ type SiteSurfaceRegistrySurface = {
   catalog_surface_id: string;
   evidence: JsonRecord;
 };
+
+function fabricServerRuntimeKind(server: SiteMcpFabricServer): SiteSurfaceRegistrySurface['runtime_binding']['runtime_kind'] {
+  if (server.child_invocation_kind === 'native_applet' || server.child_invocation_kind === 'native_entrypoint') {
+    return 'rust-stdio';
+  }
+  return /(^|[\\/])bun(?:\.exe)?$/i.test(server.command) ? 'bun-stdio' : 'node-stdio';
+}
 
 function runtimeBindingForFabricServer(site: SiteDef, server: SiteMcpFabricServer): SiteSurfaceRegistrySurface['runtime_binding'] {
   const surfaceId = server.surface_id ?? fabricSurfaceId(server.server_key, site);
@@ -3965,7 +3972,7 @@ function runtimeBindingForFabricServer(site: SiteDef, server: SiteMcpFabricServe
     ]
     : [server.entrypoint, ...server.args];
   return {
-    runtime_kind: /(^|[\\/])bun(?:\.exe)?$/i.test(server.command) ? 'bun-stdio' : 'node-stdio',
+    runtime_kind: fabricServerRuntimeKind(server),
     proxy_implementation: server.uses_runtime_proxy ? runtimeProxyImplementation : null,
     entrypoint: server.entrypoint,
     owner_site_id: site.site_id,
