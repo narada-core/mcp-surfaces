@@ -2118,15 +2118,35 @@ fn preflight_refusal(options: &Options, mut refusal: Refusal) -> Result<(), Stri
 }
 
 fn recovery(options: &Options, refusal: &Refusal) -> Value {
-    let args = options.registrar_entrypoint.as_ref().map(|path| {
-        vec![
-            path.to_string_lossy().to_string(),
-            "--materialize-all".to_string(),
-        ]
-    });
-    let command = match (&options.registrar_command, args) {
-        (Some(executable), Some(args)) => {
-            json!({ "executable": executable, "args": args, "display": format!("\"{}\" \"{}\" \"--materialize-all\"", executable, options.registrar_entrypoint.as_ref().unwrap().display()) })
+    let command = match (
+        &options.registrar_command,
+        &options.registrar_entrypoint,
+        &options.materialization_sidecar,
+    ) {
+        (Some(executable), Some(entrypoint), Some(sidecar))
+            if same_path(executable, &entrypoint.to_string_lossy()) =>
+        {
+            let args = vec![
+                "recover-generation".to_string(),
+                "--generation".to_string(),
+                sidecar.to_string_lossy().to_string(),
+            ];
+            json!({
+                "executable": executable,
+                "args": args,
+                "display": format!("\"{}\" recover-generation --generation \"{}\"", executable, sidecar.display())
+            })
+        }
+        (Some(executable), Some(entrypoint), _) => {
+            let args = vec![
+                entrypoint.to_string_lossy().to_string(),
+                "--materialize-all".to_string(),
+            ];
+            json!({
+                "executable": executable,
+                "args": args,
+                "display": format!("\"{}\" \"{}\" \"--materialize-all\"", executable, entrypoint.display())
+            })
         }
         _ => Value::Null,
     };

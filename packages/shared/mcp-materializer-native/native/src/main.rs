@@ -198,6 +198,54 @@ fn run() -> Result<(), Failure> {
         println!("{result}");
         return Ok(());
     }
+    if command == "recover-generation" {
+        let flag = args.next().and_then(|value| value.into_string().ok());
+        if flag.as_deref() != Some("--generation") {
+            return Err(Failure::new(
+                "materializer_generation_required",
+                "Expected recover-generation --generation <path>.",
+            ));
+        }
+        let generation = args.next().map(PathBuf::from).ok_or_else(|| {
+            Failure::new(
+                "materializer_generation_required",
+                "Expected a generation path.",
+            )
+        })?;
+        if args.next().is_some() {
+            return Err(Failure::new(
+                "materializer_argument_unknown",
+                "Unexpected trailing argument.",
+            ));
+        }
+        let options = derive::options_from_generation(&generation)?;
+        let result = materialize(derive::derive_input(options)?)?;
+        println!("{result}");
+        return Ok(());
+    }
+    if command == "verify-all" {
+        let flag = args.next().and_then(|value| value.into_string().ok());
+        if flag.as_deref() != Some("--installed-index") {
+            return Err(Failure::new(
+                "materializer_installed_index_required",
+                "Expected verify-all --installed-index <path>.",
+            ));
+        }
+        let index = args.next().map(PathBuf::from).ok_or_else(|| {
+            Failure::new(
+                "materializer_installed_index_required",
+                "Expected an installed carrier index path.",
+            )
+        })?;
+        if args.next().is_some() {
+            return Err(Failure::new(
+                "materializer_argument_unknown",
+                "Unexpected trailing argument.",
+            ));
+        }
+        println!("{}", verify_all(&index)?);
+        return Ok(());
+    }
     if command != "materialize-all" {
         return Err(Failure::new(
             "materializer_command_unknown",
@@ -232,6 +280,216 @@ fn run() -> Result<(), Failure> {
     let result = materialize(input)?;
     println!("{result}");
     Ok(())
+}
+
+fn verify_all(index_path: &Path) -> Result<Value, Failure> {
+    let index = read_json(index_path, "materializer_installed_index_invalid")?;
+    if index.get("schema").and_then(Value::as_str) != Some("narada.installed_carrier_index.v1") {
+        return Err(Failure::new(
+            "materializer_installed_index_schema_unsupported",
+            path_text(index_path),
+        ));
+    }
+    let carriers = index
+        .get("carriers")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            Failure::new(
+                "materializer_installed_index_carriers_required",
+                path_text(index_path),
+            )
+        })?;
+    if carriers.is_empty() {
+        return Err(Failure::new(
+            "materializer_installed_index_empty",
+            path_text(index_path),
+        ));
+    }
+    let mut verified = Vec::new();
+    for carrier in carriers {
+        let carrier_id = json_field_string(carrier, "carrier_id")?;
+        let sidecar_path = PathBuf::from(json_field_string(carrier, "generation_sidecar_path")?);
+        let generation = read_json(&sidecar_path, "materializer_generation_invalid")?;
+        verify_generation(
+            &generation,
+            &sidecar_path,
+            carrier
+                .get("materialization_generation_fingerprint")
+                .and_then(Value::as_str),
+        )?;
+        verified.push(carrier_id.to_string());
+    }
+    Ok(json!({
+        "schema": "narada.mcp_materializer.verification.v1",
+        "status": "current",
+        "installed_carrier_index_path": path_text(index_path),
+        "verified_carrier_ids": verified,
+        "verified_carrier_count": verified.len(),
+    }))
+}
+
+fn verify_generation(
+    generation: &Value,
+    sidecar_path: &Path,
+    indexed_fingerprint: Option<&str>,
+) -> Result<(), Failure> {
+    if generation.get("schema").and_then(Value::as_str) != Some(GENERATION_SCHEMA) {
+        return Err(Failure::new(
+            "materializer_generation_schema_unsupported",
+            path_text(sidecar_path),
+        ));
+    }
+    let expected = json_field_string(generation, "generation_fingerprint")?;
+    if indexed_fingerprint != Some(expected) {
+        return Err(Failure::new(
+            "materializer_index_generation_mismatch",
+            path_text(sidecar_path),
+        ));
+    }
+    let fields = [
+        "schema",
+        "contract_version",
+        "carrier_id",
+        "carrier_kind",
+        "config_path",
+        "config_sha256",
+        "artifact_manifest_path",
+        "artifact_manifest_fingerprint",
+        "runtime_profile_kind",
+        "runtime_materialization_plan_path",
+        "runtime_materialization_plan_fingerprint",
+        "runtime_implementation_matrix_path",
+        "runtime_implementation_matrix_fingerprint",
+        "registrar_entrypoint",
+        "registrar_fingerprint",
+        "proxy_implementation",
+        "proxy_entrypoint",
+        "proxy_fingerprint",
+        "server_count",
+        "proxy_count",
+        "generated_at",
+    ];
+    let mut unsigned = Map::new();
+    for field in fields {
+        unsigned.insert(
+            field.to_string(),
+            generation.get(field).cloned().unwrap_or(Value::Null),
+        );
+    }
+    if sha256(&serde_json::to_vec(&Value::Object(unsigned)).map_err(json_failure)?) != expected {
+        return Err(Failure::new(
+            "materializer_generation_fingerprint_mismatch",
+            path_text(sidecar_path),
+        ));
+    }
+    if generation.get("contract_version").and_then(Value::as_u64) != Some(6) {
+        return Err(Failure::new(
+            "materializer_generation_contract_obsolete",
+            path_text(sidecar_path),
+        ));
+    }
+    verify_file_fingerprint(generation, "registrar_entrypoint", "registrar_fingerprint")?;
+    verify_file_fingerprint(generation, "proxy_entrypoint", "proxy_fingerprint")?;
+    verify_file_fingerprint(
+        generation,
+        "runtime_implementation_matrix_path",
+        "runtime_implementation_matrix_fingerprint",
+    )?;
+    let manifest_path = PathBuf::from(json_field_string(generation, "artifact_manifest_path")?);
+    let manifest = read_json(&manifest_path, "materializer_artifact_manifest_invalid")?;
+    if manifest.get("manifest_fingerprint").and_then(Value::as_str)
+        != generation
+            .get("artifact_manifest_fingerprint")
+            .and_then(Value::as_str)
+    {
+        return Err(Failure::new(
+            "materializer_artifact_manifest_fingerprint_mismatch",
+            path_text(&manifest_path),
+        ));
+    }
+    let config_path = PathBuf::from(json_field_string(generation, "config_path")?);
+    let expected_config_path = sidecar_path
+        .to_string_lossy()
+        .strip_suffix(".narada-generation.json")
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            Failure::new(
+                "materializer_generation_sidecar_pair_invalid",
+                path_text(sidecar_path),
+            )
+        })?;
+    if !path_eq(&config_path, &expected_config_path) {
+        return Err(Failure::new(
+            "materializer_generation_config_pair_mismatch",
+            path_text(sidecar_path),
+        ));
+    }
+    let kind = match json_field_string(generation, "carrier_kind")? {
+        "codex" => CarrierKind::Codex,
+        "kimi" => CarrierKind::Kimi,
+        "opencode" => CarrierKind::Opencode,
+        value => return Err(Failure::new("materializer_carrier_kind_unsupported", value)),
+    };
+    let config = fs::read(&config_path)
+        .map_err(|error| Failure::new("materializer_config_read_failed", error.to_string()))?;
+    if materialization_config_fingerprint(kind, &config)?
+        != json_field_string(generation, "config_sha256")?
+    {
+        return Err(Failure::new(
+            "materializer_config_fingerprint_mismatch",
+            path_text(&config_path),
+        ));
+    }
+    let plan_path = PathBuf::from(json_field_string(
+        generation,
+        "runtime_materialization_plan_path",
+    )?);
+    let plan = read_json(&plan_path, "materializer_runtime_plan_invalid")?;
+    let expected_plan = json_field_string(generation, "runtime_materialization_plan_fingerprint")?;
+    let mut unsigned_plan = plan.clone();
+    let embedded_plan = unsigned_plan
+        .as_object_mut()
+        .and_then(|object| object.remove("plan_fingerprint"))
+        .and_then(|value| value.as_str().map(str::to_string));
+    if embedded_plan.as_deref() != Some(expected_plan)
+        || sha256(&serde_json::to_vec(&unsigned_plan).map_err(json_failure)?) != expected_plan
+    {
+        return Err(Failure::new(
+            "materializer_runtime_plan_fingerprint_mismatch",
+            path_text(&plan_path),
+        ));
+    }
+    Ok(())
+}
+
+fn verify_file_fingerprint(
+    generation: &Value,
+    path_field: &'static str,
+    fingerprint_field: &'static str,
+) -> Result<(), Failure> {
+    let path = PathBuf::from(json_field_string(generation, path_field)?);
+    let bytes = fs::read(&path).map_err(|error| {
+        Failure::new("materializer_authority_file_read_failed", error.to_string())
+    })?;
+    if generation.get(fingerprint_field).and_then(Value::as_str) != Some(sha256(&bytes).as_str()) {
+        return Err(Failure::new(
+            "materializer_authority_file_fingerprint_mismatch",
+            path_text(&path),
+        ));
+    }
+    Ok(())
+}
+
+fn read_json(path: &Path, code: &'static str) -> Result<Value, Failure> {
+    let bytes = fs::read(path).map_err(|error| Failure::new(code, error.to_string()))?;
+    serde_json::from_slice(&bytes).map_err(|error| Failure::new(code, error.to_string()))
+}
+
+fn json_field_string<'a>(value: &'a Value, field: &'static str) -> Result<&'a str, Failure> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| Failure::new("materializer_json_field_required", field))
 }
 
 fn publish_self(artifact_root: &Path) -> Result<Value, Failure> {

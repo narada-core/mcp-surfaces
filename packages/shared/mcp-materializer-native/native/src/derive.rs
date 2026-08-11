@@ -329,6 +329,69 @@ pub(crate) fn derive_input(options: DeriveOptions) -> Result<MaterializationInpu
     })
 }
 
+pub(crate) fn options_from_generation(path: &Path) -> Result<DeriveOptions, Failure> {
+    require_absolute(path, "generation")?;
+    let bytes = read_required(path, "materializer_generation_read_failed")?;
+    let generation: Value = serde_json::from_slice(&bytes)
+        .map_err(|error| Failure::new("materializer_generation_invalid", error.to_string()))?;
+    if generation.get("schema").and_then(Value::as_str)
+        != Some("narada.mcp_materialization_generation.v1")
+    {
+        return Err(Failure::new(
+            "materializer_generation_schema_unsupported",
+            path_text(path),
+        ));
+    }
+    let config_path = PathBuf::from(required_string(&generation, "config_path")?);
+    let carrier_kind = required_string(&generation, "carrier_kind")?;
+    let artifact_manifest = PathBuf::from(required_string(&generation, "artifact_manifest_path")?);
+    let matrix = PathBuf::from(required_string(
+        &generation,
+        "runtime_implementation_matrix_path",
+    )?);
+    let workspace_root = artifact_manifest
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .ok_or_else(|| {
+            Failure::new(
+                "materializer_workspace_root_unresolved",
+                path_text(&artifact_manifest),
+            )
+        })?;
+    let contract: Contract = serde_json::from_str(CONTRACT).map_err(|error| {
+        Failure::new("materializer_carrier_contract_invalid", error.to_string())
+    })?;
+    let declared = contract
+        .carriers
+        .iter()
+        .find(|carrier| match carrier.carrier_kind {
+            CarrierKind::Codex => carrier_kind == "codex",
+            CarrierKind::Kimi => carrier_kind == "kimi",
+            CarrierKind::Opencode => carrier_kind == "opencode",
+        })
+        .ok_or_else(|| Failure::new("materializer_carrier_kind_unsupported", carrier_kind))?;
+    let relative = PathBuf::from(&declared.config_relative_path);
+    if !config_path.ends_with(&relative) {
+        return Err(Failure::new(
+            "materializer_config_path_contract_mismatch",
+            path_text(&config_path),
+        ));
+    }
+    let mut home = config_path.clone();
+    for _ in relative.components() {
+        home.pop();
+    }
+    Ok(DeriveOptions {
+        registry: home.join("Narada/.narada/capabilities/mcp-surfaces.json"),
+        workspace_root,
+        matrix,
+        installed_index: home.join(".narada/carriers/installed-carriers.json"),
+        home,
+    })
+}
+
 fn read_required(path: &Path, code: &'static str) -> Result<Vec<u8>, Failure> {
     fs::read(path).map_err(|error| {
         Failure::new(code, error.to_string()).with_details(json!({"path": path_text(path)}))

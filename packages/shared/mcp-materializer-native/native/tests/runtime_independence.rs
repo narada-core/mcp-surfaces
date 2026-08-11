@@ -153,11 +153,12 @@ fn derives_all_carriers_from_declared_site_capabilities_without_javascript() {
     let root = tempdir().unwrap();
     let workspace = root.path().join("workspace");
     let home = root.path().join("home");
-    let registry_path = root.path().join("mcp-surfaces.json");
+    let registry_path = home.join("Narada/.narada/capabilities/mcp-surfaces.json");
     let matrix_path = root.path().join("runtime-implementation-matrix.json");
     let index_path = home.join(".narada/carriers/installed-carriers.json");
     let proxy = root.path().join("narada-mcp-runtime.exe");
     fs::create_dir_all(workspace.join(".ai/runtime")).unwrap();
+    fs::create_dir_all(registry_path.parent().unwrap()).unwrap();
     fs::write(&proxy, b"native proxy fixture").unwrap();
     fs::write(&matrix_path, b"{\"schema\":\"fixture\"}\n").unwrap();
     fs::write(
@@ -247,6 +248,39 @@ fn derives_all_carriers_from_declared_site_capabilities_without_javascript() {
             "[mcp_servers.narada-site-andrey-user-{surface_id}]"
         )));
     }
-    let installed: Value = serde_json::from_slice(&fs::read(index_path).unwrap()).unwrap();
+    let installed: Value = serde_json::from_slice(&fs::read(&index_path).unwrap()).unwrap();
     assert_eq!(installed["carriers"].as_array().unwrap().len(), 3);
+
+    let verification = Command::new(env!("CARGO_BIN_EXE_narada-mcp-materializer"))
+        .env_clear()
+        .arg("verify-all")
+        .arg("--installed-index")
+        .arg(&index_path)
+        .output()
+        .unwrap();
+    assert!(
+        verification.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&verification.stderr)
+    );
+    let verification_result: Value = serde_json::from_slice(&verification.stdout).unwrap();
+    assert_eq!(verification_result["status"], "current");
+    assert_eq!(verification_result["verified_carrier_count"], 3);
+
+    fs::write(home.join(".codex/config.toml"), b"corrupted\n").unwrap();
+    let recovery = Command::new(env!("CARGO_BIN_EXE_narada-mcp-materializer"))
+        .env_clear()
+        .arg("recover-generation")
+        .arg("--generation")
+        .arg(home.join(".codex/config.toml.narada-generation.json"))
+        .output()
+        .unwrap();
+    assert!(
+        recovery.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&recovery.stderr)
+    );
+    assert!(fs::read_to_string(home.join(".codex/config.toml"))
+        .unwrap()
+        .contains("[mcp_servers.narada-site-andrey-user-local-filesystem]"));
 }
