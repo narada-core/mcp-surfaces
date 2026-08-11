@@ -2137,17 +2137,6 @@ fn recovery(options: &Options, refusal: &Refusal) -> Value {
                 "display": format!("\"{}\" recover-generation --generation \"{}\"", executable, sidecar.display())
             })
         }
-        (Some(executable), Some(entrypoint), _) => {
-            let args = vec![
-                entrypoint.to_string_lossy().to_string(),
-                "--materialize-all".to_string(),
-            ];
-            json!({
-                "executable": executable,
-                "args": args,
-                "display": format!("\"{}\" \"{}\" \"--materialize-all\"", executable, entrypoint.display())
-            })
-        }
         _ => Value::Null,
     };
     let materialization = refusal.code.starts_with("materialization_")
@@ -2180,7 +2169,7 @@ fn recovery(options: &Options, refusal: &Refusal) -> Value {
             "recovery_group_id": group_id,
             "deduplication": { "scope": "carrier_materialization", "key": group_id, "guidance": "Report one recovery action for this group; bootstrap surfaces sharing this id describe the same carrier failure." },
             "carrier": { "carrier_id": options.carrier_id, "carrier_kind": options.carrier_kind, "config_path": config_path },
-            "regeneration": { "required": true, "available": !command.is_null(), "owner": "mcp-registrar", "command": command, "unavailable_reason": if options.registrar_entrypoint.is_none() { Value::String("The materialization record does not identify the registrar entrypoint.".to_string()) } else { Value::Null } },
+            "regeneration": { "required": true, "available": !command.is_null(), "owner": "narada-mcp-materializer", "command": command, "unavailable_reason": if options.registrar_entrypoint.is_none() { Value::String("The materialization record does not identify the native materializer entrypoint.".to_string()) } else { Value::Null } },
             "restart_required": true,
             "restart": { "owner": options.carrier_kind.as_deref().unwrap_or("carrier"), "automatic": false, "instruction": carrier_restart(options.carrier_kind.as_deref()) }
         });
@@ -2198,7 +2187,7 @@ fn recovery(options: &Options, refusal: &Refusal) -> Value {
         "cause": { "code": refusal.code, "reason": refusal.reason, "details": refusal.details },
         "steps": [
             { "order": 1, "action": "build_workspace", "command": { "executable": "pnpm", "args": ["build"], "cwd": workspace_root, "display": "pnpm build" } },
-            { "order": 2, "action": "materialize_all_carriers", "required": true, "owner": "mcp-registrar", "available": !command.is_null(), "command": command, "unavailable_reason": if options.registrar_entrypoint.is_none() { Value::String("The carrier launch does not identify the registrar entrypoint.".to_string()) } else { Value::Null } },
+            { "order": 2, "action": "materialize_all_carriers", "required": true, "owner": "narada-mcp-materializer", "available": !command.is_null(), "command": command, "unavailable_reason": if options.registrar_entrypoint.is_none() { Value::String("The carrier launch does not identify the native materializer entrypoint.".to_string()) } else { Value::Null } },
             { "order": 3, "action": "restart_carrier", "required": true, "automatic": false, "instruction": carrier_restart(options.carrier_kind.as_deref()) }
         ],
         "restart_required": true

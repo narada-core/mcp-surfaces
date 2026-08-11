@@ -282,8 +282,9 @@ function buildMaterializationRecovery(options: ProxyOptions, preflight: Material
     actual_manifest_fingerprint: stringDetail(details, 'actual_manifest_fingerprint'),
   });
   const recoveryGroupId = `materialization-${createHash('sha256').update(groupKey, 'utf8').digest('hex').slice(0, 20)}`;
-  const commandArgs = registrarEntrypoint
-    ? [registrarEntrypoint, '--materialize-all']
+  const commandArgs = registrarEntrypoint && options.registrarCommand && options.materializationSidecarPath
+    && resolve(registrarEntrypoint).toLowerCase() === resolve(options.registrarCommand).toLowerCase()
+    ? ['recover-generation', '--generation', options.materializationSidecarPath]
     : null;
   const command = commandArgs && options.registrarCommand
     ? {
@@ -308,7 +309,7 @@ function buildMaterializationRecovery(options: ProxyOptions, preflight: Material
     regeneration: {
       required: true,
       available: command !== null,
-      owner: 'mcp-registrar',
+      owner: 'narada-mcp-materializer',
       command,
       unavailable_reason: command ? null : 'The materialization record does not identify the registrar entrypoint.',
     },
@@ -342,8 +343,9 @@ function buildWorkspaceArtifactRecovery(options: ProxyOptions, preflight: Worksp
     code: preflight.code ?? 'workspace_manifest_stale',
   });
   const recoveryGroupId = `workspace-materialization-${createHash('sha256').update(groupKey, 'utf8').digest('hex').slice(0, 20)}`;
-  const materializeArgs = registrarEntrypoint
-    ? [registrarEntrypoint, '--materialize-all']
+  const materializeArgs = registrarEntrypoint && options.registrarCommand && options.materializationSidecarPath
+    && resolve(registrarEntrypoint).toLowerCase() === resolve(options.registrarCommand).toLowerCase()
+    ? ['recover-generation', '--generation', options.materializationSidecarPath]
     : null;
   const materializeCommand = materializeArgs && options.registrarCommand
     ? {
@@ -377,7 +379,7 @@ function buildWorkspaceArtifactRecovery(options: ProxyOptions, preflight: Worksp
         order: 2,
         action: 'materialize_all_carriers',
         required: true,
-        owner: 'mcp-registrar',
+        owner: 'narada-mcp-materializer',
         available: materializeCommand !== null,
         command: materializeCommand,
         unavailable_reason: materializeCommand ? null : 'The carrier launch does not identify the registrar entrypoint.',
