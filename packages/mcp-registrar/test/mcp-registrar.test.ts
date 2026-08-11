@@ -35,7 +35,8 @@ const nativeSharedSurfaceArtifactAvailable = process.platform === 'win32' && exi
 const nativeSharedSurfaceEntrypoint = workspacePath('packages', 'shared', 'mcp-surfaces-native', 'dist', 'native', 'narada-mcp-surfaces.exe');
 assert.equal(
   defaultRuntimeProxyImplementation(process.platform, nativeRuntimeArtifactAvailable),
-  nativeRuntimeArtifactAvailable ? 'native' : 'bun',);
+  nativeRuntimeArtifactAvailable ? 'native' : 'bun',
+);
 const defaultMaterializationArgs = parseArgs(['--materialize-all']);
 assert.equal(defaultMaterializationArgs.mode, 'materialize-all');
 if (defaultMaterializationArgs.mode === 'materialize-all') {
@@ -1193,14 +1194,16 @@ try {
       assert.equal(sharedServer.args[sharedServer.args.indexOf('--child-invocation-kind') + 1], 'native_entrypoint');
       assert.match(sharedServer.command, /narada-mcp-runtime\.exe$/i);
       assert.match(sharedServer.args[sharedServer.args.indexOf('--child-command') + 1], /narada-mcp-surfaces\.exe$/i);
-      const separator = sharedServer.args.indexOf('--');      assert.equal(sharedServer.args[separator + 1], '--surface-id');
+      const separator = sharedServer.args.indexOf('--');
+      assert.equal(sharedServer.args[separator + 1], '--surface-id');
       assert.equal(sharedServer.args[separator + 2], surfaceId);
       assert.equal(sharedServer.args.includes('--native-authority'), surfaceId === 'calendar' || surfaceId === 'graph-mail');
     }
   }
   assert.equal(schedServer.narada_scope.bound_into_site, 'narada-sonar');
 
-  const smartSchedulingBindConfig: any = buildSiteBindConfig(    { site_id: 'smart-scheduling', root, config_path: join(root, 'site.json'), surfaces: [] },
+  const smartSchedulingBindConfig: any = buildSiteBindConfig(
+    { site_id: 'smart-scheduling', root, config_path: join(root, 'site.json'), surfaces: [] },
     { id: 'scheduler', package: 'scheduler-mcp', entrypoint: 'C:/workspace/mcp-surfaces/packages/scheduler-mcp/dist/src/main.js', kind: 'mcp_surface', args: ['--allowed-root', '{site_root}'], tools: ['scheduler_task_list'] },
   );
   assert.equal(smartSchedulingBindConfig.fileName, 'narada-smart-scheduling-scheduler-mcp.json');
