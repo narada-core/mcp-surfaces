@@ -5,11 +5,11 @@ import { createHash } from 'node:crypto';
 import { DatabaseSync } from '@narada-core/sqlite';
 import { spawn } from 'node:child_process';
 import { payloadShow } from '@narada-core/mcp-transport';
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { defineNativeSurface, surfaceDescriptorDigest, surfaceExecutionDeclaration, surfaceToolContractDigest, type DefinedSurface, type McpToolDefinition, type SurfaceDescriptorV2, type SurfaceExecutionDeclaration } from '@narada-core/mcp-fabric-contracts';
+import { defineNativeSurface, parseSurfaceDescriptorV2, surfaceDescriptorDigest, surfaceExecutionDeclaration, surfaceToolContractDigest, type DefinedSurface, type McpToolDefinition, type SurfaceDescriptorV2, type SurfaceExecutionDeclaration } from '@narada-core/mcp-fabric-contracts';
 import {
   MCP_RUNTIME_CONTRACT_VERSION,
   buildMaterializationGeneration,
@@ -96,6 +96,7 @@ type SiteLocalSurface = {
   kind: 'mcp_entrypoint';
   command: string;
   path: string;
+  surface_descriptor_path?: string;
   canonical_tool_prefix?: string;
   replaces?: string;
 };
@@ -1468,6 +1469,7 @@ function readSiteConfig(site: SiteDef): SiteLocalSurface[] {
         kind: 'mcp_entrypoint',
         command: String(rec.command ?? 'node'),
         path: String(rec.path ?? ''),
+        surface_descriptor_path: rec.surface_descriptor_path ? String(rec.surface_descriptor_path) : undefined,
         canonical_tool_prefix: rec.canonical_tool_prefix ? String(rec.canonical_tool_prefix) : undefined,
         replaces: rec.replaces ? String(rec.replaces) : undefined,
       });
@@ -3416,8 +3418,12 @@ export function checkSiteRegistryConformance(
       ? String(actualSurface.catalog_surface_id ?? '')
       : (server.surface_id ?? fabricSurfaceId(server.server_key, site));
     const catalog = catalogSurface(catalogSurfaceId) ?? catalogSurfaceAlias(catalogSurfaceId);
+    const localDescriptor = siteLocalDescriptorForFabricServer(site, server, catalog);
+    const descriptorTools = catalog
+      ? catalog.tools
+      : localDescriptor?.exposed_tools ?? [];
     const rawFabricTools = readConfiguredServerToolsRaw(site, server);
-    const fabricTools = uniqueStrings(rawFabricTools);
+    const fabricTools = uniqueStrings(rawFabricTools.length > 0 ? rawFabricTools : descriptorTools);
     const liveTools = observedToolsForSurface(observedToolsInput, server, actualSurface);
     const liveReadOnlyTools = observedToolsForSurface(observedReadOnlyToolsInput, server, actualSurface);
     const liveMutatingTools = observedToolsForSurface(observedMutatingToolsInput, server, actualSurface);
@@ -3444,7 +3450,7 @@ export function checkSiteRegistryConformance(
     };
 
     if (!actualSurface) add('materialized_registry', 'registry_surface_missing');
-    if (!catalog) add('registrar_catalog', 'catalog_surface_missing');
+    if (!catalog && !localDescriptor) add('registrar_catalog', 'site_local_descriptor_missing');
     const surfaceWasRequested = observedServerKeys.size === 0 || observedServerKeys.has(server.server_key)
       || observedServerKeys.has(server.surface_id ?? '') || observedServerKeys.has(String(actualSurface?.catalog_surface_id ?? ''));
     if (!surfaceWasRequested) {
@@ -3477,6 +3483,7 @@ export function checkSiteRegistryConformance(
     if (liveTools !== null) {
       compare('site_fabric', 'fabric_tools_differ_from_live', liveTools, fabricTools);
       if (catalog) compare('registrar_catalog', 'catalog_tools_differ_from_live', liveTools, catalog.tools);
+      if (localDescriptor) compare('site_local_descriptor', 'descriptor_tools_differ_from_live', liveTools, localDescriptor.exposed_tools);
     }
 
     if (actualSurface) {
@@ -3507,6 +3514,7 @@ export function checkSiteRegistryConformance(
       if (liveTools !== null) compare('materialized_registry', 'registered_tools_differ_from_live', liveTools, registeredTools);
       compare('materialized_registry', 'registered_tools_differ_from_fabric', fabricTools, registeredTools);
       if (catalog) compare('materialized_registry', 'registered_tools_differ_from_catalog', catalog.tools, registeredTools);
+      if (localDescriptor) compare('materialized_registry', 'registered_tools_differ_from_descriptor', localDescriptor.exposed_tools, registeredTools);
       compare('tool_contract', 'tool_contract_partition_incomplete', registeredTools, contractUnion);
       if (overlaps.length > 0) add('tool_contract', 'tool_contract_partition_overlap', { overlapping_tools: overlaps });
       if (refusedTools.length > 0) add('tool_contract', 'tool_contract_contains_external_refusals', { refused_tools: refusedTools });
@@ -3516,7 +3524,7 @@ export function checkSiteRegistryConformance(
       if (liveMutatingTools !== null) compare('tool_contract', 'mutating_classification_differ_from_live', liveMutatingTools, mutatingTools);
 
       const expectedSurface = registrySurfaceForFabricServer(site, server);
-      for (const field of ['surface_id', 'display_name', 'server_name', 'authority_boundary', 'client_config', 'catalog_surface_id']) {
+      for (const field of ['surface_id', 'display_name', 'server_name', 'authority_boundary', 'client_config', 'catalog_surface_id', 'descriptor_provenance', 'surface_descriptor']) {
         if (canonicalJson(actualSurface[field]) !== canonicalJson(asRecord(expectedSurface)[field])) {
           add('materialized_registry', 'registry_surface_projection_drift', { field });
         }
@@ -4184,6 +4192,7 @@ type SiteMcpFabricServer = {
   projection_id?: string;
   runtime_kind?: McpRuntimeKind;
   runtime_requirements?: McpRuntimeKind[];
+  surface_descriptor_path?: string;
   narada_scope: NaradaScopeMetadata;
   source_file: string;
   projection_kind: 'site_fabric' | 'carrier_projection';
@@ -4326,6 +4335,7 @@ function discoverMcpConfigDirectory(
         runtime_requirements: Array.isArray(surfaceProjection.runtime_requirements)
           ? surfaceProjection.runtime_requirements.filter((value): value is McpRuntimeKind => value === 'nars')
           : undefined,
+        surface_descriptor_path: optionalString(server.surface_descriptor_path) ?? undefined,
         narada_scope: readNaradaScope(server, surfaceId, controlRoot, site.site_id),
         source_file: projectionKind === 'carrier_projection' ? `carriers/${file}` : file,
         projection_kind: projectionKind,
@@ -4367,6 +4377,186 @@ function catalogSurfaceForFabricServer(site: SiteDef, server: SiteMcpFabricServe
   return SURFACES.find((surface) => portablePath(surface.entrypoint) === portablePath(server.entrypoint));
 }
 
+type SiteLocalDescriptorResolution = {
+  descriptor: SurfaceDescriptorV2;
+  projection: SurfaceDescriptorV2['projections'][number];
+  declared_path: string;
+  relative_path: string;
+  content_sha256: string;
+  descriptor_digest: string;
+  exposed_tools: string[];
+};
+
+const MAX_SITE_LOCAL_DESCRIPTOR_BYTES = 256 * 1024;
+
+function pathIsWithin(root: string, candidate: string): boolean {
+  const pathFromRoot = relative(root, candidate);
+  return pathFromRoot === '' || (!isAbsolute(pathFromRoot) && pathFromRoot !== '..' && !pathFromRoot.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`));
+}
+
+function comparableMaterializedToken(value: string): string {
+  const normalized = isAbsolute(value) ? resolve(value).replace(/\\/g, '/') : value;
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
+function assertSiteLocalDescriptorTransport(
+  site: SiteDef,
+  server: SiteMcpFabricServer,
+  descriptor: SurfaceDescriptorV2,
+  projection: SurfaceDescriptorV2['projections'][number],
+): void {
+  if (projection.transport.kind !== 'stdio') {
+    throw diagnosticError(
+      'registrar_site_local_descriptor_transport_unsupported',
+      `registrar_site_local_descriptor_transport_unsupported:${descriptor.surface_id}`,
+      { site_id: site.site_id, surface_id: descriptor.surface_id, transport_kind: projection.transport.kind },
+    );
+  }
+  const paths = sitePathInterpolation(site.root, siteWorkspaceRoot(site));
+  const expectedCommand = materializedExecutableCommand(interpolateArg(projection.transport.command, site.site_id, paths));
+  const expectedArgs = projection.transport.args.map((value) => interpolateArg(value, site.site_id, paths));
+  const actualArgs = server.entrypoint ? [server.entrypoint, ...server.args] : [...server.args];
+  const commandMatches = comparableMaterializedToken(expectedCommand) === comparableMaterializedToken(server.command);
+  const argsMatch = expectedArgs.length === actualArgs.length
+    && expectedArgs.every((value, index) => comparableMaterializedToken(value) === comparableMaterializedToken(actualArgs[index] ?? ''));
+  if (!commandMatches || !argsMatch) {
+    throw diagnosticError(
+      'registrar_site_local_descriptor_transport_mismatch',
+      `registrar_site_local_descriptor_transport_mismatch:${descriptor.surface_id}`,
+      {
+        site_id: site.site_id,
+        surface_id: descriptor.surface_id,
+        expected: { command: expectedCommand, args: expectedArgs },
+        actual: { command: server.command, args: actualArgs },
+      },
+    );
+  }
+}
+
+function siteLocalDescriptorForFabricServer(
+  site: SiteDef,
+  server: SiteMcpFabricServer,
+  catalog: RegistrarSurfaceRecord | undefined,
+): SiteLocalDescriptorResolution | null {
+  const declaredPath = server.surface_descriptor_path;
+  if (!declaredPath) return null;
+  const surfaceId = server.surface_id ?? fabricSurfaceId(server.server_key, site);
+  if (catalog) {
+    throw diagnosticError(
+      'registrar_site_local_descriptor_global_collision',
+      `registrar_site_local_descriptor_global_collision:${surfaceId}`,
+      { site_id: site.site_id, surface_id: surfaceId, catalog_surface_id: catalog.id },
+    );
+  }
+  if (isAbsolute(declaredPath)) {
+    throw diagnosticError(
+      'registrar_site_local_descriptor_path_must_be_relative',
+      `registrar_site_local_descriptor_path_must_be_relative:${declaredPath}`,
+      { site_id: site.site_id, surface_id: surfaceId, descriptor_path: declaredPath },
+    );
+  }
+  const workspaceRoot = canonicalWorkspaceRoot(siteWorkspaceRoot(site));
+  const candidatePath = resolve(workspaceRoot, declaredPath);
+  if (!existsSync(candidatePath)) {
+    throw diagnosticError(
+      'registrar_site_local_descriptor_not_found',
+      `registrar_site_local_descriptor_not_found:${declaredPath}`,
+      { site_id: site.site_id, surface_id: surfaceId, descriptor_path: declaredPath },
+    );
+  }
+  const canonicalRoot = realpathSync(workspaceRoot);
+  const canonicalPath = realpathSync(candidatePath);
+  if (!pathIsWithin(canonicalRoot, canonicalPath)) {
+    throw diagnosticError(
+      'registrar_site_local_descriptor_path_escape',
+      `registrar_site_local_descriptor_path_escape:${declaredPath}`,
+      { site_id: site.site_id, surface_id: surfaceId, descriptor_path: declaredPath },
+    );
+  }
+  const descriptorStat = statSync(canonicalPath);
+  if (!descriptorStat.isFile() || descriptorStat.size > MAX_SITE_LOCAL_DESCRIPTOR_BYTES) {
+    throw diagnosticError(
+      'registrar_site_local_descriptor_file_invalid',
+      `registrar_site_local_descriptor_file_invalid:${declaredPath}`,
+      {
+        site_id: site.site_id,
+        surface_id: surfaceId,
+        descriptor_path: declaredPath,
+        is_file: descriptorStat.isFile(),
+        size: descriptorStat.size,
+        max_size: MAX_SITE_LOCAL_DESCRIPTOR_BYTES,
+      },
+    );
+  }
+  const raw = readFileSync(canonicalPath, 'utf8');
+  let descriptor: SurfaceDescriptorV2;
+  try {
+    descriptor = parseSurfaceDescriptorV2(JSON.parse(raw));
+  } catch (error) {
+    throw diagnosticError(
+      'registrar_site_local_descriptor_invalid',
+      `registrar_site_local_descriptor_invalid:${declaredPath}`,
+      { site_id: site.site_id, surface_id: surfaceId, descriptor_path: declaredPath, reason: String(error) },
+    );
+  }
+  if (descriptor.source !== 'site_local') {
+    throw diagnosticError(
+      'registrar_site_local_descriptor_source_invalid',
+      `registrar_site_local_descriptor_source_invalid:${descriptor.surface_id}`,
+      { site_id: site.site_id, surface_id: descriptor.surface_id, expected_source: 'site_local', actual_source: descriptor.source },
+    );
+  }
+  if (descriptor.surface_id !== surfaceId) {
+    throw diagnosticError(
+      'registrar_site_local_descriptor_identity_mismatch',
+      `registrar_site_local_descriptor_identity_mismatch:${surfaceId}`,
+      { site_id: site.site_id, surface_id: surfaceId, descriptor_surface_id: descriptor.surface_id },
+    );
+  }
+  const collision = catalogSurface(descriptor.surface_id) ?? catalogSurfaceAlias(descriptor.surface_id);
+  if (collision) {
+    throw diagnosticError(
+      'registrar_site_local_descriptor_global_collision',
+      `registrar_site_local_descriptor_global_collision:${descriptor.surface_id}`,
+      { site_id: site.site_id, surface_id: descriptor.surface_id, catalog_surface_id: collision.id },
+    );
+  }
+  const candidates = server.projection_id
+    ? descriptor.projections.filter((projection) => projection.id === server.projection_id)
+    : descriptor.projections.filter((projection) => projection.injection_scope === 'local_site');
+  if (candidates.length !== 1) {
+    throw diagnosticError(
+      'registrar_site_local_descriptor_projection_ambiguous',
+      `registrar_site_local_descriptor_projection_ambiguous:${descriptor.surface_id}`,
+      {
+        site_id: site.site_id,
+        surface_id: descriptor.surface_id,
+        requested_projection_id: server.projection_id ?? null,
+        matching_projection_ids: candidates.map((projection) => projection.id),
+      },
+    );
+  }
+  const projection = candidates[0]!;
+  if (projection.injection_scope !== 'local_site') {
+    throw diagnosticError(
+      'registrar_site_local_descriptor_scope_invalid',
+      `registrar_site_local_descriptor_scope_invalid:${descriptor.surface_id}`,
+      { site_id: site.site_id, surface_id: descriptor.surface_id, injection_scope: projection.injection_scope },
+    );
+  }
+  assertSiteLocalDescriptorTransport(site, server, descriptor, projection);
+  const exposedTools = projection.exposed_tools ?? descriptor.tools.map((tool) => tool.name);
+  return {
+    descriptor,
+    projection,
+    declared_path: declaredPath,
+    relative_path: relative(canonicalRoot, canonicalPath).replace(/\\/g, '/'),
+    content_sha256: createHash('sha256').update(raw).digest('hex'),
+    descriptor_digest: surfaceDescriptorDigest(descriptor),
+    exposed_tools: uniqueStrings(exposedTools),
+  };
+}
+
 type SiteSurfaceRegistrySurface = {
   surface_id: string;
   surface_projection: JsonRecord;
@@ -4396,6 +4586,14 @@ type SiteSurfaceRegistrySurface = {
   };
   registered_live_tools: string[];
   catalog_surface_id: string;
+  descriptor_provenance?: {
+    source: 'site_local';
+    owner_site_id: string;
+    path: string;
+    content_sha256: string;
+    descriptor_digest: string;
+  };
+  surface_descriptor?: SurfaceDescriptorV2;
   evidence: JsonRecord;
 };
 
@@ -4448,30 +4646,61 @@ function runtimeBindingForFabricServer(site: SiteDef, server: SiteMcpFabricServe
 function registrySurfaceForFabricServer(site: SiteDef, server: SiteMcpFabricServer): SiteSurfaceRegistrySurface {
   const surfaceId = server.surface_id ?? fabricSurfaceId(server.server_key, site);
   const catalog = catalogSurfaceForFabricServer(site, server);
+  const localDescriptor = siteLocalDescriptorForFabricServer(site, server, catalog);
+  if (!catalog && !localDescriptor) {
+    throw diagnosticError(
+      'registrar_site_local_descriptor_missing',
+      `registrar_site_local_descriptor_missing:${surfaceId}`,
+      {
+        site_id: site.site_id,
+        surface_id: surfaceId,
+        server_key: server.server_key,
+        remediation: 'Declare a Site-relative surface_descriptor_path on the Site-local MCP server entry.',
+      },
+    );
+  }
+  const descriptor = catalog ? nativeSurfaceDescriptor(catalog.id) : localDescriptor!.descriptor;
   const surfaceProjection = catalog
     ? projectionMetadata(catalog.id, server.projection_id, server.runtime_kind)
     : {
-      surface_id: surfaceId,
-      projection_id: server.projection_id ?? 'unknown',
-      runtime_requirements: server.runtime_requirements ?? [],
+      surface_id: descriptor.surface_id,
+      projection_id: localDescriptor!.projection.id,
+      injection_scope: localDescriptor!.projection.injection_scope,
+      runtime_requirements: localDescriptor!.projection.runtime_requirements,
+      authority_requirements: localDescriptor!.projection.authority_requirements,
+      descriptor_digest: localDescriptor!.descriptor_digest,
       ...(server.runtime_kind ? { runtime_kind: server.runtime_kind } : {}),
     };
   const registeredTools = uniqueStrings(catalog
     ? nativeProjectionToolNames(catalog.id, server.projection_id, server.runtime_kind)
-    : readConfiguredServerTools(site, server));
-  const toolContract = surfaceToolContract(catalog?.id ?? surfaceId, registeredTools);
+    : localDescriptor!.exposed_tools);
+  const configuredTools = readConfiguredServerTools(site, server);
+  if (localDescriptor && configuredTools.length > 0 && !sameStringSet(configuredTools, registeredTools)) {
+    throw diagnosticError(
+      'registrar_site_local_descriptor_tools_mismatch',
+      `registrar_site_local_descriptor_tools_mismatch:${surfaceId}`,
+      {
+        site_id: site.site_id,
+        surface_id: surfaceId,
+        configured_tools: configuredTools,
+        descriptor_tools: registeredTools,
+      },
+    );
+  }
+  const toolContract = surfaceToolContract(descriptor, registeredTools);
   return {
     surface_id: `${server.server_key}.local`,
     surface_projection: surfaceProjection,
-    surface_type: catalog?.kind ?? 'mcp_surface',
+    surface_type: catalog?.kind ?? 'site_local_mcp_surface',
     display_name: server.server_key,
     server_name: server.server_key,
     runtime_binding: runtimeBindingForFabricServer(site, server),
     authority_boundary: {
-      posture: 'registrar_generated_runtime_surface_registry',
+      posture: localDescriptor ? 'site_local_descriptor_bound_runtime_surface' : 'registrar_generated_runtime_surface_registry',
       grants_tool_authority: true,
       granted_tool_authority_kind: 'declared_enabled_mcp_surface_tools',
-      source: 'site_mcp_fabric_and_registrar_catalog',
+      source: localDescriptor ? 'site_mcp_fabric_and_site_local_descriptor' : 'site_mcp_fabric_and_registrar_catalog',
+      ...(localDescriptor ? { owner_site_id: site.site_id, injection_scope: 'local_site' } : {}),
     },
     client_config: {
       generated_path: `.ai/mcp/${server.source_file}`,
@@ -4479,11 +4708,26 @@ function registrySurfaceForFabricServer(site: SiteDef, server: SiteMcpFabricServ
     },
     tool_contract: toolContract,
     registered_live_tools: registeredTools,
-    catalog_surface_id: catalog?.id ?? surfaceId,
+    catalog_surface_id: descriptor.surface_id,
+    ...(localDescriptor ? {
+      descriptor_provenance: {
+        source: 'site_local' as const,
+        owner_site_id: site.site_id,
+        path: localDescriptor.relative_path,
+        content_sha256: localDescriptor.content_sha256,
+        descriptor_digest: localDescriptor.descriptor_digest,
+      },
+      surface_descriptor: localDescriptor.descriptor,
+    } : {}),
     evidence: {
-      source: 'site_mcp_fabric',
+      source: localDescriptor ? 'site_mcp_fabric_and_site_local_descriptor' : 'site_mcp_fabric',
       path: `.ai/mcp/${server.source_file}`,
       projection_kind: server.projection_kind,
+      ...(localDescriptor ? {
+        descriptor_path: localDescriptor.relative_path,
+        descriptor_content_sha256: localDescriptor.content_sha256,
+        descriptor_digest: localDescriptor.descriptor_digest,
+      } : {}),
     },
   };
 }
@@ -4499,12 +4743,11 @@ function readConfiguredServerTools(site: SiteDef, server: SiteMcpFabricServer): 
   return uniqueStrings(readConfiguredServerToolsRaw(site, server));
 }
 
-function surfaceToolContract(surfaceId: string, registeredTools: string[]): SiteSurfaceRegistrySurface['tool_contract'] {
-  const descriptor = nativeSurfaceDescriptor(surfaceId);
-  // readOnlyHint is the cross-surface authority for mutation semantics. A
-  // read-only runtime-admin tool may intentionally use a non-read effect class.
+function surfaceToolContract(descriptor: SurfaceDescriptorV2, registeredTools: string[]): SiteSurfaceRegistrySurface['tool_contract'] {
+  // The common descriptor effect is authoritative for Site-local tools.
+  // Native descriptors may additionally preserve an explicit readOnlyHint.
   const readOnlyTools = descriptor.tools
-    .filter((tool) => tool.annotations?.readOnlyHint === true && registeredTools.includes(tool.name))
+    .filter((tool) => (tool.effect.class === 'read' || tool.annotations?.readOnlyHint === true) && registeredTools.includes(tool.name))
     .map((tool) => tool.name);
   const refusedTools = descriptor.tools
     .filter((tool) => tool.annotations?.legacy_policy === 'refused' && registeredTools.includes(tool.name))
@@ -4598,6 +4841,38 @@ export function validateSiteMcpFabric(site: SiteDef, includeOk = false): JsonRec
     const canonicalSurface = catalogSurfaceForFabricServer(site, server);
     presentSurfaceIds.add(server.surface_id ?? surfaceId);
     const scopeDetail = scopeFindingDetail(server.narada_scope);
+    try {
+      const localDescriptor = siteLocalDescriptorForFabricServer(site, server, canonicalSurface);
+      if (!canonicalSurface && !localDescriptor) {
+        add('error', 'registrar_site_local_descriptor_missing', `Site-local surface '${surfaceId}' has no governed descriptor`, {
+          site_id: siteId,
+          server_key: server.server_key,
+          surface_id: surfaceId,
+          source_file: server.source_file,
+          remediation: 'Declare a Site-relative surface_descriptor_path on the Site-local MCP server entry.',
+          ...scopeDetail,
+        });
+      } else if (localDescriptor && includeOk) {
+        add('info', 'registrar_site_local_descriptor_ok', `Site-local descriptor for '${surfaceId}' is valid and Site-bound`, {
+          site_id: siteId,
+          server_key: server.server_key,
+          surface_id: surfaceId,
+          descriptor_path: localDescriptor.relative_path,
+          descriptor_digest: localDescriptor.descriptor_digest,
+          ...scopeDetail,
+        });
+      }
+    } catch (error) {
+      const diagnostic = errorDiagnostic(error);
+      add('error', String(diagnostic.code), String(diagnostic.message), {
+        site_id: siteId,
+        server_key: server.server_key,
+        surface_id: surfaceId,
+        source_file: server.source_file,
+        ...asRecord(diagnostic.details),
+        ...scopeDetail,
+      });
+    }
     if (seenKeys.has(server.server_key)) {
       add('error', 'registrar_site_fabric_duplicate_server_key', `Duplicate server key '${server.server_key}' in site fabric`, { site_id: siteId, server_key: server.server_key, source_file: server.source_file, surface_id: surfaceId, ...scopeDetail });
     } else {

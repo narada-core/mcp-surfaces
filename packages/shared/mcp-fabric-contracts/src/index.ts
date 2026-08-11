@@ -115,6 +115,7 @@ export const SurfaceProjectionV2Schema = z.object({
     StdioTransportSchema,
     StreamableHttpTransportSchema,
   ]),
+  exposed_tools: z.array(IdentifierSchema).min(1).optional(),
   injection_scope: z.enum(['host', 'user_site', 'local_site']),
   default_injection: z.enum(['enabled', 'disabled']).default('disabled'),
   runtime_requirements: z.array(IdentifierSchema).default([]),
@@ -125,7 +126,7 @@ export const SurfaceProjectionV2Schema = z.object({
 
 export const SurfaceDescriptorV2Schema = z.object({
   schema_version: VersionSchema,
-  source: z.enum(['native', 'legacy_adapter']),
+  source: z.enum(['native', 'legacy_adapter', 'site_local']),
   surface_id: IdentifierSchema,
   surface_version: VersionSchema,
   package: z.string().trim().min(1),
@@ -141,6 +142,24 @@ export const SurfaceDescriptorV2Schema = z.object({
     ['projections'],
     context,
   );
+  const declaredToolNames = new Set(descriptor.tools.map((tool) => tool.name));
+  descriptor.projections.forEach((projection, projectionIndex) => {
+    if (projection.exposed_tools === undefined) return;
+    addDuplicateIssues(
+      projection.exposed_tools,
+      'projection tool',
+      ['projections', projectionIndex, 'exposed_tools'],
+      context,
+    );
+    projection.exposed_tools.forEach((toolName, toolIndex) => {
+      if (declaredToolNames.has(toolName)) return;
+      context.addIssue({
+        code: 'custom',
+        message: 'projection exposed_tools must name declared tools',
+        path: ['projections', projectionIndex, 'exposed_tools', toolIndex],
+      });
+    });
+  });
   if (
     descriptor.guidance_tool !== null
     && !descriptor.tools.some((tool) => tool.name === descriptor.guidance_tool)
@@ -799,7 +818,7 @@ type IssueContext = {
 function addDuplicateIssues(
   values: string[],
   noun: string,
-  basePath: string[],
+  basePath: Array<string | number>,
   context: IssueContext,
 ): void {
   const seen = new Map<string, number>();

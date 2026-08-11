@@ -114,6 +114,11 @@ test('descriptor digest is stable across declaration and object-key order', () =
   assert.equal(surfaceDescriptorDigest(left), surfaceDescriptorDigest(right));
 });
 
+test('common descriptor contract distinguishes Site-local ownership from the global native catalog', () => {
+  const siteLocal = { ...descriptor(), source: 'site_local' as const };
+  assert.equal(parseSurfaceDescriptorV2(siteLocal).source, 'site_local');
+});
+
 test('defineSurface uses one registry for tools/list and descriptor emission', () => {
   const definition = {
     name: 'example_guidance',
@@ -206,6 +211,29 @@ test('duplicate tool and projection identities are rejected', () => {
   const duplicateProjection = descriptor();
   duplicateProjection.projections.push({ ...duplicateProjection.projections[0]! });
   assert.throws(() => parseSurfaceDescriptorV2(duplicateProjection), /duplicate projection/);
+});
+
+test('projection tool inventories are declared subsets and reject drift at definition time', () => {
+  const projected = descriptor();
+  projected.projections[0]!.exposed_tools = ['example_read'];
+  assert.deepEqual(
+    parseSurfaceDescriptorV2(projected).projections[0]!.exposed_tools,
+    ['example_read'],
+  );
+
+  const duplicate = descriptor();
+  duplicate.projections[0]!.exposed_tools = ['example_read', 'example_read'];
+  assert.throws(
+    () => parseSurfaceDescriptorV2(duplicate),
+    /duplicate projection tool/,
+  );
+
+  const undeclared = descriptor();
+  undeclared.projections[0]!.exposed_tools = ['not_declared'];
+  assert.throws(
+    () => parseSurfaceDescriptorV2(undeclared),
+    /projection exposed_tools must name declared tools/,
+  );
 });
 
 test('invalid effect and lifecycle combinations are rejected', () => {
