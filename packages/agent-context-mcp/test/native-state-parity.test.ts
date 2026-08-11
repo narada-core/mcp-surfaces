@@ -114,6 +114,19 @@ try {
       const tsReady = await tsOccupant.call('agent_orientation_read', tsMaterial.next_call.arguments);
       assert.deepEqual(normalize(rustReady, rust), normalize(tsReady, ts), 'acknowledgement and ready gate projection');
     } finally { await Promise.all([tsOccupant.stop(), rustOccupant.stop()]); }
+    const tsAdminEvidence = client(process.execPath, [tsEntrypoint, '--site-root', ts.root, '--site-id', 'parity', '--tool-projection', 'admin'], ts, tsOrientation);
+    const rustAdminEvidence = client(rustEntrypoint, ['--site-root', rust.root, '--site-id', 'parity', '--tool-projection', 'admin'], rust, rustOrientation);
+    try {
+      for (const [tool, argumentsValue] of [
+        ['agent_context_whoami', { hint: 'parity.builder' }],
+        ['agent_context_startup_sequence', {}],
+        ['agent_orientation_read', { selection: 'continuity' }],
+        ['agent_orientation_read', { selection: 'work' }],
+        ['agent_orientation_acknowledge', {}],
+      ] as const) {
+        assert.deepEqual(normalize(await rustAdminEvidence.call(tool, argumentsValue), rust), normalize(await tsAdminEvidence.call(tool, argumentsValue), ts), `${tool} native administrative evidence parity`);
+      }
+    } finally { await Promise.all([tsAdminEvidence.stop(), rustAdminEvidence.stop()]); }
   } finally {
     await Promise.all([tsClient.stop(), rustClient.stop()]);
   }

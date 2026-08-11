@@ -7,7 +7,7 @@ use sha2::Sha256;
 use std::env;
 
 pub fn read(context: &Context, projection: &str, args: &Value) -> Result<Value, String> {
-    let evidence = evidence(context)?;
+    let evidence = evidence(context, args)?;
     let packet = entry_packet(context, &evidence)?;
     if projection == "admin" {
         return admin_read(context, args, &evidence, packet);
@@ -57,11 +57,25 @@ struct Evidence {
     delivery: Value,
     manifest_id: String,
 }
-fn evidence(context: &Context) -> Result<Evidence, String> {
-    let admission = parse_env_json(
-        "NARADA_CARRIER_SESSION_ADMISSION_RECEIPT",
-        "agent_context_exact_admission_receipt_required",
-    )?;
+fn evidence(context: &Context, args: &Value) -> Result<Evidence, String> {
+    let inherited = env::var("NARADA_CARRIER_SESSION_ADMISSION_RECEIPT")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(|raw| {
+            serde_json::from_str::<Value>(&raw)
+                .map_err(|error| format!("agent_context_admission_receipt_env_invalid:{error}"))
+        })
+        .transpose()?;
+    let supplied = args
+        .get("admission_receipt")
+        .filter(|v| !v.is_null())
+        .cloned();
+    if supplied.is_some() && inherited.is_some() && supplied != inherited {
+        return Err("agent_context_conflicting_admission_receipts".into());
+    }
+    let admission = supplied
+        .or(inherited)
+        .ok_or("agent_context_exact_admission_receipt_required")?;
     if admission.get("schema").and_then(Value::as_str)
         != Some("narada.carrier_session.admission_receipt.v0")
         || admission.get("decision").and_then(Value::as_str) != Some("admitted")
@@ -121,6 +135,53 @@ fn evidence(context: &Context) -> Result<Evidence, String> {
         delivery,
         manifest_id,
     })
+}
+
+pub fn whoami(context: &Context, args: &Value) -> Result<Value, String> {
+    let has_receipt = args.get("admission_receipt").is_some()
+        || env::var_os("NARADA_CARRIER_SESSION_ADMISSION_RECEIPT").is_some();
+    if !has_receipt {
+        return Ok(
+            json!({"schema":"narada.agent_context.identity_resolution.v1","status":"blocked","reason":"agent_context_exact_admission_receipt_required","rejected_fallbacks":["latest_checkpoint","latest_start_event","identity_name_inference"]}),
+        );
+    }
+    let evidence = evidence(context, args)?;
+    let admission = &evidence.admission;
+    let identity = admission
+        .pointer("/agent_identity/local_agent_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let hint = args.get("hint").and_then(Value::as_str);
+    Ok(
+        json!({"schema":"narada.agent_context.identity_resolution.v1","status":"ok","identity":identity,"canonical_agent_id":admission.pointer("/agent_identity/canonical_agent_id").cloned().unwrap_or(Value::Null),"confidence":"exact","source":"carrier_session_admission_receipt","admission_receipt_ref":admission["receipt_id"],"carrier_session":admission["coordinate"],"authority_readback_ref":admission["authority_readback_ref"],"hint_match":hint.map(|v|v==identity||Some(v)==admission.pointer("/agent_identity/canonical_agent_id").and_then(Value::as_str))}),
+    )
+}
+
+pub fn startup(context: &Context, args: &Value) -> Result<Value, String> {
+    for forbidden in ["checkpoint_id", "checkpoint_startup", "generated_at"] {
+        if args.get(forbidden).is_some() {
+            return Ok(
+                json!({"schema":"narada.agent_context.orientation_delivery.v1","status":"blocked","source_mutation":false,"reason":"orientation_startup_exact_generation_only","rejected_argument":forbidden,"required_next_step":"Use agent_context_hydrate_current for a separately identified diagnostic candidate generation."}),
+            );
+        }
+    }
+    let evidence = evidence(context, args)?;
+    let mut packet = entry_packet(context, &evidence)?;
+    packet.as_object_mut().unwrap().insert(
+        "compatibility_alias".into(),
+        json!("agent_context_startup_sequence"),
+    );
+    packet
+        .as_object_mut()
+        .unwrap()
+        .insert("canonical_tool".into(), json!("agent_orientation_read"));
+    Ok(packet)
+}
+
+pub fn acknowledge_tool(context: &Context, args: &Value) -> Result<Value, String> {
+    let evidence = evidence(context, args)?;
+    let packet = entry_packet(context, &evidence)?;
+    acknowledge(context, &evidence, &packet)
 }
 fn parse_env_json(name: &str, missing: &str) -> Result<Value, String> {
     let raw = env::var(name)
@@ -667,13 +728,88 @@ fn ready(packet: &Value, ack: Option<&str>) -> Value {
     json!({"schema":"narada.agent_context.orientation_ready.v1","status":"ready","source_mutation":false,"local_persistence":true,"ordinary_work_gate":"open","orientation":orientation,"manifest_ref":packet["manifest_ref"],"acknowledgement_ref":ack.map(Value::from).unwrap_or_else(||packet["acknowledgement_ref"].clone()),"next_call":null,"suggested_next_call":work_call})
 }
 fn admin_read(
-    _context: &Context,
+    context: &Context,
     args: &Value,
-    _e: &Evidence,
+    evidence: &Evidence,
     packet: Value,
 ) -> Result<Value, String> {
-    if args.get("step_id").is_some() || args.get("selection").is_some() {
-        return Err("agent_context_native_orientation_admin_read_not_implemented".into());
+    let step_id = args
+        .get("step_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    let selection = args
+        .get("selection")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    if !step_id.is_empty() && !selection.is_empty() {
+        return Err("agent_context_orientation_read_mode_ambiguous".into());
+    }
+    if step_id.is_empty() && args.get("offset").is_some() {
+        return Err("agent_context_orientation_required_read_step_id_required_for_offset".into());
+    }
+    if !selection.is_empty() {
+        let field = match selection {
+            "continuity" => "continuity_selection",
+            "work" => "work_selection",
+            _ => {
+                return Err(format!(
+                    "agent_context_orientation_selection_invalid:{selection}"
+                ))
+            }
+        };
+        let selected = &packet["orientation_brief"][field];
+        if selected.get("mode").and_then(Value::as_str) == Some("omitted") {
+            return Ok(
+                json!({"schema":"narada.agent_context.orientation_selection_read.v1","status":"omitted","source_mutation":false,"ordinary_work_gate":packet["ordinary_work_gate"],"selection_kind":selection,"manifest_ref":packet["manifest_ref"],"selection":selected,"projection":null}),
+            );
+        }
+        let db = context.open_db()?;
+        let manifest_text:String=db.query_row("SELECT manifest_json FROM orientation_manifest_generations WHERE manifest_id=?1 LIMIT 1",[&evidence.manifest_id],|row|row.get(0)).map_err(db_error)?;
+        let manifest: Value = serde_json::from_str(&manifest_text).map_err(|_| {
+            format!(
+                "agent_context_orientation_manifest_generation_json_invalid:{}",
+                evidence.manifest_id
+            )
+        })?;
+        let compartment = if selection == "continuity" {
+            "continuity"
+        } else {
+            "work_orientation"
+        };
+        let entry = manifest
+            .get("entries")
+            .and_then(Value::as_array)
+            .and_then(|values| {
+                values.iter().find(|entry| {
+                    entry.get("compartment").and_then(Value::as_str) == Some(compartment)
+                        && entry.get("projection_status").and_then(Value::as_str)
+                            == Some("available")
+                })
+            })
+            .ok_or_else(|| {
+                format!("agent_context_orientation_selection_binding_mismatch:{selection}")
+            })?;
+        if entry.get("artifact_ref") != selected.get("artifact_ref")
+            || entry.get("revision") != selected.get("revision")
+        {
+            return Err(format!(
+                "agent_context_orientation_selection_binding_mismatch:{selection}"
+            ));
+        }
+        return Ok(
+            json!({"schema":"narada.agent_context.orientation_selection_read.v1","status":"exact","source_mutation":false,"ordinary_work_gate":packet["ordinary_work_gate"],"selection_kind":selection,"manifest_ref":packet["manifest_ref"],"selection":selected,"projection":{"entry_id":entry["entry_id"],"source_authority_ref":entry["source_authority_ref"],"artifact_ref":entry["artifact_ref"],"revision":entry["revision"],"observed_at":entry["observed_at"],"revalidation_rule":entry["revalidation_rule"],"payload":entry["payload"],"rendered_text":entry["rendered_text"]}}),
+        );
+    }
+    if !step_id.is_empty() {
+        return required_read(
+            context,
+            evidence,
+            &packet,
+            step_id,
+            args.get("offset").and_then(Value::as_i64).unwrap_or(0),
+        );
     }
     Ok(packet)
 }

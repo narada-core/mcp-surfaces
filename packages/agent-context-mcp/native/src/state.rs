@@ -82,9 +82,11 @@ pub fn call_tool(
     match name {
         "agent_context_doctor" => doctor(context),
         "agent_context_guidance" => guidance(&args),
-        "agent_context_whoami" => whoami_without_receipt(&args),
+        "agent_context_whoami" => crate::orientation::whoami(context, &args),
         "agent_context_hydrate_current" => hydrate_without_receipt(&args),
         "agent_orientation_read" => crate::orientation::read(context, projection, &args),
+        "agent_orientation_acknowledge" => crate::orientation::acknowledge_tool(context, &args),
+        "agent_context_startup_sequence" => crate::orientation::startup(context, &args),
         "mcp_output_show" => output_show(context, &args),
         "agent_context_checkpoint" => checkpoint(context, &args),
         "agent_context_rehydrate" => rehydrate(context, &args),
@@ -452,16 +454,6 @@ fn guidance(args: &Value) -> Result<Value, String> {
     Ok(result)
 }
 
-fn whoami_without_receipt(args: &Value) -> Result<Value, String> {
-    if args.get("admission_receipt").is_some()
-        || env::var_os("NARADA_CARRIER_SESSION_ADMISSION_RECEIPT").is_some()
-    {
-        return Err("agent_context_native_admission_receipt_not_implemented".into());
-    }
-    Ok(
-        json!({"schema":"narada.agent_context.identity_resolution.v1","status":"blocked","reason":"agent_context_exact_admission_receipt_required","rejected_fallbacks":["latest_checkpoint","latest_start_event","identity_name_inference"]}),
-    )
-}
 fn hydrate_without_receipt(args: &Value) -> Result<Value, String> {
     if args.get("checkpoint_startup") == Some(&Value::Bool(true)) {
         return Ok(
