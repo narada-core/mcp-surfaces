@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 import { payloadShow } from '@narada-core/mcp-transport';
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { defineNativeSurface, parseSurfaceDescriptorV2, surfaceDescriptorDigest, surfaceExecutionDeclaration, surfaceToolContractDigest, type DefinedSurface, type McpToolDefinition, type SurfaceDescriptorV2, type SurfaceExecutionDeclaration } from '@narada-core/mcp-fabric-contracts';
 import {
@@ -211,7 +211,33 @@ function requiredNativeArtifact(packageRoot: string, artifactName: string): stri
 function nativeRuntimeProxyEntrypoint(): string {
   return requiredNativeArtifact(MCP_RUNTIME_PROXY_PACKAGE_ROOT, 'narada-mcp-runtime.exe');
 }
+const MCP_MATERIALIZER_NATIVE_PACKAGE_ROOT = resolve(MCP_SURFACES_ROOT, 'shared', 'mcp-materializer-native');
+const MCP_NATIVE_MATERIALIZER_ARTIFACT_NAME = 'narada-mcp-materializer' + (process.platform === 'win32' ? '.exe' : '');
+function nativeMaterializerEntrypoint(): string {
+  const artifactRoot = resolve(MCP_MATERIALIZER_NATIVE_PACKAGE_ROOT, 'dist', 'native');
+  const pointerPath = resolve(artifactRoot, 'current.json');
+  if (!existsSync(pointerPath)) throw new Error(`native_materializer_pointer_unavailable:${pointerPath}`);
+  const pointer = JSON.parse(readFileSync(pointerPath, 'utf8')) as JsonRecord;
+  if (pointer.schema !== 'narada.mcp_materializer.native_artifact_pointer.v1') {
+    throw new Error(`native_materializer_pointer_schema_unsupported:${pointerPath}`);
+  }
+  const relative = asRecord(pointer.artifacts)[MCP_NATIVE_MATERIALIZER_ARTIFACT_NAME];
+  const escapedName = MCP_NATIVE_MATERIALIZER_ARTIFACT_NAME.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  if (typeof relative !== 'string' || !new RegExp(`^versions/[0-9a-f]{64}/${escapedName}$`).test(relative)) {
+    throw new Error(`native_materializer_pointer_target_invalid:${pointerPath}`);
+  }
+  const entrypoint = resolve(artifactRoot, ...relative.split('/'));
+  const versionsRoot = resolve(artifactRoot, 'versions') + sep;
+  if (!entrypoint.startsWith(versionsRoot) || !existsSync(entrypoint)) {
+    throw new Error(`native_materializer_artifact_unavailable:${entrypoint}`);
+  }
+  return portablePathLiteral(entrypoint);
+}
 const MCP_REGISTRAR_RUNTIME_ENTRYPOINT = `${MCP_SURFACES_ROOT}/mcp-registrar/dist/src/main.js`;
+const MCP_NATIVE_REGISTRAR_ARTIFACT_NAME = 'narada-mcp-registrar' + (process.platform === 'win32' ? '.exe' : '');
+export function nativeRegistrarEntrypoint(): string {
+  return requiredNativeArtifact(MCP_REGISTRAR_PACKAGE_ROOT, MCP_NATIVE_REGISTRAR_ARTIFACT_NAME);
+}
 const MCP_RUNTIME_IMPLEMENTATION_MATRIX_PATH = resolve(runtimeImplementationMatrixContractPath());
 const MCP_MCP_LOADER_PACKAGE_ROOT = resolve(MCP_SURFACES_ROOT, 'mcp-loader-mcp');
 const MCP_NATIVE_MCP_LOADER_ARTIFACT_NAME = `narada-mcp-loader${process.platform === 'win32' ? '.exe' : ''}`;
@@ -2085,10 +2111,12 @@ function carrierLaunchCommand(
   const useNativeLifecycle = selectedEngine === 'rust' && (componentKind === 'task-lifecycle-mcp' || componentKind === 'work-lifecycle-mcp');
   const useNativeAgentContext = selectedEngine === 'rust' && componentKind === 'agent-context-mcp'
     && (server.projection?.id ?? 'default') === 'default';
+  const useNativeRegistrar = selectedEngine === 'rust' && componentKind === 'mcp-registrar';
   const useNativeSharedSurface = selectedEngine === 'rust' && (surfaceId === 'catalog-observation' || surfaceId === 'operator-routing' || surfaceId === 'site-inbox' || surfaceId === 'site-lifecycle' || surfaceId === 'site-registry' || surfaceId === 'project-state' || surfaceId === 'runtime-introspection' || surfaceId === 'site-coherence' || surfaceId === 'launcher' || surfaceId === 'mailbox' || surfaceId === 'graph-mail' || surfaceId === 'calendar' || surfaceId === 'site-loop' || surfaceId === 'worker-delegation' || surfaceId === 'delegated-task' || surfaceId === 'sop' || surfaceId === 'scheduler' || surfaceId === 'surface-feedback' || surfaceId === 'speech' || surfaceId === 'artifacts' || surfaceId === 'nars-session' || surfaceId === 'quota-meter' || surfaceId === 'operator-console-overlay' || surfaceId === 'browser-control' || surfaceId === 'cloudflare-carrier');
   const nativeApplet = useNativeFilesystemApplet ? 'filesystem' : useNativeStructuredCommandApplet ? 'structured-command' : useNativeGitApplet ? 'git' : null;
   const nativeSharedSurfaceEntrypoint = nativeSharedSurfacesEntrypoint();
   const nativeAgentContext = useNativeAgentContext ? nativeAgentContextEntrypoint() : null;
+  const nativeRegistrar = useNativeRegistrar ? nativeRegistrarEntrypoint() : null;
   const nativeLifecycleEntrypoint = resolveNativeLifecycleEntrypoint(componentKind);
   if (useNativeLifecycle && !existsSync(nativeLifecycleEntrypoint)) {
     throw diagnosticError(
@@ -2107,6 +2135,9 @@ function carrierLaunchCommand(
   if (useNativeAgentContext && (!nativeAgentContext || !existsSync(nativeAgentContext))) {
     throw diagnosticError('registrar_native_agent_context_missing', 'Native Agent Context current pointer is unavailable.', { entrypoint: nativeAgentContext, surface_id: surfaceId, component_kind: componentKind });
   }
+  if (useNativeRegistrar && (!nativeRegistrar || !existsSync(nativeRegistrar))) {
+    throw diagnosticError('registrar_native_registrar_missing', 'Native registrar current pointer is unavailable.', { entrypoint: nativeRegistrar, surface_id: surfaceId, component_kind: componentKind });
+  }
   const nativeLoaderEntrypoint = useNativeLoader
     ? resolveNativeArtifact(MCP_MCP_LOADER_PACKAGE_ROOT, MCP_NATIVE_MCP_LOADER_ARTIFACT_NAME)
     : null;
@@ -2117,22 +2148,22 @@ function carrierLaunchCommand(
       { entrypoint: nativeLoaderEntrypoint, surface_id: surfaceId, component_kind: componentKind },
     );
   }
-  if ((nativeApplet || useNativeLoader || useNativeLifecycle || useNativeSharedSurface || useNativeAgentContext) && !nativeRuntimeProxyAvailable()) {
+  if ((nativeApplet || useNativeLoader || useNativeLifecycle || useNativeSharedSurface || useNativeAgentContext || useNativeRegistrar) && !nativeRuntimeProxyAvailable()) {
     throw diagnosticError(
       'registrar_native_runtime_proxy_missing',
       `Native runtime proxy is unavailable: ${nativeRuntimeProxyEntrypoint()}`,
       { entrypoint: nativeRuntimeProxyEntrypoint(), surface_id: surfaceId, component_kind: componentKind },
     );
   }
-  const effectiveChildCommand = useNativeLoader ? nativeLoaderEntrypoint! : nativeApplet ? nativeRuntimeProxyEntrypoint() : useNativeLifecycle ? nativeLifecycleEntrypoint : useNativeSharedSurface ? nativeSharedSurfaceEntrypoint : useNativeAgentContext ? nativeAgentContext! : runtimeCommand;
-  const effectiveChildEntrypoint = useNativeLoader ? nativeLoaderEntrypoint! : nativeApplet ? nativeRuntimeProxyEntrypoint() : useNativeLifecycle ? nativeLifecycleEntrypoint : useNativeSharedSurface ? nativeSharedSurfaceEntrypoint : useNativeAgentContext ? nativeAgentContext! : childEntrypoint;
+  const effectiveChildCommand = useNativeLoader ? nativeLoaderEntrypoint! : nativeApplet ? nativeRuntimeProxyEntrypoint() : useNativeLifecycle ? nativeLifecycleEntrypoint : useNativeSharedSurface ? nativeSharedSurfaceEntrypoint : useNativeAgentContext ? nativeAgentContext! : useNativeRegistrar ? nativeRegistrar! : runtimeCommand;
+  const effectiveChildEntrypoint = useNativeLoader ? nativeLoaderEntrypoint! : nativeApplet ? nativeRuntimeProxyEntrypoint() : useNativeLifecycle ? nativeLifecycleEntrypoint : useNativeSharedSurface ? nativeSharedSurfaceEntrypoint : useNativeAgentContext ? nativeAgentContext! : useNativeRegistrar ? nativeRegistrar! : childEntrypoint;
   const sidecarPath = configPath ? materializationSidecarPath(configPath) : null;
   const nativeAuthority = useNativeSharedSurface && (surfaceId === 'calendar' || surfaceId === 'graph-mail');
   const effectiveChildArgs = useNativeSharedSurface
     ? nativeSharedSurfaceArgs(server, surfaceId, nativeAuthority)
     : childArgs;
-  const childInvocationKind = useNativeLoader || useNativeLifecycle || useNativeSharedSurface || useNativeAgentContext ? 'native_entrypoint' : nativeApplet ? 'native_applet' : null;
-  if (server.kind === 'local' && !useNativeLoader && !nativeApplet && !useNativeLifecycle && !useNativeSharedSurface && !useNativeAgentContext) {
+  const childInvocationKind = useNativeLoader || useNativeLifecycle || useNativeSharedSurface || useNativeAgentContext || useNativeRegistrar ? 'native_entrypoint' : nativeApplet ? 'native_applet' : null;
+  if (server.kind === 'local' && !useNativeLoader && !nativeApplet && !useNativeLifecycle && !useNativeSharedSurface && !useNativeAgentContext && !useNativeRegistrar) {
     return {
       command: runtimeCommand,
       args: [childEntrypoint, ...childArgs],
@@ -2147,7 +2178,7 @@ function carrierLaunchCommand(
   const proxyImplementation = proxyImplementationOverride ?? runtimeProxyImplementationForResolvedPlan(plan);
   const proxyEntrypoint = selectedRuntimeProxyEntrypoint(proxyImplementation);
   const nativeProxy = proxyImplementation === 'native';
-  const registrarEngine = selectedSurfaceRuntimeEngine('mcp-registrar', undefined, plan);
+  const materializerEntrypoint = nativeMaterializerEntrypoint();
   return {
     command: nativeProxy ? proxyEntrypoint : javascriptRuntimeCommand(proxyImplementation),
     args: [
@@ -2160,9 +2191,9 @@ function carrierLaunchCommand(
         '--carrier-kind',
         carrier.kind,
         '--registrar-command',
-        javascriptRuntimeCommand(registrarEngine),
+        materializerEntrypoint,
         '--registrar-entrypoint',
-        MCP_REGISTRAR_RUNTIME_ENTRYPOINT,
+        materializerEntrypoint,
       ] : []),
       '--child-command',
       effectiveChildCommand,
@@ -2712,9 +2743,11 @@ function runFreshRegistrarRequest(method: string, args: JsonRecord): Promise<Jso
   const requestedPlan = acceptedRuntimeMaterializationPlan(requestedProfile);
   const registrarEntry = runtimeMaterializationPlanEntry(requestedPlan, 'mcp-registrar');
   const registrarEngine = String(registrarEntry?.runtime_engine_kind ?? 'bun') as RuntimeEngineKind;
-  const registrarCommand = javascriptRuntimeCommand(registrarEngine);
+  const nativeRegistrar = registrarEngine === 'rust';
+  const registrarCommand = nativeRegistrar ? nativeRegistrarEntrypoint() : javascriptRuntimeCommand(registrarEngine);
+  const registrarEntrypoint = nativeRegistrar ? registrarCommand : MCP_REGISTRAR_RUNTIME_ENTRYPOINT;
   return new Promise((resolveRequest, rejectRequest) => {
-    const child = spawn(registrarCommand, [MCP_REGISTRAR_RUNTIME_ENTRYPOINT], {
+    const child = spawn(registrarCommand, nativeRegistrar ? [] : [MCP_REGISTRAR_RUNTIME_ENTRYPOINT], {
       cwd: MCP_WORKSPACE_ROOT,
       env: { ...process.env, NARADA_RUNTIME_PROFILE: requestedProfile, [FRESH_REGISTRAR_ENV]: '1' },
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -2730,7 +2763,7 @@ function runFreshRegistrarRequest(method: string, args: JsonRecord): Promise<Jso
       rejectRequest(diagnosticError(
         'registrar_fresh_materialization_failed',
         'Fresh registrar subprocess timed out while materializing the carrier configuration.',
-        { entrypoint: MCP_REGISTRAR_RUNTIME_ENTRYPOINT, timeout_ms: 30000, stderr_tail: stderr.slice(-4000) },
+        { entrypoint: registrarEntrypoint, timeout_ms: 30000, stderr_tail: stderr.slice(-4000) },
       ));
     }, 30000);
     const fail = (message: string, details: JsonRecord = {}) => {
@@ -2738,7 +2771,7 @@ function runFreshRegistrarRequest(method: string, args: JsonRecord): Promise<Jso
       settled = true;
       clearTimeout(timeout);
       rejectRequest(diagnosticError('registrar_fresh_materialization_failed', message, {
-        entrypoint: MCP_REGISTRAR_RUNTIME_ENTRYPOINT,
+        entrypoint: registrarEntrypoint,
         stderr_tail: stderr.slice(-4000),
         ...details,
       }));
@@ -2751,14 +2784,21 @@ function runFreshRegistrarRequest(method: string, args: JsonRecord): Promise<Jso
     child.once('close', (exitCode, signal) => {
       if (settled) return;
       clearTimeout(timeout);
-      const responseLine = stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).at(-1);
-      if (!responseLine) {
+      const responseText = nativeRegistrar
+        ? (() => {
+          const split = stdout.indexOf('\r\n\r\n');
+          if (split < 0) return null;
+          const length = Number(stdout.slice(0, split).match(/Content-Length:\s*(\d+)/i)?.[1]);
+          return Number.isFinite(length) ? stdout.slice(split + 4, split + 4 + length) : null;
+        })()
+        : stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).at(-1) ?? null;
+      if (!responseText) {
         fail('Fresh registrar subprocess exited without a JSON-RPC response.', { exit_code: exitCode, signal });
         return;
       }
       let response: JsonRecord;
       try {
-        response = asRecord(JSON.parse(responseLine));
+        response = asRecord(JSON.parse(responseText));
       } catch (error) {
         fail('Fresh registrar subprocess returned invalid JSON-RPC output.', {
           exit_code: exitCode,
@@ -2770,6 +2810,16 @@ function runFreshRegistrarRequest(method: string, args: JsonRecord): Promise<Jso
       }
       const responseError = asRecord(response.error);
       if (Object.keys(responseError).length > 0) {
+        if (nativeRegistrar) {
+          const data = asRecord(responseError.data);
+          settled = true;
+          rejectRequest(diagnosticError(
+            optionalString(data.code) ?? 'registrar_fresh_materialization_failed',
+            String(responseError.message ?? data.message ?? 'Fresh registrar materialization failed.'),
+            asRecord(data.details),
+          ));
+          return;
+        }
         fail(String(responseError.message ?? 'Fresh registrar materialization failed.'), {
           exit_code: exitCode,
           signal,

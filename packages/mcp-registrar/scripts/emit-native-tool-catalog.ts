@@ -1,7 +1,7 @@
 import { writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { gzipSync } from 'node:zlib';
-import { createServerState, handleRequest, listTools, nativeCarrierProjectionPlans, nativeCarrierValidationPlans } from '../src/main.js';
+import { createServerState, handleRequest, listTools, nativeCarrierProjectionPlans, nativeCarrierValidationPlans, nativeRegistrarEntrypoint } from '../src/main.js';
 import { buildGuidanceResult } from '../src/guidance.js';
 
 async function tool(name: string) {
@@ -25,6 +25,9 @@ const contract = JSON.stringify({
   schema: 'narada.mcp_registrar.native_tool_catalog.v1',
   tools: listTools(),
   guidance: buildGuidanceResult({}),
+  runtime_bindings: {
+    registrar_entrypoint: nativeRegistrarEntrypoint(),
+  },
   read_models: {
     registrar_surface_list: await tool('registrar_surface_list'),
     registrar_carrier_list: await tool('registrar_carrier_list'),

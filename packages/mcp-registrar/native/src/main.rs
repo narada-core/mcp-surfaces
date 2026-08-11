@@ -41,7 +41,7 @@ fn run() -> Result<(), String> {
 
 fn dispatch(request: &Value) -> Value {
     let id = request.get("id").cloned().unwrap_or(Value::Null);
-    let contract: Value = match flate2::read::GzDecoder::new(CONTRACT)
+    let mut contract: Value = match flate2::read::GzDecoder::new(CONTRACT)
         .bytes()
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())
@@ -50,6 +50,9 @@ fn dispatch(request: &Value) -> Value {
         Ok(v) => v,
         Err(e) => return error(id, format!("mcp_registrar_native_contract_invalid:{e}")),
     };
+    if let Err(e) = rebind_native_registrar(&mut contract) {
+        return error(id, format!("mcp_registrar_native_contract_invalid:{e}"));
+    }
     match request.get("method").and_then(Value::as_str).unwrap_or("") {
         "initialize" => {
             json!({"jsonrpc":"2.0","id":id,"result":{"protocolVersion":request.pointer("/params/protocolVersion").cloned().unwrap_or_else(||json!("2024-11-05")),"capabilities":{"tools":{}},"serverInfo":{"name":"mcp-registrar","version":"0.1.0"}}})
@@ -437,15 +440,15 @@ fn carrier_unbind(contract: &Value, args: &Value) -> Result<Value, MutationFailu
     if path != declared_path {
         replace_value_string(&mut runtime_plan, declared_path, path);
         replace_value_string(&mut generation, declared_path, path);
-        let object = runtime_plan.as_object_mut().unwrap();
-        object.remove("plan_fingerprint");
-        let fingerprint = sha256_text(&serde_json::to_string(object).unwrap());
-        object.insert("plan_fingerprint".into(), json!(fingerprint.clone()));
-        generation.as_object_mut().unwrap().insert(
-            "runtime_materialization_plan_fingerprint".into(),
-            json!(fingerprint),
-        );
     }
+    let object = runtime_plan.as_object_mut().unwrap();
+    object.remove("plan_fingerprint");
+    let fingerprint = sha256_text(&serde_json::to_string(object).unwrap());
+    object.insert("plan_fingerprint".into(), json!(fingerprint.clone()));
+    generation.as_object_mut().unwrap().insert(
+        "runtime_materialization_plan_fingerprint".into(),
+        json!(fingerprint),
+    );
     generation.as_object_mut().unwrap().insert(
         "config_sha256".into(),
         json!(materialization_config_fingerprint(kind, &next_content)),
@@ -534,6 +537,20 @@ fn replace_value_string(value: &mut Value, old: &str, new: &str) {
         }
         _ => {}
     }
+}
+fn rebind_native_registrar(contract: &mut Value) -> Result<(), String> {
+    let declared = contract
+        .pointer("/runtime_bindings/registrar_entrypoint")
+        .and_then(Value::as_str)
+        .ok_or("native_registrar_binding_missing")?
+        .to_string();
+    let current = native_artifact_entrypoint("mcp-registrar", if cfg!(windows) { "narada-mcp-registrar.exe" } else { "narada-mcp-registrar" })
+        .ok_or("native_registrar_artifact_unavailable")?;
+    if declared != current {
+        replace_value_string(contract, &declared, &current);
+        replace_value_string(contract, &declared.replace('/', "\\"), &current.replace('/', "\\"));
+    }
+    Ok(())
 }
 fn materialization_config_fingerprint(kind: &str, content: &str) -> String {
     let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
