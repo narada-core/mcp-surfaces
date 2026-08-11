@@ -9,9 +9,9 @@
     "build": "pnpm run build:native"
   },
   "naradaRuntimeArtifacts": {
-    "win32": ["./dist/native/narada-mcp-surfaces.exe"],
-    "linux": ["./dist/native/narada-mcp-surfaces"],
-    "darwin": ["./dist/native/narada-mcp-surfaces"]
+    "win32": ["./dist/native/narada-mcp-surfaces.exe", "./dist/native/versions/*"],
+    "linux": ["./dist/native/narada-mcp-surfaces", "./dist/native/versions/*"],
+    "darwin": ["./dist/native/narada-mcp-surfaces", "./dist/native/versions/*"]
   },
   "files": ["native/Cargo.toml", "native/Cargo.lock", "native/src/", "dist/native/"]
 }

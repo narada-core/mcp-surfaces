@@ -214,7 +214,11 @@ const MCP_LIFECYCLE_NATIVE_PACKAGE_ROOT = resolve(MCP_SURFACES_ROOT, 'shared', '
 const MCP_NATIVE_TASK_LIFECYCLE_ENTRYPOINT = portablePathLiteral(join(MCP_LIFECYCLE_NATIVE_PACKAGE_ROOT, 'dist', 'native', 'narada-task-lifecycle-mcp' + (process.platform === 'win32' ? '.exe' : '')));
 const MCP_NATIVE_WORK_LIFECYCLE_ENTRYPOINT = portablePathLiteral(join(MCP_LIFECYCLE_NATIVE_PACKAGE_ROOT, 'dist', 'native', 'narada-work-lifecycle-mcp' + (process.platform === 'win32' ? '.exe' : '')));
 const MCP_SHARED_SURFACES_NATIVE_PACKAGE_ROOT = resolve(MCP_SURFACES_ROOT, 'shared', 'mcp-surfaces-native');
-const MCP_NATIVE_SHARED_SURFACES_ENTRYPOINT = portablePathLiteral(join(MCP_SHARED_SURFACES_NATIVE_PACKAGE_ROOT, 'dist', 'native', 'narada-mcp-surfaces' + (process.platform === 'win32' ? '.exe' : '')));
+const MCP_NATIVE_SHARED_SURFACES_ARTIFACT_NAME = 'narada-mcp-surfaces' + (process.platform === 'win32' ? '.exe' : '');
+const MCP_NATIVE_SHARED_SURFACES_LEGACY_ENTRYPOINT = portablePathLiteral(join(MCP_SHARED_SURFACES_NATIVE_PACKAGE_ROOT, 'dist', 'native', MCP_NATIVE_SHARED_SURFACES_ARTIFACT_NAME));
+function nativeSharedSurfacesEntrypoint(): string {
+  return portablePathLiteral(resolveNativeArtifact(MCP_SHARED_SURFACES_NATIVE_PACKAGE_ROOT, MCP_NATIVE_SHARED_SURFACES_ARTIFACT_NAME) ?? MCP_NATIVE_SHARED_SURFACES_LEGACY_ENTRYPOINT);
+}
 const PROCESS_REGISTRAR_ENTRYPOINT_FINGERPRINT = existsSync(MCP_REGISTRAR_RUNTIME_ENTRYPOINT)
   ? createHash('sha256').update(readFileSync(MCP_REGISTRAR_RUNTIME_ENTRYPOINT)).digest('hex')
   : null;
@@ -2081,7 +2085,7 @@ function carrierLaunchCommand(
   const useNativeLifecycle = selectedEngine === 'rust' && (componentKind === 'task-lifecycle-mcp' || componentKind === 'work-lifecycle-mcp');
   const useNativeSharedSurface = selectedEngine === 'rust' && (surfaceId === 'catalog-observation' || surfaceId === 'operator-routing' || surfaceId === 'site-inbox' || surfaceId === 'site-lifecycle' || surfaceId === 'site-registry' || surfaceId === 'project-state' || surfaceId === 'runtime-introspection' || surfaceId === 'site-coherence' || surfaceId === 'launcher' || surfaceId === 'mailbox' || surfaceId === 'graph-mail' || surfaceId === 'calendar' || surfaceId === 'site-loop' || surfaceId === 'worker-delegation' || surfaceId === 'delegated-task' || surfaceId === 'sop' || surfaceId === 'scheduler' || surfaceId === 'surface-feedback' || surfaceId === 'speech' || surfaceId === 'artifacts' || surfaceId === 'nars-session' || surfaceId === 'quota-meter' || surfaceId === 'operator-console-overlay' || surfaceId === 'browser-control' || surfaceId === 'cloudflare-carrier');
   const nativeApplet = useNativeFilesystemApplet ? 'filesystem' : useNativeStructuredCommandApplet ? 'structured-command' : useNativeGitApplet ? 'git' : null;
-  const nativeSharedSurfaceEntrypoint = MCP_NATIVE_SHARED_SURFACES_ENTRYPOINT;
+  const nativeSharedSurfaceEntrypoint = nativeSharedSurfacesEntrypoint();
   const nativeLifecycleEntrypoint = componentKind === 'task-lifecycle-mcp' ? MCP_NATIVE_TASK_LIFECYCLE_ENTRYPOINT : MCP_NATIVE_WORK_LIFECYCLE_ENTRYPOINT;
   if (useNativeLifecycle && !existsSync(nativeLifecycleEntrypoint)) {
     throw diagnosticError(

@@ -31,8 +31,11 @@ const expectedUserSiteRoot = resolve(
 ).replace(/\\/g, '/');
 const nativeRuntimeArtifactAvailable = process.platform === 'win32'
   && resolveNativeArtifact(join(workspaceRoot, 'packages', 'shared', 'mcp-runtime-proxy'), 'narada-mcp-runtime.exe') !== null;
-const nativeSharedSurfaceArtifactAvailable = process.platform === 'win32' && existsSync(workspacePath('packages', 'shared', 'mcp-surfaces-native', 'dist', 'native', 'narada-mcp-surfaces.exe'));
-const nativeSharedSurfaceEntrypoint = workspacePath('packages', 'shared', 'mcp-surfaces-native', 'dist', 'native', 'narada-mcp-surfaces.exe');
+const nativeSharedSurfacePackageRoot = join(workspaceRoot, 'packages', 'shared', 'mcp-surfaces-native');
+const nativeSharedSurfaceArtifactName = process.platform === 'win32' ? 'narada-mcp-surfaces.exe' : 'narada-mcp-surfaces';
+const nativeSharedSurfaceEntrypoint = resolveNativeArtifact(nativeSharedSurfacePackageRoot, nativeSharedSurfaceArtifactName)
+  ?? workspacePath('packages', 'shared', 'mcp-surfaces-native', 'dist', 'native', nativeSharedSurfaceArtifactName);
+const nativeSharedSurfaceArtifactAvailable = process.platform === 'win32' && existsSync(nativeSharedSurfaceEntrypoint);
 assert.equal(
   defaultRuntimeProxyImplementation(process.platform, nativeRuntimeArtifactAvailable),
   nativeRuntimeArtifactAvailable ? 'native' : 'bun',
@@ -1222,9 +1225,9 @@ try {
     },
   );
   const sopServer: any = (sopBindConfig.config.mcpServers as Record<string, any>)['narada-sonar-sop'];
-  assertRuntimeProxy(sopServer, workspacePath('packages', 'sop-mcp', 'dist', 'src', 'main.js'), 'node');
+  assertRuntimeProxy(sopServer, nativeSharedSurfaceEntrypoint, 'narada-mcp-surfaces');
   const sopChildArgs = sopServer.args.slice(sopServer.args.indexOf('--') + 1);
-  assert.deepEqual(sopChildArgs, ['--sop-root', root, '--sops-dir', root + '/.narada/sops']);
+  assert.deepEqual(sopChildArgs, ['--surface-id', 'sop', '--sop-root', root, '--sops-dir', root + '/.narada/sops']);
   const mailboxBindConfig: any = buildSiteBindConfig(
     { site_id: 'narada-sonar', root, config_path: join(root, 'site.json'), surfaces: [] },
     {
