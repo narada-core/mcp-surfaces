@@ -6,8 +6,9 @@ by the registrar.
 
 ## What materialization means
 
-The registrar turns the current Site fabric, package build artifacts, runtime
-proxy, and carrier bindings into carrier configuration plus a generation
+The native Rust materializer turns the declared Site capability registry,
+carrier contract, artifact manifest, implementation matrix, and runtime
+bindings into carrier configuration plus a generation
 sidecar. The sidecar records the artifact-manifest fingerprint, runtime plan,
 runtime-contract version, registrar/proxy fingerprints, and the carrier
 identity. A carrier must use one internally consistent generation.
@@ -18,43 +19,39 @@ after successful materialization.
 
 The current runtime contract version is `6`.
 
-## Supported runtime profiles
+## Declared runtime profile
 
-`NARADA_RUNTIME_PROFILE` selects the materialized runtime plan:
-
-- `native` is the default profile and uses the available native runtime
-  components where they are built and admitted;
-- `bun` uses Bun entrypoints and the Bun TypeScript runtime path;
-- `node-compat` uses the Node-compatible TypeScript path for compatibility and
-  rollback.
-
-The profile is a coherent plan across the registrar, runtime proxy, loader,
-and child surfaces. It is not an instruction to change one child command by
-hand. The generated carrier configuration is the source of the selected
-profile.
+The canonical authority accepts only registry bindings admitted to the
+`native` runtime profile and requires one absolute native proxy executable for
+the whole carrier set. Bun and Node registrar commands remain compatibility
+tools, not alternate authorities. Runtime choices for individual child
+surfaces belong in the capability registry and implementation matrix; they are
+not inferred or silently rewritten during carrier publication.
 
 ## Canonical all-carrier procedure
 
-From the mcp-surfaces checkout:
+Publish the native authority after changing its source:
 
 ```powershell
-pnpm build
-pnpm materialize:carrier -- --materialize-all
+pnpm build:materializer:native
 ```
 
-`pnpm build` uses the Bun build path by default. Use `pnpm build:node` when the
-Node-compatible build is intentionally selected. The build and artifact
-manifest must complete successfully before materialization.
-
-For explicit profile selection:
+This writes a content-addressed executable under
+`packages/shared/mcp-materializer-native/dist/native/versions/<fingerprint>/`
+and atomically updates `current.json`. Normal materialization resolves that
+immutable executable and does not build the workspace:
 
 ```powershell
-$env:NARADA_RUNTIME_PROFILE = 'native' # or 'bun' or 'node-compat'
-pnpm build
-pnpm materialize:carrier -- --materialize-all
+pnpm materialize:carrier
 ```
 
-The registrar writes every configured carrier and its
+The equivalent direct Windows adapter is:
+
+```powershell
+./tools/materialize-all-carriers.ps1 -NoNotification
+```
+
+The Rust authority writes every declared carrier and its
 `<carrier-config>.narada-generation.json` sidecar atomically. The default
 operation is all-carrier materialization so that sibling carriers do not retain
 different runtime plans or contract generations.
@@ -81,26 +78,31 @@ The error's recovery group is a diagnostic deduplication key, not permission to
 materialize only the named surface. It identifies one carrier-wide recovery
 action shared by all affected surfaces.
 
-## Automatic stale-only recovery
+## Native recovery
 
-The repository-owned entrypoint is:
+Every native generation records the immutable materializer executable. A stale
+proxy returns a structured recovery command equivalent to:
 
 ```powershell
-node scripts/recover-carrier-materialization.mjs
+<materializer.exe> recover-generation --generation <carrier-sidecar>
 ```
 
-It inspects the workspace artifact manifest first, runs the workspace build only
-when artifacts are stale, inspects every registered carrier projection, and
-invokes transactional `--materialize-all` only when at least one projection
-differs. A current workspace is a true no-op. Standard output is a compact
-operator summary. The complete inspection and materialization record is written
-atomically under `.ai/runtime/carrier-materialization-recovery/`; the summary
-returns its evidence reference and SHA-256. The directory retains the current write plus the newest 63 remaining evidence
-files by default and prunes older current and legacy-format records after each
-write. A successful mutating recovery is also atomically pinned as
-`latest-materialization.json`; rolling no-op evidence cannot evict it. Set
-`NARADA_MCP_RECOVERY_EVIDENCE_MAX_FILES` to an integer from 1 through 10000 for
-an explicit local retention bound.
+The authority reconstructs the declared registry, workspace, matrix, home, and
+installed-index inputs from that generation and the embedded carrier contract,
+then transactionally rematerializes all carriers. This path does not invoke
+Bun, Node, `node_modules`, generated registrar JavaScript, pnpm, or a workspace
+build. If the artifact manifest itself is stale, rebuild it separately before
+materialization; materialization does not pretend to repair source artifacts.
+
+Verify all published evidence directly with:
+
+```powershell
+<materializer.exe> verify-all --installed-index "$env:USERPROFILE/.narada/carriers/installed-carriers.json"
+```
+
+Verification checks the installed index; generation, config, plan, manifest,
+matrix, proxy, and materializer fingerprints; carrier/config pairing; and the
+runtime contract version.
 
 Materialization records durable per-carrier restart pressure in
 `.ai/runtime/carrier-restart-pressure.json`. Later no-op checks continue to
@@ -145,20 +147,9 @@ Native lifecycle executables are published into content-addressed
 running Windows MCP processes. Existing processes keep their immutable binary;
 new materialization resolves the current version.
 
-## Emergency single-carrier escape
-
-The registrar deliberately makes a single-carrier operation difficult. The
-explicit `--materialize-carrier <carrier-id>` path requires
-`--allow-single-carrier` and the recovery escape hatch. It is for controlled
-emergency inspection or recovery only:
-
-```powershell
-pnpm materialize:carrier -- --materialize-carrier codex-andrey --allow-single-carrier --recovery-escape-hatch
-```
-
-After using this escape, run the canonical all-carrier procedure before
-considering the workspace recovered. Do not edit generated carrier
-configuration by hand.
+The canonical native authority intentionally has no single-carrier escape.
+Carrier generations are one publication unit; repair and rollback cover the
+whole declared set. Do not edit generated carrier configuration by hand.
 
 ## Verification after restart
 
@@ -187,13 +178,12 @@ It targets the version-independent Windows PowerShell 5.1 executable instead
 of a versioned `WindowsApps` PowerShell path. Re-run it after moving the
 checkout or recreating the Desktop shortcut. The shortcut invokes
 `tools/materialize-all-carriers.ps1` in a visible PowerShell window. It prints
-its active phase and a bounded spinner while build/materialization output is
+the resolved immutable authority while bounded materialization output is
 captured in `%TEMP%\\narada-materialize-all.log`; successful runs close after
 the completion notification, while failed shortcut runs print the log path and
 remain open until Enter before returning a non-zero exit code.
 
-The launcher tolerates harmless native stderr from build tools, resolves the
-available `pnpm` launcher, forwards the all-carrier flag explicitly, and
-returns a non-zero exit code on failure. It does not open an editor
-unexpectedly; inspect the log and startup diagnostics when the shortcut
-fails.
+The launcher validates that `current.json` points inside the content-addressed
+artifact directory, invokes only that native executable, and returns a non-zero
+exit code on failure. It does not discover pnpm, Bun, or Node, build the
+workspace, or open an editor.

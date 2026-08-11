@@ -219,8 +219,20 @@ fn run() -> Result<(), Failure> {
             ));
         }
         let options = derive::options_from_generation(&generation)?;
-        let result = materialize(derive::derive_input(options)?)?;
-        println!("{result}");
+        let input = derive::derive_input(options)?;
+        let installed_index = input.installed_carrier_index_path.clone();
+        let materialization = materialize(input)?;
+        let verification = verify_all(&installed_index)?;
+        println!(
+            "{}",
+            json!({
+                "schema": "narada.mcp_materializer.recovery_evidence.v1",
+                "status": "recovered",
+                "trigger_generation_path": path_text(&generation),
+                "materialization": materialization,
+                "verification": verification,
+            })
+        );
         return Ok(());
     }
     if command == "verify-all" {

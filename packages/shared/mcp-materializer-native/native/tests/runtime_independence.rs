@@ -159,6 +159,10 @@ fn derives_all_carriers_from_declared_site_capabilities_without_javascript() {
     let proxy = root.path().join("narada-mcp-runtime.exe");
     fs::create_dir_all(workspace.join(".ai/runtime")).unwrap();
     fs::create_dir_all(registry_path.parent().unwrap()).unwrap();
+    assert!(!workspace.join("node_modules").exists());
+    assert!(!workspace
+        .join("packages/mcp-registrar/dist/src/main.js")
+        .exists());
     fs::write(&proxy, b"native proxy fixture").unwrap();
     fs::write(&matrix_path, b"{\"schema\":\"fixture\"}\n").unwrap();
     fs::write(
@@ -280,6 +284,13 @@ fn derives_all_carriers_from_declared_site_capabilities_without_javascript() {
         "stderr={}",
         String::from_utf8_lossy(&recovery.stderr)
     );
+    let recovery_result: Value = serde_json::from_slice(&recovery.stdout).unwrap();
+    assert_eq!(
+        recovery_result["schema"],
+        "narada.mcp_materializer.recovery_evidence.v1"
+    );
+    assert_eq!(recovery_result["status"], "recovered");
+    assert_eq!(recovery_result["verification"]["status"], "current");
     assert!(fs::read_to_string(home.join(".codex/config.toml"))
         .unwrap()
         .contains("[mcp_servers.narada-site-andrey-user-local-filesystem]"));
