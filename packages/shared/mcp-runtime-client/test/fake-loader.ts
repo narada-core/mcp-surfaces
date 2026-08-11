@@ -7,6 +7,7 @@ let attachCount = 0;
 let responseCount = 0;
 let outputCount = 0;
 const materializedOutputs = new Map<string, JsonRecord>();
+const incompleteOutputRefs = new Set<string>();
 
 const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
 for await (const line of lines) {
@@ -71,7 +72,7 @@ for await (const line of lines) {
         next_offset: nextOffset,
         output_text: outputText,
         output_truncated: nextOffset !== null,
-        full_output_char_length: fullText.length,
+        full_output_char_length: incompleteOutputRefs.has(ref) ? fullText.length + 1 : fullText.length,
       },
     }));
     continue;
@@ -122,6 +123,20 @@ for await (const line of lines) {
       result_bounded: true,
       details_ref: outerPageRef,
       result: outputPage(outerPageRef, 'mcp_loader_read_result'),
+    }));
+    continue;
+  }
+  if (childTool === 'incomplete') {
+    const domainRef = materialize({
+      schema: 'fake.materialized.v1',
+      kind: 'incomplete',
+      payload: 'i'.repeat(4_000),
+    });
+    incompleteOutputRefs.add(domainRef);
+    respond(request.id, toolResult({
+      schema: 'narada.mcp_loader.tool_result.v1',
+      result_bounded: false,
+      result: toolResult(outputPage(domainRef)),
     }));
     continue;
   }

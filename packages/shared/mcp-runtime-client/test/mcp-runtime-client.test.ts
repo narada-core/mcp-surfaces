@@ -69,6 +69,11 @@ try {
   assert.equal(String(doubleMaterialized.payload).length, 24_000);
 
   await assert.rejects(
+    () => client.call('alpha', 'incomplete'),
+    /mcp_runtime_materialized_result_incomplete:alpha:incomplete/,
+  );
+
+  await assert.rejects(
     () => client.call('alpha', 'too-large'),
     /mcp_runtime_materialized_result_too_large:alpha:too-large/,
   );
