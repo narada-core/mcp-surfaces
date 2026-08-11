@@ -9,6 +9,7 @@
     "test": "cargo test --locked --manifest-path native/Cargo.toml"
   },
   "files": [
+    "contracts/",
     "native/Cargo.lock",
     "native/Cargo.toml",
     "native/src/"

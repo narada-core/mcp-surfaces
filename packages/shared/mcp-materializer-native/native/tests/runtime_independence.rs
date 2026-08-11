@@ -4,6 +4,37 @@ use std::process::Command;
 use tempfile::tempdir;
 
 #[test]
+fn publishes_itself_to_a_content_addressed_immutable_location_without_javascript() {
+    let root = tempdir().unwrap();
+    let artifact_root = root.path().join("dist/native");
+    let output = Command::new(env!("CARGO_BIN_EXE_narada-mcp-materializer"))
+        .env_clear()
+        .arg("publish")
+        .arg("--artifact-root")
+        .arg(&artifact_root)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["status"], "published");
+    let executable = result["executable"].as_str().unwrap();
+    assert!(std::path::Path::new(executable).exists());
+    assert!(!executable.contains("target"));
+    let pointer: Value =
+        serde_json::from_slice(&fs::read(artifact_root.join("current.json")).unwrap()).unwrap();
+    assert_eq!(
+        pointer["schema"],
+        "narada.mcp_materializer.native_artifact_pointer.v1"
+    );
+    assert_eq!(pointer["build_fingerprint"], result["build_fingerprint"]);
+}
+
+#[test]
 fn materializes_every_supported_carrier_kind_without_javascript_runtime_environment() {
     let root = tempdir().unwrap();
     let paths = [
@@ -39,7 +70,19 @@ fn materializes_every_supported_carrier_kind_without_javascript_runtime_environm
             "servers": [{
                 "name": "narada-site-test-local-filesystem",
                 "command": root.path().join("narada-mcp-runtime.exe").to_string_lossy(),
-                "args": ["proxy", "--surface-id", "local-filesystem"],
+                "args": [
+                    "proxy", "--surface-id", "local-filesystem",
+                    "--child-command", root.path().join("filesystem.exe"),
+                    "--artifact-manifest", root.path().join("workspace-artifact-manifest.json"),
+                    "--runtime-contract-version", "6",
+                    "--entrypoint", root.path().join("filesystem.exe"),
+                    "--carrier-id", id,
+                    "--carrier-kind", kind,
+                    "--registrar-command", root.path().join("narada-mcp-materializer.exe"),
+                    "--registrar-entrypoint", root.path().join("narada-mcp-materializer.exe"),
+                    "--materialization-sidecar", format!("{}.narada-generation.json", path.to_string_lossy()),
+                    "--"
+                ],
                 "env_vars": ["NARADA_AGENT_ID"],
                 "enabled": true,
                 "approval_mode": "approve",
@@ -103,4 +146,107 @@ fn materializes_every_supported_carrier_kind_without_javascript_runtime_environm
         serde_json::from_slice(&fs::read(root.path().join("installed-carriers.json")).unwrap())
             .unwrap();
     assert_eq!(index["carriers"].as_array().unwrap().len(), 3);
+}
+
+#[test]
+fn derives_all_carriers_from_declared_site_capabilities_without_javascript() {
+    let root = tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    let home = root.path().join("home");
+    let registry_path = root.path().join("mcp-surfaces.json");
+    let matrix_path = root.path().join("runtime-implementation-matrix.json");
+    let index_path = home.join(".narada/carriers/installed-carriers.json");
+    let proxy = root.path().join("narada-mcp-runtime.exe");
+    fs::create_dir_all(workspace.join(".ai/runtime")).unwrap();
+    fs::write(&proxy, b"native proxy fixture").unwrap();
+    fs::write(&matrix_path, b"{\"schema\":\"fixture\"}\n").unwrap();
+    fs::write(
+        workspace.join(".ai/runtime/workspace-artifact-manifest.json"),
+        serde_json::to_vec_pretty(&json!({
+            "schema": "narada.workspace_artifact_manifest.v1",
+            "manifest_fingerprint": "e".repeat(64)
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let surface_ids = [
+        "agent-context",
+        "local-filesystem",
+        "mcp-registrar",
+        "mcp-loader",
+        "task-lifecycle",
+        "surface-feedback",
+    ];
+    let registry = json!({
+        "schema": "narada.site.capabilities.mcp_surfaces.v1",
+        "site_id": "andrey-user",
+        "surfaces": surface_ids.iter().map(|surface_id| json!({
+            "catalog_surface_id": surface_id,
+            "server_name": format!("narada-site-andrey-user-{surface_id}"),
+            "registered_live_tools": [format!("{}_guidance", surface_id.replace('-', "_"))],
+            "runtime_binding": {
+                "proxy_implementation": "native",
+                "transport": {
+                    "type": "stdio",
+                    "command": proxy,
+                    "args": [
+                        "proxy", "--surface-id", surface_id,
+                        "--child-command", root.path().join(format!("{surface_id}.exe")),
+                        "--artifact-manifest", workspace.join(".ai/runtime/workspace-artifact-manifest.json"),
+                        "--runtime-contract-version", "6",
+                        "--entrypoint", root.path().join(format!("{surface_id}.exe")),
+                        "--"
+                    ]
+                }
+            },
+            "surface_projection": {
+                "projection_id": "default",
+                "surface_descriptor": {
+                    "metadata": { "codex_startup_timeout_sec": 60 },
+                    "projections": [{
+                        "id": "default",
+                        "transport": { "env": ["NARADA_AGENT_ID"] }
+                    }]
+                }
+            }
+        })).collect::<Vec<_>>()
+    });
+    fs::write(
+        &registry_path,
+        serde_json::to_vec_pretty(&registry).unwrap(),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_narada-mcp-materializer"))
+        .env_clear()
+        .arg("materialize-site")
+        .arg("--registry")
+        .arg(&registry_path)
+        .arg("--workspace-root")
+        .arg(&workspace)
+        .arg("--home")
+        .arg(&home)
+        .arg("--matrix")
+        .arg(&matrix_path)
+        .arg("--installed-index")
+        .arg(&index_path)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["carrier_count"], 3);
+    let codex = fs::read_to_string(home.join(".codex/config.toml")).unwrap();
+    assert_eq!(codex.matches("[mcp_servers.").count(), 12);
+    for surface_id in surface_ids {
+        assert!(codex.contains(&format!(
+            "[mcp_servers.narada-site-andrey-user-{surface_id}]"
+        )));
+    }
+    let installed: Value = serde_json::from_slice(&fs::read(index_path).unwrap()).unwrap();
+    assert_eq!(installed["carriers"].as_array().unwrap().len(), 3);
 }

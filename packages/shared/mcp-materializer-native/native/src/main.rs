@@ -8,6 +8,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
+mod derive;
+
 const INPUT_SCHEMA: &str = "narada.carrier_materialization_input.v1";
 const GENERATION_SCHEMA: &str = "narada.mcp_materialization_generation.v1";
 
@@ -51,7 +53,7 @@ enum CarrierKind {
     Opencode,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 struct ServerInput {
     name: String,
@@ -70,7 +72,7 @@ struct ServerInput {
     tools: Vec<ToolInput>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 struct ToolInput {
     name: String,
@@ -167,6 +169,35 @@ fn run() -> Result<(), Failure> {
                 "Expected `materialize-all --input <path>`.",
             )
         })?;
+    if command == "publish" {
+        let flag = args.next().and_then(|value| value.into_string().ok());
+        if flag.as_deref() != Some("--artifact-root") {
+            return Err(Failure::new(
+                "materializer_artifact_root_required",
+                "Expected publish --artifact-root <path>.",
+            ));
+        }
+        let artifact_root = args.next().map(PathBuf::from).ok_or_else(|| {
+            Failure::new(
+                "materializer_artifact_root_required",
+                "Expected an artifact root.",
+            )
+        })?;
+        if args.next().is_some() {
+            return Err(Failure::new(
+                "materializer_argument_unknown",
+                "Unexpected trailing argument.",
+            ));
+        }
+        println!("{}", publish_self(&artifact_root)?);
+        return Ok(());
+    }
+    if command == "materialize-site" {
+        let options = derive::DeriveOptions::parse(args)?;
+        let result = materialize(derive::derive_input(options)?)?;
+        println!("{result}");
+        return Ok(());
+    }
     if command != "materialize-all" {
         return Err(Failure::new(
             "materializer_command_unknown",
@@ -203,6 +234,71 @@ fn run() -> Result<(), Failure> {
     Ok(())
 }
 
+fn publish_self(artifact_root: &Path) -> Result<Value, Failure> {
+    if !artifact_root.is_absolute() {
+        return Err(Failure::new(
+            "materializer_artifact_root_not_absolute",
+            path_text(artifact_root),
+        ));
+    }
+    let executable = env::current_exe()
+        .map_err(|error| Failure::new("materializer_executable_unresolved", error.to_string()))?;
+    let bytes = fs::read(&executable)
+        .map_err(|error| Failure::new("materializer_executable_read_failed", error.to_string()))?;
+    let fingerprint = sha256(&bytes);
+    let name = if cfg!(windows) {
+        "narada-mcp-materializer.exe"
+    } else {
+        "narada-mcp-materializer"
+    };
+    let destination = artifact_root.join("versions").join(&fingerprint).join(name);
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            Failure::new("materializer_artifact_directory_failed", error.to_string())
+        })?;
+    }
+    if destination.exists() {
+        let existing = fs::read(&destination).map_err(|error| {
+            Failure::new("materializer_artifact_read_failed", error.to_string())
+        })?;
+        if existing != bytes {
+            return Err(Failure::new(
+                "materializer_artifact_collision",
+                path_text(&destination),
+            ));
+        }
+    } else {
+        atomic_write(&destination, &bytes).map_err(|error| {
+            Failure::new("materializer_artifact_publish_failed", error.to_string())
+        })?;
+    }
+    let generated_at = OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .map_err(|error| Failure::new("materializer_clock_failed", error.to_string()))?;
+    let relative = format!("versions/{fingerprint}/{name}");
+    let pointer = json!({
+        "schema": "narada.mcp_materializer.native_artifact_pointer.v1",
+        "generated_at": generated_at,
+        "build_fingerprint": fingerprint,
+        "artifacts": { name: relative },
+    });
+    atomic_write(&artifact_root.join("current.json"), &pretty_json(&pointer)?).map_err(
+        |error| {
+            Failure::new(
+                "materializer_artifact_pointer_publish_failed",
+                error.to_string(),
+            )
+        },
+    )?;
+    Ok(json!({
+        "schema": "narada.mcp_materializer.publish_result.v1",
+        "status": "published",
+        "executable": path_text(&destination),
+        "pointer_path": path_text(&artifact_root.join("current.json")),
+        "build_fingerprint": fingerprint,
+    }))
+}
+
 fn materialize(input: MaterializationInput) -> Result<Value, Failure> {
     validate_input(&input)?;
     let generated_at = OffsetDateTime::now_utc()
@@ -212,31 +308,27 @@ fn materialize(input: MaterializationInput) -> Result<Value, Failure> {
     let mut index_carriers = Vec::new();
     for carrier in &input.carriers {
         let config = emit_carrier(carrier)?;
-        let config_hash = sha256(&config);
+        let config_hash = materialization_config_fingerprint(carrier.carrier_kind, &config)?;
         let plan_path = suffix_path(&carrier.config_path, ".narada-runtime-plan.json");
         let sidecar_path = suffix_path(&carrier.config_path, ".narada-generation.json");
-        let plan = serde_json::to_vec_pretty(&json!({
+        let plan_unsigned = json!({
             "schema": "narada.runtime_materialization_plan.v1",
+            "status": "accepted",
             "runtime_profile_kind": input.runtime_profile_kind,
-            "runtime_implementation_matrix_path": path_text(&input.runtime_implementation_matrix_path),
-            "runtime_implementation_matrix_fingerprint": input.runtime_implementation_matrix_fingerprint,
+            "source": {
+                "authority": "narada.runtime_implementation_matrix",
+                "matrix_fingerprint": input.runtime_implementation_matrix_fingerprint,
+            },
             "carrier_id": carrier.carrier_id,
             "servers": carrier.servers.iter().map(|server| json!({"name":server.name,"command":server.command,"args":server.args})).collect::<Vec<_>>(),
-        })).map_err(json_failure)?;
-        let plan_hash = sha256(&plan);
-        let fingerprint_source = json!({
-            "carrier_id": carrier.carrier_id,
-            "carrier_kind": carrier.carrier_kind,
-            "config_sha256": config_hash,
-            "artifact_manifest_fingerprint": input.artifact_manifest_fingerprint,
-            "runtime_materialization_plan_fingerprint": plan_hash,
-            "runtime_implementation_matrix_fingerprint": input.runtime_implementation_matrix_fingerprint,
-            "registrar_fingerprint": input.registrar_fingerprint,
-            "proxy_fingerprint": input.proxy_fingerprint,
         });
-        let generation_fingerprint =
-            sha256(&serde_json::to_vec(&fingerprint_source).map_err(json_failure)?);
-        let generation = Generation {
+        let plan_hash = sha256(&serde_json::to_vec(&plan_unsigned).map_err(json_failure)?);
+        let mut plan = plan_unsigned;
+        plan.as_object_mut().expect("plan is an object").insert(
+            "plan_fingerprint".to_string(),
+            Value::String(plan_hash.clone()),
+        );
+        let mut generation = Generation {
             schema: GENERATION_SCHEMA,
             contract_version: 6,
             carrier_id: carrier.carrier_id.clone(),
@@ -261,16 +353,24 @@ fn materialize(input: MaterializationInput) -> Result<Value, Failure> {
             proxy_fingerprint: input.proxy_fingerprint.clone(),
             server_count: carrier.servers.len(),
             proxy_count: carrier.servers.len(),
-            generation_fingerprint: generation_fingerprint.clone(),
             generated_at: generated_at.clone(),
+            generation_fingerprint: String::new(),
         };
+        let mut unsigned_generation = serde_json::to_value(&generation).map_err(json_failure)?;
+        unsigned_generation
+            .as_object_mut()
+            .expect("generation is an object")
+            .remove("generation_fingerprint");
+        let generation_fingerprint =
+            sha256(&serde_json::to_vec(&unsigned_generation).map_err(json_failure)?);
+        generation.generation_fingerprint = generation_fingerprint.clone();
         publications.push(Publication {
             path: carrier.config_path.clone(),
             content: config,
         });
         publications.push(Publication {
             path: plan_path,
-            content: with_newline(plan),
+            content: pretty_json(&plan)?,
         });
         publications.push(Publication {
             path: sidecar_path.clone(),
@@ -367,9 +467,96 @@ fn validate_input(input: &MaterializationInput) -> Result<(), Failure> {
                     server.name.clone(),
                 ));
             }
+            validate_proxy_launch(input, carrier, server)?;
         }
     }
     Ok(())
+}
+
+fn validate_proxy_launch(
+    input: &MaterializationInput,
+    carrier: &CarrierInput,
+    server: &ServerInput,
+) -> Result<(), Failure> {
+    let command = PathBuf::from(&server.command);
+    if !command.is_absolute() || !path_eq(&command, &input.proxy_entrypoint) {
+        return Err(Failure::new(
+            "materializer_proxy_command_mismatch",
+            server.name.clone(),
+        ));
+    }
+    let required = [
+        ("--runtime-contract-version", "6".to_string()),
+        (
+            "--artifact-manifest",
+            path_text(&input.artifact_manifest_path),
+        ),
+        ("--carrier-id", carrier.carrier_id.clone()),
+        (
+            "--carrier-kind",
+            match carrier.carrier_kind {
+                CarrierKind::Codex => "codex",
+                CarrierKind::Kimi => "kimi",
+                CarrierKind::Opencode => "opencode",
+            }
+            .to_string(),
+        ),
+        (
+            "--registrar-command",
+            path_text(&input.registrar_entrypoint),
+        ),
+        (
+            "--registrar-entrypoint",
+            path_text(&input.registrar_entrypoint),
+        ),
+        (
+            "--materialization-sidecar",
+            path_text(&suffix_path(
+                &carrier.config_path,
+                ".narada-generation.json",
+            )),
+        ),
+    ];
+    for (flag, expected) in required {
+        let actual = arg_value(&server.args, flag);
+        let equal = if flag.contains("manifest")
+            || flag.contains("registrar")
+            || flag.contains("sidecar")
+        {
+            actual
+                .map(PathBuf::from)
+                .is_some_and(|value| path_eq(&value, Path::new(&expected)))
+        } else {
+            actual == Some(expected.as_str())
+        };
+        if !equal {
+            return Err(Failure::new(
+                "materializer_proxy_argument_mismatch",
+                format!("{}:{flag}", server.name),
+            )
+            .with_details(json!({"expected":expected,"actual":actual})));
+        }
+    }
+    if arg_value(&server.args, "--child-command").is_none()
+        || arg_value(&server.args, "--entrypoint").is_none()
+    {
+        return Err(Failure::new(
+            "materializer_proxy_child_contract_incomplete",
+            server.name.clone(),
+        ));
+    }
+    Ok(())
+}
+
+fn arg_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    args.iter()
+        .position(|arg| arg == flag)
+        .and_then(|index| args.get(index + 1))
+        .map(String::as_str)
+}
+
+fn path_eq(left: &Path, right: &Path) -> bool {
+    path_text(left).eq_ignore_ascii_case(&path_text(right))
 }
 
 fn validate_identifier(value: &str, field: &'static str) -> Result<(), Failure> {
@@ -571,10 +758,6 @@ fn pretty_json(value: &Value) -> Result<Vec<u8>, Failure> {
     bytes.push(b'\n');
     Ok(bytes)
 }
-fn with_newline(mut value: Vec<u8>) -> Vec<u8> {
-    value.push(b'\n');
-    value
-}
 fn json_failure(error: serde_json::Error) -> Failure {
     Failure::new("materializer_json_failed", error.to_string())
 }
@@ -586,6 +769,44 @@ fn suffix_path(path: &Path, suffix: &str) -> PathBuf {
 }
 fn path_text(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
+}
+
+fn materialization_config_fingerprint(
+    carrier_kind: CarrierKind,
+    content: &[u8],
+) -> Result<String, Failure> {
+    let normalized = String::from_utf8(content.to_vec())
+        .map_err(|error| Failure::new("materializer_config_not_utf8", error.to_string()))?
+        .replace("\r\n", "\n")
+        .replace('\r', "\n");
+    let canonical = if matches!(carrier_kind, CarrierKind::Codex) {
+        let mut lines = Vec::new();
+        let mut in_mcp_table = false;
+        let mut saw_mcp_table = false;
+        for line in normalized.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("[mcp_servers.") && trimmed.ends_with(']') {
+                in_mcp_table = true;
+                saw_mcp_table = true;
+                lines.push(line);
+                continue;
+            }
+            if trimmed.starts_with('[') && trimmed.ends_with(']') {
+                in_mcp_table = false;
+            }
+            if in_mcp_table {
+                lines.push(line);
+            }
+        }
+        if saw_mcp_table {
+            lines.join("\n")
+        } else {
+            normalized.clone()
+        }
+    } else {
+        normalized
+    };
+    Ok(sha256(canonical.trim_end_matches('\n').as_bytes()))
 }
 
 #[cfg(test)]
@@ -616,8 +837,31 @@ mod tests {
                 trust_projects: vec![],
                 servers: vec![ServerInput {
                     name: "narada-test".into(),
-                    command: "server.exe".into(),
-                    args: vec!["--stdio".into()],
+                    command: path_text(&root.join("narada-mcp-runtime.exe")),
+                    args: vec![
+                        "proxy".into(),
+                        "--surface-id".into(),
+                        "fixture".into(),
+                        "--child-command".into(),
+                        path_text(&root.join("child.exe")),
+                        "--artifact-manifest".into(),
+                        path_text(&root.join("manifest.json")),
+                        "--runtime-contract-version".into(),
+                        "6".into(),
+                        "--entrypoint".into(),
+                        path_text(&root.join("child.exe")),
+                        "--carrier-id".into(),
+                        "codex-test".into(),
+                        "--carrier-kind".into(),
+                        "codex".into(),
+                        "--registrar-command".into(),
+                        path_text(&root.join("narada-mcp-materializer.exe")),
+                        "--registrar-entrypoint".into(),
+                        path_text(&root.join("narada-mcp-materializer.exe")),
+                        "--materialization-sidecar".into(),
+                        path_text(&root.join("config.toml.narada-generation.json")),
+                        "--".into(),
+                    ],
                     env_vars: vec![],
                     enabled: true,
                     approval_mode: Some("approve".into()),

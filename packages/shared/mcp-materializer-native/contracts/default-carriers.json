@@ -1,0 +1,32 @@
+{
+  "schema": "narada.native_carrier_contract.v1",
+  "site_id": "andrey-user",
+  "surface_ids": [
+    "agent-context",
+    "local-filesystem",
+    "mcp-registrar",
+    "mcp-loader",
+    "task-lifecycle",
+    "surface-feedback"
+  ],
+  "carriers": [
+    {
+      "carrier_id": "opencode-andrey",
+      "carrier_kind": "opencode",
+      "config_relative_path": ".config/opencode/opencode.jsonc"
+    },
+    {
+      "carrier_id": "kimi-andrey",
+      "carrier_kind": "kimi",
+      "config_relative_path": ".kimi-code/mcp.json"
+    },
+    {
+      "carrier_id": "codex-andrey",
+      "carrier_kind": "codex",
+      "config_relative_path": ".codex/config.toml",
+      "codex_plugin_overrides": {
+        "github@openai-curated-remote": false
+      }
+    }
+  ]
+}
