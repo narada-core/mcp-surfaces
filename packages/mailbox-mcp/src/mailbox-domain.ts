@@ -414,33 +414,57 @@ export class MailboxDomainService {
     const generationId = requiredBoundedString(args.generation_id, 'mailbox_reconciliation_generation_id_required', 128);
     const loaded = await this.loadScope(args, kernel);
     const limit = boundedInteger(args.limit, 100, 1, 100);
-    const factDb = new kernel.Database(join(loaded.scope.root_dir, '.narada', 'facts.db'));
-    const facts = new kernel.SqliteFactStore({ db: factDb });
-    facts.initSchema();
     const store = this.openStore();
+    let factStore: FactStore | null = null;
     try {
       const observed = store.observedMessageKeys(loaded.scope.scope_id);
       const candidatesByIdentity = new Map<string, FirstObservationCandidate>();
-      for (const fact of facts.getFactsByScope(loaded.scope.scope_id)) {
-        if (fact.fact_type !== 'mail.message.discovered') continue;
-        const metadata = mailMetadata(fact);
-        if (metadata.mailbox_id !== loaded.scope.scope_id) {
-          throw new Error(`mailbox_reconciliation_scope_mismatch:${metadata.mailbox_id}:${loaded.scope.scope_id}`);
+      for (const record of store.generationRecords(generationId)) {
+        if (record.application_status === 'not_applied') continue;
+        if (record.event_kind === 'delete' || record.event_kind === 'deleted') continue;
+        if (!record.mailbox_id || !record.message_id) continue;
+        if (record.mailbox_id !== loaded.scope.scope_id) {
+          throw new Error(`mailbox_reconciliation_scope_mismatch:${record.mailbox_id}:${loaded.scope.scope_id}`);
         }
-        const identity = `${metadata.mailbox_id}\u0000${metadata.message_id}`;
-        if (!candidatesByIdentity.has(identity)) {
+        const identity = `${record.mailbox_id}\u0000${record.message_id}`;
+        if (!observed.has(identity) && !candidatesByIdentity.has(identity)) {
           candidatesByIdentity.set(identity, {
-            mailbox_id: metadata.mailbox_id,
-            message_id: metadata.message_id,
-            fact_id: fact.fact_id,
-            conversation_id: metadata.conversation_id,
+            mailbox_id: record.mailbox_id,
+            message_id: record.message_id,
+            fact_id: record.fact_id,
+            conversation_id: record.conversation_id,
           });
         }
       }
-      const unobserved = [...candidatesByIdentity.entries()]
-        .filter(([identity]) => !observed.has(identity))
-        .map(([, candidate]) => candidate);
+      const unobserved = [...candidatesByIdentity.values()];
       const candidates = unobserved.slice(0, limit);
+      if (candidates.length > 0) {
+        const databasePath = join(loaded.scope.root_dir, '.narada', 'facts.db');
+        if (!existsSync(databasePath)) {
+          throw new Error(`mailbox_reconciliation_fact_db_missing:${databasePath}`);
+        }
+        try {
+          const factDb = new kernel.Database(databasePath);
+          factStore = new kernel.SqliteFactStore({ db: factDb });
+          for (const candidate of candidates) {
+            const fact = factStore.getById(candidate.fact_id);
+            if (!fact) throw new Error(`mailbox_reconciliation_fact_not_found:${candidate.fact_id}`);
+            if (fact.fact_type !== 'mail.message.discovered') {
+              throw new Error(`mailbox_reconciliation_fact_type_invalid:${fact.fact_type}`);
+            }
+            const metadata = mailMetadata(fact);
+            if (metadata.mailbox_id !== candidate.mailbox_id || metadata.message_id !== candidate.message_id) {
+              throw new Error(`mailbox_reconciliation_fact_identity_mismatch:${candidate.fact_id}`);
+            }
+            if (metadata.conversation_id) candidate.conversation_id = metadata.conversation_id;
+          }
+        } catch (error) {
+          throw new Error(`mailbox_reconciliation_fact_validation_failed:${asError(error).message}`);
+        } finally {
+          factStore?.close();
+          factStore = null;
+        }
+      }
       const requestFingerprint = fingerprint({
         schema: 'narada.mailbox.reconcile_first_observations_request.v1',
         scope_id: loaded.scope.scope_id,
@@ -467,7 +491,6 @@ export class MailboxDomainService {
       };
     } finally {
       store.close();
-      facts.close();
     }
   }
 
