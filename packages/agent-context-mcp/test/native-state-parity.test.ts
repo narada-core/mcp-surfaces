@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
+import { issueCarrierSessionOrientationDeliveryReceipt } from '@narada-core/orientation-manifest';
+import { materializeAgentSessionStart, recordOrientationDeliveryReceipt } from '../src/session-start.js';
 
 const tsEntrypoint = fileURLToPath(new URL('../src/main.js', import.meta.url));
 const rustEntrypoint = fileURLToPath(new URL(`../../native/target/release/narada-agent-context-mcp${process.platform === 'win32' ? '.exe' : ''}`, import.meta.url));
@@ -85,6 +87,18 @@ try {
     const historyRust = await rustClient.call('agent_context_rehydrate', { agent_id: 'parity.builder', history: true, limit: 10 });
     assert.deepEqual(normalize(historyRust, rust), normalize(historyTs, ts), 'checkpoint history projection');
     assert.deepEqual(dbCounts(rust.db), dbCounts(ts.db), 'checkpoint persistence counts');
+
+    const tsOrientation = prepareOrientation(ts);
+    const rustOrientation = prepareOrientation(rust);
+    const tsOccupant = client(process.execPath, [tsEntrypoint, '--site-root', ts.root, '--site-id', 'parity', '--tool-projection', 'occupant'], ts, tsOrientation);
+    const rustOccupant = client(rustEntrypoint, ['--site-root', rust.root, '--site-id', 'parity', '--tool-projection', 'occupant'], rust, rustOrientation);
+    try {
+      assert.deepEqual(
+        normalize(await rustOccupant.call('agent_orientation_read', {}), rust),
+        normalize(await tsOccupant.call('agent_orientation_read', {}), ts),
+        'initial occupant orientation projection and continuation binding',
+      );
+    } finally { await Promise.all([tsOccupant.stop(), rustOccupant.stop()]); }
   } finally {
     await Promise.all([tsClient.stop(), rustClient.stop()]);
   }
@@ -102,8 +116,8 @@ function fixture(label: string) {
   return { root, db: join(root, '.ai', 'state', 'agent-context.sqlite') };
 }
 
-function client(executable: string, args: string[], fixtureValue: ReturnType<typeof fixture>) {
-  const child = spawn(executable, args, { env: { ...process.env, NARADA_AGENT_CONTEXT_DB: fixtureValue.db }, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true }) as ChildProcessWithoutNullStreams;
+function client(executable: string, args: string[], fixtureValue: ReturnType<typeof fixture>, extraEnv: Record<string, string> = {}) {
+  const child = spawn(executable, args, { env: { ...process.env, NARADA_AGENT_CONTEXT_DB: fixtureValue.db, ...extraEnv }, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true }) as ChildProcessWithoutNullStreams;
   let output = Buffer.alloc(0); let stderr = ''; let id = 0;
   child.stdout.on('data', (chunk) => { output = Buffer.concat([output, chunk]); });
   child.stderr.setEncoding('utf8'); child.stderr.on('data', (chunk) => { stderr += chunk; });
@@ -176,4 +190,24 @@ function seedSessions(path: string) {
     insert.run('evt-newer', 'parity.builder', 'codex', '2026-02-01T00:00:00.000Z', 'materialized', 'resume newer', 'file:///bootstrap');
     insert.run('evt-other', 'other.builder', 'codex', '2026-03-01T00:00:00.000Z', 'materialized', null, null);
   } finally { db.close(); }
+}
+
+function prepareOrientation(fixtureValue: ReturnType<typeof fixture>) {
+  const carrierSessionId = 'carrier-parity';
+  const admission: any = {
+    schema: 'narada.carrier_session.admission_receipt.v0', receipt_id: 'receipt:carrier-parity:1', decision: 'admitted', state: 'starting',
+    coordinate: { authority_scope: 'test', site_ref: 'site:parity', carrier_session_id: carrierSessionId, authority_epoch: 1 },
+    agent_identity: { source_authority_ref: 'agent-identity:parity', artifact_ref: 'agent:parity.builder@1', revision: '1', local_agent_id: 'parity.builder', canonical_agent_id: 'parity.builder' },
+    carrier_kind: 'codex', admission_policy: { source_authority_ref: 'site-law:parity', artifact_ref: 'carrier-policy:parity', revision: '1' },
+    issued_at: '2026-08-11T00:00:00.000Z', valid_until: null, authority_readback_ref: 'carrier-session-authority:carrier-parity', evidence_refs: [], reason_codes: [],
+  };
+  const started: any = materializeAgentSessionStart({ siteRoot: fixtureValue.root, siteId: 'parity', identity: 'parity.builder', runtime: 'codex', dbPath: fixtureValue.db, carrierSessionId, admissionReceipt: admission, generatedAt: '2026-08-11T00:00:00.000Z' });
+  const delivery: any = issueCarrierSessionOrientationDeliveryReceipt({ admissionReceipt: admission, brief: started.orientation_brief, deliveredAt: '2026-08-11T00:00:00.000Z' });
+  recordOrientationDeliveryReceipt({ siteRoot: fixtureValue.root, dbPath: fixtureValue.db, admissionReceipt: admission, brief: started.orientation_brief, deliveryReceipt: delivery });
+  return {
+    NARADA_AGENT_ID: 'parity.builder', NARADA_CARRIER_SESSION_ID: carrierSessionId,
+    NARADA_CARRIER_SESSION_ADMISSION_RECEIPT: JSON.stringify(admission),
+    NARADA_ORIENTATION_MANIFEST_ID: started.orientation_manifest.manifest_id,
+    NARADA_ORIENTATION_DELIVERY_RECEIPT: JSON.stringify(delivery),
+  };
 }

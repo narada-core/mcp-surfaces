@@ -3,6 +3,7 @@ use std::env;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
+mod orientation;
 mod state;
 
 const CATALOG: &str = include_str!("../tool-catalog.json");

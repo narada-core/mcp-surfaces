@@ -44,7 +44,7 @@ impl Context {
         })
     }
 
-    fn open_db(&self) -> Result<Connection, String> {
+    pub(crate) fn open_db(&self) -> Result<Connection, String> {
         if let Some(parent) = self.db_path.parent() {
             fs::create_dir_all(parent)
                 .map_err(|error| format!("agent_context_db_directory_failed:{error}"))?;
@@ -84,6 +84,7 @@ pub fn call_tool(
         "agent_context_guidance" => guidance(&args),
         "agent_context_whoami" => whoami_without_receipt(&args),
         "agent_context_hydrate_current" => hydrate_without_receipt(&args),
+        "agent_orientation_read" => crate::orientation::read(context, projection, &args),
         "mcp_output_show" => output_show(context, &args),
         "agent_context_checkpoint" => checkpoint(context, &args),
         "agent_context_rehydrate" => rehydrate(context, &args),
