@@ -4,12 +4,14 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { performance } from 'node:perf_hooks';
+import { resolveNativeArtifact } from '@narada-core/mcp-runtime-proxy/native-artifact';
 
 type Json = Record<string, any>;
 type Topology = { id: string; loader: string; child: string; command: string; args: string[] };
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const serverPath = join(packageRoot, 'dist', 'src', 'main.js');
-const nativePath = join(packageRoot, 'dist', 'native', process.platform === 'win32' ? 'narada-mcp-loader.exe' : 'narada-mcp-loader');
+const nativeArtifactName = process.platform === 'win32' ? 'narada-mcp-loader.exe' : 'narada-mcp-loader';
+const nativePath = resolveNativeArtifact(packageRoot, nativeArtifactName);
 const n = positive(process.env.NARADA_LOADER_BENCHMARK_SAMPLES, 12);
 const warmCount = positive(process.env.NARADA_LOADER_BENCHMARK_WARM_CALLS, 60);
 const fixture = mkdtempSync(join(tmpdir(), 'narada-loader-benchmark-'));
@@ -93,7 +95,7 @@ function topologies(): Topology[] {
   const node = basename(process.execPath).toLowerCase().includes('node') ? process.execPath : 'node';
   const bun = basename(process.execPath).toLowerCase().includes('bun') ? process.execPath : 'bun';
   if (!existsSync(serverPath)) throw new Error('benchmark_missing_typescript_build');
-  if (!existsSync(nativePath)) throw new Error('benchmark_missing_native_build');
+  if (!nativePath || !existsSync(nativePath)) throw new Error('benchmark_missing_native_build');
   if (!available(node)) throw new Error('benchmark_node_unavailable');
   if (!available(bun)) throw new Error('benchmark_bun_unavailable');
   return [

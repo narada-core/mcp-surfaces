@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { requireNativeArtifact } from '@narada-core/mcp-runtime-proxy/native-artifact';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,7 +9,7 @@ import { parseRpcLines, toolCall } from './script-support.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const extension = process.platform === 'win32' ? '.exe' : '';
-const executable = (name: string): string => join(root, 'dist', 'native', `${name}${extension}`);
+const executable = (name: string): string => requireNativeArtifact(root, `${name}${extension}`);
 const run = (
   name: string,
   args: readonly string[],

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { requireNativeArtifact } from '@narada-core/mcp-runtime-proxy/native-artifact';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -12,7 +13,7 @@ const packageRoot = fileURLToPath(new URL('..', import.meta.url));
 const extension = process.platform === 'win32' ? '.exe' : '';
 const samples = positiveInteger(process.env.NARADA_LIFECYCLE_BENCHMARK_SAMPLES ?? '12', 'samples');
 const warmCalls = positiveInteger(process.env.NARADA_LIFECYCLE_BENCHMARK_WARM_CALLS ?? '24', 'warm_calls');
-const executable = (name: string): string => join(packageRoot, 'dist', 'native', `${name}${extension}`);
+const executable = (name: string): string => requireNativeArtifact(packageRoot, `${name}${extension}`);
 
 function percentile(values: readonly number[], fraction: number): number {
   if (values.length === 0) throw new Error('benchmark_percentile_requires_samples');

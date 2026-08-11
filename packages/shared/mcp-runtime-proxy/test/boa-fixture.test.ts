@@ -5,12 +5,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
-import { resolveNativeArtifact } from '../src/native-artifact.js';
+import { requireNativeArtifact } from '../src/native-artifact.js';
 
 type JsonRecord = Record<string, any>;
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const executable = resolveNativeArtifact(packageRoot, 'narada-mcp-boa-fixture.exe') ?? fileURLToPath(new URL('../native/narada-mcp-boa-fixture.exe', import.meta.url));
+const executable = requireNativeArtifact(packageRoot, 'narada-mcp-boa-fixture.exe');
 
 if (process.platform !== 'win32' || !existsSync(executable)) {
   console.log(JSON.stringify({ schema: 'narada.mcp_runtime_proxy.boa_fixture_test.v1', status: 'skipped', reason: 'boa_artifact_unavailable' }));

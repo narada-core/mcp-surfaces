@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { requireNativeArtifact } from '@narada-core/mcp-runtime-proxy/native-artifact';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -25,7 +26,7 @@ const nodeEntrypoint = join(
   'task-lifecycle',
   'task-mcp-server.js',
 );
-const rustEntrypoint = join(packageRoot, 'dist', 'native', `narada-task-lifecycle-mcp${extension}`);
+const rustEntrypoint = requireNativeArtifact(packageRoot, `narada-task-lifecycle-mcp${extension}`);
 const requests = `${[
   rpc(1, 'initialize'),
   rpc(2, 'tools/list'),

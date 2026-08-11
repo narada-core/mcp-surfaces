@@ -4629,19 +4629,24 @@ function fabricServerRuntimeKind(server: SiteMcpFabricServer): SiteSurfaceRegist
 
 function runtimeBindingForFabricServer(site: SiteDef, server: SiteMcpFabricServer): SiteSurfaceRegistrySurface['runtime_binding'] {
   const surfaceId = server.surface_id ?? fabricSurfaceId(server.server_key, site);
+  const canonicalNativeLoader = surfaceId === 'mcp-loader' && server.child_invocation_kind === 'native_entrypoint'
+    ? requiredNativeArtifact(MCP_MCP_LOADER_PACKAGE_ROOT, MCP_NATIVE_MCP_LOADER_ARTIFACT_NAME)
+    : null;
+  const childCommand = canonicalNativeLoader ?? server.command;
+  const childEntrypoint = canonicalNativeLoader ?? server.entrypoint;
   const transportArgs = server.uses_runtime_proxy
     ? [
       ...(runtimeProxyImplementation === 'native' ? ['proxy'] : [server.launch_entrypoint]),
       '--surface-id',
       surfaceId,
       '--child-command',
-      server.command,
+      childCommand,
       '--artifact-manifest',
       MCP_WORKSPACE_ARTIFACT_MANIFEST,
       '--runtime-contract-version',
       String(MCP_RUNTIME_CONTRACT_VERSION),
       '--entrypoint',
-      server.entrypoint,
+      childEntrypoint,
       ...(server.child_invocation_kind === 'native_applet'
         ? ['--child-invocation-kind', 'native_applet', '--child-applet', server.child_applet ?? 'filesystem']
          : server.child_invocation_kind === 'native_entrypoint'
@@ -4650,17 +4655,17 @@ function runtimeBindingForFabricServer(site: SiteDef, server: SiteMcpFabricServe
       '--',
       ...server.args,
     ]
-    : [server.entrypoint, ...server.args];
+    : [childEntrypoint, ...server.args];
   return {
     runtime_kind: fabricServerRuntimeKind(server),
     proxy_implementation: server.uses_runtime_proxy ? runtimeProxyImplementation : null,
-    entrypoint: server.entrypoint,
+    entrypoint: childEntrypoint,
     owner_site_id: site.site_id,
     transport: {
       type: 'stdio',
       command: server.uses_runtime_proxy && runtimeProxyImplementation === 'native'
         ? nativeRuntimeProxyEntrypoint()
-        : server.command,
+        : childCommand,
       args: transportArgs,
     },
   };

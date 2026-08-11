@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { requireNativeArtifact } from '@narada-core/mcp-runtime-proxy/native-artifact';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,7 +9,7 @@ import { parseRpcLines, type JsonObject, type RpcId, type RpcRecord } from './sc
 
 const packageRoot = fileURLToPath(new URL('..', import.meta.url));
 const extension = process.platform === 'win32' ? '.exe' : '';
-const executable = join(packageRoot, 'dist', 'native', `narada-task-lifecycle-mcp${extension}`);
+const executable = requireNativeArtifact(packageRoot, `narada-task-lifecycle-mcp${extension}`);
 
 function run(root: string, requests: readonly JsonObject[]): RpcRecord[] {
   const input = `${requests.map((request) => JSON.stringify(request)).join('\n')}\n`;

@@ -89,19 +89,22 @@ in a new or restarted session.
 
 The package builds a Rust multicall executable whose first applet is `proxy`,
 plus the benchmark-only `narada-mcp-rhai-filesystem.exe` applet. Each native
-build is published under `dist/native/versions/<build-fingerprint>/` and an
+build is published under `dist/native/versions/<build-fingerprint>/`, and an
 atomic `dist/native/current.json` pointer selects the current generation for
 new materializations. The registrar resolves that pointer dynamically; an
-already-materialized carrier keeps its concrete old path until it drains. The
-legacy `dist/native/narada-mcp-runtime.exe` and
-`dist/native/narada-mcp-rhai-filesystem.exe` paths are compatibility artifacts
-and are created once but never overwritten, so live Windows processes cannot
-block a later build. In native mode this process performs
-preflight, stdio framing, timeout/cancellation, diagnostics, and process-tree
-ownership itself. It creates the MCP server suspended, assigns it to a
-kill-on-close Windows Job Object, and only then resumes its main thread. This
-removes the assignment race and the separate supervisor process while keeping
-the domain surface in its declared Bun or Node runtime.
+already-materialized carrier keeps its concrete versioned path until it drains.
+Mutable legacy executables directly under `dist/native/` are never consumed.
+Every publication removes legacy siblings before advancing the pointer and
+fails closed if a running legacy process still locks one. Resolution is
+pointer-only: if `current.json` is absent, malformed, or points outside its
+immutable version directory, native startup is refused.
+
+In native mode the proxy performs preflight, stdio framing,
+timeout/cancellation, diagnostics, and process-tree ownership itself. It creates
+the MCP server suspended, assigns it to a kill-on-close Windows Job Object, and
+only then resumes its main thread. This removes the assignment race and the
+separate supervisor process while keeping the domain surface in its declared
+Bun or Node runtime.
 
 On supported Windows hosts, carrier materialization uses the native Rust proxy
 by default:

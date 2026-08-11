@@ -6,17 +6,12 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { runSopEngineParity } from './verify-sop-engine-parity.mjs';
+import { requireNativeArtifact } from '@narada-core/mcp-runtime-proxy/native-artifact';
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const executableName = process.platform === 'win32' ? 'narada-mcp-surfaces.exe' : 'narada-mcp-surfaces';
-const nativeOutputRoot = join(packageRoot, 'dist', 'native');
-const pointerPath = join(nativeOutputRoot, 'current.json');
-const pointerArtifact = existsSync(pointerPath)
-  ? JSON.parse(readFileSync(pointerPath, 'utf8'))?.artifacts?.[executableName]
-  : null;
 const executable = process.env.NARADA_NATIVE_SURFACE_EXECUTABLE
-  ?? (typeof pointerArtifact === 'string' ? resolve(nativeOutputRoot, pointerArtifact) : null)
-  ?? join(nativeOutputRoot, executableName);
+  ?? requireNativeArtifact(packageRoot, executableName);
 const surfaces = [
   'catalog-observation',
   'operator-routing',

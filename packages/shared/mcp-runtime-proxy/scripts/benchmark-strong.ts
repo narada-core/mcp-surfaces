@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { performance } from 'node:perf_hooks';
 import { buildWorkspaceArtifactManifest, fingerprintWorkspaceArtifactManifest, type ArtifactFingerprint } from '../src/workspace-artifact-manifest.js';
 import { MCP_RUNTIME_CONTRACT_VERSION } from '../src/materialization-contract.js';
-import { resolveNativeArtifact } from '../src/native-artifact.js';
+import { requireNativeArtifact } from '../src/native-artifact.js';
 
 type JsonRecord = Record<string, any>;
 type RuntimeName = 'bun' | 'node' | 'deno';
@@ -85,8 +85,8 @@ mkdirSync(diagnosticsRoot, { recursive: true });
 const reportId = `mcp-runtime-strong-${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}`;
 const bunProxyPath = fileURLToPath(new URL('../dist/src/main.js', import.meta.url));
 const runtimeProxyPackageRoot = join(workspaceRoot, 'packages', 'shared', 'mcp-runtime-proxy');
-const nativeProxyPath = process.env['NARADA_MCP_NATIVE_PROXY_PATH']?.trim() || resolveNativeArtifact(runtimeProxyPackageRoot, 'narada-mcp-runtime.exe') || fileURLToPath(new URL('../dist/native/narada-mcp-runtime.exe', import.meta.url));
-const nativeRhaiFilesystemPath = process.env['NARADA_MCP_NATIVE_RHAI_FILESYSTEM_PATH']?.trim() || resolveNativeArtifact(runtimeProxyPackageRoot, 'narada-mcp-rhai-filesystem.exe') || fileURLToPath(new URL('../dist/native/narada-mcp-rhai-filesystem.exe', import.meta.url));
+const nativeProxyPath = process.env['NARADA_MCP_NATIVE_PROXY_PATH']?.trim() || requireNativeArtifact(runtimeProxyPackageRoot, 'narada-mcp-runtime.exe');
+const nativeRhaiFilesystemPath = process.env['NARADA_MCP_NATIVE_RHAI_FILESYSTEM_PATH']?.trim() || requireNativeArtifact(runtimeProxyPackageRoot, 'narada-mcp-rhai-filesystem.exe');
 const dotnetFilesystemPath = join(workspaceRoot, 'packages', 'local-filesystem-mcp', 'native-dotnet', 'publish', 'narada-filesystem-dotnet.exe');
 
 function selectionValues(value: string | undefined): string[] | undefined {

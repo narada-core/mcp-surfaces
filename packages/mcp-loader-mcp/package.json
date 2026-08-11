@@ -35,13 +35,14 @@
   },
   "devDependencies": {
     "@narada-core/mcp-e2e-harness": "workspace:*",
+    "@narada-core/mcp-runtime-proxy": "workspace:*",
     "@types/node": "^22.15.3",
     "typescript": "^5.8.3"
   },
   "naradaRuntimeArtifacts": {
-    "win32": ["./dist/native/narada-mcp-loader.exe"],
-    "linux": ["./dist/native/narada-mcp-loader"],
-    "darwin": ["./dist/native/narada-mcp-loader"]
+    "win32": ["./dist/native/current.json", "./dist/native/versions/*"],
+    "linux": ["./dist/native/current.json", "./dist/native/versions/*"],
+    "darwin": ["./dist/native/current.json", "./dist/native/versions/*"]
   },
   "files": [
     "dist/"

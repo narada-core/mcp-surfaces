@@ -5,12 +5,12 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { resolveNativeArtifact } from '../src/native-artifact.js';
+import { requireNativeArtifact } from '../src/native-artifact.js';
 
 type JsonRecord = Record<string, any>;
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const executable = resolve(process.env.NARADA_NATIVE_GIT_TEST_EXECUTABLE ?? resolveNativeArtifact(packageRoot, 'narada-mcp-runtime.exe') ?? resolve(packageRoot, 'dist', 'native', 'narada-mcp-runtime.exe'));
+const executable = resolve(process.env.NARADA_NATIVE_GIT_TEST_EXECUTABLE ?? requireNativeArtifact(packageRoot, 'narada-mcp-runtime.exe'));
 
 function git(root: string, args: string[]): string {
   return execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }).trim();

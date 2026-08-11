@@ -67,10 +67,13 @@ export function resolveNativeArtifact(packageRoot: string, artifactName: string)
   const pointedPath = pointedTarget
     ? versionedArtifactPath(packageRoot, pointedTarget, artifactName)
     : null;
-  if (pointedPath && existsSync(pointedPath)) return pointedPath;
+  return pointedPath && existsSync(pointedPath) ? pointedPath : null;
+}
 
-  const legacyPath = resolve(nativeArtifactRoot(packageRoot), artifactName);
-  return existsSync(legacyPath) ? legacyPath : null;
+export function requireNativeArtifact(packageRoot: string, artifactName: string): string {
+  const artifact = resolveNativeArtifact(packageRoot, artifactName);
+  if (!artifact) throw new Error(`mcp_runtime_proxy_native_artifact_pointer_unavailable:${artifactName}`);
+  return artifact;
 }
 
 export function isNativeArtifactEntrypoint(
@@ -82,9 +85,6 @@ export function isNativeArtifactEntrypoint(
   const candidate = resolve(entrypoint);
   const current = resolveNativeArtifact(packageRoot, artifactName);
   if (current && samePath(current, candidate)) return true;
-
-  const legacy = resolve(nativeArtifactRoot(packageRoot), artifactName);
-  if (samePath(legacy, candidate)) return true;
 
   const versioned = versionedArtifactPath(packageRoot, relative(nativeArtifactRoot(packageRoot), candidate), artifactName);
   return versioned !== null && samePath(versioned, candidate);
@@ -124,6 +124,9 @@ export function publishImmutableNativeArtifacts(input: {
     copyImmutableFile(artifact.source, destination);
     pointerArtifacts[artifact.name] = relative(nativeRoot, destination).split(sep).join('/');
   }
+  for (const artifact of artifacts) {
+    rmSync(join(nativeRoot, artifact.name), { force: true });
+  }
   const pointer: NativeArtifactPointer = {
     schema: NATIVE_ARTIFACT_POINTER_SCHEMA,
     generated_at: input.generatedAt ?? new Date().toISOString(),
@@ -132,11 +135,6 @@ export function publishImmutableNativeArtifacts(input: {
   };
   writeJsonAtomically(nativeArtifactPointerPath(packageRoot), pointer);
   return pointer;
-}
-
-export function preserveLegacyNativeArtifact(source: string, destination: string): void {
-  if (existsSync(destination)) return;
-  copyImmutableFile(source, destination);
 }
 
 function versionedArtifactPath(packageRoot: string, target: string, artifactName: string): string | null {

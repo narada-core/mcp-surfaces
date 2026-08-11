@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { requireNativeArtifact } from '@narada-core/mcp-runtime-proxy/native-artifact';
 import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -9,7 +10,7 @@ import { parseRpcLines, rpc, toolCall, type RpcRecord } from './script-support.j
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const extension = process.platform === 'win32' ? '.exe' : '';
-const executable = (name: string): string => join(root, 'dist', 'native', `${name}${extension}`);
+const executable = (name: string): string => requireNativeArtifact(root, `${name}${extension}`);
 
 function run(name: string, args: readonly string[], input = ''): RpcRecord[] {
   const result = spawnSync(executable(name), [...args], { input, encoding: 'utf8', windowsHide: true });

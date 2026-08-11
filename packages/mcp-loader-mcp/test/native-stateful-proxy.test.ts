@@ -5,9 +5,10 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { test } from 'node:test';
+import { requireNativeArtifact } from '@narada-core/mcp-runtime-proxy/native-artifact';
 
 const packageRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
-const executable = join(packageRoot, 'dist', 'native', process.platform === 'win32' ? 'narada-mcp-loader.exe' : 'narada-mcp-loader');
+const executable = requireNativeArtifact(packageRoot, process.platform === 'win32' ? 'narada-mcp-loader.exe' : 'narada-mcp-loader');
 
 test('native loader keeps a runtime-proxy child across stateful task-lifecycle calls', async (t) => {
   if (!existsSync(executable)) {

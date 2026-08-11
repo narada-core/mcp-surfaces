@@ -21,8 +21,7 @@
   },
   "naradaRuntimeArtifacts": {
     "win32": [
-      "./dist/native/narada-task-lifecycle-mcp.exe",
-      "./dist/native/narada-work-lifecycle-mcp.exe",
+      "./dist/native/current.json",
       "./dist/native/versions/*"
     ]
   },

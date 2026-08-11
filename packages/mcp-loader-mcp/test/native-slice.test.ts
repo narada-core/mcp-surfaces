@@ -5,9 +5,10 @@ import { dirname, join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
+import { requireNativeArtifact } from '@narada-core/mcp-runtime-proxy/native-artifact';
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const executable = join(packageRoot, 'dist', 'native', process.platform === 'win32' ? 'narada-mcp-loader.exe' : 'narada-mcp-loader');
+const executable = requireNativeArtifact(packageRoot, process.platform === 'win32' ? 'narada-mcp-loader.exe' : 'narada-mcp-loader');
 
 test('native loader slice attaches, calls, restarts, and detaches one MCP child', async (t) => {
   if (!existsSync(executable)) {

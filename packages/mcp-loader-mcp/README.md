@@ -90,7 +90,7 @@ The payload's declared creator and id namespace are lineage hints and accidental
 
 ## Native loader (Rust)
 
-pnpm run build:native builds the full contract-compatible Rust loader at dist/native/narada-mcp-loader.exe on Windows. The native path covers the public MCP surface, Site-fabric resolution and policy checks, child supervision, initialization and tool routing, bounded timeouts, lifecycle diagnostics, freshness, stable logical handles across replayable child restart, inventory, observation, and bounded output references.
+`pnpm run build:native` publishes the full contract-compatible Rust loader under `dist/native/versions/<build-fingerprint>/` on Windows and atomically selects it through `dist/native/current.json`; no mutable unversioned executable is published or accepted. The native path covers the public MCP surface, Site-fabric resolution and policy checks, child supervision, initialization and tool routing, bounded timeouts, lifecycle diagnostics, freshness, stable logical handles across replayable child restart, inventory, observation, and bounded output references.
 
 The Rust implementation is admitted for the Narada native runtime profile. The TypeScript loader remains the explicit fallback and rollback path; select the native implementation for parity testing with MCP_LOADER_NATIVE=1. The existing Node/Bun behavior suite is parameterized to exercise both implementations.
 

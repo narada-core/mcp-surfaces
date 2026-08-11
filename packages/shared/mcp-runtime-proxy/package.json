@@ -19,8 +19,7 @@
   "types": "./dist/src/main.d.ts",
   "naradaRuntimeArtifacts": {
     "win32": [
-      "./dist/native/narada-mcp-runtime.exe",
-      "./dist/native/narada-mcp-rhai-filesystem.exe",
+      "./dist/native/current.json",
       "./dist/native/versions/*"
     ]
   },

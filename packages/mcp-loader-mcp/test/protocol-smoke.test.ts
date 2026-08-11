@@ -5,11 +5,12 @@ import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertLoaderRuntimeFreshnessCurrent, assertSurfaceLaunchMetadata, classifyLoaderRuntimeFreshness, createServerState } from '../src/main.js';
 import { runMcpProtocolSmoke, spawnJsonlMcpServer } from '@narada-core/mcp-e2e-harness';
+import { resolveNativeArtifact, requireNativeArtifact } from '@narada-core/mcp-runtime-proxy/native-artifact';
 
 const root = mkdtempSync(join(tmpdir(), 'mcp-loader-mcp-protocol-'));
 const serverPath = fileURLToPath(new URL('../src/main.js', import.meta.url));
 const nativeLoader = process.env.MCP_LOADER_NATIVE === '1';
-const nativeExecutable = resolve(dirname(serverPath), '..', 'native', process.platform === 'win32' ? 'narada-mcp-loader.exe' : 'narada-mcp-loader');
+const nativeExecutable = nativeLoader ? requireNativeArtifact(resolve(dirname(serverPath), '..', '..'), process.platform === 'win32' ? 'narada-mcp-loader.exe' : 'narada-mcp-loader') : '';
 const loaderCommand = nativeLoader ? nativeExecutable : process.execPath;
 const loaderArgs = nativeLoader ? [] : [serverPath];
 const server = spawnJsonlMcpServer(loaderCommand, [...loaderArgs, '--allowed-site-root', root], { label: nativeLoader ? 'mcp-loader-mcp native protocol smoke' : 'mcp-loader-mcp protocol smoke' });

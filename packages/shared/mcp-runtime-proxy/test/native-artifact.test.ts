@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { closeSync, openSync, readFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
@@ -8,8 +8,8 @@ import {
   nativeArtifactPointerPath,
   nativeArtifactRoot,
   publishImmutableNativeArtifacts,
-  preserveLegacyNativeArtifact,
   readNativeArtifactPointer,
+  requireNativeArtifact,
   resolveNativeArtifact,
 } from '../src/native-artifact.js';
 
@@ -32,7 +32,7 @@ test('native artifacts publish immutably and resolve through the current pointer
     assert.equal(isNativeArtifactEntrypoint(packageRoot, 'narada-mcp-runtime.exe', firstPath), true);
 
     const legacyPath = join(nativeArtifactRoot(packageRoot), 'narada-mcp-runtime.exe');
-    preserveLegacyNativeArtifact(source, legacyPath);
+    writeFileSync(legacyPath, 'stale-legacy-generation', 'utf8');
     writeFileSync(source, 'generation-two', 'utf8');
     const oldHandle = openSync(firstPath, 'r');
     const second = publishImmutableNativeArtifacts({
@@ -46,12 +46,15 @@ test('native artifacts publish immutably and resolve through the current pointer
     assert.notEqual(secondPath, firstPath);
     assert.equal(readFileSync(firstPath, 'utf8'), 'generation-one');
     assert.equal(readFileSync(secondPath, 'utf8'), 'generation-two');
-    assert.equal(readFileSync(legacyPath, 'utf8'), 'generation-one');
+    assert.equal(existsSync(legacyPath), false);
     assert.equal(resolveNativeArtifact(packageRoot, 'narada-mcp-runtime.exe'), secondPath);
     assert.equal(isNativeArtifactEntrypoint(packageRoot, 'narada-mcp-runtime.exe', firstPath), true);
-    assert.equal(isNativeArtifactEntrypoint(packageRoot, 'narada-mcp-runtime.exe', legacyPath), true);
+    assert.equal(isNativeArtifactEntrypoint(packageRoot, 'narada-mcp-runtime.exe', legacyPath), false);
     assert.equal(readNativeArtifactPointer(packageRoot)?.build_fingerprint, second.build_fingerprint);
     assert.equal(JSON.parse(readFileSync(nativeArtifactPointerPath(packageRoot), 'utf8')).schema, 'narada.mcp_runtime_proxy.native_artifact_pointer.v1');
+    rmSync(nativeArtifactPointerPath(packageRoot), { force: true });
+    assert.equal(resolveNativeArtifact(packageRoot, 'narada-mcp-runtime.exe'), null);
+    assert.throws(() => requireNativeArtifact(packageRoot, 'narada-mcp-runtime.exe'), /native_artifact_pointer_unavailable/);
     assert.equal(resolveNativeArtifact(packageRoot, '../outside.exe'), null);
     assert.equal(isNativeArtifactEntrypoint(packageRoot, '../outside.exe', firstPath), false);
   } finally {

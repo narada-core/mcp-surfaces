@@ -4,13 +4,13 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { resolveNativeArtifact } from '../src/native-artifact.js';
+import { requireNativeArtifact } from '../src/native-artifact.js';
 
 type JsonRecord = Record<string, any>;
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const workspaceRoot = resolve(packageRoot, '..', '..', '..');
-const executable = resolve(process.env.NARADA_NATIVE_STRUCTURED_COMMAND_TEST_EXECUTABLE ?? resolveNativeArtifact(packageRoot, 'narada-mcp-runtime.exe') ?? resolve(packageRoot, 'dist', 'native', 'narada-mcp-runtime.exe'));
+const executable = resolve(process.env.NARADA_NATIVE_STRUCTURED_COMMAND_TEST_EXECUTABLE ?? requireNativeArtifact(packageRoot, 'narada-mcp-runtime.exe'));
 
 function run(root: string, requests: JsonRecord[], auditLogDir: string): Promise<JsonRecord[]> {
   return new Promise((resolvePromise, rejectPromise) => {

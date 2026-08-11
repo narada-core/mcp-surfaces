@@ -3,7 +3,6 @@ import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
-  preserveLegacyNativeArtifact,
   publishImmutableNativeArtifacts,
   resolveNativeArtifact,
 } from '../../mcp-runtime-proxy/dist/src/native-artifact.js';
@@ -13,7 +12,6 @@ const nativeRoot = join(packageRoot, 'native');
 const executableName = process.platform === 'win32' ? 'narada-mcp-surfaces.exe' : 'narada-mcp-surfaces';
 const source = join(nativeRoot, 'target', 'release', executableName);
 const outputRoot = join(packageRoot, 'dist', 'native');
-const output = join(outputRoot, executableName);
 
 if (!['win32', 'linux', 'darwin'].includes(process.platform)) {
   process.stdout.write(JSON.stringify({
@@ -24,7 +22,7 @@ if (!['win32', 'linux', 'darwin'].includes(process.platform)) {
   }) + String.fromCharCode(10));
   process.exit(0);
 }
-const result = spawnSync('cargo', [
+const result = spawnSync('cargo', [
   'build',
   '--release',
   '--locked',
@@ -38,14 +36,12 @@ const pointer = publishImmutableNativeArtifacts({
   packageRoot,
   artifacts: [{ name: executableName, source }],
 });
-preserveLegacyNativeArtifact(source, output);
 const currentExecutable = resolveNativeArtifact(packageRoot, executableName);
 if (!currentExecutable) throw new Error('mcp_surfaces_native_artifact_publication_missing');
 process.stdout.write(JSON.stringify({
   schema: 'narada.mcp_surfaces_native.build.v1',
   status: 'built',
   executable: currentExecutable,
-  legacy_executable: output,
   pointer_path: join(outputRoot, 'current.json'),
   build_fingerprint: pointer.build_fingerprint,
   versioned_directory: join(outputRoot, 'versions', pointer.build_fingerprint),

@@ -3,7 +3,6 @@ import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
-  preserveLegacyNativeArtifact,
   publishImmutableNativeArtifacts,
   resolveNativeArtifact,
 } from '@narada-core/mcp-runtime-proxy/native-artifact';
@@ -25,9 +24,6 @@ const sources = names.map((name) => {
   return { name, source };
 });
 const pointer = publishImmutableNativeArtifacts({ packageRoot, artifacts: sources });
-for (const artifact of sources) {
-  preserveLegacyNativeArtifact(artifact.source, join(outputRoot, artifact.name));
-}
 const artifacts = sources.map((artifact) => ({
   path: resolveNativeArtifact(packageRoot, artifact.name),
   publication: 'immutable',

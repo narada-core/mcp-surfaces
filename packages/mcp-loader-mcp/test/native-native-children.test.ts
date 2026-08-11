@@ -5,12 +5,13 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { test } from 'node:test';
+import { requireNativeArtifact } from '@narada-core/mcp-runtime-proxy/native-artifact';
 
 const packageRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const workspaceRoot = resolve(packageRoot, '..', '..');
-const loaderExecutable = join(packageRoot, 'dist', 'native', process.platform === 'win32' ? 'narada-mcp-loader.exe' : 'narada-mcp-loader');
-const runtimeExecutable = join(workspaceRoot, 'packages', 'shared', 'mcp-runtime-proxy', 'dist', 'native', process.platform === 'win32' ? 'narada-mcp-runtime.exe' : 'narada-mcp-runtime');
-const taskExecutable = join(workspaceRoot, 'packages', 'shared', 'mcp-lifecycle-native', 'dist', 'native', process.platform === 'win32' ? 'narada-task-lifecycle-mcp.exe' : 'narada-task-lifecycle-mcp');
+const loaderExecutable = requireNativeArtifact(packageRoot, process.platform === 'win32' ? 'narada-mcp-loader.exe' : 'narada-mcp-loader');
+const runtimeExecutable = requireNativeArtifact(resolve(workspaceRoot, 'packages', 'shared', 'mcp-runtime-proxy'), process.platform === 'win32' ? 'narada-mcp-runtime.exe' : 'narada-mcp-runtime');
+const taskExecutable = requireNativeArtifact(resolve(workspaceRoot, 'packages', 'shared', 'mcp-lifecycle-native'), process.platform === 'win32' ? 'narada-task-lifecycle-mcp.exe' : 'narada-task-lifecycle-mcp');
 
 type Pending = { resolve: (value: any) => void; reject: (error: Error) => void };
 

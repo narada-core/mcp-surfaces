@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { nativeArtifactRoot, preserveLegacyNativeArtifact, publishImmutableNativeArtifacts, resolveNativeArtifact } from '../src/native-artifact.js';
+import { nativeArtifactRoot, publishImmutableNativeArtifacts, resolveNativeArtifact } from '../src/native-artifact.js';
 import { fileURLToPath } from 'node:url';
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -75,7 +75,7 @@ const pointerPath = join(outputRoot, 'current.json');
 const previousPointer = existsSync(pointerPath) ? readFileSync(pointerPath) : null;
 const pointer = publishImmutableNativeArtifacts({ packageRoot, artifacts: publishArtifacts });
 const workspaceRoot = resolve(packageRoot, '..', '..', '..');
-const registrySync = spawnSync(process.execPath, [
+const registrySync = spawnSync(process.env['npm_node_execpath']?.trim() || 'node', [
   '--import', 'tsx', join(workspaceRoot, 'scripts', 'sync-declared-site-registries.ts'),
 ], {
   cwd: workspaceRoot,
@@ -87,12 +87,6 @@ if (registrySync.error || registrySync.status !== 0) {
   else writeFileSync(pointerPath, previousPointer);
   if (registrySync.error) throw registrySync.error;
   throw new Error(`mcp_runtime_proxy_site_registry_sync_failed:${registrySync.status ?? 'signal'}`);
-}
-for (const artifact of artifacts) {
-  preserveLegacyNativeArtifact(artifact.source, join(outputRoot, artifact.name));
-}
-if (boaBuild.status === 'built') {
-  preserveLegacyNativeArtifact(boaArtifact.source, join(outputRoot, boaArtifact.name));
 }
 const currentExecutable = resolveNativeArtifact(packageRoot, 'narada-mcp-runtime.exe');
 if (!currentExecutable) throw new Error('mcp_runtime_proxy_native_artifact_publication_missing');
@@ -107,7 +101,6 @@ process.stdout.write(JSON.stringify({
   schema: 'narada.mcp_runtime_proxy.native_build.v1',
   executable: currentExecutable,
   executables: currentExecutables,
-  legacy_executables: executableNames.map((name) => join(outputRoot, name)),
   pointer_path: pointerPath,
   build_fingerprint: pointer.build_fingerprint,
   versioned_directory: join(outputRoot, 'versions', pointer.build_fingerprint),

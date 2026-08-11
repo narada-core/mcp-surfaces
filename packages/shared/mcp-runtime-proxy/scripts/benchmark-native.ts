@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { performance } from 'node:perf_hooks';
 import { MCP_RUNTIME_CONTRACT_VERSION } from '../src/materialization-contract.js';
 import { fingerprintWorkspaceArtifactManifest } from '../src/workspace-artifact-manifest.js';
-import { resolveNativeArtifact } from '../src/native-artifact.js';
+import { requireNativeArtifact } from '../src/native-artifact.js';
 
 type JsonRecord = Record<string, any>;
 type RuntimeName = 'bun' | 'node' | 'deno' | 'boa';
@@ -56,8 +56,8 @@ const fixtureHostPath = join(root, 'fixture-host.mjs');
 const manifestPath = join(root, 'workspace-artifact-manifest.json');
 const bunProxyPath = fileURLToPath(new URL('../dist/src/main.js', import.meta.url));
 const packageRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
-const nativeProxyPath = resolveNativeArtifact(packageRoot, 'narada-mcp-runtime.exe') ?? fileURLToPath(new URL('../dist/native/narada-mcp-runtime.exe', import.meta.url));
-const nativeBoaPath = resolveNativeArtifact(packageRoot, 'narada-mcp-boa-fixture.exe') ?? fileURLToPath(new URL('../dist/native/narada-mcp-boa-fixture.exe', import.meta.url));
+const nativeProxyPath = requireNativeArtifact(packageRoot, 'narada-mcp-runtime.exe');
+const nativeBoaPath = requireNativeArtifact(packageRoot, 'narada-mcp-boa-fixture.exe');
 const reportId = `mcp-runtime-${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}`;
 
 function parseArgs(argv: string[]): { outputDir?: string; samples?: number; warmCalls?: number } {

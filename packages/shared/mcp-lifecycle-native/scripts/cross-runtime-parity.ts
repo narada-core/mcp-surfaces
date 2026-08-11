@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { requireNativeArtifact } from '@narada-core/mcp-runtime-proxy/native-artifact';
 import {
   byId,
   parseRpcLines,
@@ -29,13 +30,13 @@ const extension = process.platform === 'win32' ? '.exe' : '';
 const entrypoints: Record<Surface, EntrypointSpec> = {
   task: {
     node: join(surfacesRoot, 'packages', 'task-lifecycle-mcp', 'dist', 'src', 'task-lifecycle', 'task-mcp-server.js'),
-    rust: join(packageRoot, 'dist', 'native', `narada-task-lifecycle-mcp${extension}`),
+    rust: requireNativeArtifact(packageRoot, `narada-task-lifecycle-mcp${extension}`),
     protocol: '2026-04-18',
     server: 'narada-task-lifecycle-mcp',
   },
   work: {
     node: join(surfacesRoot, 'packages', 'work-lifecycle-mcp', 'dist', 'src', 'main.js'),
-    rust: join(packageRoot, 'dist', 'native', `narada-work-lifecycle-mcp${extension}`),
+    rust: requireNativeArtifact(packageRoot, `narada-work-lifecycle-mcp${extension}`),
     protocol: '2024-11-05',
     server: 'work-lifecycle-mcp',
   },

@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { requireNativeArtifact } from '@narada-core/mcp-runtime-proxy/native-artifact';
 import { McpProcessClient, isRecord, type JsonRecord } from './process-client.js';
 
 export interface SiteFabricClientOptions {
@@ -303,11 +304,8 @@ export function defaultMcpLoaderEntrypoint(): string {
 }
 
 export function defaultMcpLoaderNativeEntrypoint(): string {
-  return resolveMcpLoaderPackagePath(
-    'dist',
-    'native',
-    process.platform === 'win32' ? 'narada-mcp-loader.exe' : 'narada-mcp-loader',
-  );
+  const packageRoot = resolveMcpLoaderPackagePath();
+  return requireNativeArtifact(packageRoot, process.platform === 'win32' ? 'narada-mcp-loader.exe' : 'narada-mcp-loader');
 }
 
 export function defaultMcpLoaderLaunch(implementation?: McpLoaderImplementation): McpLoaderLaunch {
