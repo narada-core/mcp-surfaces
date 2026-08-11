@@ -27,6 +27,7 @@ mod surface_feedback;
 mod scheduler;
 mod scheduler_activation;
 mod sop;
+mod sop_authority;
 
 const LEGACY_PROTOCOL_VERSION: &str = "2024-11-05";
 const MODERN_PROTOCOL_VERSION: &str = "2026-07-28";

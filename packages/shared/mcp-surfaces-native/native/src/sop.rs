@@ -69,7 +69,7 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<V
         "sop_handoff_show" => handoff_show(args, root),
         "sop_action_list" => action_list(args, root),
         "sop_action_show" => action_show(args, root),
-        name if MUTATING.contains(&name) => Err(authority_boundary(name)),
+        name if MUTATING.contains(&name) => crate::sop_authority::call_tool(name, args, root),
         _ => Err(error("unknown_tool", &format!("unknown_tool:{name}"))),
     }
 }

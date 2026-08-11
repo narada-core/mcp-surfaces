@@ -764,28 +764,110 @@ function runSopParity() {
   if (!existsSync(bunEntrypoint)) throw new Error('sop_parity_bun_entrypoint_missing:' + bunEntrypoint);
   const root = mkdtempSync(join(tmpdir(), 'narada-sop-native-parity-'));
   try {
-    const setupAndReads = [
-      { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'sop_template_create', arguments: { sop_id: 'fixture', title: 'Fixture SOP', description: 'Parity fixture', steps: [{ id: 'step-1', executor: 'agent', title: 'Inspect', instructions: 'Inspect fixture' }] } } },
-      { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'sop_template_list', arguments: {} } },
-      { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'sop_template_show', arguments: { sop_id: 'fixture' } } },
-      { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'sop_template_search', arguments: { query: 'Fixture' } } },
+    const bunRoot = join(root, 'bun');
+    const rustRoot = join(root, 'rust');
+    const bunSops = join(bunRoot, 'sops');
+    const rustSops = join(rustRoot, 'sops');
+    mkdirSync(bunSops, { recursive: true });
+    mkdirSync(rustSops, { recursive: true });
+    const runBun = (requests) => runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', [bunEntrypoint, '--sop-root', bunRoot, '--sops-dir', bunSops], requests, workspaceRoot);
+    const runRust = (requests) => runMailbox(executable, ['--surface-id', 'sop', '--sop-root', rustRoot, '--sops-dir', rustSops], requests, workspaceRoot);
+    const normalize = (value) => {
+      if (Array.isArray(value)) return value.map(normalize);
+      if (!value || typeof value !== 'object') return value;
+      const normalized = Object.fromEntries(Object.entries(value)
+        .filter(([key]) => !['created_at', 'updated_at', 'recorded_at', 'event_id', 'native_hydration', 'yaml_path', 'db_path'].includes(key))
+        .map(([key, child]) => [key, normalize(child)]));
+      if (['narada.sop.template_list.v2', 'narada.sop.template_search.v2'].includes(normalized.schema)) delete normalized.status;
+      return normalized;
+    };
+    const diagnosticCode = (responses, id, runtime) => {
+      const response = responses.find((candidate) => candidate.id === id);
+      const code = response?.error?.data?.code;
+      if (typeof code !== 'string') throw new Error('sop_parity_diagnostic_missing:' + runtime + ':' + id + ':' + JSON.stringify(response).slice(0, 500));
+      return code;
+    };
+    const assertStructured = (label, bun, rust, id) => {
+      assertSame(label, normalize(mailboxStructured(bun, id, 'bun')), normalize(mailboxStructured(rust, id, 'rust')));
+    };
+    const requests = [
+      { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'sop_template_create', arguments: { sop_id: 'fixture', title: 'Fixture SOP', description: 'Parity fixture', trigger_kind: 'manual', input_schema: { type: 'object', properties: { ticket_id: { type: 'string' } }, required: ['ticket_id'] }, output: { inspected: { $ref: 'steps.inspect.result.inspected' } }, output_schema: { type: 'object', properties: { inspected: { type: 'boolean' } }, required: ['inspected'] }, acceptance_criteria: ['The fixture was inspected.'], evidence_requirements: ['inspection record'], steps: [{ id: 'inspect', executor: 'agent', title: 'Inspect', instructions: 'Inspect fixture', result_schema: { type: 'object', properties: { inspected: { type: 'boolean' } }, required: ['inspected'] } }] } } },
+      { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'sop_template_update', arguments: { sop_id: 'fixture', title: 'Fixture SOP v2', status: 'active', steps: [{ id: 'inspect', executor: 'agent', title: 'Inspect', instructions: 'Inspect fixture', result_schema: { type: 'object', properties: { inspected: { type: 'boolean' } }, required: ['inspected'] } }, { id: 'record', executor: 'engine', title: 'Record', instructions: 'Record result', depends_on: ['inspect'], input: { inspected: { $ref: 'steps.inspect.result.inspected' } } }] } } },
+      { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'sop_template_deprecate', arguments: { sop_id: 'fixture', reason: 'parity retirement' } } },
+      { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'sop_template_show', arguments: { sop_id: 'fixture', version: 2 } } },
+      { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'sop_template_unimport', arguments: { sop_id: 'fixture', version: 1, reason: 'parity cleanup', principal: 'native-parity' } } },
+      { jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'sop_template_list', arguments: {} } },
+      { jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'sop_template_create', arguments: { sop_id: 'bad-dag', title: 'Bad DAG', steps: [{ id: 'broken', executor: 'engine', title: 'Broken', instructions: 'Broken', depends_on: ['missing'] }] } } },
+      { jsonrpc: '2.0', id: 8, method: 'tools/call', params: { name: 'sop_template_create', arguments: { sop_id: 'bad-schema', title: 'Bad schema', input_schema: { type: 'not-a-json-schema-type' }, steps: [{ id: 'step', executor: 'engine', title: 'Step', instructions: 'Step' }] } } },
     ];
-    const reads = setupAndReads.slice(1);
-    const bun = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', [bunEntrypoint, '--sop-root', root], setupAndReads, workspaceRoot);
-    const rust = runMailbox(executable, ['--surface-id', 'sop', '--site-root', root], reads.map((request, index) => ({ ...request, id: index + 2 })), workspaceRoot);
-    const bunList = mailboxStructured(bun, 2, 'bun');
-    const rustList = mailboxStructured(rust, 2, 'rust');
-    const listComparable = (value) => Object.fromEntries(['schema', 'items', 'count'].map((key) => [key, value?.[key]]));
-    assertSame('sop.template_list', listComparable(bunList), listComparable(rustList));
-    const bunShow = mailboxStructured(bun, 3, 'bun');
-    const rustShow = mailboxStructured(rust, 3, 'rust');
-    const showComparable = (value) => Object.fromEntries(Object.keys(value ?? {}).filter((key) => key !== 'native_hydration').map((key) => [key, value[key]]));
-    assertSame('sop.template_show', showComparable(bunShow), showComparable(rustShow));
-    const bunSearch = mailboxStructured(bun, 4, 'bun');
-    const rustSearch = mailboxStructured(rust, 4, 'rust');
-    const searchComparable = (value) => Object.fromEntries(['schema', 'query', 'items', 'count'].map((key) => [key, value?.[key]]));
-    assertSame('sop.template_search', searchComparable(bunSearch), searchComparable(rustSearch));
-    return { status: 'passed', fixture: 'local_template_registry', compared: ['template_list', 'template_show', 'template_search'] };
+    const bun = runBun(requests);
+    const rust = runRust(requests);
+    for (const [id, label] of [[1, 'create'], [2, 'update'], [3, 'deprecate'], [4, 'show'], [5, 'unimport'], [6, 'list']]) {
+      assertStructured('sop.template_' + label, bun, rust, id);
+    }
+    assertSame('sop.template_invalid_dag', diagnosticCode(bun, 7, 'bun'), diagnosticCode(rust, 7, 'rust'));
+    assertSame('sop.template_invalid_schema', diagnosticCode(bun, 8, 'bun'), diagnosticCode(rust, 8, 'rust'));
+
+    const insertRunReference = (runtimeRoot) => {
+      const db = new DatabaseSync(join(runtimeRoot, '.sop', 'sop.db'));
+      try {
+        db.prepare(`INSERT INTO sop_runs (
+          run_id,sop_id,sop_version,sop_title,occurrence_key,request_fingerprint,definition_fingerprint,
+          definition_json,input_json,output_json,step_states_json,trigger_source_kind,trigger_source_ref,
+          triggered_by,created_at,updated_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+          'run-template-refusal', 'fixture', 2, 'Fixture SOP v2', 'occurrence-template-refusal',
+          'request-fingerprint', 'definition-fingerprint', '{}', '{}', '{}', '[]', 'manual', '',
+          'native-parity', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z',
+        );
+      } finally {
+        db.close();
+      }
+    };
+    insertRunReference(bunRoot);
+    insertRunReference(rustRoot);
+    const refusalRequest = [{ jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'sop_template_unimport', arguments: { sop_id: 'fixture', version: 2, reason: 'must refuse', principal: 'native-parity' } } }];
+    const bunRefusal = runBun(refusalRequest);
+    const rustRefusal = runRust(refusalRequest);
+    assertSame('sop.template_unimport_refusal', diagnosticCode(bunRefusal, 9, 'bun'), diagnosticCode(rustRefusal, 9, 'rust'));
+
+    const yaml = `sop_id: yaml-fixture\ntitle: YAML Fixture\ndescription: Imported parity fixture\nstatus: active\ntrigger_kind: manual\ninput_schema:\n  type: object\n  properties:\n    ticket_id:\n      type: string\nsteps:\n  - id: inspect\n    executor: agent\n    title: Inspect\n    instructions: Inspect the YAML fixture\nacceptance_criteria:\n  - The YAML fixture was inspected.\nevidence_requirements:\n  - inspection record\n`;
+    const mismatchYaml = `sop_id: another-fixture\ntitle: Mismatch\nsteps:\n  - id: inspect\n    executor: agent\n    title: Inspect\n    instructions: Inspect\n`;
+    writeFileSync(join(bunSops, 'yaml-fixture.sop.yaml'), yaml, 'utf8');
+    writeFileSync(join(rustSops, 'yaml-fixture.sop.yaml'), yaml, 'utf8');
+    writeFileSync(join(bunSops, 'mismatch.sop.yaml'), mismatchYaml, 'utf8');
+    writeFileSync(join(rustSops, 'mismatch.sop.yaml'), mismatchYaml, 'utf8');
+    const yamlRequests = [
+      { jsonrpc: '2.0', id: 10, method: 'tools/call', params: { name: 'sop_template_import_yaml', arguments: { sop_id: 'yaml-fixture' } } },
+      { jsonrpc: '2.0', id: 11, method: 'tools/call', params: { name: 'sop_template_import_yaml', arguments: { sop_id: 'yaml-fixture' } } },
+      { jsonrpc: '2.0', id: 12, method: 'tools/call', params: { name: 'sop_template_import_yaml', arguments: { sop_id: 'mismatch' } } },
+    ];
+    const bunYaml = runBun(yamlRequests);
+    const rustYaml = runRust(yamlRequests);
+    assertStructured('sop.template_import_yaml', bunYaml, rustYaml, 10);
+    assertStructured('sop.template_import_yaml_replay', bunYaml, rustYaml, 11);
+    assertSame('sop.template_import_yaml_id_mismatch', diagnosticCode(bunYaml, 12, 'bun'), diagnosticCode(rustYaml, 12, 'rust'));
+
+    const snapshot = (runtimeRoot) => {
+      const db = new DatabaseSync(join(runtimeRoot, '.sop', 'sop.db'), { readOnly: true });
+      try {
+        const templates = db.prepare(`SELECT sop_id,version,title,status,description,steps_json,trigger_kind,
+          input_schema_json,output_mapping_json,output_ref_mapping_json,output_schema_json,
+          acceptance_criteria_json,evidence_requirements_json FROM sop_templates ORDER BY sop_id,version`).all()
+          .map((row) => Object.fromEntries(Object.entries(row).map(([key, value]) => [key.endsWith('_json') && value !== null ? key.slice(0, -5) : key, key.endsWith('_json') && value !== null ? JSON.parse(String(value)) : value])));
+        const events = db.prepare('SELECT event_kind,details_json FROM sop_events ORDER BY rowid').all()
+          .map((row) => ({ event_kind: row.event_kind, details: JSON.parse(String(row.details_json)) }));
+        return normalize({ templates, events });
+      } finally {
+        db.close();
+      }
+    };
+    assertSame('sop.template_registry_snapshot', snapshot(bunRoot), snapshot(rustRoot));
+    return {
+      status: 'passed',
+      fixture: 'independent_template_registry_authorities',
+      compared: ['create', 'update', 'deprecate', 'show', 'unimport', 'list', 'invalid_dag', 'invalid_schema', 'referenced_unimport_refusal', 'yaml_import', 'yaml_replay', 'yaml_id_mismatch', 'sqlite_snapshot'],
+    };
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
