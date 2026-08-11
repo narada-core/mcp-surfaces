@@ -88,6 +88,17 @@ fn dispatch(request: &Value) -> Value {
                     .unwrap_or_else(|| json!({}));
                 let result = surface_tool_inventory(&contract, &args);
                 json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":serde_json::to_string_pretty(&result).unwrap()}],"structuredContent":result}})
+            } else if name == "registrar_site_surfaces" {
+                let args = request
+                    .pointer("/params/arguments")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
+                match site_surfaces(&contract, &args) {
+                    Ok(result) => {
+                        json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":serde_json::to_string_pretty(&result).unwrap()}],"structuredContent":result}})
+                    }
+                    Err(message) => error(id, message),
+                }
             } else {
                 error(
                     id,
@@ -292,6 +303,114 @@ fn comparable_root(path: &Path) -> String {
 
 fn path_text(path: &Path) -> String {
     path.to_string_lossy().replace('/', "\\")
+}
+fn site_surfaces(contract: &Value, args: &Value) -> Result<Value, String> {
+    let requested = args
+        .get("site_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "registrar_requires_site_id".to_string())?;
+    if requested == "narada-andrey" || requested == "narada-user-site" {
+        return Err("registrar_legacy_site_id_rejected:site_id".into());
+    }
+    let catalog = site_list(contract);
+    let candidates = catalog["items"].as_array().cloned().unwrap_or_default();
+    let mut site = None;
+    for candidate in candidates {
+        let root = candidate["root"].as_str().unwrap_or("");
+        let fallback_id = candidate["site_id"].as_str().unwrap_or("");
+        let canonical_id = canonical_site_id(Path::new(root), fallback_id);
+        if fallback_id == requested
+            || canonical_id == requested
+            || format!("narada-{canonical_id}") == requested
+        {
+            site = Some((candidate, canonical_id));
+            break;
+        }
+    }
+    let Some((site, site_id)) = site else {
+        return Err(format!("registrar_unknown_site:{requested}"));
+    };
+    let root = PathBuf::from(site["root"].as_str().unwrap_or(""));
+    let control_root = site_mcp_control_root(&root);
+    let config_dir = control_root.join(".ai").join("mcp");
+    if !config_dir.exists() {
+        return Ok(json!({"site_id":site_id,"surfaces":[],"count":0}));
+    }
+    let surface_ids = contract["read_models"]["registrar_surface_list"]["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|surface| surface["id"].as_str())
+        .collect::<Vec<_>>();
+    let prefix = if site_id == "andrey-user" {
+        "narada-site-andrey-user".to_string()
+    } else if site_id.starts_with("narada-") {
+        site_id.clone()
+    } else {
+        format!("narada-{site_id}")
+    };
+    let mut found: Vec<String> = vec![];
+    let entries = fs::read_dir(&config_dir).map_err(|error| error.to_string())?;
+    for entry in entries.filter_map(Result::ok) {
+        if entry.path().extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        let Ok(config) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+        let servers = config.get("mcpServers").and_then(Value::as_object);
+        for surface_id in &surface_ids {
+            let key = format!("{prefix}-{surface_id}");
+            if servers.is_some_and(|value| value.contains_key(&key))
+                && !found.iter().any(|value| value == surface_id)
+            {
+                found.push((*surface_id).to_string());
+            }
+        }
+    }
+    Ok(json!({"site_id":site_id,"surfaces":found,"count":found.len()}))
+}
+
+fn canonical_site_id(root: &Path, fallback: &str) -> String {
+    for path in [
+        root.join(".narada").join("site.json"),
+        root.join("site.json"),
+    ] {
+        if let Ok(text) = fs::read_to_string(path) {
+            if let Ok(value) = serde_json::from_str::<Value>(&text) {
+                if let Some(site_id) = value
+                    .get("site_id")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    return site_id.to_string();
+                }
+            }
+        }
+    }
+    fallback.to_string()
+}
+
+fn site_mcp_control_root(root: &Path) -> PathBuf {
+    if root
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case(".narada"))
+        || root.join(".ai").join("mcp").exists()
+    {
+        return root.to_path_buf();
+    }
+    let nested = root.join(".narada");
+    if nested.join(".ai").join("mcp").exists() {
+        nested
+    } else {
+        root.to_path_buf()
+    }
 }
 fn surface_tool_inventory(contract: &Value, args: &Value) -> Value {
     let observed = args.get("observed_tools").and_then(Value::as_object);

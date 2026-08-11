@@ -9,6 +9,8 @@ try{
   for(const [name,args] of [['registrar_guidance',{workflow:'materialize_carriers',tool:'registrar_carrier_validate'}],['registrar_surface_list',{}],['registrar_carrier_list',{}],['registrar_site_list',{}],['registrar_surface_tool_inventory_check',{observed_tools:{'agent-context':['agent_orientation_read','invented_tool']},include_ok:true}]] as const){
     assert.deepEqual(await rust.call(name,args),await ts.call(name,args),`${name} native parity`);
   }
+  const sites=await ts.call('registrar_site_list',{}) as {items:Array<{site_id:string}>};
+  if(sites.items[0]) assert.deepEqual(await rust.call('registrar_site_surfaces',{site_id:sites.items[0].site_id}),await ts.call('registrar_site_surfaces',{site_id:sites.items[0].site_id}),'registrar_site_surfaces native parity');
   console.log('mcp-registrar native read model parity ok');
 }finally{await Promise.all([ts.stop(),rust.stop()])}
 
