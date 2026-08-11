@@ -80,6 +80,10 @@ test('native loader attaches native_entrypoint and native_applet children', asyn
       command: runtimeExecutable,
       args: ['proxy', '--surface-id', 'native-applet', '--child-command', runtimeExecutable, '--entrypoint', runtimeExecutable, '--child-invocation-kind', 'native_applet', '--child-applet', 'filesystem', '--', '--mode', 'read', '--allowed-root', root, '--output-root', root],
     },
+    'filesystem-user-home-anchor': {
+      command: runtimeExecutable,
+      args: ['proxy', '--surface-id', 'filesystem-user-home-anchor', '--child-command', runtimeExecutable, '--entrypoint', runtimeExecutable, '--child-invocation-kind', 'native_applet', '--child-applet', 'filesystem', '--', '--mode', 'read', '--allowed-root', root, '--anchored-allowed-root', 'user_home:.codex', '--output-root', root],
+    },
   });
 
   const loader = startLoader(root);
@@ -99,6 +103,14 @@ test('native loader attaches native_entrypoint and native_applet children', asyn
     opened.push(nativeApplet.connection_id);
     const nativeAppletTools = await loader.call('tools/call', { name: 'mcp_loader_list_tools', arguments: { connection_id: nativeApplet.connection_id } });
     assert.ok(nativeAppletTools.tools.some((tool: any) => tool.name === 'fs_stat'));
+
+    if (process.env.USERPROFILE || process.env.HOME) {
+      const filesystem = await loader.call('tools/call', { name: 'mcp_loader_open_surface', arguments: { site_root: root, surface_id: 'filesystem-user-home-anchor' } });
+      assert.equal(filesystem.schema, 'narada.mcp_loader.surface_handle_opened.v1');
+      opened.push(filesystem.connection_id);
+      const filesystemTools = await loader.call('tools/call', { name: 'mcp_loader_list_tools', arguments: { connection_id: filesystem.connection_id } });
+      assert.ok(filesystemTools.tools.some((tool: any) => tool.name === 'fs_stat'));
+    }
 
     await assert.rejects(
       loader.call('tools/call', {

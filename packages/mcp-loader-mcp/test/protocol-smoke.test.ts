@@ -24,6 +24,7 @@ try {
   if (userProfile) {
     assert.ok(defaultState.policy.allowedSiteRoots.includes(resolve(userProfile, 'Narada').replace(/\\/g, '/')));
     assert.ok(defaultState.policy.allowedEntrypointPrefixes.includes(resolve(userProfile, 'Narada', 'tools').replace(/\\/g, '/')));
+    assert.ok(defaultState.policy.allowedEnvVars.includes(process.env.USERPROFILE ? 'USERPROFILE' : 'HOME'));
   }
   const previousSourceRoot = process.env.NARADA_SRC_ROOT;
   process.env.NARADA_SRC_ROOT = join(root, 'source-root');

@@ -336,6 +336,8 @@ function defaultAllowedEntrypointPrefixes(): string[] {
   return [...new Set(prefixes)];
 }
 const DEFAULT_ALLOWED_ENV_VARS = [
+  'USERPROFILE',
+  'HOME',
   'NODE_OPTIONS',
   'PATH',
   'PROCESSOR_ARCHITECTURE',

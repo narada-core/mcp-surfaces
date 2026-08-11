@@ -816,6 +816,8 @@ fn build_policy(options: &Options, surface_root: &str, workspace_root: &str) -> 
         allowed_surface_ids: options.allowed_surface_ids.clone(),
         allowed_env_vars: options.allowed_env_vars.clone().unwrap_or_else(|| {
             vec![
+                "USERPROFILE",
+                "HOME",
                 "NODE_OPTIONS",
                 "PATH",
                 "PROCESSOR_ARCHITECTURE",
