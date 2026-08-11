@@ -5,6 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
+import { runSopEngineParity } from './verify-sop-engine-parity.mjs';
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const executable = process.env.NARADA_NATIVE_SURFACE_EXECUTABLE
@@ -2292,6 +2293,7 @@ const sopHandoffParity = runSopHandoffParity();
 const sopRunCoverageParity = runSopRunCoverageParity();
 const sopOutboxParity = runSopOutboxParity();
 const sopDurabilityMutationParity = runSopDurabilityMutationParity();
+const sopEngineParity = runSopEngineParity({ executable, workspaceRoot: resolve(packageRoot, '..', '..', '..') });
 const surfaceFeedbackParity = runSurfaceFeedbackParity();
 const siteLoopParity = runSiteLoopParity();
 const calendarParity = runCalendarParity();
@@ -2328,6 +2330,7 @@ process.stdout.write(JSON.stringify({
   sop_run_coverage_parity: sopRunCoverageParity,
   sop_outbox_parity: sopOutboxParity,
   sop_durability_mutation_parity: sopDurabilityMutationParity,
+  sop_engine_parity: sopEngineParity,
   surface_feedback_parity: surfaceFeedbackParity,
   site_loop_parity: siteLoopParity,
   calendar_parity: calendarParity,

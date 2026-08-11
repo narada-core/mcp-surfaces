@@ -10,16 +10,16 @@ use time::{Duration, OffsetDateTime, UtcOffset};
 use uuid::Uuid;
 
 const DB_RELATIVE: &str = ".sop/sop.db";
-const MAX_INLINE_VALUE_BYTES: usize = 16 * 1024;
-const MAX_RUN_STATE_BYTES: usize = 128 * 1024;
-const MAX_TEMPLATE_DEFINITION_BYTES: usize = 128 * 1024;
+pub(crate) const MAX_INLINE_VALUE_BYTES: usize = 16 * 1024;
+pub(crate) const MAX_RUN_STATE_BYTES: usize = 128 * 1024;
+pub(crate) const MAX_TEMPLATE_DEFINITION_BYTES: usize = 128 * 1024;
 const MAX_TEMPLATE_FILE_BYTES: u64 = 512 * 1024;
 const MAX_STEPS: usize = 128;
-const MAX_OUTBOX_PAYLOAD_BYTES: usize = 16 * 1024;
+pub(crate) const MAX_OUTBOX_PAYLOAD_BYTES: usize = 16 * 1024;
 const MAX_OUTBOX_RECEIPT_BYTES: usize = 8 * 1024;
 const MIN_LEASE_MS: i64 = 1_000;
 const MAX_LEASE_MS: i64 = 5 * 60_000;
-const SOP_TERMINAL_TOPIC: &str = "sop.run.terminal.v1";
+pub(crate) const SOP_TERMINAL_TOPIC: &str = "sop.run.terminal.v1";
 const TEMPLATE_SCHEMA: &str = include_str!("../../../../sop-mcp/sops/sop-template.schema.json");
 
 pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
@@ -35,11 +35,17 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<V
         "sop_outbox_consumer_register" => outbox_consumer_register(args, root),
         "sop_outbox_ack" => outbox_ack(args, root),
         "sop_outbox_compact" => outbox_compact(args, root),
-        _ => Err(authority_boundary(name)),
+        "sop_run_start" | "sop_run_refresh" | "sop_run_advance" | "sop_handoff_retry"
+        | "sop_action_resolve" | "sop_run_cancel" => crate::sop_engine::call_tool(name, args, root),
+        _ => Err(diagnostic(
+            "unknown_tool",
+            &format!("unknown_tool:{name}"),
+            json!({"tool_name":name}),
+        )),
     }
 }
 
-fn open_db(root: &Path) -> Result<Connection, Value> {
+pub(crate) fn open_db(root: &Path) -> Result<Connection, Value> {
     let path = root.join(DB_RELATIVE);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
@@ -801,7 +807,7 @@ fn require_lease(
     Ok(handoff)
 }
 
-fn get_handoff(db: &Connection, handoff_id: &str) -> Result<Value, Value> {
+pub(crate) fn get_handoff(db: &Connection, handoff_id: &str) -> Result<Value, Value> {
     let row = db
         .query_row(
             "SELECT * FROM sop_handoffs WHERE handoff_id = ?",
@@ -820,7 +826,7 @@ fn get_handoff(db: &Connection, handoff_id: &str) -> Result<Value, Value> {
     hydrate_handoff(row)
 }
 
-fn hydrate_handoff(row: Value) -> Result<Value, Value> {
+pub(crate) fn hydrate_handoff(row: Value) -> Result<Value, Value> {
     let object = row
         .as_object()
         .ok_or_else(|| diagnostic("sop_handoff_corrupt", "sop_handoff_corrupt", json!({})))?;
@@ -968,7 +974,7 @@ fn hydrate_handoff(row: Value) -> Result<Value, Value> {
     }))
 }
 
-fn public_handoff(mut handoff: Value, include_lease_token: bool) -> Value {
+pub(crate) fn public_handoff(mut handoff: Value, include_lease_token: bool) -> Value {
     if !include_lease_token {
         if let Some(object) = handoff.as_object_mut() {
             object.remove("lease_token");
@@ -1203,7 +1209,7 @@ fn outbox_compact(args: &Map<String, Value>, root: &Path) -> Result<Value, Value
     })
 }
 
-fn require_outbox_event(db: &Connection, event_id: &str) -> Result<Value, Value> {
+pub(crate) fn require_outbox_event(db: &Connection, event_id: &str) -> Result<Value, Value> {
     let row = db
         .query_row(
             "SELECT * FROM sop_outbox WHERE event_id = ?",
@@ -1222,7 +1228,7 @@ fn require_outbox_event(db: &Connection, event_id: &str) -> Result<Value, Value>
     hydrate_outbox_event(row)
 }
 
-fn hydrate_outbox_event(row: Value) -> Result<Value, Value> {
+pub(crate) fn hydrate_outbox_event(row: Value) -> Result<Value, Value> {
     let object = row.as_object().ok_or_else(|| {
         diagnostic(
             "sop_outbox_event_corrupt",
@@ -1269,7 +1275,7 @@ fn hydrate_outbox_event(row: Value) -> Result<Value, Value> {
     }))
 }
 
-fn transactional<F>(root: &Path, work: F) -> Result<Value, Value>
+pub(crate) fn transactional<F>(root: &Path, work: F) -> Result<Value, Value>
 where
     F: FnOnce(&Connection) -> Result<Value, Value>,
 {
@@ -1301,7 +1307,7 @@ where
     }
 }
 
-fn row_json(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+pub(crate) fn row_json(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
     let mut object = Map::new();
     for index in 0..row.as_ref().column_count() {
         let name = row
@@ -1422,7 +1428,7 @@ fn nonnegative_integer_member(value: Option<&Value>, code: &str) -> Result<i64, 
     Ok(parsed)
 }
 
-fn optional_bounded_string(
+pub(crate) fn optional_bounded_string(
     value: Option<&Value>,
     code: &str,
     max: usize,
@@ -1446,13 +1452,13 @@ fn normalize_timestamp(value: &str, code: &str) -> Result<String, Value> {
         .ok_or_else(|| diagnostic(code, code, json!({"value":value})))
 }
 
-fn parse_iso(value: &str) -> Option<OffsetDateTime> {
+pub(crate) fn parse_iso(value: &str) -> Option<OffsetDateTime> {
     OffsetDateTime::parse(value.trim(), &Rfc3339)
         .ok()
         .map(|timestamp| timestamp.to_offset(UtcOffset::UTC))
 }
 
-fn format_iso(value: OffsetDateTime) -> String {
+pub(crate) fn format_iso(value: OffsetDateTime) -> String {
     let value = value.to_offset(UtcOffset::UTC);
     format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
@@ -2309,7 +2315,11 @@ fn optional_value(value: Option<&Value>, field: &str) -> Result<Option<Value>, V
     Ok(Some(value.clone()))
 }
 
-fn required_string(value: Option<&Value>, code: &str, max: usize) -> Result<String, Value> {
+pub(crate) fn required_string(
+    value: Option<&Value>,
+    code: &str,
+    max: usize,
+) -> Result<String, Value> {
     let text = value
         .and_then(Value::as_str)
         .map(str::trim)
@@ -2325,7 +2335,7 @@ fn required_string(value: Option<&Value>, code: &str, max: usize) -> Result<Stri
     Ok(text.to_string())
 }
 
-fn optional_string(value: Option<&Value>) -> Option<String> {
+pub(crate) fn optional_string(value: Option<&Value>) -> Option<String> {
     value
         .and_then(Value::as_str)
         .map(str::trim)
@@ -2522,7 +2532,7 @@ fn assert_template_bound(value: &Value) -> Result<(), Value> {
     )
 }
 
-fn assert_bound(value: &Value, field: &str, max: usize) -> Result<(), Value> {
+pub(crate) fn assert_bound(value: &Value, field: &str, max: usize) -> Result<(), Value> {
     let bytes = canonical_json(value).as_bytes().len();
     if bytes > max {
         return Err(diagnostic(
@@ -2543,7 +2553,7 @@ fn encode_optional(value: Option<&Value>) -> Result<Option<String>, Value> {
     value.map(encode).transpose()
 }
 
-fn canonical_json(value: &Value) -> String {
+pub(crate) fn canonical_json(value: &Value) -> String {
     match value {
         Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {
             serde_json::to_string(value).unwrap_or_else(|_| "null".to_string())
@@ -2575,7 +2585,7 @@ fn canonical_json(value: &Value) -> String {
 }
 
 #[allow(dead_code)]
-fn fingerprint(value: &Value) -> String {
+pub(crate) fn fingerprint(value: &Value) -> String {
     Sha256::digest(canonical_json(value).as_bytes())
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -2583,7 +2593,7 @@ fn fingerprint(value: &Value) -> String {
 }
 
 #[allow(dead_code)]
-fn deterministic_id(prefix: &str, value: &str) -> String {
+pub(crate) fn deterministic_id(prefix: &str, value: &str) -> String {
     let digest = Sha256::digest(value.as_bytes());
     let hex = digest
         .iter()
@@ -2592,7 +2602,7 @@ fn deterministic_id(prefix: &str, value: &str) -> String {
     format!("{prefix}{}", &hex[..24])
 }
 
-fn now_iso() -> String {
+pub(crate) fn now_iso() -> String {
     let value = OffsetDateTime::now_utc();
     format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
@@ -2626,17 +2636,7 @@ fn valid_identifier(value: &str) -> bool {
         && characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
 }
 
-fn authority_boundary(name: &str) -> Value {
-    json!({
-        "schema":"narada.sop_mcp.authority_boundary.v1",
-        "status":"unavailable",
-        "tool_name":name,
-        "reason":"sop_run_or_delivery_authority_not_yet_enabled_in_native",
-        "remediation":"Use the configured SOP authority until the remaining run, handoff, action, and outbox parity gates pass."
-    })
-}
-
-fn diagnostic(code: &str, message: &str, details: Value) -> Value {
+pub(crate) fn diagnostic(code: &str, message: &str, details: Value) -> Value {
     json!({"schema":"narada.sop.error.v1","code":code,"message":message,"details":details})
 }
 
