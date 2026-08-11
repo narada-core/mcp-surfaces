@@ -125,7 +125,15 @@ export function publishImmutableNativeArtifacts(input: {
     pointerArtifacts[artifact.name] = relative(nativeRoot, destination).split(sep).join('/');
   }
   for (const artifact of artifacts) {
-    rmSync(join(nativeRoot, artifact.name), { force: true });
+    const legacyAlias = join(nativeRoot, artifact.name);
+    try {
+      rmSync(legacyAlias, { force: true });
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (process.platform !== 'win32' || (code !== 'EPERM' && code !== 'EBUSY')) throw error;
+      // A resident process may still hold this retired, non-authoritative alias.
+      // Publication remains safe because all resolution uses the immutable pointer below.
+    }
   }
   const pointer: NativeArtifactPointer = {
     schema: NATIVE_ARTIFACT_POINTER_SCHEMA,
