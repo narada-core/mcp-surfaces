@@ -9,7 +9,8 @@ const MAX_REGISTRY_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_RECORDS: usize = 2_000;
 const DEFAULT_LIMIT: usize = 100;
 const ADMITTED_SCOPES: [&str; 5] = ["all", "host", "user-site", "local-site", "none"];
-const DECLARED_OPTIONS: [&str; 19] = [
+const ADMITTED_AUTHORITIES: [&str; 3] = ["auto", "read", "write"];
+const DECLARED_OPTIONS: [&str; 20] = [
     "Agent",
     "All",
     "Role",
@@ -19,6 +20,7 @@ const DECLARED_OPTIONS: [&str; 19] = [
     "RegistryPath",
     "OperatorSurface",
     "Runtime",
+    "Authority",
     "IntelligenceProvider",
     "McpScope",
     "LauncherUiPort",
@@ -82,7 +84,8 @@ fn tool(name: &str, description: &str, read_only: bool) -> Value {
             "registry_path": {"type":"string"}, "agent": {"type":"array", "items":{"type":"string"}},
             "all": {"type":"boolean"}, "config_path": {"type":"array", "items":{"type":"string"}},
             "role": {"type":"array", "items":{"type":"string"}}, "site": {"type":"array", "items":{"type":"string"}},
-            "profile": {"type":"array", "items":{"type":"string"}}, "runtime": {"type":"string"},
+            "profile": {"type":"array", "items":{"type":"string"}}, "operator_surface": {"type":"string"},
+            "runtime": {"type":"string"}, "authority": {"type":"string", "enum":ADMITTED_AUTHORITIES},
             "mcp_scope": {"type":"string", "enum":ADMITTED_SCOPES}, "launch_profile": {"type":"string"},
             "startup_stagger_seconds": {"type":"integer", "minimum":0, "maximum":300},
             "intelligence_provider": {"type":"string"}, "enable_native_shell": {"type":"boolean"},
@@ -203,8 +206,27 @@ fn plan(
         }
     }
     let runtime_override = optional_string(args, "runtime");
+    let operator_surface_override = optional_string(args, "operator_surface");
+    let authority_override = optional_string(args, "authority");
+    if let Some(authority) = authority_override.as_deref() {
+        if !ADMITTED_AUTHORITIES.contains(&authority) {
+            return Err(diagnostic(
+                "authority_not_admitted",
+                &format!("authority_not_admitted:{authority}"),
+                json!({"admitted_authorities":ADMITTED_AUTHORITIES}),
+            ));
+        }
+    }
     let profile_override = optional_string(args, "launch_profile");
     let provider = optional_string(args, "intelligence_provider");
+    let mut compatibility_diagnostics = Vec::<Value>::new();
+    if let Some(provider) = provider.as_deref() {
+        compatibility_diagnostics.push(json!({
+            "code":"intelligence_provider_not_projected",
+            "message":"Intelligence provider selection is resolved by current runtime authority and is not an operator-surface runtime-start argument.",
+            "requested":provider
+        }));
+    }
     let mut wt_args = Vec::<Value>::new();
     let mut scope_plan = Vec::<Value>::new();
     let mut startup = Vec::<Value>::new();
@@ -213,6 +235,10 @@ fn plan(
             wt_args.push(json!(";"));
         }
         let runtime = runtime_override.as_deref().unwrap_or(&record.runtime);
+        let operator_surface = operator_surface_override
+            .as_deref()
+            .unwrap_or(&record.operator_surface);
+        let authority = authority_override.as_deref().unwrap_or(&record.authority);
         let profile = profile_override.as_deref().unwrap_or(&record.profile);
         let scope = requested_scope.as_deref().unwrap_or(&record.mcp_scope);
         let title = if record.title.is_empty() {
@@ -220,38 +246,42 @@ fn plan(
         } else {
             &record.title
         };
+        let working_directory = if record.workspace_root.is_empty() {
+            &record.narada_root
+        } else {
+            &record.workspace_root
+        };
         for arg in [
             "new-tab",
             "--title",
             title,
             "-d",
-            &record.narada_root,
-            "pwsh",
-            "-NoExit",
-            "-File",
+            working_directory,
+            "pnpm",
+            "--dir",
+            &record.dependency_narada_root,
+            "exec",
+            "narada",
+            "operator-surface",
+            "runtime",
+            "start",
+            operator_surface,
+            "--site-root",
+            &record.site_root,
+            "--agent",
+            &record.agent,
+            "--target-site-id",
+            &record.site,
+            "--runtime",
+            runtime,
+            "--exec",
+            "--format",
+            "human",
         ] {
             wt_args.push(json!(arg));
         }
-        wt_args.push(json!(root
-            .join("Start-NaradaAgent.ps1")
-            .to_string_lossy()
-            .to_string()));
-        for (key, value) in [
-            ("-NaradaRoot", record.narada_root.as_str()),
-            ("-SiteRoot", record.site_root.as_str()),
-            ("-Agent", record.agent.as_str()),
-            ("-Runtime", runtime),
-            ("-LauncherPath", record.launcher_path.as_str()),
-        ] {
-            wt_args.push(json!(key));
-            wt_args.push(json!(value));
-        }
-        if !profile.is_empty() {
-            wt_args.push(json!("-Profile"));
-            wt_args.push(json!(profile));
-        }
         if !record.workspace_root.is_empty() {
-            wt_args.push(json!("-WorkspaceRoot"));
+            wt_args.push(json!("--workspace-root"));
             wt_args.push(json!(&record.workspace_root));
         }
         if args
@@ -260,22 +290,21 @@ fn plan(
             .unwrap_or(false)
             || record.enable_native_shell
         {
-            wt_args.push(json!("-EnableNativeShell"));
+            wt_args.push(json!("--enable-native-shell"));
         }
-        if let Some(provider) = provider.as_deref() {
-            wt_args.push(json!("-IntelligenceProvider"));
-            wt_args.push(json!(provider));
-        }
+        wt_args.push(json!("--authority"));
+        wt_args.push(json!(authority));
         if !scope.is_empty() {
-            wt_args.push(json!("-McpScope"));
+            wt_args.push(json!("--mcp-scope"));
             wt_args.push(json!(scope));
         }
         if !args
             .get("no_wait_for_enter_before_exec")
             .and_then(Value::as_bool)
             .unwrap_or(false)
+            && !runtime.eq_ignore_ascii_case("narada-agent-runtime-server")
         {
-            wt_args.push(json!("-WaitForEnterBeforeExec"));
+            wt_args.push(json!("--wait"));
         }
         scope_plan.push(json!({"agent":record.agent,"requested":scope,"requested_loci":scope_loci(scope),"registry_default":record.mcp_scope}));
         startup.push(json!({"agent":record.agent,"site":record.site,"role":record.role,"registry_profile":if record.profile.is_empty(){Value::Null}else{json!(&record.profile)},"launch_profile":if profile.is_empty(){Value::Null}else{json!(profile)},"start_after_seconds":index * stagger,"diagnostics":if record.profile.is_empty(){json!(["registry_profile_missing"])}else{json!([])}}));
@@ -293,7 +322,7 @@ fn plan(
         .collect();
     Ok(json!({
         "schema":"narada.workspace_launch.dry_run.v1","status":"planned","count":selected.records.len(),"windows_terminal_invoked":false,
-        "registry_paths":selected.registry_paths,"wt_args":wt_args,"mcp_scope_plan":{"admitted_scopes":ADMITTED_SCOPES,"agents":scope_plan},"records":selected.records,
+        "registry_paths":selected.registry_paths,"wt_args":wt_args,"command_contract":"narada.operator_surface.runtime_start.v1","compatibility_diagnostics":compatibility_diagnostics,"mcp_scope_plan":{"admitted_scopes":ADMITTED_SCOPES,"agents":scope_plan},"records":selected.records,
         "startup_profile_plan":{"schema":"narada.launcher.profile_startup_plan.v1","execution_posture":"planned_not_started_by_mcp","selected_count":startup.len(),"stagger_seconds":stagger,"profile_count":profiles.len(),"profiles":profiles,"entries":startup,"diagnostics":[]}
     }))
 }
@@ -401,10 +430,13 @@ struct AgentRecord {
     role: String,
     site: String,
     narada_root: String,
+    dependency_narada_root: String,
     site_root: String,
     workspace_root: String,
     launcher_path: String,
+    operator_surface: String,
     runtime: String,
+    authority: String,
     profile: String,
     mcp_scope: String,
     enable_native_shell: bool,
@@ -556,10 +588,21 @@ fn load_records(path: &Path) -> Result<Vec<AgentRecord>, Value> {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
+    let operator_surface = root
+        .get("OperatorSurface")
+        .or_else(|| root.get("Carrier"))
+        .and_then(Value::as_str)
+        .unwrap_or("codex")
+        .to_string();
     let runtime = root
         .get("Runtime")
         .and_then(Value::as_str)
-        .unwrap_or("codex")
+        .unwrap_or("narada-agent-runtime-server")
+        .to_string();
+    let authority = root
+        .get("Authority")
+        .and_then(Value::as_str)
+        .unwrap_or("auto")
         .to_string();
     let profile = root
         .get("Profile")
@@ -576,6 +619,15 @@ fn load_records(path: &Path) -> Result<Vec<AgentRecord>, Value> {
         let object = agent.as_object().cloned().unwrap_or_default();
         let agent_id = required_field(&object, "Agent")?;
         let nr = string_field(&object, "NaradaRoot").unwrap_or_else(|| narada_root.clone());
+        let dependency_narada_root = string_field(&object, "DependencyNaradaRoot")
+            .or_else(|| string_field(&object, "NaradaProperRoot"))
+            .or_else(|| {
+                root.get("DependencyNaradaRoot")
+                    .or_else(|| root.get("NaradaProperRoot"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| resolve_dependency_narada_root(&nr));
         let sr = string_field(&object, "SiteRoot").unwrap_or_else(|| {
             if site_root.is_empty() {
                 nr.clone()
@@ -598,7 +650,19 @@ fn load_records(path: &Path) -> Result<Vec<AgentRecord>, Value> {
         let role = string_field(&object, "Role").unwrap_or_else(|| strip_digits(&short));
         let site = string_field(&object, "Site")
             .unwrap_or_else(|| agent_id.split('.').next().unwrap_or(&agent_id).to_string());
+        let operator_surface_value = string_field(&object, "OperatorSurface")
+            .or_else(|| string_field(&object, "Carrier"))
+            .unwrap_or_else(|| operator_surface.clone());
         let runtime_value = string_field(&object, "Runtime").unwrap_or_else(|| runtime.clone());
+        let authority_value =
+            string_field(&object, "Authority").unwrap_or_else(|| authority.clone());
+        if !ADMITTED_AUTHORITIES.contains(&authority_value.as_str()) {
+            return Err(diagnostic(
+                "authority_not_admitted",
+                &format!("authority_not_admitted:{authority_value}"),
+                json!({"agent":agent_id,"admitted_authorities":ADMITTED_AUTHORITIES}),
+            ));
+        }
         let profile_value = string_field(&object, "Profile").unwrap_or_else(|| profile.clone());
         let scope_value = string_field(&object, "McpScope").unwrap_or_else(|| mcp_scope.clone());
         if !ADMITTED_SCOPES.contains(&scope_value.as_str()) {
@@ -614,10 +678,13 @@ fn load_records(path: &Path) -> Result<Vec<AgentRecord>, Value> {
             role,
             site,
             narada_root: normalize_path(&nr),
+            dependency_narada_root: normalize_path(&dependency_narada_root),
             site_root: normalize_path(&sr),
             workspace_root: normalize_path(&wr),
             launcher_path: normalize_path(&launch),
+            operator_surface: operator_surface_value,
             runtime: runtime_value,
+            authority: authority_value,
             profile: profile_value,
             mcp_scope: scope_value,
             enable_native_shell: object
@@ -730,6 +797,42 @@ fn strip_digits(value: &str) -> String {
 }
 fn normalize_path(value: &str) -> String {
     value.replace('\\', "/")
+}
+fn resolve_dependency_narada_root(narada_root: &str) -> String {
+    let target = PathBuf::from(narada_root);
+    let parent = target.parent().unwrap_or_else(|| Path::new(""));
+    let sibling = parent.join("narada");
+    let user_source = parent.join("src").join("narada");
+    for candidate in [&target, &sibling, &user_source] {
+        if candidate.join("package.json").is_file()
+            && candidate
+                .join("packages")
+                .join("layers")
+                .join("cli")
+                .join("package.json")
+                .is_file()
+        {
+            return path_text(candidate);
+        }
+    }
+    if target
+        .file_name()
+        .map(|name| name.to_string_lossy().eq_ignore_ascii_case("narada"))
+        .unwrap_or(false)
+    {
+        return path_text(&target);
+    }
+    if parent
+        .file_name()
+        .map(|name| {
+            let value = name.to_string_lossy();
+            value.eq_ignore_ascii_case("src") || value.eq_ignore_ascii_case("code")
+        })
+        .unwrap_or(false)
+    {
+        return path_text(&sibling);
+    }
+    path_text(&user_source)
 }
 fn join_path(root: &str, child: &str) -> String {
     let path = PathBuf::from(child);
@@ -967,5 +1070,65 @@ mod tests {
     fn scope_loci_are_bounded() {
         assert_eq!(scope_loci("all"), vec!["host", "user-site", "local-site"]);
         assert!(scope_loci("none").is_empty());
+    }
+
+    #[test]
+    fn plan_uses_direct_operator_surface_runtime_contract() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let test_root = std::env::temp_dir().join(format!(
+            "narada-launcher-native-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&test_root).expect("create test root");
+        let registry = test_root.join("agents.psd1");
+        std::fs::write(
+            &registry,
+            format!(
+                "@{{ NaradaRoot = '{}'; WorkspaceRoot = '{}'; SiteRoot = '{}'; Launcher = 'site.ps1'; OperatorSurface = 'agent-cli'; Runtime = 'narada-agent-runtime-server'; Agents = @(@{{ Agent = 'site.architect'; Role = 'architect'; McpScope = 'all'; }}); }}",
+                path_text(&test_root),
+                path_text(&test_root),
+                path_text(&test_root)
+            ),
+        )
+        .expect("write registry");
+
+        let mut args = Map::new();
+        args.insert("agent".to_string(), json!(["site.architect"]));
+        let result = plan(&args, &test_root, Some(&registry)).expect("plan");
+        let argv: Vec<&str> = result["wt_args"]
+            .as_array()
+            .expect("wt args")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+
+        assert!(argv.windows(2).any(|window| window == ["pnpm", "--dir"]));
+        assert!(argv.windows(5).any(|window| {
+            window
+                == [
+                    "narada",
+                    "operator-surface",
+                    "runtime",
+                    "start",
+                    "agent-cli",
+                ]
+        }));
+        assert!(argv
+            .windows(2)
+            .any(|window| window == ["--target-site-id", "site"]));
+        assert!(argv
+            .windows(2)
+            .any(|window| window == ["--authority", "auto"]));
+        assert!(argv
+            .windows(2)
+            .any(|window| window == ["--mcp-scope", "all"]));
+        assert!(!argv.iter().any(|arg| arg.contains("Start-NaradaAgent.ps1")));
+        assert!(!argv.contains(&"-LauncherPath"));
+        assert!(!argv.contains(&"--wait"));
+
+        std::fs::remove_dir_all(test_root).expect("remove test root");
     }
 }

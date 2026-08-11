@@ -13,7 +13,9 @@ writeFileSync(registryPath, `@{
   WorkspaceRoot = "${root}"
   SiteRoot = "${root}"
   Launcher = "narada-test.ps1"
-  Runtime = "agent-cli"
+  OperatorSurface = "agent-cli"
+  Runtime = "narada-agent-runtime-server"
+  Authority = "auto"
   Agents = @(
     @{ Agent = "narada-test.architect"; Title = "Test Architect"; Site = "narada-test"; Role = "architect"; Profile = "planning"; EnableNativeShell = $false }
     @{ Agent = "narada-test.builder2"; Title = "Test Builder"; Site = "narada-test"; Profile = "implementation"; EnableNativeShell = $true }
@@ -101,6 +103,8 @@ try {
   const toolList = await ((handleRequest({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }, state)) as any) as any as Record<string, any>;
   const launcherPlanTool = toolList.result.tools.find((tool: Record<string, any>) => tool.name === 'launcher_plan');
   assert.deepEqual(launcherPlanTool.inputSchema.properties.mcp_scope.enum, ['all', 'host', 'user-site', 'local-site', 'none']);
+  assert.deepEqual(launcherPlanTool.inputSchema.properties.authority.enum, ['auto', 'read', 'write']);
+  assert.equal(launcherPlanTool.inputSchema.properties.operator_surface.type, 'string');
 
   const registry = view(await call('launcher_registry_list', { site: ['test'] }));
   assert.equal(registry.total_count, 2);
@@ -112,17 +116,31 @@ try {
   const registryByProfile = view(await call('launcher_registry_list', { profile: ['implementation'] }));
   assert.equal(registryByProfile.total_count, 1);
   assert.equal(registryByProfile.records[0].agent, 'narada-test.builder2');
+  assert.equal(registryByProfile.records[0].operator_surface, 'agent-cli');
+  assert.equal(registryByProfile.records[0].runtime, 'narada-agent-runtime-server');
 
-  const plan = view(await call('launcher_plan', { agent: ['narada-test.builder2'], runtime: 'agent-cli', launch_profile: 'implementation-fast', intelligence_provider: 'codex-subscription' }));
+  const plan = view(await call('launcher_plan', { agent: ['narada-test.builder2'], operator_surface: 'agent-cli', authority: 'write', launch_profile: 'implementation-fast', intelligence_provider: 'codex-subscription' }));
   assert.equal(plan.schema, 'narada.workspace_launch.dry_run.v1');
   assert.equal(plan.windows_terminal_invoked, false);
   assert.equal(plan.count, 1);
   assert.deepEqual(plan.wt_args.slice(0, 4), ['new-tab', '--title', 'Test Builder', '-d']);
-  assert.ok((plan.wt_args as string[]).includes('-EnableNativeShell'));
-  assert.ok((plan.wt_args as string[]).includes('-Profile'));
-  assert.ok((plan.wt_args as string[]).includes('implementation-fast'));
-  assert.ok((plan.wt_args as string[]).includes('codex-subscription'));
-  assert.ok((plan.wt_args as string[]).includes('-WaitForEnterBeforeExec'));
+  assert.ok((plan.wt_args as string[]).includes('--enable-native-shell'));
+  assert.deepEqual((plan.wt_args as string[]).slice(5, 7), ['pnpm', '--dir']);
+  const naradaCommandIndex = (plan.wt_args as string[]).indexOf('narada');
+  assert.ok(naradaCommandIndex > 0);
+  assert.equal((plan.wt_args as string[])[naradaCommandIndex - 1], 'exec');
+  assert.deepEqual((plan.wt_args as string[]).slice(naradaCommandIndex, naradaCommandIndex + 5), ['narada', 'operator-surface', 'runtime', 'start', 'agent-cli']);
+  assert.ok((plan.wt_args as string[]).includes('--target-site-id'));
+  assert.ok((plan.wt_args as string[]).includes('--workspace-root'));
+  assert.ok((plan.wt_args as string[]).includes('--authority'));
+  assert.ok((plan.wt_args as string[]).includes('write'));
+  assert.equal((plan.wt_args as string[]).some((arg) => arg.includes('Start-NaradaAgent.ps1')), false);
+  assert.equal((plan.wt_args as string[]).includes('-LauncherPath'), false);
+  assert.equal((plan.wt_args as string[]).includes('-Profile'), false);
+  assert.equal((plan.wt_args as string[]).includes('codex-subscription'), false);
+  assert.equal((plan.wt_args as string[]).includes('--wait'), false);
+  assert.equal(plan.command_contract, 'narada.operator_surface.runtime_start.v1');
+  assert.equal(plan.compatibility_diagnostics[0].code, 'intelligence_provider_not_projected');
   assert.deepEqual(plan.mcp_scope_plan.admitted_scopes, ['all', 'host', 'user-site', 'local-site', 'none']);
   assert.equal(plan.mcp_scope_plan.agents[0].requested, 'all');
   assert.deepEqual(plan.mcp_scope_plan.agents[0].requested_loci, ['host', 'user-site', 'local-site']);
@@ -133,13 +151,13 @@ try {
 
   const noWait = view(await call('launcher_plan', { all: true, role: ['architect'], no_wait_for_enter_before_exec: true, startup_stagger_seconds: 7 }));
   assert.equal(noWait.count, 1);
-  assert.equal((noWait.wt_args as string[]).includes('-WaitForEnterBeforeExec'), false);
+  assert.equal((noWait.wt_args as string[]).includes('--wait'), false);
   assert.equal(noWait.startup_profile_plan.entries[0].start_after_seconds, 0);
 
   const localSitePlan = view(await call('launcher_plan', { agent: ['narada-test.architect'], mcp_scope: 'local-site' }));
   assert.equal(localSitePlan.mcp_scope_plan.agents[0].requested, 'local-site');
   assert.deepEqual(localSitePlan.mcp_scope_plan.agents[0].requested_loci, ['local-site']);
-  assert.ok((localSitePlan.wt_args as string[]).includes('-McpScope'));
+  assert.ok((localSitePlan.wt_args as string[]).includes('--mcp-scope'));
   assert.ok((localSitePlan.wt_args as string[]).includes('local-site'));
 
   const staggered = view(await call('launcher_plan', { all: true, startup_stagger_seconds: 7 }));
@@ -166,7 +184,7 @@ try {
     },
   }, null, 2), 'utf8');
 
-  const telemetryPlan = view(await call('launcher_plan', { agent: ['narada-test.architect'], runtime: 'agent-cli' }));
+  const telemetryPlan = view(await call('launcher_plan', { agent: ['narada-test.architect'], operator_surface: 'agent-cli' }));
   const telemetryPath = join(root, '.ai', 'telemetry', 'launcher.jsonl');
   const telemetryLines = readFileSync(telemetryPath, 'utf8').trim().split('\n').filter(Boolean);
   assert.ok(telemetryLines.length >= 1);

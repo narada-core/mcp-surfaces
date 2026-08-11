@@ -2,7 +2,7 @@
 import { buildGuidanceResult } from './guidance.js';
 import { guidanceToolDefinition } from './guidance.js';
 import { existsSync, readFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { buildPathMetadataTelemetryDeclaration, emitTelemetryEvent, telemetryErrorCodeFromUnknown, type TelemetryDeclaration, type TelemetryEventKind } from '@narada-core/mcp-telemetry';
 import { defineSurface, type DefinedSurface } from '@narada-core/mcp-fabric-contracts';
@@ -11,8 +11,9 @@ const SERVER_NAME = 'launcher-mcp';
 const SERVER_VERSION = '0.1.0';
 const PROTOCOL_VERSION = '2024-11-05';
 const DEFAULT_NARADA_ROOT = 'C:/Users/Andrey/Narada';
-const DECLARED_OPTIONS = ['Agent', 'All', 'Role', 'Site', 'Profile', 'ConfigPath', 'RegistryPath', 'OperatorSurface', 'Runtime', 'IntelligenceProvider', 'McpScope', 'LauncherUiPort', 'LauncherUiPortFallback', 'EnableNativeShell', 'NoWaitForEnterBeforeExec', 'Smoke', 'DryRun'];
+const DECLARED_OPTIONS = ['Agent', 'All', 'Role', 'Site', 'Profile', 'ConfigPath', 'RegistryPath', 'OperatorSurface', 'Runtime', 'Authority', 'IntelligenceProvider', 'McpScope', 'LauncherUiPort', 'LauncherUiPortFallback', 'EnableNativeShell', 'NoWaitForEnterBeforeExec', 'Smoke', 'DryRun'];
 const ADMITTED_MCP_SCOPES = ['all', 'host', 'user-site', 'local-site', 'none'];
+const ADMITTED_AUTHORITIES = ['auto', 'read', 'write'];
 const SURFACE_ID = 'launcher';
 const LAUNCHER_TELEMETRY_TOOL_NAMES = new Set([
   'launcher_doctor',
@@ -40,10 +41,13 @@ type AgentRecord = {
   role: string;
   site: string;
   narada_root: string;
+  dependency_narada_root: string;
   site_root: string;
   workspace_root: string;
   launcher_path: string;
+  operator_surface: string;
   runtime: string;
+  authority: string;
   profile: string;
   mcp_scope: string;
   enable_native_shell: boolean;
@@ -202,9 +206,11 @@ function launcherToolDefinitions() {
           role: { type: 'array', items: { type: 'string' } },
           site: { type: 'array', items: { type: 'string' } },
           profile: { type: 'array', items: { type: 'string' } },
+          operator_surface: { type: 'string', description: 'Operator surface override for selected agents.' },
           runtime: { type: 'string' },
+          authority: { type: 'string', enum: ADMITTED_AUTHORITIES, description: 'Runtime authority posture for selected agents.' },
           mcp_scope: { type: 'string', enum: ADMITTED_MCP_SCOPES, description: 'MCP injection scope override for selected agents.' },
-          launch_profile: { type: 'string', description: 'Override the agent profile passed to Start-NaradaAgent.ps1.' },
+          launch_profile: { type: 'string', description: 'Override the profile used by the startup planning projection.' },
           startup_stagger_seconds: { type: 'integer', minimum: 0, maximum: 300, description: 'Plan-only stagger interval between selected profile-aware startup entries.' },
           intelligence_provider: { type: 'string' },
           enable_native_shell: { type: 'boolean' },
@@ -356,21 +362,40 @@ function launcherPlan(args: JsonRecord, state: LauncherState): JsonRecord {
   const wtArgs: string[] = [];
   const mcpScopePlan = [];
   const staggerSeconds = clampNumber(args.startup_stagger_seconds, 0, 0, 300);
+  const provider = optionalString(args.intelligence_provider);
+  const compatibilityDiagnostics: JsonRecord[] = [];
+  if (provider) {
+    compatibilityDiagnostics.push({
+      code: 'intelligence_provider_not_projected',
+      message: 'Intelligence provider selection is resolved by current runtime authority and is not an operator-surface runtime-start argument.',
+      requested: provider,
+    });
+  }
   for (const record of selected.records) {
     const launchRuntime = optionalString(args.runtime) ?? record.runtime;
     const launchProfile = optionalString(args.launch_profile) ?? record.profile;
+    const operatorSurface = optionalString(args.operator_surface) ?? record.operator_surface;
+    const authority = optionalString(args.authority) ?? record.authority;
+    if (!ADMITTED_AUTHORITIES.includes(authority)) throw new Error(`authority_not_admitted: ${authority}. Admitted authorities: ${ADMITTED_AUTHORITIES.join(', ')}`);
     const mcpScope = optionalString(args.mcp_scope) || record.mcp_scope;
     if (mcpScope && !ADMITTED_MCP_SCOPES.includes(mcpScope)) throw new Error(`mcp_scope_not_admitted: ${mcpScope}. Admitted scopes: ${ADMITTED_MCP_SCOPES.join(', ')}`);
     mcpScopePlan.push({ agent: record.agent, requested: mcpScope, requested_loci: mcpScopeLoci(mcpScope), registry_default: record.mcp_scope });
     if (wtArgs.length > 0) wtArgs.push(';');
-    wtArgs.push('new-tab', '--title', record.title, '-d', record.narada_root, 'pwsh', '-NoExit', '-File', join(selected.naradaRoot, 'Start-NaradaAgent.ps1'), '-NaradaRoot', record.narada_root, '-SiteRoot', record.site_root, '-Agent', record.agent, '-Runtime', launchRuntime, '-LauncherPath', record.launcher_path);
-    if (launchProfile) wtArgs.push('-Profile', launchProfile);
-    if (record.workspace_root) wtArgs.push('-WorkspaceRoot', record.workspace_root);
-    if (args.enable_native_shell === true || record.enable_native_shell) wtArgs.push('-EnableNativeShell');
-    const provider = optionalString(args.intelligence_provider);
-    if (provider) wtArgs.push('-IntelligenceProvider', provider);
-    if (mcpScope) wtArgs.push('-McpScope', mcpScope);
-    if (args.no_wait_for_enter_before_exec !== true) wtArgs.push('-WaitForEnterBeforeExec');
+    wtArgs.push(
+      'new-tab', '--title', record.title, '-d', record.workspace_root || record.narada_root,
+      'pnpm', '--dir', record.dependency_narada_root, 'exec',
+      'narada', 'operator-surface', 'runtime', 'start', operatorSurface,
+      '--site-root', record.site_root,
+      '--agent', record.agent,
+      '--target-site-id', record.site,
+      '--runtime', launchRuntime,
+      '--exec', '--format', 'human',
+    );
+    if (record.workspace_root) wtArgs.push('--workspace-root', record.workspace_root);
+    if (args.enable_native_shell === true || record.enable_native_shell) wtArgs.push('--enable-native-shell');
+    wtArgs.push('--authority', authority);
+    if (mcpScope) wtArgs.push('--mcp-scope', mcpScope);
+    if (args.no_wait_for_enter_before_exec !== true && launchRuntime.toLowerCase() !== 'narada-agent-runtime-server') wtArgs.push('--wait');
   }
   return {
     schema: 'narada.workspace_launch.dry_run.v1',
@@ -379,6 +404,8 @@ function launcherPlan(args: JsonRecord, state: LauncherState): JsonRecord {
     windows_terminal_invoked: false,
     registry_paths: selected.registryPaths,
     wt_args: wtArgs,
+    command_contract: 'narada.operator_surface.runtime_start.v1',
+    compatibility_diagnostics: compatibilityDiagnostics,
     mcp_scope_plan: {
       admitted_scopes: ADMITTED_MCP_SCOPES,
       agents: mcpScopePlan,
@@ -509,12 +536,17 @@ function loadRegistryRecords(path: string): AgentRecord[] {
 function toAgentRecord(agent: JsonRecord, config: JsonRecord, configPath: string): AgentRecord {
   const agentId = requiredText(agent.Agent, `agent_missing:${configPath}`);
   const naradaRoot = requiredText(agent.NaradaRoot ?? config.NaradaRoot, `agent_narada_root_missing:${agentId}`);
+  const dependencyNaradaRoot = text(agent.DependencyNaradaRoot ?? agent.NaradaProperRoot ?? config.DependencyNaradaRoot ?? config.NaradaProperRoot)
+    || resolveDependencyNaradaRoot(naradaRoot);
   const siteRoot = text(agent.SiteRoot ?? config.SiteRoot) || naradaRoot;
   const workspaceRoot = text(agent.WorkspaceRoot ?? config.WorkspaceRoot);
   const launcher = text(agent.Launcher ?? config.Launcher);
   const launcherPath = text(agent.LauncherPath ?? config.LauncherPath) || (launcher ? join(naradaRoot, launcher) : '');
   if (!launcherPath) throw diagnosticError('launcher_path_missing', `launcher_path_missing:${agentId}`);
-  const runtime = text(agent.Runtime ?? config.Runtime) || 'codex';
+  const operatorSurface = text(agent.OperatorSurface ?? agent.Carrier ?? config.OperatorSurface ?? config.Carrier) || 'codex';
+  const runtime = text(agent.Runtime ?? config.Runtime) || 'narada-agent-runtime-server';
+  const authority = text(agent.Authority ?? config.Authority) || 'auto';
+  if (!ADMITTED_AUTHORITIES.includes(authority)) throw diagnosticError('authority_not_admitted', `authority_not_admitted:${authority}`, { admitted_authorities: ADMITTED_AUTHORITIES });
   const profile = text(agent.Profile ?? config.Profile);
   const mcpScope = text(agent.McpScope ?? config.McpScope) || 'all';
   if (!ADMITTED_MCP_SCOPES.includes(mcpScope)) throw diagnosticError('mcp_scope_not_admitted', `mcp_scope_not_admitted:${mcpScope}`, { admitted_scopes: ADMITTED_MCP_SCOPES });
@@ -524,10 +556,13 @@ function toAgentRecord(agent: JsonRecord, config: JsonRecord, configPath: string
     role: text(agent.Role) || ((agentId.split('.').at(-1) || agentId).replace(/\d+$/, '')),
     site: text(agent.Site) || (agentId.includes('.') ? agentId.split('.')[0] : agentId),
     narada_root: normalizePath(naradaRoot),
+    dependency_narada_root: normalizePath(dependencyNaradaRoot),
     site_root: normalizePath(siteRoot),
     workspace_root: workspaceRoot ? normalizePath(workspaceRoot) : '',
     launcher_path: normalizePath(launcherPath),
+    operator_surface: operatorSurface,
     runtime,
+    authority,
     profile,
     mcp_scope: mcpScope,
     enable_native_shell: Boolean(agent.EnableNativeShell),
@@ -632,6 +667,22 @@ function siteAliases(record: AgentRecord): string[] {
 function lowerSet(values: string[]): Set<string> { return new Set(values.map((value) => value.toLowerCase())); }
 function uniqueStrings(values: string[]): string[] { return Array.from(new Set(values)); }
 function normalizePath(value: string): string { return value ? resolve(value).replace(/\\/g, '/') : value; }
+
+function resolveDependencyNaradaRoot(naradaRoot: string): string {
+  const targetRoot = resolve(naradaRoot);
+  const parent = dirname(targetRoot);
+  const sibling = join(parent, 'narada');
+  const userSource = join(parent, 'src', 'narada');
+  const candidates = [targetRoot, sibling, userSource];
+  const existing = candidates.find((candidate) => (
+    existsSync(join(candidate, 'package.json'))
+    && existsSync(join(candidate, 'packages', 'layers', 'cli', 'package.json'))
+  ));
+  if (existing) return existing;
+  if (basename(targetRoot).toLowerCase() === 'narada') return targetRoot;
+  if (['src', 'code'].includes(basename(parent).toLowerCase())) return sibling;
+  return userSource;
+}
 function optionalString(value: unknown): string | undefined { const v = text(value); return v || undefined; }
 function text(value: unknown): string { return typeof value === 'string' ? value : ''; }
 function requiredText(value: unknown, code: string): string { const v = text(value); if (!v) throw diagnosticError(code.split(':')[0], code); return v; }
