@@ -32,10 +32,10 @@ const expectedUserSiteRoot = resolve(
 const nativeRuntimeArtifactAvailable = process.platform === 'win32'
   && resolveNativeArtifact(join(workspaceRoot, 'packages', 'shared', 'mcp-runtime-proxy'), 'narada-mcp-runtime.exe') !== null;
 const nativeSharedSurfaceArtifactAvailable = process.platform === 'win32' && existsSync(workspacePath('packages', 'shared', 'mcp-surfaces-native', 'dist', 'native', 'narada-mcp-surfaces.exe'));
+const nativeSharedSurfaceEntrypoint = workspacePath('packages', 'shared', 'mcp-surfaces-native', 'dist', 'native', 'narada-mcp-surfaces.exe');
 assert.equal(
   defaultRuntimeProxyImplementation(process.platform, nativeRuntimeArtifactAvailable),
-  nativeRuntimeArtifactAvailable ? 'native' : 'bun',
-);
+  nativeRuntimeArtifactAvailable ? 'native' : 'bun',);
 const defaultMaterializationArgs = parseArgs(['--materialize-all']);
 assert.equal(defaultMaterializationArgs.mode, 'materialize-all');
 if (defaultMaterializationArgs.mode === 'materialize-all') {
@@ -1126,7 +1126,7 @@ try {
   assert.ok(!(bindConfig.config.mcpServers as Record<string, any>)['sonar-scheduler']);
   const schedServer: any = (bindConfig.config.mcpServers as Record<string, any>)['narada-sonar-scheduler'];
   assert.equal(schedServer.surface_id, 'scheduler');
-  assertRuntimeProxy(schedServer, workspacePath('packages', 'scheduler-mcp', 'dist', 'src', 'main.js'));
+  assertRuntimeProxy(schedServer, nativeSharedSurfaceEntrypoint, 'narada-mcp-surfaces');
   assert.equal(schedServer.injection_scope, 'local_site');
   assert.deepEqual(schedServer.authority_locus, { kind: 'local_site', site_root: root });
   assert.equal(schedServer.narada_scope.scope_source, 'registrar_surface_catalog');
@@ -1153,8 +1153,24 @@ try {
       ['catalog-observation', []],
       ['operator-routing', ['--site-root', '{site_root}']],
       ['site-inbox', ['--site-root', '{site_root}']],
+      ['mailbox', ['--site-root', '{site_root}']],
+      ['graph-mail', ['--site-root', '{site_root}']],
+      ['calendar', ['--site-root', '{site_root}']],
+      ['site-loop', ['--site-root', '{site_root}']],
       ['site-lifecycle', ['--site-root', '{site_root}']],
       ['site-registry', ['--site-root', '{site_root}']],
+      ['worker-delegation', ['--site-root', '{site_root}']],
+      ['delegated-task', ['--site-root', '{site_root}']],
+      ['sop', ['--site-root', '{site_root}']],
+      ['scheduler', ['--site-root', '{site_root}']],
+      ['surface-feedback', ['--site-root', '{site_root}']],
+      ['speech', ['--site-root', '{site_root}']],
+      ['artifacts', ['--site-root', '{site_root}']],
+      ['nars-session', ['--site-root', '{site_root}']],
+      ['quota-meter', ['--site-root', '{site_root}']],
+      ['operator-console-overlay', ['--site-root', '{site_root}']],
+      ['browser-control', ['--site-root', '{site_root}']],
+      ['cloudflare-carrier', ['--site-root', '{site_root}']],
       ['project-state', ['--site-root', '{site_root}']],
       ['runtime-introspection', ['--site-root', '{site_root}']],
       ['site-coherence', ['--site-root', '{site_root}']],
@@ -1177,15 +1193,14 @@ try {
       assert.equal(sharedServer.args[sharedServer.args.indexOf('--child-invocation-kind') + 1], 'native_entrypoint');
       assert.match(sharedServer.command, /narada-mcp-runtime\.exe$/i);
       assert.match(sharedServer.args[sharedServer.args.indexOf('--child-command') + 1], /narada-mcp-surfaces\.exe$/i);
-      const separator = sharedServer.args.indexOf('--');
-      assert.equal(sharedServer.args[separator + 1], '--surface-id');
+      const separator = sharedServer.args.indexOf('--');      assert.equal(sharedServer.args[separator + 1], '--surface-id');
       assert.equal(sharedServer.args[separator + 2], surfaceId);
+      assert.equal(sharedServer.args.includes('--native-authority'), surfaceId === 'calendar' || surfaceId === 'graph-mail');
     }
   }
   assert.equal(schedServer.narada_scope.bound_into_site, 'narada-sonar');
 
-  const smartSchedulingBindConfig: any = buildSiteBindConfig(
-    { site_id: 'smart-scheduling', root, config_path: join(root, 'site.json'), surfaces: [] },
+  const smartSchedulingBindConfig: any = buildSiteBindConfig(    { site_id: 'smart-scheduling', root, config_path: join(root, 'site.json'), surfaces: [] },
     { id: 'scheduler', package: 'scheduler-mcp', entrypoint: 'C:/workspace/mcp-surfaces/packages/scheduler-mcp/dist/src/main.js', kind: 'mcp_surface', args: ['--allowed-root', '{site_root}'], tools: ['scheduler_task_list'] },
   );
   assert.equal(smartSchedulingBindConfig.fileName, 'narada-smart-scheduling-scheduler-mcp.json');
@@ -1206,7 +1221,7 @@ try {
   );
   const speechServer: any = (speechBindConfig.config.mcpServers as Record<string, any>)['narada-staccato-speech'];
   assert.equal(speechServer.injection_scope, 'host');
-  assertRuntimeProxy(speechServer, workspacePath('packages', 'speech-mcp', 'dist', 'src', 'main.js'));
+  assertRuntimeProxy(speechServer, nativeSharedSurfaceEntrypoint, 'narada-mcp-surfaces');
   assert.equal(speechServer.authority_posture, 'host_injected_mcp_surface');
   assert.deepEqual(speechServer.authority_locus, { kind: 'host' });
   assert.equal(speechServer.bound_into_site, 'narada-staccato');
@@ -1229,7 +1244,7 @@ try {
   );
   const workerServer: any = (workerBindConfig.config.mcpServers as Record<string, any>)['narada-sonar-worker-delegation'];
   assert.equal(workerServer.surface_id, 'worker-delegation');
-  assertRuntimeProxy(workerServer, workspacePath('packages', 'worker-delegation-mcp', 'dist', 'src', 'main.js'));
+  assertRuntimeProxy(workerServer, nativeSharedSurfaceEntrypoint, 'narada-mcp-surfaces');
   assert.ok(workerServer.args.includes('--site-root'));
   assert.equal(workerServer.args[workerServer.args.indexOf('--site-root') + 1], root);
   assert.equal(String(workerServer.args[workerServer.args.indexOf('--run-root') + 1]).replace(/\\/g, '/'), join(root, '.narada', 'runtime', 'worker-delegation').replace(/\\/g, '/'));
@@ -1276,7 +1291,7 @@ try {
     },
   );
   const surfaceFeedbackServer: any = (surfaceFeedbackBindConfig.config.mcpServers as Record<string, any>)['narada-staccato-surface-feedback'];
-  assertRuntimeProxy(surfaceFeedbackServer, workspacePath('packages', 'surface-feedback-mcp', 'dist', 'src', 'main.js'));
+  assertRuntimeProxy(surfaceFeedbackServer, nativeSharedSurfaceEntrypoint, 'narada-mcp-surfaces');
   assert.equal(surfaceFeedbackServer.args[surfaceFeedbackServer.args.indexOf('--feedback-root') + 1], 'C:/workspace/mcp-surfaces');
   assert.equal(surfaceFeedbackServer.args[surfaceFeedbackServer.args.indexOf('--canonical-feedback-root') + 1], 'C:/workspace/mcp-surfaces');
   assert.equal(surfaceFeedbackServer.args[surfaceFeedbackServer.args.indexOf('--site-id') + 1], 'narada-staccato');
