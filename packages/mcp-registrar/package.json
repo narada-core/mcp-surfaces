@@ -22,7 +22,7 @@
     "build": "tsc -b",
     "build:native:catalog": "node --import tsx scripts/emit-native-tool-catalog.ts",
     "build:native": "tsx scripts/build-native.ts",
-    "test:native:contract": "pnpm run build:native && pnpm build && node dist/test/native-tool-catalog-parity.test.js && node dist/test/native-read-model-parity.test.js",
+    "test:native:contract": "pnpm build && pnpm run build:native && node dist/test/native-tool-catalog-parity.test.js && node dist/test/native-read-model-parity.test.js",
     "typecheck": "tsc -b --pretty false",
     "test": "pnpm run test:bun",
     "test:bun": "pnpm -w build && pnpm run test:kimi-contract:run:bun && bun test dist/test/mcp-fabric-v2-native.test.js && bun dist/test/site-local-descriptor.test.js && bun dist/test/mcp-registrar.test.js && bun dist/test/protocol-smoke.test.js && bun test --timeout 30000 dist/test/materialization-contract-e2e.test.js && bun dist/test/site-fabric-loader-e2e.test.js && bun dist/test/site-fabric-catalog-e2e.test.js",
