@@ -1,4 +1,5 @@
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::process::Command;
 use tempfile::tempdir;
@@ -47,9 +48,15 @@ fn materializes_every_supported_carrier_kind_without_javascript_runtime_environm
         ),
     ];
     let input_path = root.path().join("materialization-input.json");
+    let contract_path = root.path().join("carrier-contract.json");
+    let contract_bytes = b"{\"schema\":\"narada.native_carrier_contract.v2\"}\n";
+    fs::write(&contract_path, contract_bytes).unwrap();
+    let contract_fingerprint = hex::encode(Sha256::digest(contract_bytes));
     let input = json!({
         "schema": "narada.carrier_materialization_input.v1",
         "workspace_root": root.path(),
+        "carrier_contract_path": contract_path,
+        "carrier_contract_fingerprint": contract_fingerprint,
         "artifact_manifest_path": root.path().join("workspace-artifact-manifest.json"),
         "artifact_manifest_fingerprint": "a".repeat(64),
         "runtime_profile_kind": "native",
@@ -156,6 +163,7 @@ fn derives_all_carriers_from_declared_site_capabilities_without_javascript() {
     let registry_path = home.join("Narada/.narada/capabilities/mcp-surfaces.json");
     let matrix_path = root.path().join("runtime-implementation-matrix.json");
     let index_path = home.join(".narada/carriers/installed-carriers.json");
+    let contract_path = home.join("Narada/.narada/capabilities/carrier-materialization.json");
     let proxy = root.path().join("narada-mcp-runtime.exe");
     fs::create_dir_all(workspace.join(".ai/runtime")).unwrap();
     fs::create_dir_all(registry_path.parent().unwrap()).unwrap();
@@ -221,12 +229,75 @@ fn derives_all_carriers_from_declared_site_capabilities_without_javascript() {
         serde_json::to_vec_pretty(&registry).unwrap(),
     )
     .unwrap();
+    let second_registry_path = home.join("second-site/.narada/capabilities/mcp-surfaces.json");
+    fs::create_dir_all(second_registry_path.parent().unwrap()).unwrap();
+    let second_registry = json!({
+        "schema": "narada.site.capabilities.mcp_surfaces.v1",
+        "site_id": "second-site",
+        "surfaces": [{
+            "catalog_surface_id": "local-filesystem",
+            "server_name": "narada-site-second-site-local-filesystem",
+            "registered_live_tools": ["fs_read"],
+            "runtime_binding": {
+                "proxy_implementation": "native",
+                "transport": {
+                    "type": "stdio",
+                    "command": proxy,
+                    "args": [
+                        "proxy", "--surface-id", "local-filesystem",
+                        "--child-command", root.path().join("local-filesystem.exe"),
+                        "--artifact-manifest", workspace.join(".ai/runtime/workspace-artifact-manifest.json"),
+                        "--runtime-contract-version", "6",
+                        "--entrypoint", root.path().join("local-filesystem.exe"),
+                        "--"
+                    ]
+                }
+            },
+            "surface_projection": {
+                "projection_id": "default",
+                "surface_descriptor": {
+                    "metadata": { "codex_startup_timeout_sec": 60 },
+                    "projections": [{"id":"default","transport":{"env":["NARADA_AGENT_ID"]}}]
+                }
+            }
+        }]
+    });
+    fs::write(
+        &second_registry_path,
+        serde_json::to_vec_pretty(&second_registry).unwrap(),
+    )
+    .unwrap();
+    let contract = json!({
+        "schema": "narada.native_carrier_contract.v2",
+        "sites": [
+            {
+                "site_id": "andrey-user",
+                "registry_path": registry_path,
+                "surface_ids": surface_ids
+            },
+            {
+                "site_id": "second-site",
+                "registry_path": second_registry_path,
+                "surface_ids": ["local-filesystem"]
+            }
+        ],
+        "carriers": [
+            {"carrier_id":"opencode-test","carrier_kind":"opencode","config_relative_path":".config/opencode/opencode.jsonc"},
+            {"carrier_id":"kimi-test","carrier_kind":"kimi","config_relative_path":".kimi/mcp.json"},
+            {"carrier_id":"codex-test","carrier_kind":"codex","config_relative_path":".codex/config.toml"}
+        ]
+    });
+    fs::write(
+        &contract_path,
+        serde_json::to_vec_pretty(&contract).unwrap(),
+    )
+    .unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_narada-mcp-materializer"))
         .env_clear()
         .arg("materialize-site")
-        .arg("--registry")
-        .arg(&registry_path)
+        .arg("--contract")
+        .arg(&contract_path)
         .arg("--workspace-root")
         .arg(&workspace)
         .arg("--home")
@@ -246,12 +317,13 @@ fn derives_all_carriers_from_declared_site_capabilities_without_javascript() {
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(result["carrier_count"], 3);
     let codex = fs::read_to_string(home.join(".codex/config.toml")).unwrap();
-    assert_eq!(codex.matches("[mcp_servers.").count(), 12);
+    assert_eq!(codex.matches("[mcp_servers.").count(), 14);
     for surface_id in surface_ids {
         assert!(codex.contains(&format!(
             "[mcp_servers.narada-site-andrey-user-{surface_id}]"
         )));
     }
+    assert!(codex.contains("[mcp_servers.narada-site-second-site-local-filesystem]"));
     let installed: Value = serde_json::from_slice(&fs::read(&index_path).unwrap()).unwrap();
     assert_eq!(installed["carriers"].as_array().unwrap().len(), 3);
 
@@ -296,7 +368,7 @@ fn derives_all_carriers_from_declared_site_capabilities_without_javascript() {
         .unwrap()
         .starts_with("sha256:"));
     assert!(
-        recovery_result["restart_pressure"]["codex-andrey"]["evidence_ref"]
+        recovery_result["restart_pressure"]["codex-test"]["evidence_ref"]
             .as_str()
             .unwrap()
             .starts_with("sha256:")
@@ -327,7 +399,7 @@ fn derives_all_carriers_from_declared_site_capabilities_without_javascript() {
         .arg("--installed-index")
         .arg(&index_path)
         .arg("--carrier-id")
-        .arg("codex-andrey")
+        .arg("codex-test")
         .arg("--expected-evidence-ref")
         .arg("sha256:obsolete")
         .output()
@@ -343,7 +415,7 @@ fn derives_all_carriers_from_declared_site_capabilities_without_javascript() {
         .arg("--installed-index")
         .arg(&index_path)
         .arg("--carrier-id")
-        .arg("codex-andrey")
+        .arg("codex-test")
         .arg("--expected-evidence-ref")
         .arg(evidence_ref)
         .output()
@@ -357,6 +429,6 @@ fn derives_all_carriers_from_declared_site_capabilities_without_javascript() {
     assert_eq!(acknowledgement_result["status"], "acknowledged");
     assert_eq!(
         acknowledgement_result["remaining_carrier_ids"],
-        json!(["opencode-andrey", "kimi-andrey"])
+        json!(["opencode-test", "kimi-test"])
     );
 }

@@ -3,7 +3,7 @@ param(
   [switch]$NoNotification,
   [switch]$PauseOnError,
   [string]$LogPath,
-  [string]$RegistryPath,
+  [string]$ContractPath,
   [string]$MatrixPath,
   [string]$CarrierHome,
   [string]$InstalledIndexPath
@@ -96,8 +96,8 @@ function Show-SuccessNotification {
 try {
   if ([string]::IsNullOrWhiteSpace($env:USERPROFILE)) { throw 'USERPROFILE is required.' }
   $carrierRoot = if ($CarrierHome) { [System.IO.Path]::GetFullPath($CarrierHome) } else { $env:USERPROFILE }
-  $registry = if ($RegistryPath) { [System.IO.Path]::GetFullPath($RegistryPath) } else {
-    Join-Path $env:USERPROFILE 'Narada\.narada\capabilities\mcp-surfaces.json'
+  $contract = if ($ContractPath) { [System.IO.Path]::GetFullPath($ContractPath) } else {
+    Join-Path $env:USERPROFILE 'Narada\.narada\capabilities\carrier-materialization.json'
   }
   $matrix = if ($MatrixPath) { [System.IO.Path]::GetFullPath($MatrixPath) } else {
     Join-Path (Split-Path -Parent $repoRoot) 'narada\packages\operator-surface-runtime-contract\contracts\runtime-implementation-matrix.json'
@@ -117,7 +117,7 @@ try {
   Write-LogLine "Authority: $materializer"
   Invoke-NativeMaterializer -Executable $materializer -Arguments @(
     'materialize-site',
-    '--registry', $registry,
+    '--contract', $contract,
     '--workspace-root', $repoRoot,
     '--home', $carrierRoot,
     '--matrix', $matrix,

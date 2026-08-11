@@ -9,12 +9,11 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const CONTRACT: &str = include_str!("../../contracts/default-carriers.json");
 const REGISTRY_SCHEMA: &str = "narada.site.capabilities.mcp_surfaces.v1";
 
 #[derive(Debug)]
 pub(crate) struct DeriveOptions {
-    registry: PathBuf,
+    contract: PathBuf,
     workspace_root: PathBuf,
     home: PathBuf,
     matrix: PathBuf,
@@ -25,9 +24,16 @@ pub(crate) struct DeriveOptions {
 #[serde(deny_unknown_fields)]
 struct Contract {
     schema: String,
-    site_id: String,
-    surface_ids: Vec<String>,
+    sites: Vec<ContractSite>,
     carriers: Vec<ContractCarrier>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContractSite {
+    site_id: String,
+    registry_path: PathBuf,
+    surface_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -49,7 +55,7 @@ impl DeriveOptions {
             })?;
             if !matches!(
                 flag.as_str(),
-                "--registry" | "--workspace-root" | "--home" | "--matrix" | "--installed-index"
+                "--contract" | "--workspace-root" | "--home" | "--matrix" | "--installed-index"
             ) {
                 return Err(Failure::new(
                     "materializer_argument_unknown",
@@ -75,7 +81,7 @@ impl DeriveOptions {
             })
         };
         Ok(Self {
-            registry: take("--registry")?,
+            contract: take("--contract")?,
             workspace_root: take("--workspace-root")?,
             home: take("--home")?,
             matrix: take("--matrix")?,
@@ -85,129 +91,162 @@ impl DeriveOptions {
 }
 
 pub(crate) fn derive_input(options: DeriveOptions) -> Result<MaterializationInput, Failure> {
-    require_absolute(&options.registry, "registry")?;
+    require_absolute(&options.contract, "contract")?;
     require_absolute(&options.workspace_root, "workspace_root")?;
     require_absolute(&options.home, "home")?;
     require_absolute(&options.matrix, "matrix")?;
     require_absolute(&options.installed_index, "installed_index")?;
 
-    let contract: Contract = serde_json::from_str(CONTRACT).map_err(|error| {
+    let contract_bytes = read_required(
+        &options.contract,
+        "materializer_carrier_contract_read_failed",
+    )?;
+    let contract_fingerprint = sha256(&contract_bytes);
+    let contract: Contract = serde_json::from_slice(&contract_bytes).map_err(|error| {
         Failure::new("materializer_carrier_contract_invalid", error.to_string())
     })?;
-    if contract.schema != "narada.native_carrier_contract.v1" {
+    if contract.schema != "narada.native_carrier_contract.v2" {
         return Err(Failure::new(
             "materializer_carrier_contract_schema_unsupported",
             contract.schema,
         ));
     }
-    let registry_bytes = read_required(&options.registry, "materializer_registry_read_failed")?;
-    let registry: Value = serde_json::from_slice(&registry_bytes)
-        .map_err(|error| Failure::new("materializer_registry_invalid", error.to_string()))?;
-    if registry.get("schema").and_then(Value::as_str) != Some(REGISTRY_SCHEMA) {
+    if contract.sites.is_empty() || contract.carriers.is_empty() {
         return Err(Failure::new(
-            "materializer_registry_schema_unsupported",
-            registry
-                .get("schema")
-                .and_then(Value::as_str)
-                .unwrap_or("missing"),
+            "materializer_carrier_contract_empty",
+            "The carrier contract must declare at least one Site and one carrier.",
         ));
     }
-    if registry.get("site_id").and_then(Value::as_str) != Some(contract.site_id.as_str()) {
-        return Err(Failure::new(
-            "materializer_registry_site_mismatch",
-            "The capability registry does not belong to the declared carrier Site.",
-        ));
-    }
-
-    let surfaces = registry
-        .get("surfaces")
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            Failure::new(
-                "materializer_registry_surfaces_required",
-                "surfaces must be an array.",
-            )
-        })?;
-    let mut by_id = BTreeMap::<String, &Value>::new();
-    for surface in surfaces {
-        let id = surface
-            .get("catalog_surface_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                Failure::new(
-                    "materializer_registry_surface_id_required",
-                    "catalog_surface_id is required.",
-                )
-            })?;
-        if by_id.insert(id.to_string(), surface).is_some() {
-            return Err(Failure::new("materializer_registry_surface_duplicate", id));
-        }
-    }
-
     let mut servers = Vec::new();
     let mut proxy_commands = BTreeSet::new();
-    for surface_id in &contract.surface_ids {
-        let surface = by_id.get(surface_id).ok_or_else(|| {
-            Failure::new("materializer_declared_surface_missing", surface_id.clone())
-        })?;
-        let server_name = required_string(surface, "server_name")?;
-        let binding = surface.get("runtime_binding").ok_or_else(|| {
-            Failure::new("materializer_runtime_binding_required", surface_id.clone())
-        })?;
-        if binding.get("proxy_implementation").and_then(Value::as_str) != Some("native") {
+    let mut server_names = BTreeSet::new();
+    let mut site_ids = BTreeSet::new();
+    for site in &contract.sites {
+        if site.site_id.is_empty() || site.surface_ids.is_empty() {
             return Err(Failure::new(
-                "materializer_native_proxy_required",
-                surface_id.clone(),
+                "materializer_carrier_contract_site_empty",
+                site.site_id.clone(),
             ));
         }
-        let transport = binding
-            .get("transport")
-            .ok_or_else(|| Failure::new("materializer_transport_required", surface_id.clone()))?;
-        if transport.get("type").and_then(Value::as_str) != Some("stdio") {
+        if !site_ids.insert(site.site_id.clone()) {
             return Err(Failure::new(
-                "materializer_transport_unsupported",
-                surface_id.clone(),
+                "materializer_carrier_contract_site_duplicate",
+                site.site_id.clone(),
             ));
         }
-        let command = required_string(transport, "command")?;
-        proxy_commands.insert(command.clone());
-        let args = string_array(transport, "args")?;
-        let tools = string_array(surface, "registered_live_tools")?
-            .into_iter()
-            .map(|name| ToolInput {
-                name,
-                approval_mode: "approve".to_string(),
-            })
-            .collect();
-        let projection = surface.get("surface_projection").unwrap_or(&Value::Null);
-        let descriptor = projection.get("surface_descriptor").unwrap_or(&Value::Null);
-        let projection_id = projection.get("projection_id").and_then(Value::as_str);
-        let env_vars = descriptor
-            .get("projections")
+        require_absolute(&site.registry_path, "registry_path")?;
+        let registry_bytes =
+            read_required(&site.registry_path, "materializer_registry_read_failed")?;
+        let registry: Value = serde_json::from_slice(&registry_bytes)
+            .map_err(|error| Failure::new("materializer_registry_invalid", error.to_string()))?;
+        if registry.get("schema").and_then(Value::as_str) != Some(REGISTRY_SCHEMA) {
+            return Err(Failure::new(
+                "materializer_registry_schema_unsupported",
+                path_text(&site.registry_path),
+            ));
+        }
+        if registry.get("site_id").and_then(Value::as_str) != Some(site.site_id.as_str()) {
+            return Err(Failure::new(
+                "materializer_registry_site_mismatch",
+                site.site_id.clone(),
+            ));
+        }
+        let surfaces = registry
+            .get("surfaces")
             .and_then(Value::as_array)
-            .and_then(|items| {
-                items
-                    .iter()
-                    .find(|item| item.get("id").and_then(Value::as_str) == projection_id)
-            })
-            .and_then(|item| item.get("transport"))
-            .map(|transport| string_array(transport, "env"))
-            .transpose()?
-            .unwrap_or_default();
-        let startup_timeout_sec = descriptor
-            .get("metadata")
-            .and_then(|value| value.get("codex_startup_timeout_sec"))
-            .and_then(Value::as_u64);
-        servers.push(ServerInput {
-            name: server_name,
-            command,
-            args,
-            env_vars,
-            enabled: true,
-            approval_mode: Some("approve".to_string()),
-            startup_timeout_sec,
-            tools,
-        });
+            .ok_or_else(|| {
+                Failure::new(
+                    "materializer_registry_surfaces_required",
+                    path_text(&site.registry_path),
+                )
+            })?;
+        let mut by_id = BTreeMap::<String, &Value>::new();
+        for surface in surfaces {
+            let id = surface
+                .get("catalog_surface_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    Failure::new(
+                        "materializer_registry_surface_id_required",
+                        path_text(&site.registry_path),
+                    )
+                })?;
+            if by_id.insert(id.to_string(), surface).is_some() {
+                return Err(Failure::new("materializer_registry_surface_duplicate", id));
+            }
+        }
+        for surface_id in &site.surface_ids {
+            let surface = by_id.get(surface_id).ok_or_else(|| {
+                Failure::new(
+                    "materializer_declared_surface_missing",
+                    format!("{}:{surface_id}", site.site_id),
+                )
+            })?;
+            let server_name = required_string(surface, "server_name")?;
+            if !server_names.insert(server_name.clone()) {
+                return Err(Failure::new(
+                    "materializer_server_name_duplicate",
+                    server_name,
+                ));
+            }
+            let binding = surface.get("runtime_binding").ok_or_else(|| {
+                Failure::new("materializer_runtime_binding_required", surface_id.clone())
+            })?;
+            if binding.get("proxy_implementation").and_then(Value::as_str) != Some("native") {
+                return Err(Failure::new(
+                    "materializer_native_proxy_required",
+                    surface_id.clone(),
+                ));
+            }
+            let transport = binding.get("transport").ok_or_else(|| {
+                Failure::new("materializer_transport_required", surface_id.clone())
+            })?;
+            if transport.get("type").and_then(Value::as_str) != Some("stdio") {
+                return Err(Failure::new(
+                    "materializer_transport_unsupported",
+                    surface_id.clone(),
+                ));
+            }
+            let command = required_string(transport, "command")?;
+            proxy_commands.insert(command.clone());
+            let args = string_array(transport, "args")?;
+            let tools = string_array(surface, "registered_live_tools")?
+                .into_iter()
+                .map(|name| ToolInput {
+                    name,
+                    approval_mode: "approve".to_string(),
+                })
+                .collect();
+            let projection = surface.get("surface_projection").unwrap_or(&Value::Null);
+            let descriptor = projection.get("surface_descriptor").unwrap_or(&Value::Null);
+            let projection_id = projection.get("projection_id").and_then(Value::as_str);
+            let env_vars = descriptor
+                .get("projections")
+                .and_then(Value::as_array)
+                .and_then(|items| {
+                    items
+                        .iter()
+                        .find(|item| item.get("id").and_then(Value::as_str) == projection_id)
+                })
+                .and_then(|item| item.get("transport"))
+                .map(|transport| string_array(transport, "env"))
+                .transpose()?
+                .unwrap_or_default();
+            let startup_timeout_sec = descriptor
+                .get("metadata")
+                .and_then(|value| value.get("codex_startup_timeout_sec"))
+                .and_then(Value::as_u64);
+            servers.push(ServerInput {
+                name: server_name,
+                command,
+                args,
+                env_vars,
+                enabled: true,
+                approval_mode: Some("approve".to_string()),
+                startup_timeout_sec,
+                tools,
+            });
+        }
     }
     if proxy_commands.len() != 1 {
         return Err(Failure::new(
@@ -314,6 +353,8 @@ pub(crate) fn derive_input(options: DeriveOptions) -> Result<MaterializationInpu
     Ok(MaterializationInput {
         schema: "narada.carrier_materialization_input.v1".to_string(),
         workspace_root: options.workspace_root,
+        carrier_contract_path: options.contract,
+        carrier_contract_fingerprint: contract_fingerprint,
         artifact_manifest_path,
         artifact_manifest_fingerprint: Some(artifact_manifest_fingerprint),
         runtime_profile_kind: "native".to_string(),
@@ -360,9 +401,39 @@ pub(crate) fn options_from_generation(path: &Path) -> Result<DeriveOptions, Fail
                 path_text(&artifact_manifest),
             )
         })?;
-    let contract: Contract = serde_json::from_str(CONTRACT).map_err(|error| {
+    let plan_path = PathBuf::from(required_string(
+        &generation,
+        "runtime_materialization_plan_path",
+    )?);
+    let plan_bytes = read_required(&plan_path, "materializer_runtime_plan_read_failed")?;
+    let plan: Value = serde_json::from_slice(&plan_bytes)
+        .map_err(|error| Failure::new("materializer_runtime_plan_invalid", error.to_string()))?;
+    let source = plan.get("source").ok_or_else(|| {
+        Failure::new(
+            "materializer_runtime_plan_source_missing",
+            path_text(&plan_path),
+        )
+    })?;
+    let contract_path = PathBuf::from(required_string(source, "carrier_contract_path")?);
+    require_absolute(&contract_path, "contract")?;
+    let contract_bytes =
+        read_required(&contract_path, "materializer_carrier_contract_read_failed")?;
+    let expected_contract_fingerprint = required_string(source, "carrier_contract_fingerprint")?;
+    if sha256(&contract_bytes) != expected_contract_fingerprint {
+        return Err(Failure::new(
+            "materializer_carrier_contract_fingerprint_mismatch",
+            path_text(&contract_path),
+        ));
+    }
+    let contract: Contract = serde_json::from_slice(&contract_bytes).map_err(|error| {
         Failure::new("materializer_carrier_contract_invalid", error.to_string())
     })?;
+    if contract.schema != "narada.native_carrier_contract.v2" {
+        return Err(Failure::new(
+            "materializer_carrier_contract_schema_unsupported",
+            contract.schema,
+        ));
+    }
     let declared = contract
         .carriers
         .iter()
@@ -384,7 +455,7 @@ pub(crate) fn options_from_generation(path: &Path) -> Result<DeriveOptions, Fail
         home.pop();
     }
     Ok(DeriveOptions {
-        registry: home.join("Narada/.narada/capabilities/mcp-surfaces.json"),
+        contract: contract_path,
         workspace_root,
         matrix,
         installed_index: home.join(".narada/carriers/installed-carriers.json"),

@@ -18,6 +18,8 @@ const GENERATION_SCHEMA: &str = "narada.mcp_materialization_generation.v1";
 struct MaterializationInput {
     schema: String,
     workspace_root: PathBuf,
+    carrier_contract_path: PathBuf,
+    carrier_contract_fingerprint: String,
     artifact_manifest_path: PathBuf,
     artifact_manifest_fingerprint: Option<String>,
     runtime_profile_kind: String,
@@ -703,6 +705,29 @@ fn verify_generation(
             path_text(&plan_path),
         ));
     }
+    let source = plan.get("source").ok_or_else(|| {
+        Failure::new(
+            "materializer_runtime_plan_source_missing",
+            path_text(&plan_path),
+        )
+    })?;
+    let contract_path = PathBuf::from(json_field_string(source, "carrier_contract_path")?);
+    let contract = fs::read(&contract_path).map_err(|error| {
+        Failure::new(
+            "materializer_carrier_contract_read_failed",
+            error.to_string(),
+        )
+    })?;
+    if source
+        .get("carrier_contract_fingerprint")
+        .and_then(Value::as_str)
+        != Some(sha256(&contract).as_str())
+    {
+        return Err(Failure::new(
+            "materializer_carrier_contract_fingerprint_mismatch",
+            path_text(&contract_path),
+        ));
+    }
     Ok(())
 }
 
@@ -823,6 +848,8 @@ fn materialize(input: MaterializationInput) -> Result<Value, Failure> {
             "source": {
                 "authority": "narada.runtime_implementation_matrix",
                 "matrix_fingerprint": input.runtime_implementation_matrix_fingerprint,
+                "carrier_contract_path": path_text(&input.carrier_contract_path),
+                "carrier_contract_fingerprint": input.carrier_contract_fingerprint,
             },
             "carrier_id": carrier.carrier_id,
             "servers": carrier.servers.iter().map(|server| json!({"name":server.name,"command":server.command,"args":server.args})).collect::<Vec<_>>(),
@@ -894,6 +921,8 @@ fn materialize(input: MaterializationInput) -> Result<Value, Failure> {
         content: pretty_json(&json!({
             "schema": "narada.installed_carrier_index.v1",
             "workspace_root": path_text(&input.workspace_root),
+            "carrier_contract_path": path_text(&input.carrier_contract_path),
+            "carrier_contract_fingerprint": input.carrier_contract_fingerprint,
             "artifact_manifest_path": path_text(&input.artifact_manifest_path),
             "carriers": index_carriers,
         }))?,
@@ -918,6 +947,18 @@ fn validate_input(input: &MaterializationInput) -> Result<(), Failure> {
         return Err(Failure::new(
             "materializer_carriers_required",
             "At least one carrier is required.",
+        ));
+    }
+    if !input.carrier_contract_path.is_absolute()
+        || input.carrier_contract_fingerprint.len() != 64
+        || !input
+            .carrier_contract_fingerprint
+            .chars()
+            .all(|value| value.is_ascii_hexdigit())
+    {
+        return Err(Failure::new(
+            "materializer_carrier_contract_source_invalid",
+            path_text(&input.carrier_contract_path),
         ));
     }
     if !matches!(
@@ -1323,6 +1364,8 @@ mod tests {
         MaterializationInput {
             schema: INPUT_SCHEMA.into(),
             workspace_root: root.into(),
+            carrier_contract_path: root.join("carrier-contract.json"),
+            carrier_contract_fingerprint: "e".repeat(64),
             artifact_manifest_path: root.join("manifest.json"),
             artifact_manifest_fingerprint: Some("a".repeat(64)),
             runtime_profile_kind: "native".into(),

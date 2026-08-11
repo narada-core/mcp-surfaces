@@ -1,0 +1,17 @@
+{
+  "schema": "narada.native_carrier_contract.v2",
+  "sites": [
+    {
+      "site_id": "example-site",
+      "registry_path": "C:\\absolute\\path\\to\\site\\.narada\\capabilities\\mcp-surfaces.json",
+      "surface_ids": ["local-filesystem"]
+    }
+  ],
+  "carriers": [
+    {
+      "carrier_id": "codex-example",
+      "carrier_kind": "codex",
+      "config_relative_path": ".codex/config.toml"
+    }
+  ]
+}
