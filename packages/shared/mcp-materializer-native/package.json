@@ -1,0 +1,16 @@
+{
+  "name": "@narada-core/mcp-materializer-native",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "private": true,
+  "description": "Standalone native authority for deterministic, transactional carrier materialization.",
+  "scripts": {
+    "build:native": "cargo build --release --locked --manifest-path native/Cargo.toml",
+    "test": "cargo test --locked --manifest-path native/Cargo.toml"
+  },
+  "files": [
+    "native/Cargo.lock",
+    "native/Cargo.toml",
+    "native/src/"
+  ]
+}
