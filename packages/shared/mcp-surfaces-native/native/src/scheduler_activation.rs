@@ -199,6 +199,30 @@ fn initialize_schema(db: &Connection) -> Result<(), Value> {
         "#,
     )
     .map_err(|cause| db_error("scheduler_activation_schema_failed", cause))?;
+    let has_lease_token = db
+        .prepare("pragma table_info(scheduler_activations)")
+        .and_then(|mut statement| {
+            let columns = statement
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(columns.iter().any(|column| column == "lease_token"))
+        })
+        .map_err(|cause| db_error("scheduler_activation_schema_failed", cause))?;
+    if !has_lease_token {
+        db.execute_batch(
+            r#"
+            begin immediate;
+            alter table scheduler_activations add column lease_token text;
+            update scheduler_activations
+               set status = 'pending', lease_owner = null, lease_expires_at = null,
+                   attempt_count = attempt_count + 1,
+                   last_error = 'schema_upgrade_invalidated_lease'
+             where status = 'leased';
+            commit;
+            "#,
+        )
+        .map_err(|cause| db_error("scheduler_activation_schema_failed", cause))?;
+    }
     db.execute(
         "insert into scheduler_meta(singleton, schema_version, prepared_at) values (1, ?1, ?2) on conflict(singleton) do update set schema_version=excluded.schema_version, prepared_at=excluded.prepared_at",
         params![SCHEMA_VERSION, now_iso()],
@@ -1226,6 +1250,28 @@ mod tests {
         assert_eq!(doctor(&root)["preparation"]["status"], "missing");
         prepare(&root).expect("prepare");
         assert_eq!(doctor(&root)["preparation"]["status"], "prepared");
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn prepare_migrates_legacy_leases_without_replaying_them_as_live() {
+        let root = std::env::temp_dir().join(format!("narada-scheduler-native-{}", Uuid::new_v4()));
+        fs::create_dir_all(root.join(".ai")).expect("root");
+        let db = Connection::open(root.join(DB_RELATIVE)).expect("db");
+        db.execute_batch(
+            "pragma journal_mode=wal;
+             create table scheduler_meta(singleton integer primary key, schema_version integer not null, prepared_at text not null);
+             create table scheduler_bindings(binding_id text primary key, trigger_kind text, source_topic text, source_sop_id text, terminal_outcomes_json text, target_sop_id text, target_template_version text, concurrency text, delay_by_outcome_ms_json text, default_delay_ms integer, retry_base_ms integer, retry_max_ms integer, max_attempts integer, blocked_policy text, status text, revision integer, spec_digest text, created_at text, updated_at text);
+             create table scheduler_source_events(event_id text primary key, topic text, partition_key text, aggregate_id text, aggregate_revision integer, schema_version integer, causation_id text, idempotency_key text, payload_json text, event_digest text, occurred_at text, admitted_at text);
+             create table scheduler_activations(activation_id text primary key, binding_id text, source_event_id text, occurrence_key text, target_sop_id text, target_template_version text, partition_key text, due_at text, status text, attempt_count integer, lease_owner text, lease_expires_at text, sop_run_id text, terminal_outcome text, last_error text, created_at text, updated_at text);
+             create table scheduler_activation_receipts(activation_id text, receipt_kind text, receipt_id text, receipt_json text, recorded_at text);
+             insert into scheduler_meta values(1,1,'2026-01-01T00:00:00.000Z');
+             insert into scheduler_activations values('a','b','e','o','s','v1','p','2026-01-01T00:00:00.000Z','leased',0,'old-owner','2026-01-01T00:01:00.000Z',null,null,null,'2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z');",
+        ).expect("legacy schema");
+        drop(db);
+        prepare(&root).expect("migrate");
+        let db = Connection::open(root.join(DB_RELATIVE)).expect("reopen");
+        let row:(String,i64,Option<String>)=db.query_row("select status,attempt_count,lease_token from scheduler_activations where activation_id='a'",[],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).expect("activation");
+        assert_eq!(row, ("pending".into(), 1, None));
         let _ = fs::remove_dir_all(root);
     }
     #[test]
