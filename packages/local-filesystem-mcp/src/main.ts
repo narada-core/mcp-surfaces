@@ -22,6 +22,7 @@ import { RIPGREP_FIELD_SEPARATOR, grepMatchObject as buildGrepMatchObject, runRi
 const PROTOCOL_VERSION = '2024-11-05';
 const INLINE_RESULT_CHAR_LIMIT = 6000;
 const READ_RESULT_INLINE_CHAR_LIMIT = 20_000;
+const MAX_READ_LINE_LIMIT = 1000;
 const READ_BUFFER_BYTES = 64 * 1024;
 const DEFAULT_READ_OPERATION_TIMEOUT_MS = 5_000;
 const DEFAULT_FILESYSTEM_OPERATION_TIMEOUT_MS = 10_000;
@@ -445,11 +446,11 @@ export function listTools(mode: any) {
     guidanceToolDefinition(),
     {
       name: 'fs_read_file',
-      description: 'Read a text file under an allowed root with line offset and limit.',
+      description: 'Read a text file under an allowed root with line offset and an explicit maximum of 1000 lines. Larger requests are refused with pagination guidance; they are never silently clamped.',
       inputSchema: objectSchema({
         path: { type: 'string', description: PATH_ARGUMENT_DESCRIPTION },
         offset: { type: 'integer', default: 1 },
-        limit: { type: 'integer', default: 400 },
+        limit: { type: 'integer', minimum: 1, maximum: MAX_READ_LINE_LIMIT, default: 400 },
         timeout_ms: { type: 'integer', description: 'Optional read timeout in milliseconds. Defaults to 5000.' },
       }, ['path']),
     },
@@ -691,7 +692,7 @@ function callTool(params: any, state: any) {
 function readFileTool(args: any, state: any) {
   const { path, root } = resolveAllowedToolPath(stringField(args, 'path'), state.allowedRoots, { operation: 'fs_read_file' });
   const offset = Math.max(1, integerField(args, 'offset') ?? 1);
-  const limit = Math.min(1000, Math.max(1, integerField(args, 'limit') ?? 400));
+  const limit = explicitReadLimit(args, 'fs_read_file');
   const timeoutMs = readOperationTimeoutMs(args);
   const value = readFileRange({ path, root, offset, limit, timeoutMs, operation: 'fs_read_file' });
   return capReadFileResult(value);
@@ -702,6 +703,7 @@ function readFileRangeTool(args: any, state: any) {
   const endLine = integerField(args, 'end_line');
   if (startLine === null || startLine < 1) throw diagnosticError('start_line_must_be_positive_integer', 'start_line_must_be_positive_integer', { start_line: startLine ?? null });
   if (endLine === null || endLine < startLine) throw diagnosticError('end_line_must_be_greater_than_or_equal_start_line', 'end_line_must_be_greater_than_or_equal_start_line', { start_line: startLine ?? null, end_line: endLine ?? null });
+  assertReadSpanWithinLimit(endLine - startLine + 1, 'fs_read_file_range', { start_line: startLine, end_line: endLine });
   const { path, root } = resolveAllowedToolPath(stringField(args, 'path'), state.allowedRoots, { operation: 'fs_read_file_range' });
   const timeoutMs = readOperationTimeoutMs(args);
   const value = readFileRange({ path, root, offset: startLine, limit: endLine - startLine + 1, timeoutMs, operation: 'fs_read_file_range' });
@@ -711,10 +713,28 @@ function readFileRangeTool(args: any, state: any) {
 async function readFileToolAsync(args: any, state: any) {
   const { path, root } = resolveAllowedToolPath(stringField(args, 'path'), state.allowedRoots, { operation: 'fs_read_file' });
   const offset = Math.max(1, integerField(args, 'offset') ?? 1);
-  const limit = Math.min(1000, Math.max(1, integerField(args, 'limit') ?? 400));
+  const limit = explicitReadLimit(args, 'fs_read_file');
   const timeoutMs = readOperationTimeoutMs(args);
   const value = await readFileRangeAsync({ path, root, offset, limit, timeoutMs, operation: 'fs_read_file' }, state);
   return capReadFileResult(value);
+}
+
+function explicitReadLimit(args: any, operation: string): number {
+  const requested = integerField(args, 'limit') ?? 400;
+  assertReadSpanWithinLimit(requested, operation, { offset: Math.max(1, integerField(args, 'offset') ?? 1) });
+  return Math.max(1, requested);
+}
+
+function assertReadSpanWithinLimit(requested: number, operation: string, details: Record<string, unknown>): void {
+  if (requested <= MAX_READ_LINE_LIMIT) return;
+  throw diagnosticError(`${operation}_limit_exceeds_max`, `${operation}_limit_exceeds_max`, {
+    ...details,
+    requested_limit: requested,
+    max_limit: MAX_READ_LINE_LIMIT,
+    mutation_started: false,
+    pagination_required: true,
+    remediation: 'Retry with limit at most 1000 and follow next_offset, or use fs_read_file_range with a span of at most 1000 lines.',
+  });
 }
 
 async function readFileRangeToolAsync(args: any, state: any) {
@@ -722,6 +742,7 @@ async function readFileRangeToolAsync(args: any, state: any) {
   const endLine = integerField(args, 'end_line');
   if (startLine === null || startLine < 1) throw diagnosticError('start_line_must_be_positive_integer', 'start_line_must_be_positive_integer', { start_line: startLine ?? null });
   if (endLine === null || endLine < startLine) throw diagnosticError('end_line_must_be_greater_than_or_equal_start_line', 'end_line_must_be_greater_than_or_equal_start_line', { start_line: startLine ?? null, end_line: endLine ?? null });
+  assertReadSpanWithinLimit(endLine - startLine + 1, 'fs_read_file_range', { start_line: startLine, end_line: endLine });
   const { path, root } = resolveAllowedToolPath(stringField(args, 'path'), state.allowedRoots, { operation: 'fs_read_file_range' });
   const timeoutMs = readOperationTimeoutMs(args);
   const value = await readFileRangeAsync({ path, root, offset: startLine, limit: endLine - startLine + 1, timeoutMs, operation: 'fs_read_file_range' }, state);
@@ -785,6 +806,12 @@ function readFileRange({ path, root, offset, limit, timeoutMs, operation }: any)
     content,
     content_sha256: window.contentSha256,
     content_window_sha256: sha256(content),
+    content_hash_scope: 'full_file',
+    hash_source: 'live_file_bytes',
+    cache_used: false,
+    max_limit: MAX_READ_LINE_LIMIT,
+    limit_adjusted: false,
+    pagination_required: window.nextOffset !== null,
     timeout_ms: timeoutMs,
   };
 }
@@ -846,6 +873,12 @@ async function readFileRangeAsync({ path, root, offset, limit, timeoutMs, operat
           content,
           content_sha256: String(window.contentSha256 ?? ''),
           content_window_sha256: sha256(content),
+          content_hash_scope: 'full_file',
+          hash_source: 'live_file_bytes',
+          cache_used: false,
+          max_limit: MAX_READ_LINE_LIMIT,
+          limit_adjusted: false,
+          pagination_required: window.nextOffset !== null,
           timeout_ms: timeoutMs,
         });
         return;
@@ -923,6 +956,7 @@ function readTextLineWindow({ path, root, offset, limit }) {
   let lineNumber = 0;
   let reachedEof = false;
   let nextOffset = null;
+  let windowBounded = false;
   try {
     while (true) {
       checkTimeout('before_read_file');
@@ -935,6 +969,7 @@ function readTextLineWindow({ path, root, offset, limit }) {
       const chunk = buffer.subarray(0, bytesRead);
       if (chunk.includes(0)) fail('binary_file_not_supported', 'binary_file_not_supported: ' + path, pathMetadata(path, root));
       hash.update(chunk);
+      if (windowBounded) continue;
       pending += decoder.write(chunk);
       const lines = pending.split(/\r?\n/);
       pending = lines.pop() ?? '';
@@ -943,17 +978,19 @@ function readTextLineWindow({ path, root, offset, limit }) {
         if (lineNumber >= offset && selected.length < limit) selected.push(line);
         else if (lineNumber >= offset + limit) {
           nextOffset = lineNumber;
-          return { selected, nextOffset, totalLines: null, totalLinesExact: false, contentSha256: hash.digest('hex') };
+          windowBounded = true;
+          pending = '';
+          break;
         }
       }
     }
-    pending += decoder.end();
-    if (pending.length > 0) {
+    if (!windowBounded) pending += decoder.end();
+    if (!windowBounded && pending.length > 0) {
       lineNumber += 1;
       if (lineNumber >= offset && selected.length < limit) selected.push(pending);
       else if (lineNumber >= offset + limit) nextOffset = lineNumber;
     }
-    return { selected, nextOffset, totalLines: reachedEof ? lineNumber : null, totalLinesExact: reachedEof, contentSha256: hash.digest('hex') };
+    return { selected, nextOffset, totalLines: windowBounded ? null : lineNumber, totalLinesExact: reachedEof && !windowBounded, contentSha256: hash.digest('hex') };
   } finally {
     closeSync(fd);
   }
@@ -2579,6 +2616,7 @@ function readTextLineWindow({ path, root, offset, limit, timeoutMs, operation }:
   let lineNumber = 0;
   let reachedEof = false;
   let nextOffset = null;
+  let windowBounded = false;
   const checkTimeout = createReadTimeoutChecker(operation, timeoutMs, { path, root, offset, limit });
   try {
     while (true) {
@@ -2592,6 +2630,7 @@ function readTextLineWindow({ path, root, offset, limit, timeoutMs, operation }:
       const chunk = buffer.subarray(0, bytesRead);
       if (chunk.includes(0)) throw diagnosticError('binary_file_not_supported', `binary_file_not_supported: ${path}`, pathMetadata(path, root));
       hash.update(chunk);
+      if (windowBounded) continue;
       pending += decoder.write(chunk);
       const lines = pending.split(/\r?\n/);
       pending = lines.pop() ?? '';
@@ -2600,18 +2639,14 @@ function readTextLineWindow({ path, root, offset, limit, timeoutMs, operation }:
         if (lineNumber >= offset && selected.length < limit) selected.push(line);
         else if (lineNumber >= offset + limit) {
           nextOffset = lineNumber;
-          return {
-            selected,
-            nextOffset,
-            totalLines: null,
-            totalLinesExact: false,
-            contentSha256: hash.digest('hex'),
-          };
+          windowBounded = true;
+          pending = '';
+          break;
         }
       }
     }
-    pending += decoder.end();
-    if (pending.length > 0) {
+    if (!windowBounded) pending += decoder.end();
+    if (!windowBounded && pending.length > 0) {
       lineNumber += 1;
       if (lineNumber >= offset && selected.length < limit) selected.push(pending);
       else if (lineNumber >= offset + limit) nextOffset = lineNumber;
@@ -2619,8 +2654,8 @@ function readTextLineWindow({ path, root, offset, limit, timeoutMs, operation }:
     return {
       selected,
       nextOffset,
-      totalLines: reachedEof ? lineNumber : null,
-      totalLinesExact: reachedEof,
+      totalLines: windowBounded ? null : lineNumber,
+      totalLinesExact: reachedEof && !windowBounded,
       contentSha256: hash.digest('hex'),
     };
   } finally {
@@ -3169,6 +3204,15 @@ function assertExpectedSha256(args: any, before: any, { operation, path, root }:
       ...pathMetadata(path, root),
       expected_sha256: expected,
       actual_sha256: actual,
+      concurrency_diagnosis: {
+        reason: 'file_content_changed_since_observation_or_guard_is_not_full_file_hash',
+        expected_hash_scope: 'full_file',
+        actual_hash_scope: 'full_file',
+        actual_hash_source: 'live_file_bytes',
+        cache_used: false,
+        attribution: 'external_or_unobserved_writer_unless_a_matching_filesystem_audit_record_exists',
+      },
+      remediation: 'Read the file again, use the returned full-file content_sha256, reconcile intervening changes, then retry.',
     });
   }
 }

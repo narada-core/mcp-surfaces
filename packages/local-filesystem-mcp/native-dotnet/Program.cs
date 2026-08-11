@@ -237,7 +237,11 @@ internal static class Program
     private static JsonObject ReadFile(JsonElement args)
     {
         var offset = Math.Max(1, IntField(args, "offset") ?? IntField(args, "start_line") ?? 1);
-        var limit = Math.Min(1000, Math.Max(1, IntField(args, "limit") ?? 400));
+        var limit = Math.Max(1, IntField(args, "limit") ?? 400);
+        if (limit > 1000)
+        {
+            throw new FilesystemException("fs_read_file_limit_exceeds_max", "fs_read_file limit exceeds the maximum of 1000 lines; paginate the request");
+        }
         return ReadWindow(args, offset, limit, "fs_read_file");
     }
 
@@ -253,8 +257,12 @@ internal static class Program
         {
             throw new FilesystemException("end_line_must_be_greater_than_or_equal_start_line", "end_line must be greater than or equal to start_line");
         }
-        var limit = (int)Math.Min(1000L, Math.Max(1L, (long)end.Value - start.Value + 1));
-        return ReadWindow(args, start.Value, limit, "fs_read_file_range");
+        var span = Math.Max(1L, (long)end.Value - start.Value + 1);
+        if (span > 1000)
+        {
+            throw new FilesystemException("fs_read_file_range_limit_exceeds_max", "fs_read_file_range span exceeds the maximum of 1000 lines; paginate the request");
+        }
+        return ReadWindow(args, start.Value, (int)span, "fs_read_file_range");
     }
 
     private static JsonObject ReadWindow(JsonElement args, int startLine, int limit, string operation)
@@ -292,6 +300,12 @@ internal static class Program
             ["total_lines_exact"] = true,
             ["total_lines_status"] = "exact",
             ["content_sha256"] = Sha256File(path),
+            ["content_hash_scope"] = "full_file",
+            ["hash_source"] = "live_file_bytes",
+            ["cache_used"] = false,
+            ["max_limit"] = 1000,
+            ["limit_adjusted"] = false,
+            ["pagination_required"] = !complete,
             ["total_lines"] = allLines.Count,
         };
         return result;

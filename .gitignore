@@ -26,4 +26,4 @@ executions/
 /packages/shared/*/src/*.js.map
 packages/shared/*/native/target/
 packages/shared/*/native/*/target/
-packages/mcp-loader-mcp/native/target/
+packages/*/native/target/

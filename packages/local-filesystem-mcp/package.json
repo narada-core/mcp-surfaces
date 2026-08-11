@@ -7,6 +7,7 @@
     "build": "tsc -b",
     "typecheck": "tsc -b --pretty false",
     "test": "pnpm run test:bun",
+    "test:native-dotnet": "pnpm --filter @narada-core/mcp-runtime-proxy build:native-dotnet && pnpm build && node dist/test/native-dotnet-filesystem.test.js",
     "test:bun": "pnpm build && bun dist/test/local-filesystem-mcp.test.js && bun test dist/test/result-rendering-feedback.test.js && bun dist/test/protocol-smoke.test.js && bun dist/test/site-fabric-filesystem-e2e.test.js",
     "test:node": "pnpm build && node dist/test/local-filesystem-mcp.test.js && node dist/test/result-rendering-feedback.test.js && node dist/test/protocol-smoke.test.js && node dist/test/site-fabric-filesystem-e2e.test.js"
   },

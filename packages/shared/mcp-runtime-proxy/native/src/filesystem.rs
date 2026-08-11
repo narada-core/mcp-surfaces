@@ -298,6 +298,48 @@ fn parse_trust_config(path: &Path) -> Vec<String> {
     roots
 }
 
+fn user_home_anchor() -> Option<PathBuf> {
+    user_home_anchor_from(|key| env::var_os(key))
+}
+
+fn user_home_anchor_from<F>(get: F) -> Option<PathBuf>
+where
+    F: Fn(&str) -> Option<std::ffi::OsString>,
+{
+    for key in ["USERPROFILE", "HOME"] {
+        if let Some(value) = get(key) {
+            if !value.to_string_lossy().trim().is_empty() {
+                return Some(PathBuf::from(value));
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        if let (Some(drive), Some(path)) = (get("HOMEDRIVE"), get("HOMEPATH")) {
+            if !drive.to_string_lossy().trim().is_empty()
+                && !path.to_string_lossy().trim().is_empty()
+            {
+                return Some(PathBuf::from(format!(
+                    "{}{}",
+                    drive.to_string_lossy(),
+                    path.to_string_lossy()
+                )));
+            }
+        }
+
+        for key in ["APPDATA", "LOCALAPPDATA"] {
+            if let Some(value) = get(key) {
+                if let Some(parent) = Path::new(&value).parent().and_then(Path::parent) {
+                    return Some(parent.to_path_buf());
+                }
+            }
+        }
+    }
+
+    None
+}
+
 fn resolve_anchor(spec: &str) -> Result<String, String> {
     let Some((anchor, relative)) = spec.split_once(':') else {
         return Err(format!("anchored_allowed_root_requires_anchor:{spec}"));
@@ -308,10 +350,9 @@ fn resolve_anchor(spec: &str) -> Result<String, String> {
         ));
     }
     let base = match anchor {
-        "user_home" => env::var("USERPROFILE")
-            .or_else(|_| env::var("HOME"))
-            .map(PathBuf::from)
-            .map_err(|_| "user_home_anchor_unavailable".to_string())?,
+        "user_home" => {
+            user_home_anchor().ok_or_else(|| "user_home_anchor_unavailable".to_string())?
+        }
         _ => return Err(format!("anchored_allowed_root_unknown_anchor:{anchor}")),
     };
     Ok(base.join(relative).to_string_lossy().to_string())
@@ -584,12 +625,25 @@ fn read_file(state: &State, args: &Value, range: bool) -> Result<Value, FsError>
                 json!({"start_line": start, "end_line": end}),
             ));
         }
-        (start, (end - start + 1).min(1000))
+        let requested = end - start + 1;
+        if requested > 1000 {
+            return Err(FsError::new(
+                "fs_read_file_range_limit_exceeds_max",
+                "fs_read_file_range_limit_exceeds_max",
+                json!({"start_line": start, "end_line": end, "requested_limit": requested, "max_limit": 1000, "pagination_required": true, "mutation_started": false}),
+            ));
+        }
+        (start, requested)
     } else {
-        (
-            integer(args, "offset").unwrap_or(1).max(1),
-            integer(args, "limit").unwrap_or(400).max(1).min(1000),
-        )
+        let requested = integer(args, "limit").unwrap_or(400).max(1);
+        if requested > 1000 {
+            return Err(FsError::new(
+                "fs_read_file_limit_exceeds_max",
+                "fs_read_file_limit_exceeds_max",
+                json!({"offset": integer(args, "offset").unwrap_or(1).max(1), "requested_limit": requested, "max_limit": 1000, "pagination_required": true, "mutation_started": false}),
+            ));
+        }
+        (integer(args, "offset").unwrap_or(1).max(1), requested)
     };
     let timeout = integer(args, "timeout_ms")
         .unwrap_or(READ_TIMEOUT_MS as i64)
@@ -640,22 +694,12 @@ fn read_file(state: &State, args: &Value, range: bool) -> Result<Value, FsError>
     } else {
         Some((end_index + 1) as i64)
     };
-    let (total_lines, total_lines_exact, line_window_complete, content_hash) = if complete {
-        (json!(lines.len()), true, true, sha256_bytes(&bytes))
+    let (total_lines, total_lines_exact, line_window_complete) = if complete {
+        (json!(lines.len()), true, true)
     } else {
-        let boundary = text
-            .match_indices('\n')
-            .nth(end_index)
-            .map(|(index, _)| index + 1)
-            .unwrap_or(bytes.len());
-        let prefix_len = ((boundary + 65_535) / 65_536 * 65_536).min(bytes.len());
-        (
-            Value::Null,
-            false,
-            false,
-            sha256_bytes(&bytes[..prefix_len]),
-        )
+        (Value::Null, false, false)
     };
+    let content_hash = sha256_bytes(&bytes);
     Ok(json!({
         "schema": "local.filesystem.read.v1",
         "path": path,
@@ -671,7 +715,13 @@ fn read_file(state: &State, args: &Value, range: bool) -> Result<Value, FsError>
         "next_offset": next_offset,
         "content": content,
         "content_sha256": content_hash,
+        "content_hash_scope": "full_file",
+        "hash_source": "live_file_bytes",
+        "cache_used": false,
         "content_window_sha256": sha256_bytes(content.as_bytes()),
+        "max_limit": 1000,
+        "limit_adjusted": false,
+        "pagination_required": next_offset.is_some(),
         "timeout_ms": timeout
     }))
 }
@@ -767,7 +817,7 @@ fn write_file(state: &State, args: &Value) -> Result<Value, FsError> {
             return Err(FsError::new(
                 "fs_write_file_expected_sha256_mismatch",
                 "fs_write_file_expected_sha256_mismatch",
-                json!({"operation": "fs_write_file", "expected_sha256": expected, "actual_sha256": before_sha256, "path": path, "root": root, "relative_path": relative_path(&root, &path)}),
+                json!({"operation": "fs_write_file", "expected_sha256": expected, "actual_sha256": before_sha256, "path": path, "root": root, "relative_path": relative_path(&root, &path), "concurrency_diagnosis": {"reason": "file_content_changed_since_observation_or_guard_is_not_full_file_hash", "expected_hash_scope": "full_file", "actual_hash_scope": "full_file", "actual_hash_source": "live_file_bytes", "cache_used": false, "attribution": "external_or_unobserved_writer_unless_a_matching_filesystem_audit_record_exists"}, "remediation": "Re-read the full-file content_sha256, reconcile the concurrent change, and retry with that live hash."}),
             ));
         }
     }
@@ -857,7 +907,7 @@ fn str_replace_file(state: &State, args: &Value) -> Result<Value, FsError> {
             return Err(FsError::new(
                 "fs_str_replace_file_expected_sha256_mismatch",
                 "fs_str_replace_file_expected_sha256_mismatch",
-                json!({"expected_sha256": expected, "actual_sha256": before_sha256, "path": path, "root": root}),
+                json!({"operation": "fs_str_replace_file", "expected_sha256": expected, "actual_sha256": before_sha256, "path": path, "root": root, "concurrency_diagnosis": {"reason": "file_content_changed_since_observation_or_guard_is_not_full_file_hash", "expected_hash_scope": "full_file", "actual_hash_scope": "full_file", "actual_hash_source": "live_file_bytes", "cache_used": false, "attribution": "external_or_unobserved_writer_unless_a_matching_filesystem_audit_record_exists"}, "remediation": "Re-read the full-file content_sha256, reconcile the concurrent change, and retry with that live hash."}),
             ));
         }
     }
@@ -953,7 +1003,7 @@ fn replace_range(state: &State, args: &Value) -> Result<Value, FsError> {
             return Err(FsError::new(
                 "fs_replace_range_expected_sha256_mismatch",
                 "fs_replace_range_expected_sha256_mismatch",
-                json!({"expected_sha256": expected, "actual_sha256": before_sha256, "path": path, "root": root}),
+                json!({"operation": "fs_replace_range", "expected_sha256": expected, "actual_sha256": before_sha256, "path": path, "root": root, "concurrency_diagnosis": {"reason": "file_content_changed_since_observation_or_guard_is_not_full_file_hash", "expected_hash_scope": "full_file", "actual_hash_scope": "full_file", "actual_hash_source": "live_file_bytes", "cache_used": false, "attribution": "external_or_unobserved_writer_unless_a_matching_filesystem_audit_record_exists"}, "remediation": "Re-read the full-file content_sha256, reconcile the concurrent change, and retry with that live hash."}),
             ));
         }
     }
@@ -2594,5 +2644,59 @@ pub(crate) fn write_message<W: Write>(
         )
     } else {
         writeln!(writer, "{body}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsString;
+
+    fn fake_env(entries: &[(&str, &str)]) -> HashMap<String, OsString> {
+        entries
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), OsString::from(*value)))
+            .collect()
+    }
+
+    #[test]
+    fn user_home_anchor_prefers_non_empty_userprofile() {
+        let values = fake_env(&[
+            ("USERPROFILE", r"C:\Users\andrey"),
+            ("HOME", r"C:\Users\fallback"),
+        ]);
+        assert_eq!(
+            user_home_anchor_from(|key| values.get(key).cloned()),
+            Some(PathBuf::from(r"C:\Users\andrey"))
+        );
+    }
+
+    #[test]
+    fn user_home_anchor_uses_home_when_userprofile_is_missing() {
+        let values = fake_env(&[("HOME", r"C:\Users\andrey")]);
+        assert_eq!(
+            user_home_anchor_from(|key| values.get(key).cloned()),
+            Some(PathBuf::from(r"C:\Users\andrey"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn user_home_anchor_uses_home_drive_and_path_fallback() {
+        let values = fake_env(&[("HOMEDRIVE", "C:"), ("HOMEPATH", r"\Users\andrey")]);
+        assert_eq!(
+            user_home_anchor_from(|key| values.get(key).cloned()),
+            Some(PathBuf::from(r"C:\Users\andrey"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn user_home_anchor_uses_appdata_parent_fallback() {
+        let values = fake_env(&[("APPDATA", r"C:\Users\andrey\AppData\Roaming")]);
+        assert_eq!(
+            user_home_anchor_from(|key| values.get(key).cloned()),
+            Some(PathBuf::from(r"C:\Users\andrey"))
+        );
     }
 }

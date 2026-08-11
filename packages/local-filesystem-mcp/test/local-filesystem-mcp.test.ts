@@ -294,6 +294,20 @@ trust_level = "untrusted"
   assert.equal(boundedReadResponse.result.structuredContent.next_offset, 101);
   assert.equal(boundedReadResponse.result.structuredContent.timeout_ms, 5000);
   assert.match(boundedReadResponse.result.structuredContent.content, /line-100/);
+  assert.equal(boundedReadResponse.result.structuredContent.content_sha256, sha256(readFileSync(join(trusted, 'bounded-read.txt'))));
+  assert.equal(boundedReadResponse.result.structuredContent.content_hash_scope, 'full_file');
+  assert.equal(boundedReadResponse.result.structuredContent.hash_source, 'live_file_bytes');
+  assert.equal(boundedReadResponse.result.structuredContent.cache_used, false);
+  assert.equal(boundedReadResponse.result.structuredContent.limit_adjusted, false);
+  assert.equal(boundedReadResponse.result.structuredContent.pagination_required, true);
+
+  const refusedClamp = call(readState, 10115, 'fs_read_file', { path: join(trusted, 'bounded-read.txt'), limit: 5000 });
+  assert.equal(refusedClamp.error.data.code, 'fs_read_file_limit_exceeds_max');
+  assert.equal(refusedClamp.error.data.details.requested_limit, 5000);
+  assert.equal(refusedClamp.error.data.details.max_limit, 1000);
+  assert.equal(refusedClamp.error.data.details.pagination_required, true);
+  const refusedRangeClamp = call(readState, 10116, 'fs_read_file_range', { path: join(trusted, 'bounded-read.txt'), start_line: 1, end_line: 1001 });
+  assert.equal(refusedRangeClamp.error.data.code, 'fs_read_file_range_limit_exceeds_max');
 
   const oversizedReadResponse = call(readState, 1012, 'fs_read_file', { path: join(trusted, 'bounded-read.txt'), limit: 500 });
   assert.equal(oversizedReadResponse.result.structuredContent.schema, 'local.filesystem.read_window_too_large.v1');
@@ -758,6 +772,9 @@ trust_level = "untrusted"
   assert.equal(changedAfterRead.error.data.code, 'fs_str_replace_file_expected_sha256_mismatch');
   assert.equal(changedAfterRead.error.data.details.expected_sha256, verifyWriteRead.result.structuredContent.content_sha256);
   assert.equal(changedAfterRead.error.data.details.actual_sha256, sha256('created-via-guard'));
+  assert.equal(changedAfterRead.error.data.details.concurrency_diagnosis.actual_hash_scope, 'full_file');
+  assert.equal(changedAfterRead.error.data.details.concurrency_diagnosis.cache_used, false);
+  assert.match(changedAfterRead.error.data.details.remediation, /Read the file again/);
   const payloadDir = join(tempRoot, '.ai', 'tmp', 'mcp-payloads', 'workspace');
   mkdirSync(payloadDir, { recursive: true });
   const payloadPath = join(payloadDir, 'large-write.json');

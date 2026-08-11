@@ -41,6 +41,8 @@ const responses = await run([
   { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} },
   { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'fs_read_file_range', arguments: { path: 'packages/local-filesystem-mcp/package.json', start_line: 1, end_line: 3 } } },
   { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'fs_grep_search', arguments: { pattern: 'local-filesystem', path: 'packages/local-filesystem-mcp', output_mode: 'files_with_matches', limit: 5 } } },
+  { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'fs_read_file', arguments: { path: 'packages/local-filesystem-mcp/package.json', offset: 1, limit: 1 } } },
+  { jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'fs_read_file', arguments: { path: 'packages/local-filesystem-mcp/package.json', offset: 1, limit: 1001 } } },
 ]);
 const byId = new Map(responses.map((response) => [response.id, response]));
 assert.equal(byId.get(1)?.result?.serverInfo?.name, 'local-filesystem-read-native');
@@ -49,6 +51,14 @@ assert.equal(byId.get(3)?.result?.structuredContent?.schema, 'local.filesystem.r
 assert.equal(byId.get(3)?.result?.structuredContent?.returned_lines, 3);
 assert.equal(byId.get(4)?.result?.structuredContent?.schema, 'local.filesystem.grep.v1');
 assert.equal(byId.get(4)?.result?.structuredContent?.count > 0, true);
+const boundedRead = byId.get(5)?.result?.structuredContent;
+assert.equal(boundedRead?.content_sha256, createHash('sha256').update(readFileSync(join(workspaceRoot, 'packages/local-filesystem-mcp/package.json'))).digest('hex'));
+assert.equal(boundedRead?.content_hash_scope, 'full_file');
+assert.equal(boundedRead?.hash_source, 'live_file_bytes');
+assert.equal(boundedRead?.cache_used, false);
+assert.equal(boundedRead?.limit_adjusted, false);
+assert.equal(boundedRead?.pagination_required, true);
+assert.match(JSON.stringify(byId.get(6)), /fs_read_file_limit_exceeds_max/);
 
 const manifestPath = join(tmpdir(), 'native-filesystem-manifest-' + process.pid + '.json');
 const bytes = readFileSync(executable);
