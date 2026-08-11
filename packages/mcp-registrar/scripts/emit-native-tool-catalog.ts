@@ -10,6 +10,17 @@ async function tool(name: string) {
   return response.result.structuredContent;
 }
 
+async function fallbackSiteList() {
+  const previous = process.env.NARADA_SITE_REGISTRY_DB;
+  process.env.NARADA_SITE_REGISTRY_DB = resolve(import.meta.dirname, '..', 'native', '.missing-site-registry.db');
+  try {
+    return await tool('registrar_site_list');
+  } finally {
+    if (previous === undefined) delete process.env.NARADA_SITE_REGISTRY_DB;
+    else process.env.NARADA_SITE_REGISTRY_DB = previous;
+  }
+}
+
 const contract = JSON.stringify({
   schema: 'narada.mcp_registrar.native_tool_catalog.v1',
   tools: listTools(),
@@ -17,6 +28,7 @@ const contract = JSON.stringify({
   read_models: {
     registrar_surface_list: await tool('registrar_surface_list'),
     registrar_carrier_list: await tool('registrar_carrier_list'),
+    registrar_site_list_fallback: await fallbackSiteList(),
   },
 });
 writeFileSync(resolve(import.meta.dirname, '..', 'native', 'tool-catalog.json.gz'), gzipSync(Buffer.from(contract), { level: 9 }));

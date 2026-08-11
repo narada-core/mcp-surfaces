@@ -1,5 +1,8 @@
 use serde_json::{json, Value};
+use std::env;
+use std::fs;
 use std::io::{self, BufRead, Read, Write};
+use std::path::{Path, PathBuf};
 
 const CONTRACT: &[u8] = include_bytes!("../tool-catalog.json.gz");
 
@@ -58,10 +61,15 @@ fn dispatch(request: &Value) -> Value {
                 .unwrap_or("");
             if matches!(
                 name,
-                "registrar_guidance" | "registrar_surface_list" | "registrar_carrier_list"
+                "registrar_guidance"
+                    | "registrar_surface_list"
+                    | "registrar_carrier_list"
+                    | "registrar_site_list"
             ) {
                 let mut guidance = if name == "registrar_guidance" {
                     contract["guidance"].clone()
+                } else if name == "registrar_site_list" {
+                    site_list(&contract)
                 } else {
                     contract["read_models"][name].clone()
                 };
@@ -89,6 +97,201 @@ fn dispatch(request: &Value) -> Value {
         }
         method => error(id, format!("unsupported_mcp_method:{method}")),
     }
+}
+fn site_list(contract: &Value) -> Value {
+    let fallback = &contract["read_models"]["registrar_site_list_fallback"];
+    let registry_path = env::var_os("NARADA_SITE_REGISTRY_DB")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| user_site_root().join("registry.db"));
+    if !registry_path.exists() {
+        return fallback_site_list(fallback, &registry_path, "registry_file_missing");
+    }
+    match read_site_registry(&registry_path, fallback) {
+        Ok(items) => json!({
+            "items": items,
+            "count": items.len(),
+            "catalog_source": "user_site_site_registry",
+            "registry_path": path_text(&registry_path),
+            "compatibility_fallback_used": false
+        }),
+        Err(message) => fallback_site_list(fallback, &registry_path, &message),
+    }
+}
+
+fn fallback_site_list(fallback: &Value, path: &Path, error_message: &str) -> Value {
+    json!({
+        "items": fallback["items"],
+        "count": fallback["count"],
+        "catalog_source": "legacy_compatibility_catalog",
+        "registry_path": path_text(path),
+        "compatibility_fallback_used": true,
+        "catalog_error": error_message
+    })
+}
+
+fn read_site_registry(path: &Path, fallback: &Value) -> Result<Vec<Value>, String> {
+    let connection = rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| error.to_string())?;
+    let has_lifecycle = {
+        let mut statement = connection
+            .prepare("PRAGMA table_info(site_registry)")
+            .map_err(|error| error.to_string())?;
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|error| error.to_string())?;
+        let found = columns
+            .filter_map(Result::ok)
+            .any(|name| name == "lifecycle_status");
+        found
+    };
+    let sql = if has_lifecycle {
+        "SELECT site_id, site_root, lifecycle_status FROM site_registry ORDER BY created_at ASC, site_id ASC"
+    } else {
+        "SELECT site_id, site_root, NULL FROM site_registry ORDER BY created_at ASC, site_id ASC"
+    };
+    let mut statement = connection.prepare(sql).map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?;
+    let known = fallback["items"].as_array().cloned().unwrap_or_default();
+    let mut items = vec![];
+    for row in rows {
+        let (site_id, root, lifecycle) = row.map_err(|error| error.to_string())?;
+        let site_id = site_id.unwrap_or_default().trim().to_string();
+        let root = root.unwrap_or_default().trim().to_string();
+        let lifecycle = lifecycle
+            .unwrap_or_else(|| "active".into())
+            .trim()
+            .to_ascii_lowercase();
+        if site_id.is_empty() || root.is_empty() || lifecycle != "active" {
+            continue;
+        }
+        let root = canonical_root(PathBuf::from(root));
+        let template = known.iter().find(|site| {
+            site["root"].as_str().is_some_and(|known_root| {
+                comparable_root(Path::new(known_root)) == comparable_root(&root)
+            })
+        });
+        let config_path = site_config_path(&root);
+        let fallback_overrides = template
+            .and_then(|site| site.get("surface_overrides"))
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let overrides = read_surface_overrides(&config_path, fallback_overrides)?;
+        items.push(json!({
+            "site_id": site_id,
+            "root": path_text(&root),
+            "config_path": path_text(&config_path),
+            "surfaces": template.and_then(|site| site.get("surfaces")).cloned().unwrap_or_else(||json!([])),
+            "surface_overrides": overrides
+        }));
+        if let Some(allowlist) = template.and_then(|site| site.get("local_surface_allowlist")) {
+            if !allowlist.is_null() {
+                items
+                    .last_mut()
+                    .unwrap()
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("local_surface_allowlist".into(), allowlist.clone());
+            }
+        }
+    }
+    Ok(items)
+}
+
+fn read_surface_overrides(config_path: &Path, fallback: Value) -> Result<Value, String> {
+    if !config_path.exists() {
+        return Ok(fallback);
+    }
+    let text = fs::read_to_string(config_path).map_err(|error| error.to_string())?;
+    let parsed: Value =
+        serde_json::from_str(text.trim_start_matches('\u{feff}')).map_err(|error| {
+            format!(
+                "registrar_site_config_parse_failed:{}:{error}",
+                path_text(config_path)
+            )
+        })?;
+    let mut overrides = fallback.as_object().cloned().unwrap_or_default();
+    if let Some(entries) = parsed.get("surface_overrides").and_then(Value::as_object) {
+        for (surface_id, value) in entries {
+            let enabled = value
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| format!("registrar_site_surface_override_invalid:{surface_id}"))?;
+            let mut item = json!({"enabled": enabled});
+            if let Some(implementation) =
+                value.get("surface_implementation").and_then(Value::as_str)
+            {
+                if implementation != "js" && implementation != "native" {
+                    return Err(format!(
+                        "registrar_site_surface_override_invalid:{surface_id}"
+                    ));
+                }
+                item.as_object_mut()
+                    .unwrap()
+                    .insert("surface_implementation".into(), json!(implementation));
+            }
+            overrides.insert(surface_id.clone(), item);
+        }
+    }
+    Ok(Value::Object(overrides))
+}
+
+fn user_site_root() -> PathBuf {
+    env::var_os("NARADA_USER_SITE_ROOT")
+        .or_else(|| {
+            env::var_os("USERPROFILE")
+                .map(|home| PathBuf::from(home).join("Narada").into_os_string())
+        })
+        .or_else(|| {
+            env::var_os("HOME").map(|home| PathBuf::from(home).join("Narada").into_os_string())
+        })
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(".narada/user-site"))
+}
+
+fn canonical_root(path: PathBuf) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path
+    } else {
+        env::current_dir().unwrap_or_default().join(path)
+    };
+    if absolute
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case(".narada"))
+    {
+        absolute.parent().unwrap_or(&absolute).to_path_buf()
+    } else {
+        absolute
+    }
+}
+
+fn site_config_path(root: &Path) -> PathBuf {
+    let nested = root.join(".narada").join("config.json");
+    if nested.exists() {
+        nested
+    } else {
+        root.join("config.json")
+    }
+}
+
+fn comparable_root(path: &Path) -> String {
+    path_text(&canonical_root(path.to_path_buf()))
+        .trim_end_matches('/')
+        .to_ascii_lowercase()
+}
+
+fn path_text(path: &Path) -> String {
+    path.to_string_lossy().replace('/', "\\")
 }
 fn surface_tool_inventory(contract: &Value, args: &Value) -> Value {
     let observed = args.get("observed_tools").and_then(Value::as_object);
