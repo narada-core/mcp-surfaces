@@ -35,6 +35,21 @@ function structured(response: JsonRecord): JsonRecord {
   return (response.result as JsonRecord)?.structuredContent as JsonRecord ?? response.result as JsonRecord;
 }
 
+let topologyRequestId = 100;
+async function topologyRequest(name: string, arguments_: JsonRecord): Promise<JsonRecord> {
+  const ownerId = `site-fabric-topology-${topologyRequestId++}`;
+  const scope = structured(await server.client.request(topologyRequestId++, 'tools/call', {
+    name: 'git_begin_work_scope', arguments: { working_directory: repo, owner_id: ownerId, scope_kind: 'repository_topology' },
+  }));
+  try {
+    return await server.client.request(topologyRequestId++, 'tools/call', { name, arguments: { ...arguments_, work_scope_ref: scope.work_scope_ref } });
+  } finally {
+    structured(await server.client.request(topologyRequestId++, 'tools/call', {
+      name: 'git_end_work_scope', arguments: { working_directory: repo, owner_id: ownerId, work_scope_ref: scope.work_scope_ref },
+    }));
+  }
+}
+
 try {
   await runMcpProtocolSmoke(server.client, {
     requiredTools: [
@@ -84,39 +99,25 @@ try {
   }));
   assert.equal((initialRemoteBranches.branches as JsonRecord[]).some((branch) => branch.name === 'origin/main'), true, JSON.stringify(initialRemoteBranches));
 
-  const createdBranch = structured(await server.client.request(8, 'tools/call', {
-    name: 'git_branch_create', arguments: { working_directory: repo, name: 'site-feature' },
-  }));
+  const createdBranch = structured(await topologyRequest('git_branch_create', { working_directory: repo, name: 'site-feature' }));
   assert.equal(createdBranch.checked_out, false, JSON.stringify(createdBranch));
   const listedBranches = structured(await server.client.request(9, 'tools/call', {
     name: 'git_branch_list', arguments: { working_directory: repo, scope: 'local' },
   }));
   assert.equal((listedBranches.branches as JsonRecord[]).some((branch) => branch.name === 'site-feature'), true);
-  const switchedBranch = structured(await server.client.request(10, 'tools/call', {
-    name: 'git_branch_switch', arguments: { working_directory: repo, branch: 'site-feature' },
-  }));
+  const switchedBranch = structured(await topologyRequest('git_branch_switch', { working_directory: repo, branch: 'site-feature' }));
   assert.equal((switchedBranch.post_status as JsonRecord).branch, 'site-feature');
-  const renamedBranch = structured(await server.client.request(11, 'tools/call', {
-    name: 'git_branch_rename', arguments: { working_directory: repo, old_name: 'site-feature', new_name: 'site-feature-renamed' },
-  }));
+  const renamedBranch = structured(await topologyRequest('git_branch_rename', { working_directory: repo, old_name: 'site-feature', new_name: 'site-feature-renamed' }));
   assert.equal((renamedBranch.post_status as JsonRecord).branch, 'site-feature-renamed');
-  await server.client.request(12, 'tools/call', { name: 'git_branch_switch', arguments: { working_directory: repo, branch: 'main' } });
-  const deletedBranch = structured(await server.client.request(13, 'tools/call', {
-    name: 'git_branch_delete', arguments: { working_directory: repo, branch: 'site-feature-renamed', base: 'main' },
-  }));
+  structured(await topologyRequest('git_branch_switch', { working_directory: repo, branch: 'main' }));
+  const deletedBranch = structured(await topologyRequest('git_branch_delete', { working_directory: repo, branch: 'site-feature-renamed', base: 'main' }));
   assert.equal(deletedBranch.merge_check, 'passed');
-  const setUpstream = structured(await server.client.request(14, 'tools/call', {
-    name: 'git_branch_set_upstream', arguments: { working_directory: repo, local_branch: 'main', remote: 'origin', remote_branch: 'main' },
-  }));
+  const setUpstream = structured(await topologyRequest('git_branch_set_upstream', { working_directory: repo, local_branch: 'main', remote: 'origin', remote_branch: 'main' }));
   assert.equal((setUpstream.post_status as JsonRecord).upstream, 'origin/main');
-  const unsetUpstream = structured(await server.client.request(15, 'tools/call', {
-    name: 'git_branch_unset_upstream', arguments: { working_directory: repo, local_branch: 'main' },
-  }));
+  const unsetUpstream = structured(await topologyRequest('git_branch_unset_upstream', { working_directory: repo, local_branch: 'main' }));
   assert.equal((unsetUpstream.post_status as JsonRecord).upstream, null);
 
-  const remoteMergedBranch = structured(await server.client.request(17, 'tools/call', {
-    name: 'git_branch_create', arguments: { working_directory: repo, name: 'site-remote-merged' },
-  }));
+  const remoteMergedBranch = structured(await topologyRequest('git_branch_create', { working_directory: repo, name: 'site-remote-merged' }));
   assert.equal(remoteMergedBranch.checked_out, false, JSON.stringify(remoteMergedBranch));
   const remoteMergedPush = structured(await server.client.request(18, 'tools/call', {
     name: 'git_push', arguments: { working_directory: repo, remote: 'origin', branch: 'site-remote-merged' },
@@ -126,22 +127,16 @@ try {
     name: 'git_branch_list', arguments: { working_directory: repo, scope: 'remote' },
   }));
   assert.equal((remoteBranchesBeforeDelete.branches as JsonRecord[]).some((branch) => branch.name === 'origin/site-remote-merged'), true, JSON.stringify(remoteBranchesBeforeDelete));
-  const deletedRemoteBranch = structured(await server.client.request(20, 'tools/call', {
-    name: 'git_branch_delete_remote', arguments: { working_directory: repo, remote: 'origin', branch: 'site-remote-merged', base: 'main' },
-  }));
+  const deletedRemoteBranch = structured(await topologyRequest('git_branch_delete_remote', { working_directory: repo, remote: 'origin', branch: 'site-remote-merged', base: 'main' }));
   assert.equal(deletedRemoteBranch.merge_check, 'passed', JSON.stringify(deletedRemoteBranch));
   const remoteBranchesAfterDelete = structured(await server.client.request(21, 'tools/call', {
     name: 'git_branch_list', arguments: { working_directory: repo, scope: 'remote' },
   }));
   assert.equal((remoteBranchesAfterDelete.branches as JsonRecord[]).some((branch) => branch.name === 'origin/site-remote-merged'), false, JSON.stringify(remoteBranchesAfterDelete));
 
-  const remoteUnmergedBranch = structured(await server.client.request(22, 'tools/call', {
-    name: 'git_branch_create', arguments: { working_directory: repo, name: 'site-remote-unmerged' },
-  }));
+  const remoteUnmergedBranch = structured(await topologyRequest('git_branch_create', { working_directory: repo, name: 'site-remote-unmerged' }));
   assert.equal(remoteUnmergedBranch.checked_out, false, JSON.stringify(remoteUnmergedBranch));
-  await server.client.request(23, 'tools/call', {
-    name: 'git_branch_switch', arguments: { working_directory: repo, branch: 'site-remote-unmerged' },
-  });
+  structured(await topologyRequest('git_branch_switch', { working_directory: repo, branch: 'site-remote-unmerged' }));
   writeFileSync(join(repo, 'remote-unmerged.txt'), 'remote unmerged branch\n', 'utf8');
   const remoteUnmergedScope = structured(await server.client.request(32, 'tools/call', {
     name: 'git_begin_work_scope', arguments: { working_directory: repo, owner_id: 'site-fabric-unmerged', allowed_paths: ['remote-unmerged.txt'] },
@@ -161,18 +156,13 @@ try {
     name: 'git_push', arguments: { working_directory: repo, remote: 'origin', branch: 'site-remote-unmerged' },
   }));
   assert.equal(remoteUnmergedPush.status, 'ok', JSON.stringify(remoteUnmergedPush));
-  await server.client.request(27, 'tools/call', {
-    name: 'git_branch_switch', arguments: { working_directory: repo, branch: 'main' },
-  });
-  const refusedRemoteDelete = await server.client.request(28, 'tools/call', {
-    name: 'git_branch_delete_remote', arguments: { working_directory: repo, remote: 'origin', branch: 'site-remote-unmerged', base: 'main' },
-  });
-  assert.equal((refusedRemoteDelete.error?.data as JsonRecord)?.code, 'git_branch_not_merged', JSON.stringify(refusedRemoteDelete));
+  structured(await topologyRequest('git_branch_switch', { working_directory: repo, branch: 'main' }));
+  const refusedRemoteDelete = await topologyRequest('git_branch_delete_remote', { working_directory: repo, remote: 'origin', branch: 'site-remote-unmerged', base: 'main' });
+  assert.equal((((refusedRemoteDelete.error ?? {}) as JsonRecord).data as JsonRecord)?.code, 'git_branch_not_merged', JSON.stringify(refusedRemoteDelete));
   const remoteBranchesAfterRefusal = structured(await server.client.request(29, 'tools/call', {
     name: 'git_branch_list', arguments: { working_directory: repo, scope: 'remote' },
   }));
   assert.equal((remoteBranchesAfterRefusal.branches as JsonRecord[]).some((branch) => branch.name === 'origin/site-remote-unmerged'), true, JSON.stringify(remoteBranchesAfterRefusal));
-
   const log = structured(await server.client.request(6, 'tools/call', {
     name: 'git_log', arguments: { working_directory: repo, limit: 5 },
   }));

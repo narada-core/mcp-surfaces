@@ -6,6 +6,7 @@ import type { GitMcpState } from './state.js';
 export type GitBaseState = {
   head: string | null;
   index_digest: string | null;
+  worktree_digest: string | null;
 };
 
 export type GitWorkScope = {
@@ -14,6 +15,7 @@ export type GitWorkScope = {
   repository_root: string;
   owner_id: string;
   registry_path: string;
+  authority: 'paths' | 'repository_topology';
   allowed_paths: string[];
   base_state: GitBaseState;
   created_at: string;
@@ -45,6 +47,7 @@ export function createWorkScope(args: {
   repositoryRoot: string;
   ownerId: string;
   registryPath: string;
+  authority: 'paths' | 'repository_topology';
   allowedPaths: string[];
   baseState: GitBaseState;
 }): GitWorkScope {
@@ -54,6 +57,7 @@ export function createWorkScope(args: {
     repository_root: args.repositoryRoot,
     owner_id: args.ownerId,
     registry_path: args.registryPath,
+    authority: args.authority,
     allowed_paths: [...new Set(args.allowedPaths)].sort(),
     base_state: args.baseState,
     ...timestamps(),

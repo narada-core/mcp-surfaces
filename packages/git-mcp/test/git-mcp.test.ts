@@ -386,6 +386,31 @@ const abandonedRegistryLock = join(scopeRegistry, '.lock');
 writeFileSync(abandonedRegistryLock, '');
 const staleTime = new Date(Date.now() - 60_000);
 utimesSync(abandonedRegistryLock, staleTime, staleTime);
+writeFileSync(abandonedRegistryLock, JSON.stringify({
+  schema: 'narada.git.work_scope_registry_lock.v2',
+  pid: process.pid,
+  process_instance_id: 'reused-pid-instance',
+  lock_nonce: 'reused-pid-lock',
+  created_at: new Date().toISOString(),
+}));
+const reusedPidRecoveryScope = await gitBeginWorkScope({ working_directory: scopedRepo, owner_id: 'pid-reuse-recovery', allowed_paths: ['alpha.txt'] }, state);
+await gitEndWorkScope({ working_directory: scopedRepo, owner_id: 'pid-reuse-recovery', work_scope_ref: reusedPidRecoveryScope.work_scope_ref }, state);
+const currentProcessRecord = JSON.parse(readFileSync(join(scopeRegistry, '.processes', `${process.pid}.json`), 'utf8')) as { process_instance_id: string };
+writeFileSync(abandonedRegistryLock, JSON.stringify({
+  schema: 'narada.git.work_scope_registry_lock.v2',
+  pid: process.pid,
+  process_instance_id: currentProcessRecord.process_instance_id,
+  lock_nonce: 'live-long-held-lock',
+  created_at: new Date(Date.now() - 3_600_000).toISOString(),
+}));
+utimesSync(abandonedRegistryLock, new Date(Date.now() - 3_600_000), new Date(Date.now() - 3_600_000));
+await assert.rejects(
+  () => gitBeginWorkScope({ working_directory: scopedRepo, owner_id: 'must-not-steal-live-lock', allowed_paths: ['alpha.txt'] }, state),
+  (error: any) => error.codeName === 'git_work_scope_registry_busy'
+    && error.details.owner_process_alive === true
+    && error.details.owner_process_instance_matches === true,
+);
+rmSync(abandonedRegistryLock);
 const workScope = await gitBeginWorkScope({ working_directory: scopedRepo, owner_id: 'git-mcp-test', allowed_paths: ['alpha.txt'] }, state);
 assert.equal(existsSync(abandonedRegistryLock), false);
 assert.match(workScope.work_scope_ref, /^gws_/);
@@ -423,6 +448,20 @@ await assert.rejects(
 );
 const reclaimedScope = await gitBeginWorkScope({ working_directory: scopedRepo, owner_id: 'competing-agent', allowed_paths: ['alpha.txt'] }, competingState);
 await gitEndWorkScope({ working_directory: scopedRepo, owner_id: 'competing-agent', work_scope_ref: reclaimedScope.work_scope_ref }, competingState);
+const topologyScope = await gitBeginWorkScope({ working_directory: scopedRepo, owner_id: 'topology-drift-test', scope_kind: 'repository_topology' }, state);
+assert.equal(topologyScope.authority, 'repository_topology');
+await assert.rejects(
+  () => gitBeginWorkScope({ working_directory: scopedRepo, owner_id: 'path-conflicts-with-topology', allowed_paths: ['alpha.txt'] }, competingState),
+  (error: any) => error.codeName === 'git_work_scope_path_already_owned' && error.details.paths.includes('<repository-topology>'),
+);
+writeFileSync(join(scopedRepo, 'alpha.txt'), 'out-of-band editor change\n', 'utf8');
+await assert.rejects(
+  () => gitBranchCreate({ working_directory: scopedRepo, name: 'must-not-create-after-drift', work_scope_ref: topologyScope.work_scope_ref }, state),
+  (error: any) => error.codeName === 'git_repository_topology_scope_base_state_drift'
+    && error.details.changed_fields.includes('worktree_digest')
+    && error.details.cooperative_boundary === true,
+);
+await gitEndWorkScope({ working_directory: scopedRepo, owner_id: 'topology-drift-test', work_scope_ref: topologyScope.work_scope_ref }, state);
 mkdirSync(join(scopedRepo, 'nested'), { recursive: true });
 writeFileSync(join(scopedRepo, 'nested', 'file.txt'), 'nested\n', 'utf8');
 const directoryScope = await gitBeginWorkScope({ working_directory: scopedRepo, owner_id: 'directory-test', allowed_paths: ['nested'] }, state);
@@ -580,41 +619,50 @@ const baseBranch = currentBranch(repo);
 assert.equal(initialBranchList.current_branch, baseBranch);
 assert.equal((initialBranchList.branches as any[]).some((branch: any) => branch.name === baseBranch && branch.type === 'local' && branch.current === true), true);
 
-const createdBranch = await gitBranchCreate({ working_directory: repo, name: 'feature/mcp' }, state);
+async function topologyMutation<T>(workingDirectory: string, ownerId: string, mutation: (workScopeRef: string) => Promise<T>): Promise<T> {
+  const scope = await gitBeginWorkScope({ working_directory: workingDirectory, owner_id: ownerId, scope_kind: 'repository_topology' }, state);
+  try {
+    return await mutation(String(scope.work_scope_ref));
+  } finally {
+    await gitEndWorkScope({ working_directory: workingDirectory, owner_id: ownerId, work_scope_ref: scope.work_scope_ref }, state);
+  }
+}
+
+const createdBranch = await topologyMutation(repo, 'branch-create-feature', (work_scope_ref) => gitBranchCreate({ working_directory: repo, name: 'feature/mcp', work_scope_ref }, state));
 assert.equal(createdBranch.checked_out, false);
 assert.equal((createdBranch.verified_post_state as any).verification, 'verified');
 assert.equal((createdBranch.post_status as any).branch, baseBranch);
-const switchedBranch = await gitBranchSwitch({ working_directory: repo, branch: 'feature/mcp' }, state);
+const switchedBranch = await topologyMutation(repo, 'branch-switch-feature', (work_scope_ref) => gitBranchSwitch({ working_directory: repo, branch: 'feature/mcp', work_scope_ref }, state));
 assert.equal((switchedBranch.verified_post_state as any).verification, 'verified');
 assert.equal((switchedBranch.post_status as any).branch, 'feature/mcp');
-const renamedBranch = await gitBranchRename({ working_directory: repo, old_name: 'feature/mcp', new_name: 'feature/renamed' }, state);
+const renamedBranch = await topologyMutation(repo, 'branch-rename-feature', (work_scope_ref) => gitBranchRename({ working_directory: repo, old_name: 'feature/mcp', new_name: 'feature/renamed', work_scope_ref }, state));
 assert.equal((renamedBranch.verified_post_state as any).verification, 'verified');
 assert.equal((renamedBranch.post_status as any).branch, 'feature/renamed');
-await gitBranchSwitch({ working_directory: repo, branch: baseBranch }, state);
-const deletedMergedBranch = await gitBranchDelete({ working_directory: repo, branch: 'feature/renamed', base: baseBranch }, state);
+await topologyMutation(repo, 'branch-switch-base-merged', (work_scope_ref) => gitBranchSwitch({ working_directory: repo, branch: baseBranch, work_scope_ref }, state));
+const deletedMergedBranch = await topologyMutation(repo, 'branch-delete-merged', (work_scope_ref) => gitBranchDelete({ working_directory: repo, branch: 'feature/renamed', base: baseBranch, work_scope_ref }, state));
 assert.equal(deletedMergedBranch.merge_check, 'passed');
 
-await gitBranchCreate({ working_directory: repo, name: 'feature/unmerged', start_point: baseBranch }, state);
-await gitBranchSwitch({ working_directory: repo, branch: 'feature/unmerged' }, state);
+await topologyMutation(repo, 'branch-create-unmerged', (work_scope_ref) => gitBranchCreate({ working_directory: repo, name: 'feature/unmerged', start_point: baseBranch, work_scope_ref }, state));
+await topologyMutation(repo, 'branch-switch-unmerged', (work_scope_ref) => gitBranchSwitch({ working_directory: repo, branch: 'feature/unmerged', work_scope_ref }, state));
 writeFileSync(join(repo, 'unmerged.txt'), 'unmerged branch\n', 'utf8');
 git(repo, ['add', 'unmerged.txt']);
 git(repo, ['commit', '-m', 'Unmerged branch test']);
-await gitBranchSwitch({ working_directory: repo, branch: baseBranch }, state);
+await topologyMutation(repo, 'branch-switch-base-unmerged', (work_scope_ref) => gitBranchSwitch({ working_directory: repo, branch: baseBranch, work_scope_ref }, state));
 await assert.rejects(
-  () => gitBranchDelete({ working_directory: repo, branch: 'feature/unmerged', base: baseBranch }, state),
+  () => topologyMutation(repo, 'branch-refuse-unmerged', (work_scope_ref) => gitBranchDelete({ working_directory: repo, branch: 'feature/unmerged', base: baseBranch, work_scope_ref }, state)),
   (error: any) => error.codeName === 'git_branch_not_merged',
 );
 git(repo, ['branch', '-D', 'feature/unmerged']);
 
-await gitBranchCreate({ working_directory: repo, name: 'remote/merged', start_point: baseBranch }, state);
+await topologyMutation(repo, 'branch-create-remote', (work_scope_ref) => gitBranchCreate({ working_directory: repo, name: 'remote/merged', start_point: baseBranch, work_scope_ref }, state));
 await gitPush({ working_directory: repo, remote: 'origin', branch: 'remote/merged' }, state);
-const setUpstream = await gitBranchSetUpstream({ working_directory: repo, local_branch: baseBranch, remote: 'origin', remote_branch: baseBranch }, state);
+const setUpstream = await topologyMutation(repo, 'branch-set-upstream', (work_scope_ref) => gitBranchSetUpstream({ working_directory: repo, local_branch: baseBranch, remote: 'origin', remote_branch: baseBranch, work_scope_ref }, state));
 assert.equal((setUpstream.post_status as any).upstream, `origin/${baseBranch}`);
-const unsetUpstream = await gitBranchUnsetUpstream({ working_directory: repo, local_branch: baseBranch }, state);
+const unsetUpstream = await topologyMutation(repo, 'branch-unset-upstream', (work_scope_ref) => gitBranchUnsetUpstream({ working_directory: repo, local_branch: baseBranch, work_scope_ref }, state));
 assert.equal((unsetUpstream.post_status as any).upstream, null);
-const deletedRemoteBranch = await gitBranchDeleteRemote({ working_directory: repo, remote: 'origin', branch: 'remote/merged', base: baseBranch }, state);
+const deletedRemoteBranch = await topologyMutation(repo, 'branch-delete-remote', (work_scope_ref) => gitBranchDeleteRemote({ working_directory: repo, remote: 'origin', branch: 'remote/merged', base: baseBranch, work_scope_ref }, state));
 assert.equal(deletedRemoteBranch.merge_check, 'passed');
-await gitBranchDelete({ working_directory: repo, branch: 'remote/merged', base: baseBranch }, state);
+await topologyMutation(repo, 'branch-delete-local-remote', (work_scope_ref) => gitBranchDelete({ working_directory: repo, branch: 'remote/merged', base: baseBranch, work_scope_ref }, state));
 const remoteBranchList = await gitBranchList({ working_directory: repo, scope: 'remote' }, state);
 assert.equal((remoteBranchList.branches as any[]).some((branch: any) => branch.name === 'origin/remote/merged'), false);
 
@@ -818,6 +866,14 @@ git(syncPeer, ['config', 'user.email', 'peer@example.test']);
 git(syncPeer, ['config', 'user.name', 'Peer Test']);
 const syncState = createServerState({ allowedRoot: syncRoot, outputRoot: syncRoot, mode: 'write' });
 const syncReadState = createServerState({ allowedRoot: syncRoot, outputRoot: syncRoot, mode: 'read' });
+async function syncTopologyMutation<T>(ownerId: string, mutation: (workScopeRef: string) => Promise<T>): Promise<T> {
+  const scope = await gitBeginWorkScope({ working_directory: syncRepo, owner_id: ownerId, scope_kind: 'repository_topology' }, syncState);
+  try {
+    return await mutation(String(scope.work_scope_ref));
+  } finally {
+    await gitEndWorkScope({ working_directory: syncRepo, owner_id: ownerId, work_scope_ref: scope.work_scope_ref }, syncState);
+  }
+}
 
 writeFileSync(join(syncPeer, 'remote.txt'), 'remote\n', 'utf8');
 git(syncPeer, ['add', 'remote.txt']);
@@ -832,7 +888,7 @@ assert.equal((fetched.post_status as any).behind, 1);
 writeFileSync(join(syncRepo, 'local.txt'), 'local\n', 'utf8');
 git(syncRepo, ['add', 'local.txt']);
 git(syncRepo, ['commit', '-m', 'local change']);
-const rebased = await gitRebase({ working_directory: syncRepo, onto: 'origin/main', autostash: false }, syncState);
+const rebased = await syncTopologyMutation('rebase-clean', (work_scope_ref) => gitRebase({ working_directory: syncRepo, onto: 'origin/main', autostash: false, work_scope_ref }, syncState));
 assert.equal(rebased.schema, 'narada.git.rebase.v1');
 assert.equal(rebased.status, 'rebased');
 assert.equal((rebased.verified_post_state as any).verification, 'verified');
@@ -844,12 +900,12 @@ git(syncPeer, ['commit', '-m', 'peer second change']);
 git(syncPeer, ['push', 'origin', 'main']);
 await gitFetch({ working_directory: syncRepo, remote: 'origin', branch: 'main' }, syncState);
 writeFileSync(join(syncRepo, 'local.txt'), 'local dirty\n', 'utf8');
-const dirtyRebase = await gitRebase({ working_directory: syncRepo, onto: 'origin/main', autostash: true }, syncState);
+const dirtyRebase = await syncTopologyMutation('rebase-dirty', (work_scope_ref) => gitRebase({ working_directory: syncRepo, onto: 'origin/main', autostash: true, work_scope_ref }, syncState));
 assert.equal(dirtyRebase.status, 'rebased');
 assert.equal(readFileSync(join(syncRepo, 'local.txt'), 'utf8').replaceAll('\r\n', '\n'), 'local dirty\n');
 writeFileSync(join(syncRepo, 'untracked.txt'), 'must preserve\n', 'utf8');
 await assert.rejects(
-  () => gitRebase({ working_directory: syncRepo, onto: 'origin/main', autostash: true }, syncState),
+  () => syncTopologyMutation('rebase-untracked', (work_scope_ref) => gitRebase({ working_directory: syncRepo, onto: 'origin/main', autostash: true, work_scope_ref }, syncState)),
   (error: any) => error.codeName === 'git_untracked_worktree_requires_manual_preservation',
 );
 writeFileSync(join(syncRepo, 'local.txt'), 'local dirty\n', 'utf8');
@@ -865,14 +921,16 @@ writeFileSync(join(syncRepo, 'conflict.txt'), 'local conflict\n', 'utf8');
 git(syncRepo, ['add', 'conflict.txt']);
 git(syncRepo, ['commit', '-m', 'local conflict']);
 await gitFetch({ working_directory: syncRepo, remote: 'origin', branch: 'main' }, syncState);
-const conflictRebase = await gitRebase({ working_directory: syncRepo, onto: 'origin/main', autostash: false }, syncState);
+const conflictScope = await gitBeginWorkScope({ working_directory: syncRepo, owner_id: 'rebase-conflict', scope_kind: 'repository_topology' }, syncState);
+const conflictRebase = await gitRebase({ working_directory: syncRepo, onto: 'origin/main', autostash: false, work_scope_ref: conflictScope.work_scope_ref }, syncState);
 assert.equal(conflictRebase.status, 'conflict');
 assert.equal(conflictRebase.operation_in_progress, true);
 assert.deepEqual(conflictRebase.recovery, ['git_rebase_continue', 'git_rebase_abort', 'git_sync_status']);
 const syncStatus = await gitSyncStatus({ working_directory: syncRepo }, syncState);
 assert.equal(syncStatus.operation, 'rebase');
 assert.equal(syncStatus.in_progress, true);
-const abortedRebase = await gitRebaseAbort({ working_directory: syncRepo }, syncState);
+const abortedRebase = await gitRebaseAbort({ working_directory: syncRepo, work_scope_ref: conflictScope.work_scope_ref }, syncState);
+await gitEndWorkScope({ working_directory: syncRepo, owner_id: 'rebase-conflict', work_scope_ref: conflictScope.work_scope_ref }, syncState);
 assert.equal(abortedRebase.status, 'aborted');
 assert.equal((await gitSyncStatus({ working_directory: syncRepo }, syncState)).operation, null);
 
@@ -882,11 +940,11 @@ writeFileSync(join(syncRepo, 'feature.txt'), 'feature\n', 'utf8');
 git(syncRepo, ['add', 'feature.txt']);
 git(syncRepo, ['commit', '-m', 'feature change']);
 git(syncRepo, ['switch', 'main']);
-const merged = await gitMerge({ working_directory: syncRepo, target: 'feature', autostash: false }, syncState);
+const merged = await syncTopologyMutation('merge-clean', (work_scope_ref) => gitMerge({ working_directory: syncRepo, target: 'feature', autostash: false, work_scope_ref }, syncState));
 assert.equal(merged.status, 'merged');
 assert.equal((merged.verified_post_state as any).verification, 'verified');
 assert.equal((merged.post_status as any).clean, true);
-assert.equal((await gitMergeContinue({ working_directory: syncRepo }, syncState).catch(() => null)), null);
+assert.equal((await syncTopologyMutation('merge-continue-noop', (work_scope_ref) => gitMergeContinue({ working_directory: syncRepo, work_scope_ref }, syncState)).catch(() => null)), null);
 await assert.rejects(
   () => gitFetch({ working_directory: syncRepo, remote: 'origin', branch: 'main' }, syncReadState),
   (error: any) => error.codeName === 'git_write_mode_required',

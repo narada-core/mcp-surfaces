@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import {
   optionalBranchName,
@@ -20,6 +20,7 @@ import {
   createIndexScope,
   createWorkScope,
   resolveScopeToken,
+  sha256,
   scopeTokenMap,
   storeScopeToken,
   type GitBaseState,
@@ -133,6 +134,7 @@ export async function gitFetch(args: Record<string, unknown>, state: GitMcpState
 export async function gitRebase(args: Record<string, unknown>, state: GitMcpState, context: GitRequestContext = {}) {
   requireWriteMode(state.policy, 'git_rebase');
   const cwd = resolveWorkingDirectory(args, state);
+  await requireTopologyScopeForMutation(cwd, args, state, context);
   const onto = requireCommitish(args.onto);
   const autostash = args.autostash === true;
   const scopeLabel = optionalNonEmptyString(args.scope_label);
@@ -144,6 +146,7 @@ export async function gitRebase(args: Record<string, unknown>, state: GitMcpStat
 export async function gitMerge(args: Record<string, unknown>, state: GitMcpState, context: GitRequestContext = {}) {
   requireWriteMode(state.policy, 'git_merge');
   const cwd = resolveWorkingDirectory(args, state);
+  await requireTopologyScopeForMutation(cwd, args, state, context);
   const target = requireCommitish(args.target);
   const autostash = args.autostash === true;
   const scopeLabel = optionalNonEmptyString(args.scope_label);
@@ -154,21 +157,25 @@ export async function gitMerge(args: Record<string, unknown>, state: GitMcpState
 
 export async function gitRebaseContinue(args: Record<string, unknown>, state: GitMcpState, context: GitRequestContext = {}) {
   requireWriteMode(state.policy, 'git_rebase_continue');
+  await requireTopologyScopeForMutation(resolveWorkingDirectory(args, state), args, state, context, false);
   return continueSyncOperation('rebase', args, state, context);
 }
 
 export async function gitRebaseAbort(args: Record<string, unknown>, state: GitMcpState, context: GitRequestContext = {}) {
   requireWriteMode(state.policy, 'git_rebase_abort');
+  await requireTopologyScopeForMutation(resolveWorkingDirectory(args, state), args, state, context, false);
   return abortSyncOperation('rebase', args, state, context);
 }
 
 export async function gitMergeContinue(args: Record<string, unknown>, state: GitMcpState, context: GitRequestContext = {}) {
   requireWriteMode(state.policy, 'git_merge_continue');
+  await requireTopologyScopeForMutation(resolveWorkingDirectory(args, state), args, state, context, false);
   return continueSyncOperation('merge', args, state, context);
 }
 
 export async function gitMergeAbort(args: Record<string, unknown>, state: GitMcpState, context: GitRequestContext = {}) {
   requireWriteMode(state.policy, 'git_merge_abort');
+  await requireTopologyScopeForMutation(resolveWorkingDirectory(args, state), args, state, context, false);
   return abortSyncOperation('merge', args, state, context);
 }
 
@@ -641,6 +648,7 @@ export async function gitBranchList(args: Record<string, unknown>, state: GitMcp
 export async function gitBranchCreate(args: Record<string, unknown>, state: GitMcpState, context: GitRequestContext = {}) {
   requireWriteMode(state.policy, 'git_branch_create');
   const cwd = resolveWorkingDirectory(args, state);
+  await requireTopologyScopeForMutation(cwd, args, state, context);
   const scopeLabel = optionalNonEmptyString(args.scope_label);
   const branch = requiredBranchName(args.name);
   const startPoint = args.start_point === undefined ? 'HEAD' : requireCommitish(args.start_point);
@@ -671,6 +679,7 @@ export async function gitBranchCreate(args: Record<string, unknown>, state: GitM
 export async function gitBranchSwitch(args: Record<string, unknown>, state: GitMcpState, context: GitRequestContext = {}) {
   requireWriteMode(state.policy, 'git_branch_switch');
   const cwd = resolveWorkingDirectory(args, state);
+  await requireTopologyScopeForMutation(cwd, args, state, context);
   const scopeLabel = optionalNonEmptyString(args.scope_label);
   const branch = requiredBranchName(args.branch);
   const before = await gitStatus({ working_directory: cwd }, state, context);
@@ -700,6 +709,7 @@ export async function gitBranchSwitch(args: Record<string, unknown>, state: GitM
 export async function gitBranchRename(args: Record<string, unknown>, state: GitMcpState, context: GitRequestContext = {}) {
   requireWriteMode(state.policy, 'git_branch_rename');
   const cwd = resolveWorkingDirectory(args, state);
+  await requireTopologyScopeForMutation(cwd, args, state, context);
   const scopeLabel = optionalNonEmptyString(args.scope_label);
   const oldName = requiredBranchName(args.old_name, 'old_name');
   const newName = requiredBranchName(args.new_name, 'new_name');
@@ -731,6 +741,7 @@ export async function gitBranchRename(args: Record<string, unknown>, state: GitM
 export async function gitBranchDelete(args: Record<string, unknown>, state: GitMcpState, context: GitRequestContext = {}) {
   requireWriteMode(state.policy, 'git_branch_delete');
   const cwd = resolveWorkingDirectory(args, state);
+  await requireTopologyScopeForMutation(cwd, args, state, context);
   const scopeLabel = optionalNonEmptyString(args.scope_label);
   const branch = requiredBranchName(args.branch);
   const before = await gitStatus({ working_directory: cwd }, state, context);
@@ -774,6 +785,7 @@ export async function gitBranchDelete(args: Record<string, unknown>, state: GitM
 export async function gitBranchDeleteRemote(args: Record<string, unknown>, state: GitMcpState, context: GitRequestContext = {}) {
   requireWriteMode(state.policy, 'git_branch_delete_remote');
   const cwd = resolveWorkingDirectory(args, state);
+  await requireTopologyScopeForMutation(cwd, args, state, context);
   const scopeLabel = optionalNonEmptyString(args.scope_label);
   const remote = requiredRemoteName(args.remote);
   const branch = requiredBranchName(args.branch);
@@ -810,6 +822,7 @@ export async function gitBranchDeleteRemote(args: Record<string, unknown>, state
 export async function gitBranchSetUpstream(args: Record<string, unknown>, state: GitMcpState, context: GitRequestContext = {}) {
   requireWriteMode(state.policy, 'git_branch_set_upstream');
   const cwd = resolveWorkingDirectory(args, state);
+  await requireTopologyScopeForMutation(cwd, args, state, context);
   const scopeLabel = optionalNonEmptyString(args.scope_label);
   const before = await gitStatus({ working_directory: cwd }, state, context);
   const localBranch = resolveLocalBranchArgument(args.local_branch, before);
@@ -843,6 +856,7 @@ export async function gitBranchSetUpstream(args: Record<string, unknown>, state:
 export async function gitBranchUnsetUpstream(args: Record<string, unknown>, state: GitMcpState, context: GitRequestContext = {}) {
   requireWriteMode(state.policy, 'git_branch_unset_upstream');
   const cwd = resolveWorkingDirectory(args, state);
+  await requireTopologyScopeForMutation(cwd, args, state, context);
   const scopeLabel = optionalNonEmptyString(args.scope_label);
   const before = await gitStatus({ working_directory: cwd }, state, context);
   const localBranch = resolveLocalBranchArgument(args.local_branch, before);
@@ -870,8 +884,10 @@ export async function gitBeginWorkScope(args: Record<string, unknown>, state: Gi
   requireWriteMode(state.policy, 'git_begin_work_scope');
   const cwd = resolveWorkingDirectory(args, state);
   const ownerId = requiredNonEmptyString(args.owner_id, 'git_begin_work_scope_requires_owner_id');
+  const authority = args.scope_kind === 'repository_topology' ? 'repository_topology' : 'paths';
   const requestedPaths = stringArray(args.allowed_paths);
-  if (requestedPaths.length === 0) throw diagnosticError('git_begin_work_scope_requires_allowed_paths');
+  if (authority === 'paths' && requestedPaths.length === 0) throw diagnosticError('git_begin_work_scope_requires_allowed_paths');
+  if (authority === 'repository_topology' && requestedPaths.length > 0) throw diagnosticError('git_repository_scope_does_not_accept_paths');
   const allowedPaths = requestedPaths.map((path) => {
     const validated = validateGitPathspec(path);
     if (validated === '.' || /[*?\[]/.test(validated)) {
@@ -882,7 +898,7 @@ export async function gitBeginWorkScope(args: Record<string, unknown>, state: Gi
   const root = (await gitText(cwd, ['rev-parse', '--show-toplevel'], state.policy, 'git_begin_work_scope_failed', context)).trim();
   const baseState = await readGitBaseState(cwd, state, context);
   const suppliedBase = asRecord(args.base_state);
-  for (const field of ['head', 'index_digest'] as const) {
+  for (const field of ['head', 'index_digest', 'worktree_digest'] as const) {
     if (suppliedBase[field] !== undefined && suppliedBase[field] !== baseState[field]) {
       throw diagnosticError('git_work_scope_base_state_mismatch', 'git_work_scope_base_state_mismatch', {
         field, supplied: suppliedBase[field], actual: baseState[field], mutation_started: false, atomic: true,
@@ -892,7 +908,7 @@ export async function gitBeginWorkScope(args: Record<string, unknown>, state: Gi
   const registry = await gitPath(cwd, 'narada-work-scopes', state, context);
   if (!registry) throw diagnosticError('git_work_scope_registry_unavailable');
   mkdirSync(registry, { recursive: true });
-  const token = createWorkScope({ repositoryRoot: root, ownerId, registryPath: registry, allowedPaths, baseState });
+  const token = createWorkScope({ repositoryRoot: root, ownerId, registryPath: registry, authority, allowedPaths, baseState });
   withWorkScopeRegistryLock(registry, () => {
     const now = Date.now();
     for (const name of readdirSync(registry)) {
@@ -906,7 +922,9 @@ export async function gitBeginWorkScope(args: Record<string, unknown>, state: Gi
         rmSync(leasePath, { force: true });
         continue;
       }
-      const overlap = token.allowed_paths.filter((path) => lease!.allowed_paths.some((held) => pathMatches(path, held) || pathMatches(held, path)));
+      const overlap = token.authority === 'repository_topology' || lease.authority === 'repository_topology'
+        ? ['<repository-topology>']
+        : token.allowed_paths.filter((path) => lease.allowed_paths.some((held) => pathMatches(path, held) || pathMatches(held, path)));
       if (overlap.length) {
         throw diagnosticError('git_work_scope_path_already_owned', 'git_work_scope_path_already_owned', {
           requested_owner_id: ownerId, current_owner_id: lease.owner_id, current_work_scope_ref: lease.ref,
@@ -919,9 +937,9 @@ export async function gitBeginWorkScope(args: Record<string, unknown>, state: Gi
   storeScopeToken(state, token);
   return {
     schema: 'narada.git.work_scope.v1', status: 'ok', working_directory: cwd, repository_root: root,
-    work_scope_ref: token.ref, owner_id: token.owner_id, allowed_paths: token.allowed_paths, base_state: token.base_state,
+    work_scope_ref: token.ref, owner_id: token.owner_id, authority: token.authority, allowed_paths: token.allowed_paths, base_state: token.base_state,
     created_at: token.created_at, expires_at: token.expires_at, mutation_started: true,
-    summary: `work scope leased for ${token.allowed_paths.length} path${token.allowed_paths.length === 1 ? '' : 's'}`,
+    summary: token.authority === 'repository_topology' ? 'repository topology scope leased' : `work scope leased for ${token.allowed_paths.length} path${token.allowed_paths.length === 1 ? '' : 's'}`,
   };
 }
 
@@ -949,34 +967,90 @@ export async function gitEndWorkScope(args: Record<string, unknown>, state: GitM
   return { schema: 'narada.git.work_scope_end.v1', status: 'released', work_scope_ref: workScopeRef, owner_id: ownerId, released_paths: token!.allowed_paths, mutation_started: true };
 }
 
-const WORK_SCOPE_REGISTRY_STALE_LOCK_MS = 30_000;
+const WORK_SCOPE_REGISTRY_MALFORMED_LOCK_GRACE_MS = 30_000;
+const WORK_SCOPE_PROCESS_INSTANCE_ID = randomUUID();
+
+type WorkScopeLockRecord = {
+  schema: 'narada.git.work_scope_registry_lock.v2';
+  pid: number;
+  process_instance_id: string;
+  lock_nonce: string;
+  created_at: string;
+};
+
+function registerWorkScopeProcess(registry: string): void {
+  const processDirectory = join(registry, '.processes');
+  mkdirSync(processDirectory, { recursive: true });
+  const path = join(processDirectory, `${process.pid}.json`);
+  const temporaryPath = `${path}.${WORK_SCOPE_PROCESS_INSTANCE_ID}.tmp`;
+  writeFileSync(temporaryPath, JSON.stringify({
+    schema: 'narada.git.work_scope_process.v1',
+    pid: process.pid,
+    process_instance_id: WORK_SCOPE_PROCESS_INSTANCE_ID,
+    heartbeat_at: new Date().toISOString(),
+  }));
+  renameSync(temporaryPath, path);
+}
+
+function registeredProcessInstance(registry: string, pid: number): string | null {
+  try {
+    const record = JSON.parse(readFileSync(join(registry, '.processes', `${pid}.json`), 'utf8')) as { process_instance_id?: unknown };
+    return typeof record.process_instance_id === 'string' ? record.process_instance_id : null;
+  } catch {
+    return null;
+  }
+}
 
 function withWorkScopeRegistryLock<T>(registry: string, action: () => T): T {
+  registerWorkScopeProcess(registry);
   const lockPath = join(registry, '.lock');
   let recoveredStaleLock = false;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
+      const record: WorkScopeLockRecord = {
+        schema: 'narada.git.work_scope_registry_lock.v2',
+        pid: process.pid,
+        process_instance_id: WORK_SCOPE_PROCESS_INSTANCE_ID,
+        lock_nonce: randomUUID(),
+        created_at: new Date().toISOString(),
+      };
       const handle = openSync(lockPath, 'wx');
-      closeSync(handle);
-      writeFileSync(lockPath, JSON.stringify({ schema: 'narada.git.work_scope_registry_lock.v1', pid: process.pid, created_at: new Date().toISOString() }));
+      try {
+        writeSync(handle, JSON.stringify(record));
+        fsyncSync(handle);
+      } finally {
+        closeSync(handle);
+      }
       try { return action(); } finally { rmSync(lockPath, { force: true }); }
     } catch (error) {
       if (!existsSync(lockPath)) throw error;
       const ageMs = Date.now() - statSync(lockPath).mtimeMs;
-      let ownerPid: number | null = null;
+      let owner: WorkScopeLockRecord | null = null;
       try {
-        const record = JSON.parse(readFileSync(lockPath, 'utf8')) as { pid?: unknown };
-        ownerPid = typeof record.pid === 'number' ? record.pid : null;
-      } catch { /* an interrupted empty lock is recoverable after the stale threshold */ }
-      const ownerAlive = ownerPid !== null && processIsAlive(ownerPid);
-      if (attempt === 0 && ageMs > WORK_SCOPE_REGISTRY_STALE_LOCK_MS && !ownerAlive) {
+        const parsed = JSON.parse(readFileSync(lockPath, 'utf8')) as Partial<WorkScopeLockRecord>;
+        if (typeof parsed.pid === 'number' && typeof parsed.process_instance_id === 'string') owner = parsed as WorkScopeLockRecord;
+      } catch { /* malformed lock handled below */ }
+      const ownerAlive = owner !== null && processIsAlive(owner.pid);
+      const registeredInstance = owner ? registeredProcessInstance(registry, owner.pid) : null;
+      const ownerInstanceMatches = owner !== null && registeredInstance === owner.process_instance_id;
+      const stale = owner
+        ? !ownerAlive || !ownerInstanceMatches
+        : ageMs > WORK_SCOPE_REGISTRY_MALFORMED_LOCK_GRACE_MS;
+      if (attempt === 0 && stale) {
         rmSync(lockPath, { force: true });
         recoveredStaleLock = true;
         continue;
       }
       throw diagnosticError('git_work_scope_registry_busy', 'git_work_scope_registry_busy', {
-        mutation_started: false, retryable: true, lock_age_ms: ageMs, owner_pid: ownerPid,
-        owner_process_alive: ownerAlive, stale_lock_recovered: recoveredStaleLock,
+        mutation_started: false,
+        retryable: true,
+        lock_age_ms: ageMs,
+        owner_pid: owner?.pid ?? null,
+        owner_process_alive: ownerAlive,
+        owner_process_instance_id: owner?.process_instance_id ?? null,
+        registered_process_instance_id: registeredInstance,
+        owner_process_instance_matches: ownerInstanceMatches,
+        stale_lock_recovered: recoveredStaleLock,
       });
     }
   }
@@ -986,7 +1060,6 @@ function withWorkScopeRegistryLock<T>(registry: string, action: () => T): T {
 function processIsAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
-
 export async function gitStatus(args: Record<string, unknown>, state: GitMcpState, context: GitRequestContext = {}): Promise<Record<string, unknown>> {
   const cwd = resolveWorkingDirectory(args, state);
   const root = await gitText(cwd, ['rev-parse', '--show-toplevel'], state.policy, 'git_status_failed', context);
@@ -1093,12 +1166,16 @@ function pathMatches(path: string, pattern: string): boolean {
 async function readGitBaseState(cwd: string, state: GitMcpState, context: GitRequestContext): Promise<GitBaseState> {
   const headResult = await runGit(cwd, ['rev-parse', 'HEAD'], state.policy, context);
   const indexResult = await runGit(cwd, ['write-tree'], state.policy, context);
+  const worktreeResult = await runGit(cwd, ['status', '--porcelain=v1', '-z', '--untracked-files=all'], state.policy, context);
   return {
     head: headResult.exit_code === 0 && !headResult.timed_out && !headResult.cancelled
       ? headResult.output_text.trim()
       : null,
     index_digest: indexResult.exit_code === 0 && !indexResult.timed_out && !indexResult.cancelled
       ? indexResult.output_text.trim()
+      : null,
+    worktree_digest: worktreeResult.exit_code === 0 && !worktreeResult.timed_out && !worktreeResult.cancelled
+      ? sha256(worktreeResult.output_text)
       : null,
   };
 }
@@ -1117,6 +1194,33 @@ function requireWorkScope(ref: unknown, repositoryRoot: string, state: GitMcpSta
       atomic: true,
     });
   }
+}
+
+function requireRepositoryTopologyScope(ref: unknown, repositoryRoot: string, state: GitMcpState): GitWorkScope {
+  const scope = requireWorkScope(ref, repositoryRoot, state);
+  if (scope.authority !== 'repository_topology') {
+    throw diagnosticError('git_repository_topology_scope_required', 'git_repository_topology_scope_required', {
+      work_scope_ref: scope.ref,
+      supplied_authority: scope.authority ?? 'paths',
+      mutation_started: false,
+      atomic: true,
+      remediation: 'Acquire git_begin_work_scope with scope_kind=repository_topology and no allowed_paths.',
+    });
+  }
+  return scope;
+}
+
+async function requireTopologyScopeForMutation(
+  cwd: string,
+  args: Record<string, unknown>,
+  state: GitMcpState,
+  context: GitRequestContext,
+  validateBaseState = true,
+): Promise<GitWorkScope> {
+  const repositoryRoot = (await gitText(cwd, ['rev-parse', '--show-toplevel'], state.policy, 'git_repository_topology_scope_failed', context)).trim();
+  const scope = requireRepositoryTopologyScope(args.work_scope_ref, repositoryRoot, state);
+  if (validateBaseState) assertTopologyScopeBaseState(scope, await readGitBaseState(cwd, state, context));
+  return scope;
 }
 
 function assertPathsWithinWorkScope(paths: string[], workScope: GitWorkScope, code: string): void {
@@ -1145,6 +1249,23 @@ function requireIndexScope(ref: unknown, repositoryRoot: string, state: GitMcpSt
       repository_root: repositoryRoot,
       mutation_started: false,
       atomic: true,
+    });
+  }
+}
+
+function assertTopologyScopeBaseState(scope: GitWorkScope, current: GitBaseState): void {
+  const changedFields = (['head', 'index_digest', 'worktree_digest'] as const)
+    .filter((field) => scope.base_state[field] !== current[field]);
+  if (changedFields.length > 0) {
+    throw diagnosticError('git_repository_topology_scope_base_state_drift', 'git_repository_topology_scope_base_state_drift', {
+      changed_fields: changedFields,
+      expected_base_state: scope.base_state,
+      actual_base_state: current,
+      scope_ref: scope.ref,
+      mutation_started: false,
+      atomic: true,
+      cooperative_boundary: true,
+      remediation: 'Out-of-band Git or editor activity changed repository state after lease acquisition. Release this scope, reconcile the changes, and acquire a fresh repository_topology scope.',
     });
   }
 }

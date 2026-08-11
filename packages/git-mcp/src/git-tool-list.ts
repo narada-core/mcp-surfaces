@@ -37,9 +37,10 @@ export function listTools(mode: string = 'read'): Array<Record<string, any>> {
       inputSchema: objectSchema({
         working_directory: { type: 'string', description: WORKING_DIRECTORY_DESCRIPTION },
         onto: { type: 'string', description: 'Explicit branch, tag, or commit to rebase onto.' },
+        work_scope_ref: topologyScopeProperty(),
         autostash: { type: 'boolean', default: false, description: 'Required for tracked dirty worktrees; untracked files are always refused.' },
         scope_label: { type: 'string', description: 'Optional caller-supplied audit label for this mutation.' },
-      }, ['onto']),
+      }, ['onto', 'work_scope_ref']),
     },
     {
       name: 'git_rebase_continue',
@@ -63,9 +64,10 @@ export function listTools(mode: string = 'read'): Array<Record<string, any>> {
       inputSchema: objectSchema({
         working_directory: { type: 'string', description: WORKING_DIRECTORY_DESCRIPTION },
         target: { type: 'string', description: 'Explicit branch, tag, or commit to merge.' },
+        work_scope_ref: topologyScopeProperty(),
         autostash: { type: 'boolean', default: false, description: 'Required for tracked dirty worktrees; untracked files are always refused.' },
         scope_label: { type: 'string', description: 'Optional caller-supplied audit label for this mutation.' },
-      }, ['target']),
+      }, ['target', 'work_scope_ref']),
     },
     {
       name: 'git_merge_continue',
@@ -196,13 +198,14 @@ export function listTools(mode: string = 'read'): Array<Record<string, any>> {
   const writeTools = [
     {
       name: 'git_begin_work_scope',
-      description: 'Acquire a durable, short-lived cooperative ownership lease for explicit repository paths. Overlapping live leases are refused across Git MCP processes.',
+      description: 'Acquire a durable cooperative lease for explicit paths or exclusive repository topology. Topology leases conflict with every live lease and detect out-of-band repository drift before mutation.',
       inputSchema: objectSchema({
         working_directory: { type: 'string', description: WORKING_DIRECTORY_DESCRIPTION },
         owner_id: { type: 'string', description: 'Stable caller or agent identity that owns and must release the lease.' },
-        allowed_paths: { type: 'array', items: { type: 'string' }, description: 'Explicit repository-relative files or directories to lease.' },
-        base_state: { type: 'object', additionalProperties: true, description: 'Optional caller-supplied base state; supplied head or index_digest must match.' },
-      }, ['owner_id', 'allowed_paths']),
+        scope_kind: { type: 'string', enum: ['paths', 'repository_topology'], default: 'paths', description: 'Lease explicit paths, or exclusively lease branch/ref topology.' },
+        allowed_paths: { type: 'array', items: { type: 'string' }, description: 'Required for paths scope; forbidden for repository_topology.' },
+        base_state: { type: 'object', additionalProperties: true, description: 'Optional caller-supplied base state; supplied fields must match.' },
+      }, ['owner_id']),
     },
     {
       name: 'git_end_work_scope',
@@ -275,84 +278,95 @@ export function listTools(mode: string = 'read'): Array<Record<string, any>> {
         remote: { type: 'string' },
         branch: { type: 'string' },
         expected_commit: { type: 'string', description: 'Optional commit SHA or commit_ref returned by git_commit; push refuses if HEAD differs.' },
+        work_scope_ref: topologyScopeProperty(),
         scope_label: { type: 'string', description: 'Optional caller-supplied audit label for this mutation.' },
-      }),
+      }, ['work_scope_ref']),
     },
     {
       name: 'git_branch_create',
-      description: 'Create a local branch from HEAD or an explicit start point without checking it out.',
+      description: 'Create a local branch from HEAD or an explicit start point under an exclusive topology scope.',
       inputSchema: objectSchema({
         working_directory: { type: 'string', description: WORKING_DIRECTORY_DESCRIPTION },
         name: { type: 'string' },
         start_point: { type: 'string', description: 'Optional commit, branch, or tag; defaults to HEAD.' },
+        work_scope_ref: topologyScopeProperty(),
         scope_label: { type: 'string', description: 'Optional caller-supplied audit label for this mutation.' },
-      }, ['name']),
+      }, ['name', 'work_scope_ref']),
     },
     {
       name: 'git_branch_switch',
-      description: 'Switch to an existing local branch without creating, discarding, or force-applying changes.',
+      description: 'Switch to an existing local branch under an exclusive topology scope without discarding changes.',
       inputSchema: objectSchema({
         working_directory: { type: 'string', description: WORKING_DIRECTORY_DESCRIPTION },
         branch: { type: 'string' },
+        work_scope_ref: topologyScopeProperty(),
         scope_label: { type: 'string', description: 'Optional caller-supplied audit label for this mutation.' },
-      }, ['branch']),
+      }, ['branch', 'work_scope_ref']),
     },
     {
       name: 'git_branch_rename',
-      description: 'Rename an existing local branch to a new local branch name.',
+      description: 'Rename an existing local branch under an exclusive topology scope.',
       inputSchema: objectSchema({
         working_directory: { type: 'string', description: WORKING_DIRECTORY_DESCRIPTION },
         old_name: { type: 'string' },
         new_name: { type: 'string' },
+        work_scope_ref: topologyScopeProperty(),
         scope_label: { type: 'string', description: 'Optional caller-supplied audit label for this mutation.' },
-      }, ['old_name', 'new_name']),
+      }, ['old_name', 'new_name', 'work_scope_ref']),
     },
     {
       name: 'git_branch_delete',
-      description: 'Delete a local branch only after verifying it is merged into the selected base; force deletion is not supported.',
+      description: 'Delete a merged local branch under an exclusive topology scope; force deletion is not supported.',
       inputSchema: objectSchema({
         working_directory: { type: 'string', description: WORKING_DIRECTORY_DESCRIPTION },
         branch: { type: 'string' },
         base: { type: 'string', description: 'Commit, branch, or tag used for the merged-only safety check; defaults to the current branch.' },
+        work_scope_ref: topologyScopeProperty(),
         scope_label: { type: 'string', description: 'Optional caller-supplied audit label for this mutation.' },
-      }, ['branch']),
+      }, ['branch', 'work_scope_ref']),
     },
     {
       name: 'git_branch_delete_remote',
-      description: 'Delete a remote branch only after verifying its remote ref is merged into an explicit local base; force deletion is not supported.',
+      description: 'Delete a merged remote branch under an exclusive topology scope; force deletion is not supported.',
       inputSchema: objectSchema({
         working_directory: { type: 'string', description: WORKING_DIRECTORY_DESCRIPTION },
         remote: { type: 'string' },
         branch: { type: 'string' },
         base: { type: 'string', description: 'Local commit, branch, or tag used for the merged-only safety check.' },
+        work_scope_ref: topologyScopeProperty(),
         scope_label: { type: 'string', description: 'Optional caller-supplied audit label for this mutation.' },
-      }, ['remote', 'branch', 'base']),
+      }, ['remote', 'branch', 'base', 'work_scope_ref']),
     },
     {
       name: 'git_branch_set_upstream',
-      description: 'Set a local branch upstream to an existing branch on a configured remote.',
+      description: 'Set a local branch upstream under an exclusive topology scope.',
       inputSchema: objectSchema({
         working_directory: { type: 'string', description: WORKING_DIRECTORY_DESCRIPTION },
         local_branch: { type: 'string', description: 'Local branch; defaults to the current branch.' },
         remote: { type: 'string' },
         remote_branch: { type: 'string', description: 'Remote branch; defaults to local_branch.' },
+        work_scope_ref: topologyScopeProperty(),
         scope_label: { type: 'string', description: 'Optional caller-supplied audit label for this mutation.' },
-      }, ['remote']),
+      }, ['remote', 'work_scope_ref']),
     },
     {
       name: 'git_branch_unset_upstream',
-      description: 'Remove upstream configuration from a local branch; defaults to the current branch.',
+      description: 'Remove upstream configuration under an exclusive topology scope.',
       inputSchema: objectSchema({
         working_directory: { type: 'string', description: WORKING_DIRECTORY_DESCRIPTION },
         local_branch: { type: 'string', description: 'Local branch; defaults to the current branch.' },
+        work_scope_ref: topologyScopeProperty(),
         scope_label: { type: 'string', description: 'Optional caller-supplied audit label for this mutation.' },
-      }),
+      }, ['work_scope_ref']),
     },
   ];
   const renderedWriteTools = mode === 'write'
     ? writeTools
     : writeTools.map((tool) => ({ ...tool, description: `${tool.description} Requires git-mcp mode=write.` }));
   return decorateTools([...readTools, ...renderedWriteTools]);
+}
+function topologyScopeProperty() {
+  return { type: 'string', description: 'Required exclusive repository-topology scope issued by git_begin_work_scope with scope_kind=repository_topology.' };
 }
 
 function objectSchema(properties: Record<string, unknown>, required: string[] = []) {

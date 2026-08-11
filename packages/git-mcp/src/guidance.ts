@@ -59,13 +59,15 @@ export function buildGuidanceResult(args: GuidanceRecord = {}): GuidanceRecord {
       ],
       branch_lifecycle: [
         'git_branch_list before selecting a local branch target.',
-        'git_branch_create with an explicit name and optional start point; creation does not check out the branch.',
+        'Acquire git_begin_work_scope with scope_kind=repository_topology; it conflicts with every live path or topology lease.',
+        'git_branch_create with an explicit name, optional start point, and the topology work_scope_ref; creation does not check out the branch.',
         'git_branch_switch only for an existing branch; Git must preserve the worktree safely.',
         'git_branch_rename with explicit old_name and new_name.',
-        'git_branch_delete only after the merged-only base check passes; force deletion is unavailable.'
+        'git_branch_delete only after the merged-only base check passes; force deletion is unavailable.',
+        'Release the topology lease with git_end_work_scope after the branch mutation.'
       ],
       remote_administration: [
-        'git_branch_list with scope=remote or all before remote administration.',
+        'git_branch_list with scope=remote or all before remote administration, then acquire a repository_topology work scope for remote deletion or upstream mutation.',
         'git_branch_set_upstream or git_branch_unset_upstream for local tracking configuration.',
         'git_branch_delete_remote with explicit remote, branch, and base; the remote ref must be merged before deletion.',
         'Use git_push separately to publish a newly created local branch.'
