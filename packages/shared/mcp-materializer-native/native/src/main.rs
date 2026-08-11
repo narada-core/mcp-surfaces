@@ -353,6 +353,53 @@ fn run() -> Result<(), Failure> {
         println!("{}", verify_all(&index)?);
         return Ok(());
     }
+    if command == "acknowledge-restart" {
+        let mut values = BTreeMap::<String, String>::new();
+        while let Some(flag) = args.next() {
+            let flag = flag.into_string().map_err(|_| {
+                Failure::new("materializer_argument_invalid", "Argument is not UTF-8.")
+            })?;
+            if !matches!(
+                flag.as_str(),
+                "--installed-index" | "--carrier-id" | "--expected-evidence-ref"
+            ) {
+                return Err(Failure::new(
+                    "materializer_argument_unknown",
+                    format!("Unknown argument: {flag}"),
+                ));
+            }
+            let value = args
+                .next()
+                .and_then(|value| value.into_string().ok())
+                .ok_or_else(|| {
+                    Failure::new(
+                        "materializer_argument_value_required",
+                        format!("{flag} requires a value."),
+                    )
+                })?;
+            if values.insert(flag.clone(), value).is_some() {
+                return Err(Failure::new(
+                    "materializer_argument_duplicate",
+                    format!("Duplicate argument: {flag}"),
+                ));
+            }
+        }
+        let required = |flag: &str| {
+            values.get(flag).cloned().ok_or_else(|| {
+                Failure::new("materializer_argument_required", format!("Missing {flag}."))
+            })
+        };
+        let result = acknowledge_restart(
+            Path::new(&required("--installed-index")?),
+            &required("--carrier-id")?,
+            &required("--expected-evidence-ref")?,
+        )?;
+        println!("{result}");
+        if result.get("status").and_then(Value::as_str) == Some("stale_ack_refused") {
+            std::process::exit(2);
+        }
+        return Ok(());
+    }
     if command != "materialize-all" {
         return Err(Failure::new(
             "materializer_command_unknown",
@@ -387,6 +434,96 @@ fn run() -> Result<(), Failure> {
     let result = materialize(input)?;
     println!("{result}");
     Ok(())
+}
+
+fn acknowledge_restart(
+    installed_index_path: &Path,
+    carrier_id: &str,
+    expected_evidence_ref: &str,
+) -> Result<Value, Failure> {
+    validate_identifier(carrier_id, "carrier_id")?;
+    if expected_evidence_ref.trim().is_empty() {
+        return Err(Failure::new(
+            "materializer_expected_evidence_ref_required",
+            "Expected evidence reference must not be empty.",
+        ));
+    }
+    let index = read_json(installed_index_path, "materializer_installed_index_invalid")?;
+    if index.get("schema").and_then(Value::as_str) != Some("narada.installed_carrier_index.v1") {
+        return Err(Failure::new(
+            "materializer_installed_index_schema_unsupported",
+            path_text(installed_index_path),
+        ));
+    }
+    let workspace_root = PathBuf::from(json_field_string(&index, "workspace_root")?);
+    let pressure_path = workspace_root.join(".ai/runtime/carrier-restart-pressure.json");
+    let mut pressure = if pressure_path.exists() {
+        read_json(&pressure_path, "materializer_restart_pressure_invalid")?
+    } else {
+        json!({
+            "schema": "narada.carrier_restart_pressure.v1",
+            "carriers": {},
+        })
+    };
+    if pressure.get("schema").and_then(Value::as_str) != Some("narada.carrier_restart_pressure.v1")
+    {
+        return Err(Failure::new(
+            "materializer_restart_pressure_schema_unsupported",
+            path_text(&pressure_path),
+        ));
+    }
+    let carriers = pressure
+        .get_mut("carriers")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| {
+            Failure::new(
+                "materializer_restart_pressure_carriers_required",
+                path_text(&pressure_path),
+            )
+        })?;
+    let current = carriers.get(carrier_id).cloned();
+    let current_ref = current
+        .as_ref()
+        .and_then(|value| value.get("evidence_ref"))
+        .and_then(Value::as_str);
+    if current.is_some() && current_ref != Some(expected_evidence_ref) {
+        return Ok(json!({
+            "schema": "narada.carrier_restart_acknowledgement.v1",
+            "status": "stale_ack_refused",
+            "carrier_id": carrier_id,
+            "expected_pressure_ref": expected_evidence_ref,
+            "current_pressure": current,
+            "remaining_carrier_ids": carriers.keys().cloned().collect::<Vec<_>>(),
+        }));
+    }
+    let acknowledged = carriers.remove(carrier_id);
+    let updated_at = OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .map_err(|error| Failure::new("materializer_clock_failed", error.to_string()))?;
+    pressure
+        .as_object_mut()
+        .expect("pressure is an object")
+        .insert("updated_at".to_string(), Value::String(updated_at));
+    atomic_write(&pressure_path, &pretty_json(&pressure)?).map_err(|error| {
+        Failure::new(
+            "materializer_restart_pressure_publish_failed",
+            error.to_string(),
+        )
+        .with_details(json!({"path": path_text(&pressure_path)}))
+    })?;
+    let remaining = pressure
+        .get("carriers")
+        .and_then(Value::as_object)
+        .map(|value| value.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    Ok(json!({
+        "schema": "narada.carrier_restart_acknowledgement.v1",
+        "status": if acknowledged.is_some() { "acknowledged" } else { "already_current" },
+        "carrier_id": carrier_id,
+        "acknowledged_pressure": acknowledged,
+        "remaining_carrier_ids": remaining,
+        "restart_pressure_path": path_text(&pressure_path),
+    }))
 }
 
 fn verify_all(index_path: &Path) -> Result<Value, Failure> {

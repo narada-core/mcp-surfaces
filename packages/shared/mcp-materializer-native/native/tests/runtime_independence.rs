@@ -320,4 +320,43 @@ fn derives_all_carriers_from_declared_site_capabilities_without_javascript() {
         "stderr={}",
         String::from_utf8_lossy(&compatibility_recovery.stderr)
     );
+
+    let stale_acknowledgement = Command::new(env!("CARGO_BIN_EXE_narada-mcp-materializer"))
+        .env_clear()
+        .arg("acknowledge-restart")
+        .arg("--installed-index")
+        .arg(&index_path)
+        .arg("--carrier-id")
+        .arg("codex-andrey")
+        .arg("--expected-evidence-ref")
+        .arg("sha256:obsolete")
+        .output()
+        .unwrap();
+    assert_eq!(stale_acknowledgement.status.code(), Some(2));
+    let stale_result: Value = serde_json::from_slice(&stale_acknowledgement.stdout).unwrap();
+    assert_eq!(stale_result["status"], "stale_ack_refused");
+
+    let evidence_ref = recovery_result["ref"].as_str().unwrap();
+    let acknowledgement = Command::new(env!("CARGO_BIN_EXE_narada-mcp-materializer"))
+        .env_clear()
+        .arg("acknowledge-restart")
+        .arg("--installed-index")
+        .arg(&index_path)
+        .arg("--carrier-id")
+        .arg("codex-andrey")
+        .arg("--expected-evidence-ref")
+        .arg(evidence_ref)
+        .output()
+        .unwrap();
+    assert!(
+        acknowledgement.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&acknowledgement.stderr)
+    );
+    let acknowledgement_result: Value = serde_json::from_slice(&acknowledgement.stdout).unwrap();
+    assert_eq!(acknowledgement_result["status"], "acknowledged");
+    assert_eq!(
+        acknowledgement_result["remaining_carrier_ids"],
+        json!(["opencode-andrey", "kimi-andrey"])
+    );
 }
