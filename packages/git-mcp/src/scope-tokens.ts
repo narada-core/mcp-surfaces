@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import type { GitMcpState } from './state.js';
 
 export type GitBaseState = {
@@ -10,6 +12,8 @@ export type GitWorkScope = {
   kind: 'work_scope';
   ref: string;
   repository_root: string;
+  owner_id: string;
+  registry_path: string;
   allowed_paths: string[];
   base_state: GitBaseState;
   created_at: string;
@@ -39,6 +43,8 @@ export function scopeTokenMap(state: GitMcpState): Map<string, GitScopeToken> {
 
 export function createWorkScope(args: {
   repositoryRoot: string;
+  ownerId: string;
+  registryPath: string;
   allowedPaths: string[];
   baseState: GitBaseState;
 }): GitWorkScope {
@@ -46,12 +52,13 @@ export function createWorkScope(args: {
     kind: 'work_scope',
     ref: `gws_${randomUUID().replaceAll('-', '').slice(0, 28)}`,
     repository_root: args.repositoryRoot,
+    owner_id: args.ownerId,
+    registry_path: args.registryPath,
     allowed_paths: [...new Set(args.allowedPaths)].sort(),
     base_state: args.baseState,
     ...timestamps(),
   };
 }
-
 export function createIndexScope(args: {
   repositoryRoot: string;
   workScopeRef: string | null;
@@ -76,6 +83,10 @@ export function resolveScopeToken(state: GitMcpState, ref: unknown, kind: GitSco
   const token = tokenRef ? scopeTokenMap(state).get(tokenRef) : undefined;
   if (!token || token.kind !== kind) {
     throw new Error(`git_${kind}_ref_not_found`);
+  }
+  if (token.kind === 'work_scope' && !existsSync(join(token.registry_path, `${token.ref}.json`))) {
+    scopeTokenMap(state).delete(token.ref);
+    throw new Error('git_work_scope_ref_released');
   }
   if (Date.parse(token.expires_at) <= Date.now()) {
     scopeTokenMap(state).delete(token.ref);

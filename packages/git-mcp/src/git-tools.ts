@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, rmSync, statSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { appendFileSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import {
   optionalBranchName,
   optionalRefName,
@@ -20,6 +20,7 @@ import {
   createIndexScope,
   createWorkScope,
   resolveScopeToken,
+  scopeTokenMap,
   storeScopeToken,
   type GitBaseState,
   type GitIndexScope,
@@ -44,6 +45,7 @@ export async function callGitTool(name: string, args: Record<string, unknown>, s
   if (name === 'git_policy_inspect') return publicGitPolicy(state.policy);
   if (name === 'git_status') return gitStatus(args, state, runContext);
   if (name === 'git_begin_work_scope') return gitBeginWorkScope(args, state, runContext);
+  if (name === 'git_end_work_scope') return gitEndWorkScope(args, state, runContext);
   if (name === 'git_sync_status') return gitSyncStatus(args, state, runContext);
   if (name === 'git_branch_list') return gitBranchList(args, state, runContext);
   if (name === 'git_branch_create') return gitBranchCreate(args, state, runContext);
@@ -61,6 +63,7 @@ export async function callGitTool(name: string, args: Record<string, unknown>, s
   if (name === 'git_unstage') return gitUnstage(args, state, runContext);
   if (name === 'git_commit') return gitCommit(args, state, runContext);
   if (name === 'git_commit_paths') return gitCommitPaths(args, state, runContext);
+  if (name === 'git_reconcile_index') return gitReconcileIndex(args, state, runContext);
   if (name === 'git_push') return gitPush(args, state, runContext);
   if (name === 'git_fetch') return gitFetch(args, state, runContext);
   if (name === 'git_rebase') return gitRebase(args, state, runContext);
@@ -372,8 +375,12 @@ export async function gitUnstage(args: Record<string, unknown>, state: GitMcpSta
   requireWriteMode(state.policy, 'git_unstage');
   const cwd = resolveWorkingDirectory(args, state);
   const scopeLabel = optionalNonEmptyString(args.scope_label);
+  const repositoryRoot = (await gitText(cwd, ['rev-parse', '--show-toplevel'], state.policy, 'git_unstage_failed', context)).trim();
+  const workScope = requireWorkScope(args.work_scope_ref, repositoryRoot, state);
+  assertScopeHead(workScope, await readGitBaseState(cwd, state, context));
   const paths = await Promise.all(stringArray(args.paths).map((path) => validateExplicitFilePath(cwd, path, (workdir, gitArgs) => runGit(workdir, gitArgs, state.policy, context))));
   if (paths.length === 0) throw diagnosticError('git_unstage_requires_paths');
+  assertPathsWithinWorkScope(paths, workScope, 'git_unstage_paths_outside_work_scope');
   let result = await runGit(cwd, ['restore', '--staged', '--', ...paths], state.policy, context);
   if (result.exit_code !== 0 && /could not resolve 'HEAD'|ambiguous argument 'HEAD'|unknown revision/i.test(combineOutput(result))) {
     result = await runGit(cwd, ['rm', '--cached', '--', ...paths], state.policy, context);
@@ -859,9 +866,10 @@ export async function gitBranchUnsetUpstream(args: Record<string, unknown>, stat
   audit(state, payload);
   return payload;
 }
-
 export async function gitBeginWorkScope(args: Record<string, unknown>, state: GitMcpState, context: GitRequestContext = {}) {
+  requireWriteMode(state.policy, 'git_begin_work_scope');
   const cwd = resolveWorkingDirectory(args, state);
+  const ownerId = requiredNonEmptyString(args.owner_id, 'git_begin_work_scope_requires_owner_id');
   const requestedPaths = stringArray(args.allowed_paths);
   if (requestedPaths.length === 0) throw diagnosticError('git_begin_work_scope_requires_allowed_paths');
   const allowedPaths = requestedPaths.map((path) => {
@@ -877,29 +885,106 @@ export async function gitBeginWorkScope(args: Record<string, unknown>, state: Gi
   for (const field of ['head', 'index_digest'] as const) {
     if (suppliedBase[field] !== undefined && suppliedBase[field] !== baseState[field]) {
       throw diagnosticError('git_work_scope_base_state_mismatch', 'git_work_scope_base_state_mismatch', {
-        field,
-        supplied: suppliedBase[field],
-        actual: baseState[field],
-        mutation_started: false,
-        atomic: true,
+        field, supplied: suppliedBase[field], actual: baseState[field], mutation_started: false, atomic: true,
       });
     }
   }
-  const token = createWorkScope({ repositoryRoot: root, allowedPaths, baseState });
+  const registry = await gitPath(cwd, 'narada-work-scopes', state, context);
+  if (!registry) throw diagnosticError('git_work_scope_registry_unavailable');
+  mkdirSync(registry, { recursive: true });
+  const token = createWorkScope({ repositoryRoot: root, ownerId, registryPath: registry, allowedPaths, baseState });
+  withWorkScopeRegistryLock(registry, () => {
+    const now = Date.now();
+    for (const name of readdirSync(registry)) {
+      if (!name.endsWith('.json')) continue;
+      const leasePath = join(registry, name);
+      let lease: GitWorkScope;
+      try { lease = JSON.parse(readFileSync(leasePath, 'utf8')) as GitWorkScope; } catch {
+        throw diagnosticError('git_work_scope_registry_corrupt', 'git_work_scope_registry_corrupt', { lease_path: leasePath, mutation_started: false });
+      }
+      if (Date.parse(lease.expires_at) <= now) {
+        rmSync(leasePath, { force: true });
+        continue;
+      }
+      const overlap = token.allowed_paths.filter((path) => lease!.allowed_paths.some((held) => pathMatches(path, held) || pathMatches(held, path)));
+      if (overlap.length) {
+        throw diagnosticError('git_work_scope_path_already_owned', 'git_work_scope_path_already_owned', {
+          requested_owner_id: ownerId, current_owner_id: lease.owner_id, current_work_scope_ref: lease.ref,
+          paths: overlap, expires_at: lease.expires_at, mutation_started: false, atomic: true,
+        });
+      }
+    }
+    writeFileSync(join(registry, `${token.ref}.json`), JSON.stringify(token, null, 2), { flag: 'wx' });
+  });
   storeScopeToken(state, token);
   return {
-    schema: 'narada.git.work_scope.v1',
-    status: 'ok',
-    working_directory: cwd,
-    repository_root: root,
-    work_scope_ref: token.ref,
-    allowed_paths: token.allowed_paths,
-    base_state: token.base_state,
-    created_at: token.created_at,
-    expires_at: token.expires_at,
-    mutation_started: false,
-    summary: `work scope issued for ${token.allowed_paths.length} path${token.allowed_paths.length === 1 ? '' : 's'}`,
+    schema: 'narada.git.work_scope.v1', status: 'ok', working_directory: cwd, repository_root: root,
+    work_scope_ref: token.ref, owner_id: token.owner_id, allowed_paths: token.allowed_paths, base_state: token.base_state,
+    created_at: token.created_at, expires_at: token.expires_at, mutation_started: true,
+    summary: `work scope leased for ${token.allowed_paths.length} path${token.allowed_paths.length === 1 ? '' : 's'}`,
   };
+}
+
+export async function gitEndWorkScope(args: Record<string, unknown>, state: GitMcpState, context: GitRequestContext = {}) {
+  requireWriteMode(state.policy, 'git_end_work_scope');
+  const cwd = resolveWorkingDirectory(args, state);
+  const ownerId = requiredNonEmptyString(args.owner_id, 'git_end_work_scope_requires_owner_id');
+  const workScopeRef = requiredNonEmptyString(args.work_scope_ref, 'git_end_work_scope_requires_work_scope_ref');
+  if (!/^gws_[a-f0-9]{28}$/.test(workScopeRef)) throw diagnosticError('git_work_scope_ref_invalid');
+  const root = (await gitText(cwd, ['rev-parse', '--show-toplevel'], state.policy, 'git_end_work_scope_failed', context)).trim();
+  const registry = await gitPath(cwd, 'narada-work-scopes', state, context);
+  if (!registry) throw diagnosticError('git_work_scope_registry_unavailable');
+  let token: GitWorkScope | null = null;
+  withWorkScopeRegistryLock(registry, () => {
+    const leasePath = join(registry, `${workScopeRef}.json`);
+    if (!existsSync(leasePath)) throw diagnosticError('git_work_scope_ref_not_found', 'git_work_scope_ref_not_found', { work_scope_ref: workScopeRef });
+    try { token = JSON.parse(readFileSync(leasePath, 'utf8')) as GitWorkScope; } catch {
+      throw diagnosticError('git_work_scope_registry_corrupt', 'git_work_scope_registry_corrupt', { lease_path: leasePath, mutation_started: false });
+    }
+    if (token!.repository_root !== root) throw diagnosticError('git_work_scope_repository_mismatch');
+    if (token!.owner_id !== ownerId) throw diagnosticError('git_work_scope_owner_mismatch', 'git_work_scope_owner_mismatch', { expected_owner_id: token!.owner_id, supplied_owner_id: ownerId });
+    rmSync(leasePath, { force: true });
+  });
+  scopeTokenMap(state).delete(workScopeRef);
+  return { schema: 'narada.git.work_scope_end.v1', status: 'released', work_scope_ref: workScopeRef, owner_id: ownerId, released_paths: token!.allowed_paths, mutation_started: true };
+}
+
+const WORK_SCOPE_REGISTRY_STALE_LOCK_MS = 30_000;
+
+function withWorkScopeRegistryLock<T>(registry: string, action: () => T): T {
+  const lockPath = join(registry, '.lock');
+  let recoveredStaleLock = false;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const handle = openSync(lockPath, 'wx');
+      closeSync(handle);
+      writeFileSync(lockPath, JSON.stringify({ schema: 'narada.git.work_scope_registry_lock.v1', pid: process.pid, created_at: new Date().toISOString() }));
+      try { return action(); } finally { rmSync(lockPath, { force: true }); }
+    } catch (error) {
+      if (!existsSync(lockPath)) throw error;
+      const ageMs = Date.now() - statSync(lockPath).mtimeMs;
+      let ownerPid: number | null = null;
+      try {
+        const record = JSON.parse(readFileSync(lockPath, 'utf8')) as { pid?: unknown };
+        ownerPid = typeof record.pid === 'number' ? record.pid : null;
+      } catch { /* an interrupted empty lock is recoverable after the stale threshold */ }
+      const ownerAlive = ownerPid !== null && processIsAlive(ownerPid);
+      if (attempt === 0 && ageMs > WORK_SCOPE_REGISTRY_STALE_LOCK_MS && !ownerAlive) {
+        rmSync(lockPath, { force: true });
+        recoveredStaleLock = true;
+        continue;
+      }
+      throw diagnosticError('git_work_scope_registry_busy', 'git_work_scope_registry_busy', {
+        mutation_started: false, retryable: true, lock_age_ms: ageMs, owner_pid: ownerPid,
+        owner_process_alive: ownerAlive, stale_lock_recovered: recoveredStaleLock,
+      });
+    }
+  }
+  throw diagnosticError('git_work_scope_registry_busy');
+}
+
+function processIsAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
 export async function gitStatus(args: Record<string, unknown>, state: GitMcpState, context: GitRequestContext = {}): Promise<Record<string, unknown>> {
@@ -1028,6 +1113,20 @@ function requireWorkScope(ref: unknown, repositoryRoot: string, state: GitMcpSta
     throw diagnosticError(message, message, {
       work_scope_ref: ref ?? null,
       repository_root: repositoryRoot,
+      mutation_started: false,
+      atomic: true,
+    });
+  }
+}
+
+function assertPathsWithinWorkScope(paths: string[], workScope: GitWorkScope, code: string): void {
+  const outOfScope = paths.filter((path) => !workScope.allowed_paths.some((allowed) => pathMatches(path, allowed)));
+  if (outOfScope.length > 0) {
+    throw diagnosticError(code, code, {
+      work_scope_ref: workScope.ref,
+      owner_id: workScope.owner_id,
+      allowed_paths: workScope.allowed_paths,
+      out_of_scope_paths: outOfScope,
       mutation_started: false,
       atomic: true,
     });
@@ -1243,10 +1342,10 @@ export async function gitAdd(args: Record<string, unknown>, state: GitMcpState, 
   if (requestedPaths.length === 0) throw diagnosticError('git_add_requires_paths');
   const before = await gitStatus({ working_directory: cwd }, state, context);
   const repositoryRoot = String(before.repository_root ?? cwd);
-  const workScope = args.work_scope_ref ? requireWorkScope(args.work_scope_ref, repositoryRoot, state) : null;
+  const workScope = requireWorkScope(args.work_scope_ref, repositoryRoot, state);
   const baseState = await readGitBaseState(cwd, state, context);
-  if (workScope) {
-    assertScopeHead(workScope, baseState);
+  assertScopeHead(workScope, baseState);
+  {
     const existingOutOfScope = stringArray(before.staged)
       .map(normalizeCommitScopePath)
       .filter((path) => path && !workScope.allowed_paths.some((allowed) => pathMatches(path, allowed)));
@@ -1261,7 +1360,7 @@ export async function gitAdd(args: Record<string, unknown>, state: GitMcpState, 
     }
   }
   const paths = await expandGitAddPaths(cwd, requestedPaths, state, context);
-  if (workScope) {
+  {
     const outOfScope = paths.filter((path) => !workScope.allowed_paths.some((allowed) => pathMatches(path, allowed)));
     if (outOfScope.length > 0) {
       throw diagnosticError('git_add_paths_outside_work_scope', 'git_add_paths_outside_work_scope', {
@@ -1386,6 +1485,103 @@ async function preflightGitAddPaths(cwd: string, paths: string[], state: GitMcpS
   });
 }
 
+async function reconcileSharedIndex(cwd: string, commit: string, committedPaths: string[], state: GitMcpState, context: GitRequestContext) {
+  const indexPath = await gitPath(cwd, 'index', state, context);
+  if (!indexPath) return { status: 'pending', reason: 'shared_index_path_unavailable' };
+  const lockPath = `${indexPath}.lock`;
+  const reconciliationIndex = await gitPath(cwd, `narada-indexes/reconcile-${randomUUID()}.index`, state, context);
+  if (!reconciliationIndex) return { status: 'pending', reason: 'reconciliation_index_path_unavailable' };
+  let lockOwned = false;
+  try {
+    const handle = openSync(lockPath, 'wx');
+    closeSync(handle);
+    lockOwned = true;
+  } catch {
+    return { status: 'pending', reason: 'shared_index_locked', retryable: true };
+  }
+  try {
+    mkdirSync(dirname(reconciliationIndex), { recursive: true });
+    if (existsSync(indexPath)) copyFileSync(indexPath, reconciliationIndex);
+    else {
+      const emptyContext = { ...context, env: { ...(context.env ?? process.env), GIT_INDEX_FILE: reconciliationIndex } };
+      ensureGitOk(await runGit(cwd, ['read-tree', commit], state.policy, emptyContext), 'git_commit_paths_reconciliation_read_tree_failed');
+    }
+    const reconciliationContext = { ...context, env: { ...(context.env ?? process.env), GIT_INDEX_FILE: reconciliationIndex } };
+    const result = await runGit(cwd, ['reset', commit, '--', ...committedPaths], state.policy, reconciliationContext);
+    if (result.exit_code !== 0 || result.timed_out || result.cancelled) {
+      return { status: 'pending', reason: 'reset_failed', exit_code: result.exit_code, output: result.output_text };
+    }
+    copyFileSync(reconciliationIndex, lockPath);
+    renameSync(lockPath, indexPath);
+    lockOwned = false;
+    return { status: 'reconciled', lock_protocol: 'git_index_lock_atomic_replace' };
+  } finally {
+    rmSync(reconciliationIndex, { force: true });
+    if (lockOwned) rmSync(lockPath, { force: true });
+  }
+}
+
+type GitIndexReconciliationRecord = {
+  schema: 'narada.git.index_reconciliation.v1';
+  reconciliation_ref: string;
+  repository_root: string;
+  commit: string;
+  paths: string[];
+  work_scope_ref: string;
+  created_at: string;
+};
+
+async function persistIndexReconciliation(cwd: string, commit: string, paths: string[], workScopeRef: string, state: GitMcpState, context: GitRequestContext): Promise<GitIndexReconciliationRecord> {
+  const reconciliationRef = `gir_${randomUUID().replaceAll('-', '').slice(0, 28)}`;
+  const directory = await gitPath(cwd, 'narada-index-reconciliations', state, context);
+  if (!directory) throw diagnosticError('git_index_reconciliation_store_unavailable');
+  mkdirSync(directory, { recursive: true });
+  const repositoryRoot = (await gitText(cwd, ['rev-parse', '--show-toplevel'], state.policy, 'git_index_reconciliation_store_failed', context)).trim();
+  const record: GitIndexReconciliationRecord = {
+    schema: 'narada.git.index_reconciliation.v1',
+    reconciliation_ref: reconciliationRef,
+    repository_root: repositoryRoot,
+    commit,
+    paths,
+    work_scope_ref: workScopeRef,
+    created_at: new Date().toISOString(),
+  };
+  writeFileSync(join(directory, `${reconciliationRef}.json`), JSON.stringify(record, null, 2), { flag: 'wx' });
+  return record;
+}
+
+export async function gitReconcileIndex(args: Record<string, unknown>, state: GitMcpState, context: GitRequestContext = {}) {
+  requireWriteMode(state.policy, 'git_reconcile_index');
+  const cwd = resolveWorkingDirectory(args, state);
+  const reconciliationRef = requiredNonEmptyString(args.reconciliation_ref, 'git_reconcile_index_requires_reconciliation_ref');
+  if (!/^gir_[a-f0-9]{28}$/.test(reconciliationRef)) throw diagnosticError('git_index_reconciliation_ref_invalid');
+  const directory = await gitPath(cwd, 'narada-index-reconciliations', state, context);
+  if (!directory) throw diagnosticError('git_index_reconciliation_store_unavailable');
+  const recordPath = join(directory, `${reconciliationRef}.json`);
+  if (!existsSync(recordPath)) throw diagnosticError('git_index_reconciliation_ref_not_found');
+  let record: GitIndexReconciliationRecord;
+  try { record = JSON.parse(readFileSync(recordPath, 'utf8')) as GitIndexReconciliationRecord; } catch {
+    throw diagnosticError('git_index_reconciliation_record_corrupt', 'git_index_reconciliation_record_corrupt', { reconciliation_ref: reconciliationRef });
+  }
+  const root = (await gitText(cwd, ['rev-parse', '--show-toplevel'], state.policy, 'git_reconcile_index_failed', context)).trim();
+  if (record.repository_root !== root) throw diagnosticError('git_index_reconciliation_repository_mismatch');
+  const workScope = requireWorkScope(args.work_scope_ref, root, state);
+  if (workScope.ref !== record.work_scope_ref) throw diagnosticError('git_index_reconciliation_work_scope_mismatch');
+  assertPathsWithinWorkScope(record.paths, workScope, 'git_index_reconciliation_paths_outside_work_scope');
+  const reconciliation = await reconcileSharedIndex(cwd, record.commit, record.paths, state, context);
+  if (reconciliation.status !== 'reconciled') {
+    return { schema: 'narada.git.index_reconciliation_result.v1', status: 'pending', reconciliation_ref: reconciliationRef, reconciliation, mutation_started: false };
+  }
+  rmSync(recordPath, { force: true });
+  const postStatus = await gitStatus({ working_directory: cwd }, state, context);
+  const payload = {
+    schema: 'narada.git.index_reconciliation_result.v1', status: 'reconciled', reconciliation_ref: reconciliationRef,
+    commit: record.commit, reconciled_paths: record.paths, reconciliation, mutation_started: true, post_status: postStatus,
+  };
+  audit(state, payload);
+  return payload;
+}
+
 export async function gitCommitPaths(args: Record<string, unknown>, state: GitMcpState, context: GitRequestContext = {}) {
   requireWriteMode(state.policy, 'git_commit_paths');
   const cwd = resolveWorkingDirectory(args, state);
@@ -1397,6 +1593,10 @@ export async function gitCommitPaths(args: Record<string, unknown>, state: GitMc
   const paths = await expandGitAddPaths(cwd, requestedPaths, state, context);
   await preflightGitAddPaths(cwd, paths, state, context);
   const before = await gitStatus({ working_directory: cwd }, state, context);
+  const repositoryRoot = String(before.repository_root ?? cwd);
+  const workScope = requireWorkScope(args.work_scope_ref, repositoryRoot, state);
+  assertScopeHead(workScope, await readGitBaseState(cwd, state, context));
+  assertPathsWithinWorkScope(paths, workScope, 'git_commit_paths_outside_work_scope');
   const stagedBefore = stringArray(before.staged).map(normalizeCommitScopePath).filter(Boolean);
   const overlap = paths.filter((path) => stagedBefore.some((staged) => pathMatches(staged, path) || pathMatches(path, staged)));
   if (overlap.length) throw diagnosticError('git_commit_paths_shared_index_overlap', 'git_commit_paths_shared_index_overlap', { paths: overlap, mutation_started: false, atomic: true });
@@ -1424,9 +1624,10 @@ export async function gitCommitPaths(args: Record<string, unknown>, state: GitMc
     commit = (await gitText(cwd, commitArgs, state.policy, 'git_commit_paths_commit_tree_failed', isolatedContext)).trim();
     const update = await runGit(cwd, ['update-ref', branchRef, commit, expectedHead], state.policy, context);
     if (update.exit_code !== 0 || update.timed_out || update.cancelled) throw diagnosticError('git_commit_paths_head_changed', 'git_commit_paths_head_changed', { expected_head: expectedHead, candidate_commit: commit, mutation_started: false, atomic: true });
-    const reconciliation = await runGit(cwd, ['reset', 'HEAD', '--', ...committedPaths], state.policy, context);
-    if (reconciliation.exit_code !== 0 || reconciliation.timed_out || reconciliation.cancelled) {
-      const pending = { schema: 'narada.git.commit_paths.v1', status: 'committed_shared_index_reconciliation_required', working_directory: cwd, scope_label: scopeLabel, isolation: 'dedicated_temporary_index', expected_head: expectedHead, branch_ref: branchRef, commit, commit_ref: `git_commit:${commit}`, committed_files: committedPaths, committed_count: committedPaths.length, mutation_performed: true, verification_status: 'commit_ref_updated_reconciliation_pending', reconciliation: { status: 'pending', command: ['git', 'reset', 'HEAD', '--', ...committedPaths], exit_code: reconciliation.exit_code, output: reconciliation.output_text }, post_status: null, summary: 'commit published locally; shared-index reconciliation requires retry' };
+    const reconciliation = await reconcileSharedIndex(cwd, commit, committedPaths, state, context);
+    if (reconciliation.status !== 'reconciled') {
+      const record = await persistIndexReconciliation(cwd, commit, committedPaths, workScope.ref, state, context);
+      const pending = { schema: 'narada.git.commit_paths.v1', status: 'committed_shared_index_reconciliation_required', working_directory: cwd, scope_label: scopeLabel, isolation: 'dedicated_temporary_index', expected_head: expectedHead, branch_ref: branchRef, commit, commit_ref: `git_commit:${commit}`, committed_files: committedPaths, committed_count: committedPaths.length, mutation_performed: true, verification_status: 'commit_ref_updated_reconciliation_pending', reconciliation_ref: record.reconciliation_ref, reconciliation: { ...reconciliation, retry_tool: 'git_reconcile_index', retry_arguments: { working_directory: cwd, reconciliation_ref: record.reconciliation_ref, work_scope_ref: workScope.ref } }, post_status: null, summary: 'commit published locally; call git_reconcile_index with the durable reconciliation reference' };
       audit(state, pending);
       return pending;
     }
@@ -1448,7 +1649,7 @@ export async function gitCommit(args: Record<string, unknown>, state: GitMcpStat
   const expectedStagedPaths = optionalExpectedStagedPaths(args.expected_staged_paths);
   const statusBefore = await gitStatus({ working_directory: cwd }, state, context);
   const repositoryRoot = String(statusBefore.repository_root ?? cwd);
-  const workScope = args.work_scope_ref ? requireWorkScope(args.work_scope_ref, repositoryRoot, state) : null;
+  const workScope = requireWorkScope(args.work_scope_ref, repositoryRoot, state);
   const indexScope = args.index_scope_ref ? requireIndexScope(args.index_scope_ref, repositoryRoot, state) : null;
   const baseStateBefore = await readGitBaseState(cwd, state, context);
   if (workScope) assertScopeHead(workScope, baseStateBefore);
@@ -1487,7 +1688,17 @@ export async function gitCommit(args: Record<string, unknown>, state: GitMcpStat
   const untrackedPaths = (stringArray(statusBefore.untracked) ?? []).map(normalizeCommitScopePath).filter(Boolean);
   const conflictPaths = (stringArray(statusBefore.conflicts) ?? []).map(normalizeCommitScopePath).filter(Boolean);
   if (workScope) {
-    const outOfScope = actualStagedPaths.filter((path) => !workScope.allowed_paths.some((allowed) => pathMatches(path, allowed)));
+    const stagedAuthorityPaths = Array.isArray(statusBefore.status_entries)
+      ? statusBefore.status_entries
+        .filter((entry) => asStatusEntry(entry).staged)
+        .flatMap((entry) => {
+          const statusEntry = asStatusEntry(entry);
+          return [statusEntry.path, statusEntry.original_path].filter((path): path is string => Boolean(path));
+        })
+        .map(normalizeCommitScopePath)
+        .filter(Boolean)
+      : actualStagedPaths;
+    const outOfScope = stagedAuthorityPaths.filter((path) => !workScope.allowed_paths.some((allowed) => pathMatches(path, allowed)));
     if (outOfScope.length > 0) {
       throw diagnosticError('git_commit_paths_outside_work_scope', 'git_commit_paths_outside_work_scope', {
         work_scope_ref: workScope.ref,

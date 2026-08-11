@@ -19,6 +19,8 @@ export {
   gitBranchSwitch,
   gitBranchUnsetUpstream,
   gitBeginWorkScope,
+  gitEndWorkScope,
+  gitReconcileIndex,
   gitChangedSummary,
   gitCommit,
   gitCommitPaths,

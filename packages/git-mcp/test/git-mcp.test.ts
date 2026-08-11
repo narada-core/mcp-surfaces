@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -19,6 +19,7 @@ import {
   gitCommit,
   gitCommitPaths,
   gitDiff,
+  gitEndWorkScope,
   gitFetch,
   gitLog,
   gitMerge,
@@ -28,6 +29,7 @@ import {
   gitRebase,
   gitRebaseAbort,
   gitRebaseContinue,
+  gitReconcileIndex,
   gitRepositoriesSummary,
   gitShow,
   gitStatus,
@@ -104,6 +106,7 @@ assert.deepEqual(toolNames.filter((tool: any) => tool.startsWith('git_')), [
   'git_commit',
   'git_commit_paths',
   'git_diff',
+  'git_end_work_scope',
   'git_fetch',
   'git_guidance',
   'git_log',
@@ -116,6 +119,7 @@ assert.deepEqual(toolNames.filter((tool: any) => tool.startsWith('git_')), [
   'git_rebase',
   'git_rebase_abort',
   'git_rebase_continue',
+  'git_reconcile_index',
   'git_repositories_summary',
   'git_show',
   'git_status',
@@ -177,9 +181,12 @@ assert.equal(guidanceContent.surface_id, 'git');
 assert.ok((guidanceContent.workflows.normal_publication as string[]).some((step: any) => step.includes('git_workflow_record')));
 assert.ok((guidanceContent.workflows.normal_publication as string[]).some((step: any) => step.includes('any unstaged, untracked, or conflict paths')));
 assert.deepEqual(guidanceContent.tool_inventory.write, [
+  'git_begin_work_scope',
+  'git_end_work_scope',
   'git_add',
   'git_unstage',
   'git_commit_paths',
+  'git_reconcile_index',
   'git_commit',
   'git_push',
   'git_fetch',
@@ -274,7 +281,8 @@ const untrackedDiff = await gitDiff({ working_directory: repo, scope: 'working',
 assert.deepEqual(untrackedDiff.untracked_paths, ['README.md']);
 assert.match(untrackedDiff.diff, /\+hello/);
 
-const addResult = await gitAdd({ working_directory: repo, paths: ['README.md'] }, state);
+const initialWorkScope = await gitBeginWorkScope({ working_directory: repo, owner_id: 'git-mcp-test', allowed_paths: ['README.md'] }, state);
+const addResult = await gitAdd({ working_directory: repo, paths: ['README.md'], work_scope_ref: initialWorkScope.work_scope_ref }, state);
 assert.deepEqual((addResult.post_status as any).staged, ['README.md']);
 assert.equal((addResult.verified_post_state as any).verification, 'verified');
 assert.equal(addResult.verification_status, 'verified');
@@ -295,34 +303,21 @@ const unstageResponse = await rpc({
   jsonrpc: '2.0',
   id: 27,
   method: 'tools/call',
-  params: { name: 'git_unstage', arguments: { working_directory: repo, paths: ['README.md'] } },
+  params: { name: 'git_unstage', arguments: { working_directory: repo, paths: ['README.md'], work_scope_ref: initialWorkScope.work_scope_ref } },
 }, state);
 assert.equal(unstageResponse.error, undefined);
 assert.equal(unstageResponse.result?.structuredContent.schema, 'narada.git.unstage.v1');
 assert.equal(unstageResponse.result?.structuredContent.verified_post_state.verification, 'verified');
 assert.deepEqual((unstageResponse.result?.structuredContent.post_status as any).staged, []);
 assert.deepEqual((unstageResponse.result?.structuredContent.post_status as any).unstaged, []);
-await gitAdd({ working_directory: repo, paths: ['README.md'] }, state);
+await gitAdd({ working_directory: repo, paths: ['README.md'], work_scope_ref: initialWorkScope.work_scope_ref }, state);
 
-await assert.rejects(
-  () => gitCommit({ working_directory: repo, message: 'Reject mixed worktree scope' }, state),
-  (error: any) => {
-    assert.equal(error.codeName, 'git_commit_scope_required_for_mixed_worktree');
-    assert.deepEqual(error.details.staged_paths, ['README.md']);
-    assert.ok(error.details.untracked_paths.includes('notes/task.md'));
-    assert.ok(error.details.untracked_paths.includes('runtime/tmp/artifact.log'));
-    assert.equal(error.details.mutation_started, false);
-    assert.equal(error.details.atomic, true);
-    assert.match(error.details.remediation, /expected_staged_paths/);
-    return true;
-  },
-);
-
-const commitResult = await gitCommit({ working_directory: repo, message: 'Initial commit', expected_staged_paths: ['README.md'] }, state);
+const commitResult = await gitCommit({ working_directory: repo, message: 'Initial commit', expected_staged_paths: ['README.md'], work_scope_ref: initialWorkScope.work_scope_ref }, state);
 assert.match(commitResult.commit, /^[0-9a-f]{40}$/);
 assert.equal((commitResult.verified_post_state as any).verification, 'verified');
 assert.equal(commitResult.verification_status, 'verified');
 assert.equal((commitResult.mutation_effect as any).operation, 'commit');
+await gitEndWorkScope({ working_directory: repo, owner_id: 'git-mcp-test', work_scope_ref: initialWorkScope.work_scope_ref }, state);
 
 const isolatedRepo = join(root, 'isolated-index-repo');
 git(root, ['init', '--initial-branch=main', isolatedRepo]);
@@ -335,11 +330,13 @@ git(isolatedRepo, ['commit', '-m', 'isolated base']);
 writeFileSync(join(isolatedRepo, 'alpha.txt'), 'alpha agent\n', 'utf8');
 writeFileSync(join(isolatedRepo, 'beta.txt'), 'beta other agent\n', 'utf8');
 git(isolatedRepo, ['add', 'beta.txt']);
+const isolatedScope = await gitBeginWorkScope({ working_directory: isolatedRepo, owner_id: 'isolated-agent', allowed_paths: ['alpha.txt'] }, state);
 const isolatedCommit = await gitCommitPaths({
   working_directory: isolatedRepo,
   paths: ['alpha.txt'],
   message: 'Commit alpha through isolated index',
   scope_label: 'agent-alpha',
+  work_scope_ref: isolatedScope.work_scope_ref,
 }, state);
 assert.equal(isolatedCommit.isolation, 'dedicated_temporary_index');
 assert.deepEqual(isolatedCommit.committed_files, ['alpha.txt']);
@@ -347,6 +344,31 @@ assert.deepEqual((isolatedCommit.post_status as any).staged, ['beta.txt']);
 assert.equal(git(isolatedRepo, ['show', '--format=', '--name-only', 'HEAD']).trim(), 'alpha.txt');
 assert.equal(git(isolatedRepo, ['show', 'HEAD:alpha.txt']).trim(), 'alpha agent');
 assert.equal(git(isolatedRepo, ['show', 'HEAD:beta.txt']).trim(), 'beta base');
+await gitEndWorkScope({ working_directory: isolatedRepo, owner_id: 'isolated-agent', work_scope_ref: isolatedScope.work_scope_ref }, state);
+writeFileSync(join(isolatedRepo, 'alpha.txt'), 'alpha after lock\n', 'utf8');
+const lockedScope = await gitBeginWorkScope({ working_directory: isolatedRepo, owner_id: 'isolated-agent', allowed_paths: ['alpha.txt'] }, state);
+const heldIndexLock = join(isolatedRepo, '.git', 'index.lock');
+writeFileSync(heldIndexLock, 'held by competing git process', 'utf8');
+const pendingReconciliation = await gitCommitPaths({
+  working_directory: isolatedRepo,
+  paths: ['alpha.txt'],
+  message: 'Commit while shared index is locked',
+  work_scope_ref: lockedScope.work_scope_ref,
+}, state);
+assert.equal(pendingReconciliation.status, 'committed_shared_index_reconciliation_required');
+assert.equal((pendingReconciliation as any).reconciliation.reason, 'shared_index_locked');
+assert.match((pendingReconciliation as any).reconciliation_ref, /^gir_/);
+assert.equal((pendingReconciliation as any).reconciliation.retry_tool, 'git_reconcile_index');
+assert.equal(existsSync(heldIndexLock), true);
+rmSync(heldIndexLock);
+const retriedReconciliation = await gitReconcileIndex({
+  working_directory: isolatedRepo,
+  reconciliation_ref: (pendingReconciliation as any).reconciliation_ref,
+  work_scope_ref: lockedScope.work_scope_ref,
+}, state);
+assert.equal(retriedReconciliation.status, 'reconciled');
+assert.equal(((retriedReconciliation as any).post_status as any).staged.includes('beta.txt'), true);
+await gitEndWorkScope({ working_directory: isolatedRepo, owner_id: 'isolated-agent', work_scope_ref: lockedScope.work_scope_ref }, state);
 
 const scopedRepo = join(root, 'scoped-repo');
 git(root, ['init', '--initial-branch=main', scopedRepo]);
@@ -358,9 +380,23 @@ git(scopedRepo, ['add', '.']);
 git(scopedRepo, ['commit', '-m', 'Scoped base']);
 writeFileSync(join(scopedRepo, 'alpha.txt'), 'alpha changed\n', 'utf8');
 writeFileSync(join(scopedRepo, 'beta.txt'), 'beta changed\n', 'utf8');
-const workScope = await gitBeginWorkScope({ working_directory: scopedRepo, allowed_paths: ['alpha.txt'] }, state);
+const scopeRegistry = join(scopedRepo, '.git', 'narada-work-scopes');
+mkdirSync(scopeRegistry, { recursive: true });
+const abandonedRegistryLock = join(scopeRegistry, '.lock');
+writeFileSync(abandonedRegistryLock, '');
+const staleTime = new Date(Date.now() - 60_000);
+utimesSync(abandonedRegistryLock, staleTime, staleTime);
+const workScope = await gitBeginWorkScope({ working_directory: scopedRepo, owner_id: 'git-mcp-test', allowed_paths: ['alpha.txt'] }, state);
+assert.equal(existsSync(abandonedRegistryLock), false);
 assert.match(workScope.work_scope_ref, /^gws_/);
 assert.deepEqual(workScope.allowed_paths, ['alpha.txt']);
+const competingState = createServerState({ allowedRoot: root, outputRoot: root, mode: 'write' });
+await assert.rejects(
+  () => gitBeginWorkScope({ working_directory: scopedRepo, owner_id: 'competing-agent', allowed_paths: ['alpha.txt'] }, competingState),
+  (error: any) => error.codeName === 'git_work_scope_path_already_owned' && error.details.current_owner_id === 'git-mcp-test',
+);
+const independentScope = await gitBeginWorkScope({ working_directory: scopedRepo, owner_id: 'competing-agent', allowed_paths: ['beta.txt'] }, competingState);
+await gitEndWorkScope({ working_directory: scopedRepo, owner_id: 'competing-agent', work_scope_ref: independentScope.work_scope_ref }, competingState);
 const scopedStatus = await gitStatus({ working_directory: scopedRepo, work_scope_ref: workScope.work_scope_ref, format: 'summary' }, state);
 assert.equal((scopedStatus.summary as any).matching_path_count, 1);
 assert.deepEqual(scopedStatus.paths, ['alpha.txt']);
@@ -374,22 +410,34 @@ await assert.rejects(
   () => gitCommit({ working_directory: scopedRepo, message: 'Reject out-of-scope index', work_scope_ref: workScope.work_scope_ref, index_scope_ref: scopedAdd.index_scope_ref }, state),
   (error: any) => error.codeName === 'git_index_scope_state_drift' && error.details.mutation_started === false && error.details.atomic === true,
 );
-await gitUnstage({ working_directory: scopedRepo, paths: ['beta.txt'] }, state);
+const betaScope = await gitBeginWorkScope({ working_directory: scopedRepo, owner_id: 'beta-cleanup', allowed_paths: ['beta.txt'] }, state);
+await gitUnstage({ working_directory: scopedRepo, paths: ['beta.txt'], work_scope_ref: betaScope.work_scope_ref }, state);
+await gitEndWorkScope({ working_directory: scopedRepo, owner_id: 'beta-cleanup', work_scope_ref: betaScope.work_scope_ref }, state);
 const scopedCommit = await gitCommit({ working_directory: scopedRepo, message: 'Scoped commit', work_scope_ref: workScope.work_scope_ref, index_scope_ref: scopedAdd.index_scope_ref }, state);
 assert.equal(scopedCommit.committed_files.includes('alpha.txt'), true);
 assert.match(scopedCommit.commit_ref, /^git_commit:[0-9a-f]{40}$/);
+await gitEndWorkScope({ working_directory: scopedRepo, owner_id: 'git-mcp-test', work_scope_ref: workScope.work_scope_ref }, competingState);
+await assert.rejects(
+  () => gitStatus({ working_directory: scopedRepo, work_scope_ref: workScope.work_scope_ref }, state),
+  /git_work_scope_ref_released/,
+);
+const reclaimedScope = await gitBeginWorkScope({ working_directory: scopedRepo, owner_id: 'competing-agent', allowed_paths: ['alpha.txt'] }, competingState);
+await gitEndWorkScope({ working_directory: scopedRepo, owner_id: 'competing-agent', work_scope_ref: reclaimedScope.work_scope_ref }, competingState);
 mkdirSync(join(scopedRepo, 'nested'), { recursive: true });
 writeFileSync(join(scopedRepo, 'nested', 'file.txt'), 'nested\n', 'utf8');
-const directoryAdd = await gitAdd({ working_directory: scopedRepo, paths: ['nested'] }, state);
+const directoryScope = await gitBeginWorkScope({ working_directory: scopedRepo, owner_id: 'directory-test', allowed_paths: ['nested'] }, state);
+const directoryAdd = await gitAdd({ working_directory: scopedRepo, paths: ['nested'], work_scope_ref: directoryScope.work_scope_ref }, state);
 assert.deepEqual(directoryAdd.paths, ['nested/file.txt']);
 assert.deepEqual((directoryAdd.post_status as any).staged, ['nested/file.txt']);
-await gitUnstage({ working_directory: scopedRepo, paths: ['nested/file.txt'] }, state);
+await gitUnstage({ working_directory: scopedRepo, paths: ['nested/file.txt'], work_scope_ref: directoryScope.work_scope_ref }, state);
+await gitEndWorkScope({ working_directory: scopedRepo, owner_id: 'directory-test', work_scope_ref: directoryScope.work_scope_ref }, state);
 
 writeFileSync(join(repo, 'scope-a.txt'), 'a\n', 'utf8');
 writeFileSync(join(repo, 'scope-b.txt'), 'b\n', 'utf8');
-await gitAdd({ working_directory: repo, paths: ['scope-a.txt', 'scope-b.txt'] }, state);
+const multiPathScope = await gitBeginWorkScope({ working_directory: repo, owner_id: 'multi-path-test', allowed_paths: ['scope-a.txt', 'scope-b.txt'] }, state);
+await gitAdd({ working_directory: repo, paths: ['scope-a.txt', 'scope-b.txt'], work_scope_ref: multiPathScope.work_scope_ref }, state);
 await assert.rejects(
-  () => gitCommit({ working_directory: repo, message: 'Reject unrelated staged path', scope_label: 'scope-a-only', expected_staged_paths: ['scope-a.txt'] }, state),
+  () => gitCommit({ working_directory: repo, message: 'Reject unrelated staged path', scope_label: 'scope-a-only', expected_staged_paths: ['scope-a.txt'], work_scope_ref: multiPathScope.work_scope_ref }, state),
   (error: any) => {
     assert.equal(error.codeName, 'git_commit_staged_scope_mismatch');
     assert.deepEqual(error.details.expected_staged_paths, ['scope-a.txt']);
@@ -402,13 +450,15 @@ await assert.rejects(
   },
 );
 assert.deepEqual((await gitStatus({ working_directory: repo }, state)).staged, ['scope-a.txt', 'scope-b.txt']);
-await gitUnstage({ working_directory: repo, paths: ['scope-a.txt', 'scope-b.txt'] }, state);
+await gitUnstage({ working_directory: repo, paths: ['scope-a.txt', 'scope-b.txt'], work_scope_ref: multiPathScope.work_scope_ref }, state);
+await gitEndWorkScope({ working_directory: repo, owner_id: 'multi-path-test', work_scope_ref: multiPathScope.work_scope_ref }, state);
 
 writeFileSync(join(repo, '.gitignore'), 'ignored-staging.txt\n', 'utf8');
 writeFileSync(join(repo, 'staging-safe.txt'), 'safe\n', 'utf8');
 writeFileSync(join(repo, 'ignored-staging.txt'), 'ignored\n', 'utf8');
+const ignoredPathScope = await gitBeginWorkScope({ working_directory: repo, owner_id: 'ignored-path-test', allowed_paths: ['staging-safe.txt', 'ignored-staging.txt'] }, state);
 await assert.rejects(
-  () => gitAdd({ working_directory: repo, paths: ['staging-safe.txt', 'ignored-staging.txt'] }, state),
+  () => gitAdd({ working_directory: repo, paths: ['staging-safe.txt', 'ignored-staging.txt'], work_scope_ref: ignoredPathScope.work_scope_ref }, state),
   (error: any) => {
     assert.equal(error.codeName, 'git_add_ignored_paths');
     assert.deepEqual(error.details.requested_paths, ['staging-safe.txt', 'ignored-staging.txt']);
@@ -425,6 +475,7 @@ assert.deepEqual(afterRejectedBatchAdd.staged, []);
 const afterRejectedUntracked = afterRejectedBatchAdd.untracked as string[];
 assert.equal(afterRejectedUntracked.includes('staging-safe.txt'), true);
 assert.equal(afterRejectedUntracked.includes('ignored-staging.txt'), false);
+await gitEndWorkScope({ working_directory: repo, owner_id: 'ignored-path-test', work_scope_ref: ignoredPathScope.work_scope_ref }, state);
 
 const logResult = await gitLog({ working_directory: repo, limit: 5 }, state);
 assert.equal(logResult.returned, 1);
@@ -466,18 +517,22 @@ await assert.rejects(
   /git_pathspec_may_be_multiple_paths/,
 );
 
+const broadPathScope = await gitBeginWorkScope({ working_directory: repo, owner_id: 'broad-path-test', allowed_paths: ['README.md'] }, state);
 await assert.rejects(
-  () => gitAdd({ working_directory: repo, paths: ['.'] }, state),
+  () => gitAdd({ working_directory: repo, paths: ['.'], work_scope_ref: broadPathScope.work_scope_ref }, state),
   /git_broad_path_not_allowed/,
 );
+await gitEndWorkScope({ working_directory: repo, owner_id: 'broad-path-test', work_scope_ref: broadPathScope.work_scope_ref }, state);
 
 await assert.rejects(
   () => gitShow({ working_directory: repo, commit: '--all' }, state),
   /git_leading_dash_commitish_not_allowed/,
 );
 
-await gitAdd({ working_directory: repo, paths: ['README.md'] }, state);
-await gitCommit({ working_directory: repo, message: 'Update readme', expected_staged_paths: ['README.md'] }, state);
+const readmeScope = await gitBeginWorkScope({ working_directory: repo, owner_id: 'readme-update-test', allowed_paths: ['README.md'] }, state);
+await gitAdd({ working_directory: repo, paths: ['README.md'], work_scope_ref: readmeScope.work_scope_ref }, state);
+await gitCommit({ working_directory: repo, message: 'Update readme', expected_staged_paths: ['README.md'], work_scope_ref: readmeScope.work_scope_ref }, state);
+await gitEndWorkScope({ working_directory: repo, owner_id: 'readme-update-test', work_scope_ref: readmeScope.work_scope_ref }, state);
 
 git(repo, ['mv', 'README.md', 'RENAMED.md']);
 const renameStatus = await gitStatus({ working_directory: repo }, state);
@@ -488,7 +543,8 @@ assert.deepEqual((renameStatus.status_entries as any[]).filter((entry: any) => !
   path: entry.path,
   original_path: entry.original_path,
 })), [{ x: 'R', y: ' ', path: 'RENAMED.md', original_path: 'README.md' }]);
-const renameCommit = await gitCommit({ working_directory: repo, message: 'Rename readme', expected_staged_paths: ['README.md <- RENAMED.md'] }, state);
+const renameScope = await gitBeginWorkScope({ working_directory: repo, owner_id: 'rename-test', allowed_paths: ['README.md', 'RENAMED.md'] }, state);
+const renameCommit = await gitCommit({ working_directory: repo, message: 'Rename readme', expected_staged_paths: ['README.md <- RENAMED.md'], work_scope_ref: renameScope.work_scope_ref }, state);
 assert.deepEqual(renameCommit.committed_files, ['README.md <- RENAMED.md']);
 assert.deepEqual((renameCommit.committed_entries as any[]).map((entry: any) => ({
   x: entry.x,
@@ -496,6 +552,7 @@ assert.deepEqual((renameCommit.committed_entries as any[]).map((entry: any) => (
   path: entry.path,
   original_path: entry.original_path,
 })), [{ x: 'R', y: ' ', path: 'RENAMED.md', original_path: 'README.md' }]);
+await gitEndWorkScope({ working_directory: repo, owner_id: 'rename-test', work_scope_ref: renameScope.work_scope_ref }, state);
 git(repo, ['commit', '--allow-empty', '-m', 'éééé']);
 
 const byteLimitedState = createServerState({ allowedRoot: root, outputRoot: root, maxOutputBytes: 3 });
@@ -659,19 +716,21 @@ const readModeBranchCreate = await rpc({
 assert.equal(readModeBranchCreate.error?.data.code, 'git_write_mode_required');
 
 writeFileSync(join(repo, 'summary.txt'), 'summary\n', 'utf8');
+const summaryScope = await gitBeginWorkScope({ working_directory: repo, owner_id: 'rpc-summary-test', allowed_paths: ['summary.txt'] }, state);
 await rpc({
   jsonrpc: '2.0',
   id: 61,
   method: 'tools/call',
-  params: { name: 'git_add', arguments: { working_directory: repo, paths: ['summary.txt'] } },
+  params: { name: 'git_add', arguments: { working_directory: repo, paths: ['summary.txt'], work_scope_ref: summaryScope.work_scope_ref } },
 }, state);
 const commitCall = await rpc({
   jsonrpc: '2.0',
   id: 62,
   method: 'tools/call',
-  params: { name: 'git_commit', arguments: { working_directory: repo, message: 'Summary commit', expected_staged_paths: ['summary.txt'] } },
+  params: { name: 'git_commit', arguments: { working_directory: repo, message: 'Summary commit', expected_staged_paths: ['summary.txt'], work_scope_ref: summaryScope.work_scope_ref } },
 }, state);
 assert.match(commitCall.result?.content[0].text, /summary\.txt/);
+await gitEndWorkScope({ working_directory: repo, owner_id: 'rpc-summary-test', work_scope_ref: summaryScope.work_scope_ref }, state);
 
 const pushCall = await rpc({
   jsonrpc: '2.0',

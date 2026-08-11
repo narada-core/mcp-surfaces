@@ -22,15 +22,6 @@ export function listTools(mode: string = 'read'): Array<Record<string, any>> {
       }),
     },
     {
-      name: 'git_begin_work_scope',
-      description: 'Issue a short-lived explicit work-scope reference for a declared path set and current base state. It does not infer ownership and does not mutate Git.',
-      inputSchema: objectSchema({
-        working_directory: { type: 'string', description: WORKING_DIRECTORY_DESCRIPTION },
-        allowed_paths: { type: 'array', items: { type: 'string' }, description: 'Explicit repository-relative files or directories that may be staged and committed.' },
-        base_state: { type: 'object', additionalProperties: true, description: 'Optional caller-supplied base state; when head or index_digest are supplied they must match the live repository.' },
-      }, ['allowed_paths']),
-    },
-    {
       name: 'git_fetch',
       description: 'Fetch one explicit branch from one configured remote without tags or arbitrary refspecs.',
       inputSchema: objectSchema({
@@ -204,47 +195,77 @@ export function listTools(mode: string = 'read'): Array<Record<string, any>> {
   ];
   const writeTools = [
     {
+      name: 'git_begin_work_scope',
+      description: 'Acquire a durable, short-lived cooperative ownership lease for explicit repository paths. Overlapping live leases are refused across Git MCP processes.',
+      inputSchema: objectSchema({
+        working_directory: { type: 'string', description: WORKING_DIRECTORY_DESCRIPTION },
+        owner_id: { type: 'string', description: 'Stable caller or agent identity that owns and must release the lease.' },
+        allowed_paths: { type: 'array', items: { type: 'string' }, description: 'Explicit repository-relative files or directories to lease.' },
+        base_state: { type: 'object', additionalProperties: true, description: 'Optional caller-supplied base state; supplied head or index_digest must match.' },
+      }, ['owner_id', 'allowed_paths']),
+    },
+    {
+      name: 'git_end_work_scope',
+      description: 'Release a durable cooperative work-scope lease. The owner identity must match the lease.',
+      inputSchema: objectSchema({
+        working_directory: { type: 'string', description: WORKING_DIRECTORY_DESCRIPTION },
+        owner_id: { type: 'string', description: 'Owner identity supplied when the lease was acquired.' },
+        work_scope_ref: { type: 'string', description: 'Work-scope reference to release.' },
+      }, ['owner_id', 'work_scope_ref']),
+    },
+    {
       name: 'git_add',
-      description: 'Preflight explicit files or directories, including ignored-path checks, and stage them atomically. A work-scope reference constrains the index and returns a narrower index-scope reference for commit.',
+      description: 'Preflight ignored paths, then stage explicit files or directories under a required durable work-scope lease and return a narrower index-scope reference for commit.',
       inputSchema: objectSchema({
         working_directory: { type: 'string', description: WORKING_DIRECTORY_DESCRIPTION },
         paths: { type: 'array', items: { type: 'string' }, description: 'Explicit file paths to stage.' },
-        work_scope_ref: { type: 'string', description: 'Optional work-scope reference issued by git_begin_work_scope.' },
+        work_scope_ref: { type: 'string', description: 'Required durable work-scope reference issued by git_begin_work_scope.' },
         scope_label: { type: 'string', description: 'Optional caller-supplied audit label for this mutation.' },
-      }, ['paths']),
+      }, ['paths', 'work_scope_ref']),
     },
     {
       name: 'git_unstage',
-      description: 'Unstage explicit file paths from the index without modifying the working tree.',
+      description: 'Unstage explicit file paths under a required durable work-scope lease without modifying the working tree.',
       inputSchema: objectSchema({
         working_directory: { type: 'string', description: WORKING_DIRECTORY_DESCRIPTION },
         paths: { type: 'array', items: { type: 'string' }, description: 'Explicit file paths to unstage.' },
+        work_scope_ref: { type: 'string', description: 'Required durable work-scope reference covering every path.' },
         scope_label: { type: 'string', description: 'Optional caller-supplied audit label for this mutation.' },
-      }, ['paths']),
+      }, ['paths', 'work_scope_ref']),
     },
     {
       name: 'git_commit_paths',
-      description: 'Atomically commit only explicit paths through a dedicated temporary index. Unrelated shared-index entries are preserved, and concurrent HEAD movement is refused by an atomic ref compare-and-swap.',
+      description: 'Commit explicit leased paths through a dedicated temporary index. Concurrent HEAD movement is refused and shared-index reconciliation uses Git index.lock.',
       inputSchema: objectSchema({
         working_directory: { type: 'string', description: WORKING_DIRECTORY_DESCRIPTION },
         paths: { type: 'array', items: { type: 'string' }, description: 'Exact files or directories to commit without staging them in the shared index.' },
         message: { type: 'string' },
         body: { type: 'string' },
+        work_scope_ref: { type: 'string', description: 'Required durable work-scope reference covering every committed path.' },
         scope_label: { type: 'string', description: 'Optional caller-supplied audit label for this mutation.' },
-      }, ['paths', 'message']),
+      }, ['paths', 'message', 'work_scope_ref']),
+    },
+    {
+      name: 'git_reconcile_index',
+      description: 'Retry a durable post-commit shared-index reconciliation while holding Git index.lock.',
+      inputSchema: objectSchema({
+        working_directory: { type: 'string', description: WORKING_DIRECTORY_DESCRIPTION },
+        reconciliation_ref: { type: 'string', description: 'Durable reconciliation reference returned by git_commit_paths.' },
+        work_scope_ref: { type: 'string', description: 'Original durable work-scope reference recorded with the pending reconciliation.' },
+      }, ['reconciliation_ref', 'work_scope_ref']),
     },
     {
       name: 'git_commit',
-      description: 'Create a commit from already staged changes. Consume index_scope_ref for an atomic exact-index check; expected_staged_paths remains a compatibility guard.',
+      description: 'Create a commit from already staged changes under a required durable work-scope lease.',
       inputSchema: objectSchema({
         working_directory: { type: 'string', description: WORKING_DIRECTORY_DESCRIPTION },
         message: { type: 'string' },
         body: { type: 'string' },
-        work_scope_ref: { type: 'string', description: 'Optional work-scope reference that constrains the commit.' },
+        work_scope_ref: { type: 'string', description: 'Required durable work-scope reference covering every staged path.' },
         index_scope_ref: { type: 'string', description: 'Optional short-lived exact-index reference returned by git_add.' },
         scope_label: { type: 'string', description: 'Optional caller-supplied audit label for this mutation.' },
-        expected_staged_paths: { type: 'array', items: { type: 'string' }, description: 'Exact set of staged display paths required before mutation when unstaged, untracked, or conflict paths exist outside the index; also guards the index in clean or staged-only worktrees. The commit is refused atomically when the actual index differs.' },
-      }, ['message']),
+        expected_staged_paths: { type: 'array', items: { type: 'string' }, description: 'Exact staged display paths required before mutation.' },
+      }, ['message', 'work_scope_ref']),
     },
     {
       name: 'git_push',

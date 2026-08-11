@@ -46,11 +46,13 @@ Launch with write mode only for agents that are allowed to publish repository ch
 
 ## Concurrent-agent commits
 
-Prefer `git_commit_paths` when multiple agents can touch one worktree. The tool refuses requested paths already present in the shared index, commits only the validated expanded path set through `GIT_INDEX_FILE`, and uses compare-and-swap ref publication to reject concurrent `HEAD` movement. It does not make concurrent working-tree edits safe; agents must still avoid editing the same file or use separate worktrees for overlapping changes.
+`git_add`, `git_unstage`, `git_commit_paths`, and `git_commit` require a live `work_scope_ref` from `git_begin_work_scope`. The durable, expiring lease is stored under Git metadata; another Git MCP process cannot lease an overlapping file or directory until the owner calls `git_end_work_scope` or the lease expires. A crashed process's registry lock is recovered only when it is stale and its recorded PID is no longer alive. Shell editors and non-cooperating tools remain outside this enforcement boundary, so overlapping changes still require separate worktrees.
+
+`git_commit_paths` is the preferred commit path when multiple agents can touch one worktree. It refuses requested paths already present in the shared index, commits only the validated expanded path set through `GIT_INDEX_FILE`, and uses compare-and-swap ref publication to reject concurrent `HEAD` movement. After publication it reconciles only committed paths while holding Git's real `index.lock`, preserving the latest unrelated staged entries. If the lock is held, the commit remains published and returns a durable `reconciliation_ref`; call `git_reconcile_index` with that reference and the original live work scope to retry exactly the pending reconciliation.
 
 ## Branch lifecycle
 
-Start with `git_branch_list` to inspect local and remote names, current state, and upstream metadata. `git_branch_create` creates a local branch from `HEAD` or an explicit start point but does not check it out or publish it; use `git_branch_switch` separately, then use `git_push` to publish it. Use `git_branch_set_upstream` or `git_branch_unset_upstream` to make tracking explicit. Local and remote deletion require an explicit merged-only base check, and force deletion is unavailable.
+Start with `git_branch_list` to inspect local and remote names, current state, and upstream metadata. Branch and remote-ref mutations are repository-level capabilities rather than path-owned mutations, so they do not consume work-scope leases; their authority comes from write mode plus their explicit branch, remote, base, and merged-only guards. `git_branch_create` creates a local branch from `HEAD` or an explicit start point but does not check it out or publish it; use `git_branch_switch` separately, then use `git_push` to publish it. Use `git_branch_set_upstream` or `git_branch_unset_upstream` to make tracking explicit. Local and remote deletion require an explicit merged-only base check, and force deletion is unavailable.
 
 ## Remote synchronization
 
@@ -73,9 +75,11 @@ Read tools:
 
 Write-mode tools:
 
-- `git_add`: stage explicit file paths.
+- `git_begin_work_scope` / `git_end_work_scope`: acquire and release the durable path authority required by path-mutating tools.
+- `git_add`: stage explicit file paths within the supplied work scope.
 - `git_unstage`: remove explicit file paths from the index without changing the working tree.
 - `git_commit_paths`: preferred concurrent-agent commit path. It validates explicit paths, builds the commit through a dedicated temporary index, atomically advances the current branch only if `HEAD` is unchanged, and preserves unrelated shared-index entries. A post-commit index-reconciliation failure is returned as `committed_shared_index_reconciliation_required`, never as an ambiguous pre-commit failure.
+- `git_reconcile_index`: retry one durable pending shared-index reconciliation after a successful `git_commit_paths` publication.
 - `git_commit`: legacy staged-index commit. Use only when an explicitly reviewed shared-index workflow is required.
 - `git_push`: push current branch or explicit remote/branch; force push is not supported.
 - `git_fetch`: fetch one explicit branch from one configured remote; tags and arbitrary refspecs are not accepted.

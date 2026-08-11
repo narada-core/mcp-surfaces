@@ -38,7 +38,7 @@ function structured(response: JsonRecord): JsonRecord {
 try {
   await runMcpProtocolSmoke(server.client, {
     requiredTools: [
-      'git_policy_inspect', 'git_status', 'git_branch_list', 'git_diff', 'git_add', 'git_commit', 'git_push', 'git_log',
+      'git_policy_inspect', 'git_status', 'git_branch_list', 'git_diff', 'git_begin_work_scope', 'git_end_work_scope', 'git_add', 'git_commit', 'git_push', 'git_log',
       'git_branch_create', 'git_branch_switch', 'git_branch_rename', 'git_branch_delete', 'git_branch_delete_remote',
       'git_branch_set_upstream', 'git_branch_unset_upstream',
     ],
@@ -58,15 +58,21 @@ try {
   assert.equal(diff.schema, 'narada.git.diff.v1', JSON.stringify(diff));
   assert.match(String(diff.diff), /site fabric git e2e/);
 
+  const initialScope = structured(await server.client.request(30, 'tools/call', {
+    name: 'git_begin_work_scope', arguments: { working_directory: repo, owner_id: 'site-fabric-initial', allowed_paths: ['README.md'] },
+  }));
   const added = structured(await server.client.request(4, 'tools/call', {
-    name: 'git_add', arguments: { working_directory: repo, paths: ['README.md'] },
+    name: 'git_add', arguments: { working_directory: repo, paths: ['README.md'], work_scope_ref: initialScope.work_scope_ref },
   }));
   assert.deepEqual((added.post_status as JsonRecord).staged, ['README.md'], JSON.stringify(added));
 
   const committed = structured(await server.client.request(4, 'tools/call', {
-    name: 'git_commit', arguments: { working_directory: repo, message: 'Site fabric E2E commit' },
+    name: 'git_commit', arguments: { working_directory: repo, message: 'Site fabric E2E commit', work_scope_ref: initialScope.work_scope_ref },
   }));
   assert.match(String(committed.commit), /^[0-9a-f]{40}$/);
+  structured(await server.client.request(31, 'tools/call', {
+    name: 'git_end_work_scope', arguments: { working_directory: repo, owner_id: 'site-fabric-initial', work_scope_ref: initialScope.work_scope_ref },
+  }));
 
   const pushed = structured(await server.client.request(5, 'tools/call', {
     name: 'git_push', arguments: { working_directory: repo, remote: 'origin', branch: 'main' },
@@ -137,14 +143,20 @@ try {
     name: 'git_branch_switch', arguments: { working_directory: repo, branch: 'site-remote-unmerged' },
   });
   writeFileSync(join(repo, 'remote-unmerged.txt'), 'remote unmerged branch\n', 'utf8');
+  const remoteUnmergedScope = structured(await server.client.request(32, 'tools/call', {
+    name: 'git_begin_work_scope', arguments: { working_directory: repo, owner_id: 'site-fabric-unmerged', allowed_paths: ['remote-unmerged.txt'] },
+  }));
   const remoteUnmergedAdded = structured(await server.client.request(24, 'tools/call', {
-    name: 'git_add', arguments: { working_directory: repo, paths: ['remote-unmerged.txt'] },
+    name: 'git_add', arguments: { working_directory: repo, paths: ['remote-unmerged.txt'], work_scope_ref: remoteUnmergedScope.work_scope_ref },
   }));
   assert.deepEqual((remoteUnmergedAdded.post_status as JsonRecord).staged, ['remote-unmerged.txt'], JSON.stringify(remoteUnmergedAdded));
   const remoteUnmergedCommit = structured(await server.client.request(25, 'tools/call', {
-    name: 'git_commit', arguments: { working_directory: repo, message: 'Site fabric E2E unmerged remote branch' },
+    name: 'git_commit', arguments: { working_directory: repo, message: 'Site fabric E2E unmerged remote branch', work_scope_ref: remoteUnmergedScope.work_scope_ref },
   }));
   assert.match(String(remoteUnmergedCommit.commit), /^[0-9a-f]{40}$/);
+  structured(await server.client.request(33, 'tools/call', {
+    name: 'git_end_work_scope', arguments: { working_directory: repo, owner_id: 'site-fabric-unmerged', work_scope_ref: remoteUnmergedScope.work_scope_ref },
+  }));
   const remoteUnmergedPush = structured(await server.client.request(26, 'tools/call', {
     name: 'git_push', arguments: { working_directory: repo, remote: 'origin', branch: 'site-remote-unmerged' },
   }));
@@ -166,10 +178,16 @@ try {
   }));
   assert.equal((log.commits as JsonRecord[])[0].subject, 'Site fabric E2E commit');
 
+  const broadScope = structured(await server.client.request(34, 'tools/call', {
+    name: 'git_begin_work_scope', arguments: { working_directory: repo, owner_id: 'site-fabric-broad-refusal', allowed_paths: ['README.md'] },
+  }));
   const refused = await server.client.request(7, 'tools/call', {
-    name: 'git_add', arguments: { working_directory: repo, paths: ['.'] },
+    name: 'git_add', arguments: { working_directory: repo, paths: ['.'], work_scope_ref: broadScope.work_scope_ref },
   });
   assert.equal((refused.error?.data as JsonRecord)?.code, 'git_broad_path_not_allowed', JSON.stringify(refused));
+  structured(await server.client.request(35, 'tools/call', {
+    name: 'git_end_work_scope', arguments: { working_directory: repo, owner_id: 'site-fabric-broad-refusal', work_scope_ref: broadScope.work_scope_ref },
+  }));
 
   console.log(JSON.stringify({ status: 'passed', test_id: 'git.site-fabric.commit-push-policy', cleanup: 'completed_after_finally' }));
 } finally {

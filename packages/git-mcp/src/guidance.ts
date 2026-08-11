@@ -80,7 +80,7 @@ export function buildGuidanceResult(args: GuidanceRecord = {}): GuidanceRecord {
     },
     tool_inventory: {
       read: ['git_policy_inspect', 'git_status', 'git_sync_status', 'git_branch_list', 'git_changed_summary', 'git_repositories_summary', 'git_diff', 'git_log', 'git_show', 'git_output_show'],
-      write: ['git_add', 'git_unstage', 'git_commit_paths', 'git_commit', 'git_push', 'git_fetch', 'git_rebase', 'git_rebase_continue', 'git_rebase_abort', 'git_merge', 'git_merge_continue', 'git_merge_abort', 'git_branch_create', 'git_branch_switch', 'git_branch_rename', 'git_branch_delete', 'git_branch_delete_remote', 'git_branch_set_upstream', 'git_branch_unset_upstream', 'git_workflow_record'],
+      write: ['git_begin_work_scope', 'git_end_work_scope', 'git_add', 'git_unstage', 'git_commit_paths', 'git_reconcile_index', 'git_commit', 'git_push', 'git_fetch', 'git_rebase', 'git_rebase_continue', 'git_rebase_abort', 'git_merge', 'git_merge_continue', 'git_merge_abort', 'git_branch_create', 'git_branch_switch', 'git_branch_rename', 'git_branch_delete', 'git_branch_delete_remote', 'git_branch_set_upstream', 'git_branch_unset_upstream', 'git_workflow_record'],
       write_mode_note: 'Mutations require git-mcp mode=write and policy approval.'
     },
     examples: [
