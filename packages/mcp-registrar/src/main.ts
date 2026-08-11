@@ -4950,6 +4950,14 @@ export function syncSiteSurfaceRegistriesById(siteIds: string[]): JsonRecord {
   }
   const publications = uniqueIds.map((siteId) => {
     const site = lookupSite(siteId);
+    const siteFabricRefresh = refreshRegistrarOwnedSiteFabric(site);
+    if (siteFabricRefresh.status === 'error') {
+      throw diagnosticError(
+        'registrar_site_fabric_refresh_failed',
+        `registrar_site_fabric_refresh_failed:${siteId}`,
+        { site_id: siteId, site_fabric_refresh: siteFabricRefresh },
+      );
+    }
     const registry = buildSiteSurfaceRegistry(site);
     const dir = join(siteCapabilityRoot(site), 'capabilities');
     mkdirSync(dir, { recursive: true });
@@ -4967,6 +4975,7 @@ export function syncSiteSurfaceRegistriesById(siteIds: string[]): JsonRecord {
           const tools = asRecord(surface).registered_live_tools;
           return sum + (Array.isArray(tools) ? tools.length : 0);
         }, 0),
+        site_fabric_refresh: siteFabricRefresh,
       },
     };
   });
