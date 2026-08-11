@@ -1074,9 +1074,19 @@ async function attachSurface(args: JsonRecord, state: LoaderState): Promise<Json
 
   const explicitEntrypoint = optionalString(args.entrypoint);
   const extraArgs = stringArray(args.args);
+  if (!explicitEntrypoint && extraArgs && extraArgs.length > 0) {
+    throw diagnosticError(
+      'site_fabric_invocation_override_not_allowed',
+      `site_fabric_invocation_override_not_allowed:${surfaceId}`,
+      {
+        surface_id: surfaceId,
+        remediation: 'Change and rematerialize the authoritative Site fabric instead of supplying per-call arguments.',
+      },
+    );
+  }
   const launch = await resolveSurfaceEntrypoint(siteRoot, surfaceId, explicitEntrypoint, extraArgs);
   const { entrypoint, resolvedArgs } = launch;
-  ensureEntrypointAllowed(siteRoot, entrypoint, state.policy);
+  if (explicitEntrypoint) ensureEntrypointAllowed(siteRoot, entrypoint, state.policy);
   assertSurfaceLaunchMetadata(launch.childInvocationKind, entrypoint, launch.runtimeCommand);
 
   if (!existsSync(entrypoint)) {

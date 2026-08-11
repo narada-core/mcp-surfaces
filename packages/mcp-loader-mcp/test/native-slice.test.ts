@@ -37,7 +37,7 @@ process.stdin.on('data', (chunk) => {
 });
 `, 'utf8');
 
-  const processHandle = spawn(executable, ['--child-command', process.execPath, '--attach-timeout-ms', '3000', '--tool-call-timeout-ms', '3000'], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+  const processHandle = spawn(executable, ['--child-command', process.execPath, '--allowed-entrypoint-prefix', root, '--attach-timeout-ms', '3000', '--tool-call-timeout-ms', '3000'], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
   let buffer = '';
   const pending: Array<{ resolve: (value: any) => void; reject: (error: Error) => void }> = [];
   processHandle.stdout.setEncoding('utf8');

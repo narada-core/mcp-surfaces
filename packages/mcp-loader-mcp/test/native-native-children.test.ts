@@ -19,7 +19,6 @@ function startLoader(root: string) {
   const child = spawn(loaderExecutable, [
     '--allowed-site-root', root,
     '--allowed-entrypoint-prefix', root,
-    '--allowed-entrypoint-prefix', workspaceRoot,
     '--allowed-entrypoint-prefix', dirname(process.execPath),
     '--attach-timeout-ms', '5000',
     '--tool-call-timeout-ms', '5000',
@@ -100,6 +99,21 @@ test('native loader attaches native_entrypoint and native_applet children', asyn
     opened.push(nativeApplet.connection_id);
     const nativeAppletTools = await loader.call('tools/call', { name: 'mcp_loader_list_tools', arguments: { connection_id: nativeApplet.connection_id } });
     assert.ok(nativeAppletTools.tools.some((tool: any) => tool.name === 'fs_stat'));
+
+    await assert.rejects(
+      loader.call('tools/call', {
+        name: 'mcp_loader_open_surface',
+        arguments: { site_root: root, surface_id: 'native-entrypoint', entrypoint: taskExecutable },
+      }),
+      /entrypoint_not_allowed/,
+    );
+    await assert.rejects(
+      loader.call('tools/call', {
+        name: 'mcp_loader_open_surface',
+        arguments: { site_root: root, surface_id: 'native-entrypoint', args: ['--unexpected'] },
+      }),
+      /site_fabric_invocation_override_not_allowed/,
+    );
   } finally {
     for (const connection_id of opened) {
       await loader.call('tools/call', { name: 'mcp_loader_detach', arguments: { connection_id } }).catch(() => undefined);

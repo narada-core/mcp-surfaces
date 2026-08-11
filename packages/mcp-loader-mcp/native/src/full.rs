@@ -708,7 +708,13 @@ fn run_server(options: Options) -> Result<(), Diagnostic> {
         .and_then(Path::parent)
         .and_then(Path::parent)
         .ok_or_else(|| Diagnostic::new("runtime_path_unavailable", "runtime_path_unavailable"))?;
-    let surface_root = normalize_path(&native_dir.parent().unwrap_or(native_dir).to_string_lossy());
+    let package_root = native_dir.parent().unwrap_or(native_dir);
+    let surface_root = normalize_path(
+        &package_root
+            .parent()
+            .unwrap_or(package_root)
+            .to_string_lossy(),
+    );
     let workspace_root = normalize_path(
         &Path::new(&surface_root)
             .parent()
@@ -2394,6 +2400,16 @@ fn attach_surface(arguments: &JsonObject, state: &mut LoaderState) -> Result<Val
             .with_details(json!({"max_connections":inventory["max_connections"],"connection_count":inventory["connection_count"],"available_slots":inventory["available_slots"],"closed_connection_ids":inventory["closed_connection_ids"],"recovery":inventory["recovery"]})));
     }
     let extra_args = string_array(arguments.get("args"))?.unwrap_or_default();
+    if explicit_entrypoint.is_none() && !extra_args.is_empty() {
+        return Err(Diagnostic::new(
+            "site_fabric_invocation_override_not_allowed",
+            format!("site_fabric_invocation_override_not_allowed:{}", surface_id),
+        )
+        .with_details(json!({
+            "surface_id": surface_id,
+            "remediation": "Change and rematerialize the authoritative Site fabric instead of supplying per-call arguments."
+        })));
+    }
     let (entrypoint, resolved_args, command, child_invocation_kind) = if let Some(explicit) = explicit_entrypoint.clone() {
         (
             normalize_path(&explicit),
@@ -2529,7 +2545,9 @@ fn attach_surface(arguments: &JsonObject, state: &mut LoaderState) -> Result<Val
             ));
         }
     };
-    if !standalone {
+    // A Site-fabric launch is admitted by its exact materialized declaration.
+    // Prefix policy remains the authority for caller-supplied entrypoints only.
+    if explicit_entrypoint.is_some() {
         ensure_entrypoint_allowed(&site_root, &entrypoint, &state.policy)?;
     }
     if !Path::new(&entrypoint).exists() {
