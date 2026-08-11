@@ -92,19 +92,19 @@ fn run() -> Result<(), String> {
 }
 
 fn read_message(reader: &mut impl BufRead) -> Result<Option<Vec<u8>>, String> {
+    let mut line = String::new();
+    if reader
+        .read_line(&mut line)
+        .map_err(|error| format!("agent_context_native_read_failed:{error}"))?
+        == 0
+    {
+        return Ok(None);
+    }
+    if line.trim_start().starts_with('{') {
+        return Ok(Some(line.trim().as_bytes().to_vec()));
+    }
     let mut content_length = None;
     loop {
-        let mut line = String::new();
-        let bytes = reader
-            .read_line(&mut line)
-            .map_err(|error| format!("agent_context_native_read_failed:{error}"))?;
-        if bytes == 0 {
-            return if content_length.is_none() {
-                Ok(None)
-            } else {
-                Err("agent_context_native_unexpected_eof".into())
-            };
-        }
         if line == "\r\n" || line == "\n" {
             break;
         }
@@ -118,6 +118,14 @@ fn read_message(reader: &mut impl BufRead) -> Result<Option<Vec<u8>>, String> {
                     .parse::<usize>()
                     .map_err(|_| "agent_context_native_content_length_invalid".to_string())?,
             );
+        }
+        line.clear();
+        if reader
+            .read_line(&mut line)
+            .map_err(|error| format!("agent_context_native_read_failed:{error}"))?
+            == 0
+        {
+            return Err("agent_context_native_unexpected_eof".into());
         }
     }
     let length = content_length.ok_or("agent_context_native_content_length_required")?;
@@ -220,5 +228,16 @@ mod tests {
                 .collect::<BTreeSet<_>>();
             assert_eq!(names.len(), tools.len(), "tool names must be unique");
         }
+    }
+
+    #[test]
+    fn accepts_jsonl_and_content_length_requests() {
+        let json = br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+        let mut jsonl = std::io::Cursor::new([json.as_slice(), b"\n"].concat());
+        assert_eq!(read_message(&mut jsonl).unwrap().unwrap(), json);
+
+        let framed = format!("Content-Length: {}\r\n\r\n", json.len()).into_bytes();
+        let mut content_length = std::io::Cursor::new([framed, json.to_vec()].concat());
+        assert_eq!(read_message(&mut content_length).unwrap().unwrap(), json);
     }
 }
