@@ -329,6 +329,7 @@ function seedMailboxReconciliation(root) {
       scope: { included_container_refs: ['inbox'], included_item_kinds: ['message'] },
       normalize: { attachment_policy: 'metadata_only', body_policy: 'text_only', include_headers: false, tombstones_enabled: true },
       runtime: { polling_interval_ms: 60000, acquire_lock_timeout_ms: 1000, cleanup_tmp_on_startup: true, rebuild_views_after_sync: false, rebuild_search_after_sync: false },
+      admission: { mail: { included_folder_refs: ['inbox'], allowed_sender_domains: ['allowed.test'], unknown_sender_behavior: 'ignore' } },
     }],
   }), 'utf8');
   const domainPath = join(root, '.narada', 'runtime', 'mailbox-domain', 'mailbox-domain.db');
@@ -385,7 +386,15 @@ function seedMailboxReconciliation(root) {
     const provenance = { source_id: 'support', source_record_id: 'record-1', source_version: 'v1', source_cursor: 'cursor-1', observed_at: '2026-08-01T00:00:00.000Z' };
     const payload = {
       record_id: 'record-1', ordinal: '2026-08-01T00:00:00.000Z',
-      event: { mailbox_id: 'support', message_id: 'message-1', event_kind: 'upsert', payload: { mailbox_id: 'support', message_id: 'message-1', conversation_id: 'conversation-1' } },
+      event: {
+        mailbox_id: 'support', message_id: 'message-1', event_kind: 'upsert',
+        payload: {
+          mailbox_id: 'support', message_id: 'message-1', conversation_id: 'conversation-1',
+          internet_message_id: '<message-1@example.test>', subject: 'Fixture subject',
+          from: { email: 'sender@allowed.test' }, folder_refs: ['inbox'],
+          body: { text: 'secret body must not cross the admission receipt' },
+        },
+      },
     };
     facts.prepare(`
       insert into facts(fact_id,fact_type,source_id,source_record_id,source_version,source_cursor,provenance_json,payload_json,created_at)
@@ -405,11 +414,17 @@ function runMailboxReconciliationParity() {
   try {
     seedMailboxReconciliation(bunRoot);
     seedMailboxReconciliation(rustRoot);
+    const firstEventId = 'mbe_' + createHash('sha256').update('first-observed\0support\0message-1').digest('hex').slice(0, 40);
     const requests = [
       { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'mailbox_reconcile_first_observations', arguments: { idempotency_key: 'reconcile-1', generation_id: 'generation-1', scope_id: 'support', limit: 10 } } },
       { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'mailbox_reconcile_first_observations', arguments: { idempotency_key: 'reconcile-1', generation_id: 'generation-1', scope_id: 'support', limit: 10 } } },
       { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'mailbox_outbox_consumer_register', arguments: { consumer_id: 'consumer-1', scope_id: 'support', topics: ['mailbox.message.first_observed'], start_at: '2026-01-01T00:00:00.000Z' } } },
       { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'mailbox_outbox_list', arguments: { consumer_id: 'consumer-1', limit: 10 } } },
+      { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'mailbox_message_admit', arguments: { idempotency_key: 'admit-1', fact_id: 'fact-1', source_event_id: firstEventId, scope_id: 'support' } } },
+      { jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'mailbox_message_admit', arguments: { idempotency_key: 'admit-2', fact_id: 'fact-1', source_event_id: firstEventId, scope_id: 'support' } } },
+      { jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'mailbox_admission_show', arguments: { fact_id: 'fact-1', scope_id: 'support' } } },
+      { jsonrpc: '2.0', id: 8, method: 'tools/call', params: { name: 'mailbox_outbox_consumer_register', arguments: { consumer_id: 'decision-consumer', scope_id: 'support', topics: ['mailbox.message.admitted', 'mailbox.message.rejected'], start_at: '2026-01-01T00:00:00.000Z' } } },
+      { jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'mailbox_outbox_list', arguments: { consumer_id: 'decision-consumer', limit: 10 } } },
     ];
     const bun = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', [bunEntrypoint, '--site-root', bunRoot, '--control-plane-root', naradaRoot], requests, workspaceRoot);
     const rust = runMailbox(executable, ['--surface-id', 'mailbox', '--site-root', rustRoot], requests, workspaceRoot);
@@ -421,7 +436,17 @@ function runMailboxReconciliationParity() {
     for (const field of ['schema', 'event_id', 'scope_id', 'topic', 'aggregate_id', 'aggregate_revision', 'schema_version', 'causation_id', 'idempotency_key', 'partition_key', 'payload']) {
       assertSame('mailbox.reconcile.outbox.' + field, bunPage.items?.[0]?.[field], rustPage.items?.[0]?.[field]);
     }
-    return { status: 'passed', fixture: 'immutable_fact_reconciliation', compared: ['first_observation', 'idempotent_replay', 'outbox_event'] };
+    assertSame('mailbox.admission.first', mailboxStructured(bun, 5, 'bun'), mailboxStructured(rust, 5, 'rust'));
+    assertSame('mailbox.admission.canonical_replay', mailboxStructured(bun, 6, 'bun'), mailboxStructured(rust, 6, 'rust'));
+    assertSame('mailbox.admission.show', mailboxStructured(bun, 7, 'bun'), mailboxStructured(rust, 7, 'rust'));
+    const bunDecisionPage = mailboxStructured(bun, 9, 'bun');
+    const rustDecisionPage = mailboxStructured(rust, 9, 'rust');
+    assertSame('mailbox.admission.outbox.count', bunDecisionPage.count, rustDecisionPage.count);
+    for (const field of ['schema', 'event_id', 'scope_id', 'topic', 'aggregate_id', 'aggregate_revision', 'schema_version', 'causation_id', 'idempotency_key', 'partition_key', 'payload']) {
+      assertSame('mailbox.admission.outbox.' + field, bunDecisionPage.items?.[0]?.[field], rustDecisionPage.items?.[0]?.[field]);
+    }
+    if (JSON.stringify(rustDecisionPage).includes('secret body')) throw new Error('mailbox_admission_body_leaked');
+    return { status: 'passed', fixture: 'immutable_fact_reconciliation_and_admission', compared: ['first_observation', 'reconciliation_replay', 'first_observation_event', 'admission', 'canonical_admission_replay', 'admission_show', 'admission_event'] };
   } finally {
     rmSync(bunRoot, { recursive: true, force: true });
     rmSync(rustRoot, { recursive: true, force: true });

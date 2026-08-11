@@ -40,11 +40,13 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<V
         "mailbox_thread_show" => thread_show(args, root),
         "mailbox_output_show" => output_show(args, root),
         "mailbox_generation_show" => generation_show(args, root),
+        "mailbox_admission_show" => admission_show(args, root),
         "mailbox_outbox_consumer_show" => outbox_consumer_show(args, root),
         "mailbox_outbox_list" => outbox_list(args, root),
         "mailbox_outbox_consumer_register" => outbox_consumer_register(args, root),
         "mailbox_outbox_ack" => outbox_ack(args, root),
         "mailbox_reconcile_first_observations" => reconcile_first_observations(args, root),
+        "mailbox_message_admit" => admit_message(args, root),
         name if READ_NAMES.contains(&name) => Err(authority_boundary(name)),
         name if MUTATING_NAMES.contains(&name) => Err(authority_boundary(name)),
         _ => Err(error("unknown_tool", &format!("unknown_tool:{name}"))),
@@ -1129,6 +1131,538 @@ fn reconcile_first_observations(
     }
 }
 
+struct AdmissionEvaluation {
+    admitted: bool,
+    reason: &'static str,
+    folder_refs: Vec<String>,
+    sender_email: Option<String>,
+}
+
+fn fact_event(fact: &MailFact) -> Option<(&Map<String, Value>, Option<&Map<String, Value>>)> {
+    let event = fact.payload.get("event")?.as_object()?;
+    Some((event, event.get("payload").and_then(Value::as_object)))
+}
+
+fn string_set(value: Option<&Value>) -> HashSet<String> {
+    value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase())
+        .collect()
+}
+
+fn fact_folder_refs(fact: &MailFact) -> Vec<String> {
+    let mut refs = HashSet::new();
+    if let Some((_, Some(payload))) = fact_event(fact) {
+        refs.extend(string_set(payload.get("folder_refs")));
+        if let Some(graph) = payload
+            .get("source_extensions")
+            .and_then(|value| value.get("namespaces"))
+            .and_then(|value| value.get("graph"))
+            .and_then(Value::as_object)
+        {
+            for key in ["parent_folder_id", "queried_folder_ref"] {
+                if let Some(value) = graph
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    refs.insert(value.to_ascii_lowercase());
+                }
+            }
+        }
+    }
+    let mut values = refs.into_iter().collect::<Vec<_>>();
+    values.sort();
+    values
+}
+
+fn email_from(value: Option<&Value>) -> Option<String> {
+    match value {
+        Some(Value::String(value)) if value.contains('@') => Some(value.trim().to_ascii_lowercase()),
+        Some(Value::Object(value)) => value
+            .get("email")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| value.contains('@'))
+            .map(|value| value.to_ascii_lowercase()),
+        _ => None,
+    }
+}
+
+fn fact_sender_email(fact: &MailFact) -> Option<String> {
+    let (event, payload) = fact_event(fact)?;
+    email_from(event.get("from").or_else(|| payload.and_then(|payload| payload.get("from"))))
+        .or_else(|| {
+            email_from(
+                event
+                    .get("sender")
+                    .or_else(|| payload.and_then(|payload| payload.get("sender"))),
+            )
+        })
+}
+
+fn participant_emails(fact: &MailFact, fields: &[String]) -> HashSet<String> {
+    let requested = if fields.iter().any(|field| field == "any_participant") {
+        ["from", "sender", "to", "cc", "bcc"]
+            .into_iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+    } else {
+        fields.to_vec()
+    };
+    let mut emails = HashSet::new();
+    let Some((event, payload)) = fact_event(fact) else {
+        return emails;
+    };
+    for field in requested {
+        for value in [event.get(&field), payload.and_then(|payload| payload.get(&field))]
+            .into_iter()
+            .flatten()
+        {
+            if let Some(values) = value.as_array() {
+                for value in values {
+                    if let Some(email) = email_from(Some(value)) {
+                        emails.insert(email);
+                    }
+                }
+            } else if let Some(email) = email_from(Some(value)) {
+                emails.insert(email);
+            }
+        }
+    }
+    emails
+}
+
+enum PredicateMatch {
+    Yes,
+    No,
+    Unknown,
+}
+
+fn predicate_match(fact: &MailFact, predicate: &Value) -> PredicateMatch {
+    let Some(predicate) = predicate.as_object() else {
+        return PredicateMatch::No;
+    };
+    if predicate.get("kind").and_then(Value::as_str) != Some("participant") {
+        return PredicateMatch::No;
+    }
+    let fields = predicate
+        .get("fields")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        })
+        .filter(|values| !values.is_empty())
+        .unwrap_or_else(|| vec!["any_participant".to_string()]);
+    let emails = participant_emails(fact, &fields);
+    if emails.is_empty() {
+        return PredicateMatch::Unknown;
+    }
+    let addresses = string_set(predicate.get("addresses"));
+    let domains = string_set(predicate.get("domains"));
+    if addresses.is_empty() && domains.is_empty() {
+        return PredicateMatch::Yes;
+    }
+    if emails.iter().any(|email| {
+        addresses.contains(email)
+            || email
+                .rsplit_once('@')
+                .is_some_and(|(_, domain)| domains.contains(&domain.to_ascii_lowercase()))
+    }) {
+        PredicateMatch::Yes
+    } else {
+        PredicateMatch::No
+    }
+}
+
+fn evaluate_admission(fact: &MailFact, admission: &Value) -> AdmissionEvaluation {
+    let folder_refs = fact_folder_refs(fact);
+    let sender_email = fact_sender_email(fact);
+    let decision = |admitted, reason| AdmissionEvaluation {
+        admitted,
+        reason,
+        folder_refs: folder_refs.clone(),
+        sender_email: sender_email.clone(),
+    };
+    if fact.fact_type != "mail.message.discovered" {
+        return decision(true, "not_subject_to_new_message_policy");
+    }
+    let Some(admission) = admission.as_object() else {
+        return decision(true, "no_policy_restrictions");
+    };
+    if admission.is_empty() {
+        return decision(true, "no_policy_restrictions");
+    }
+    let included_folders = string_set(admission.get("included_folder_refs"));
+    let excluded_folders = string_set(admission.get("excluded_folder_refs"));
+    if folder_refs.iter().any(|value| excluded_folders.contains(value)) {
+        return decision(false, "excluded_folder");
+    }
+    if !included_folders.is_empty()
+        && !folder_refs.iter().any(|value| included_folders.contains(value))
+    {
+        return decision(false, "included_folder_not_matched");
+    }
+    if let Some(predicates) = admission.get("predicates").and_then(Value::as_object) {
+        let unknown_admitted = predicates
+            .get("unknown_participant_behavior")
+            .or_else(|| admission.get("unknown_sender_behavior"))
+            .and_then(Value::as_str)
+            == Some("admit");
+        if let Some(excluded) = predicates.get("exclude").and_then(Value::as_array) {
+            if excluded.iter().any(|predicate| {
+                matches!(predicate_match(fact, predicate), PredicateMatch::Yes)
+                    || (unknown_admitted
+                        && matches!(predicate_match(fact, predicate), PredicateMatch::Unknown))
+            }) {
+                return decision(false, "excluded_predicate");
+            }
+        }
+        if let Some(included) = predicates
+            .get("include")
+            .and_then(Value::as_array)
+            .filter(|values| !values.is_empty())
+        {
+            let mut saw_unknown = false;
+            let mut matched = false;
+            for predicate in included {
+                match predicate_match(fact, predicate) {
+                    PredicateMatch::Yes => matched = true,
+                    PredicateMatch::Unknown => saw_unknown = true,
+                    PredicateMatch::No => {}
+                }
+            }
+            if !matched && !(saw_unknown && unknown_admitted) {
+                return decision(false, "included_predicate_not_matched");
+            }
+        }
+    }
+    let addresses = string_set(admission.get("allowed_sender_addresses"));
+    let domains = string_set(admission.get("allowed_sender_domains"));
+    if addresses.is_empty() && domains.is_empty() {
+        return decision(true, "admitted");
+    }
+    let Some(sender) = sender_email.as_deref() else {
+        return decision(
+            admission.get("unknown_sender_behavior").and_then(Value::as_str) == Some("admit"),
+            if admission.get("unknown_sender_behavior").and_then(Value::as_str) == Some("admit") {
+                "admitted"
+            } else {
+                "sender_unknown_rejected"
+            },
+        );
+    };
+    let domain = sender.rsplit_once('@').map(|(_, domain)| domain.to_ascii_lowercase());
+    if addresses.contains(sender) || domain.as_ref().is_some_and(|domain| domains.contains(domain)) {
+        decision(true, "admitted")
+    } else {
+        decision(false, "sender_not_allowed")
+    }
+}
+
+fn admission_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let scope_id = required_bounded(args, "scope_id", "mailbox_admission_scope_id_required", 256)?;
+    let fact_id = required_bounded(args, "fact_id", "mailbox_admission_fact_id_required", 256)?;
+    let Some(db) = open_domain_db(root)? else {
+        return Ok(json!({"schema":"narada.mailbox.admission_show.v1","status":"not_found","scope_id":scope_id,"fact_id":fact_id}));
+    };
+    let decision_json: Option<String> = db
+        .query_row(
+            "SELECT decision_json FROM mailbox_admission_receipts WHERE scope_id=? AND fact_id=?",
+            params![scope_id, fact_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| error("mailbox_admission_query_failed", &e.to_string()))?;
+    let Some(decision_json) = decision_json else {
+        return Ok(json!({"schema":"narada.mailbox.admission_show.v1","status":"not_found","scope_id":scope_id,"fact_id":fact_id}));
+    };
+    let admission = serde_json::from_str::<Value>(&decision_json)
+        .map_err(|e| error("mailbox_admission_receipt_invalid", &e.to_string()))?;
+    Ok(json!({
+        "schema":"narada.mailbox.admission_show.v1",
+        "status":"ok",
+        "scope_id":scope_id,
+        "fact_id":fact_id,
+        "admission":admission
+    }))
+}
+
+fn admit_message(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let idempotency_key = required_bounded(
+        args,
+        "idempotency_key",
+        "mailbox_admission_idempotency_key_required",
+        512,
+    )?;
+    let fact_id = required_bounded(args, "fact_id", "mailbox_admission_fact_id_required", 256)?;
+    let source_event_id = required_bounded(
+        args,
+        "source_event_id",
+        "mailbox_admission_source_event_id_required",
+        256,
+    )?;
+    let scope = load_mailbox_scope(args, root)?;
+    let policy_version = format!(
+        "sha256:{}",
+        sha256_hex(
+            canonical_json(&json!({
+                "schema":"narada.mailbox.admission_policy.v1",
+                "scope_id":scope.scope_id,
+                "policy":scope.admission
+            }))
+            .as_bytes()
+        )
+    );
+    if let Some(expected) = args
+        .get("policy_version")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if expected != policy_version {
+            let code = format!("mailbox_admission_policy_version_mismatch:{expected}:{policy_version}");
+            return Err(error(&code, &code));
+        }
+    }
+    let fact = load_mail_fact(&scope, &fact_id).map_err(|value| {
+        if value
+            .get("code")
+            .and_then(Value::as_str)
+            .is_some_and(|code| code.contains("fact_not_found"))
+        {
+            let code = format!("mailbox_admission_fact_not_found:{fact_id}");
+            error(&code, &code)
+        } else {
+            value
+        }
+    })?;
+    if fact.fact_type != "mail.message.discovered" {
+        let code = format!("mailbox_admission_fact_type_invalid:{}", fact.fact_type);
+        return Err(error(&code, &code));
+    }
+    let metadata = mail_metadata(&fact)?;
+    if metadata.mailbox_id != scope.scope_id {
+        let code = format!(
+            "mailbox_admission_scope_mismatch:{}:{}",
+            metadata.mailbox_id, scope.scope_id
+        );
+        return Err(error(&code, &code));
+    }
+    let mut db = open_domain_db_write(root)?;
+    let source_event: Option<(String, String, String)> = db
+        .query_row(
+            "SELECT scope_id,topic,payload_json FROM mailbox_outbox WHERE event_id=?",
+            params![source_event_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(|e| error("mailbox_admission_source_event_query_failed", &e.to_string()))?;
+    let Some((event_scope, event_topic, event_payload_json)) = source_event else {
+        let code = format!("mailbox_admission_source_event_not_found:{source_event_id}");
+        return Err(error(&code, &code));
+    };
+    let event_payload = serde_json::from_str::<Value>(&event_payload_json)
+        .map_err(|e| error("mailbox_admission_source_event_invalid", &e.to_string()))?;
+    if event_topic != "mailbox.message.first_observed"
+        || event_scope != scope.scope_id
+        || event_payload.get("fact_id").and_then(Value::as_str) != Some(fact_id.as_str())
+        || event_payload.get("mailbox_id").and_then(Value::as_str) != Some(scope.scope_id.as_str())
+    {
+        let code = format!("mailbox_admission_source_event_mismatch:{source_event_id}");
+        return Err(error(&code, &code));
+    }
+    let evaluation = evaluate_admission(&fact, &scope.admission);
+    let request_fingerprint = sha256_hex(
+        canonical_json(&json!({
+            "schema":"narada.mailbox.message_admission_request.v2",
+            "scope_id":scope.scope_id,
+            "fact_id":fact_id,
+            "source_event_id":source_event_id,
+            "policy_version":policy_version
+        }))
+        .as_bytes(),
+    );
+    let admission_id = stable_id("mba_", &format!("{}\0{fact_id}", scope.scope_id));
+    let provenance = fact.provenance.as_object().cloned().unwrap_or_default();
+    let source_record_id = provenance
+        .get("source_record_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let source_version = provenance
+        .get("source_version")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let graph_mailbox_id = scope.graph_mailbox_id.clone().ok_or_else(|| {
+        let code = format!("mailbox_scope_graph_user_id_required:{}", scope.scope_id);
+        error(&code, &code)
+    })?;
+    let mut source_ref = json!({
+        "schema":"narada.mailbox.source_ref.v1",
+        "scope_id":scope.scope_id,
+        "mailbox_id":graph_mailbox_id,
+        "message_id":metadata.message_id,
+        "fact_id":fact_id,
+        "source_record_id":source_record_id,
+        "source_version":source_version
+    });
+    if let Some(conversation_id) = &metadata.conversation_id {
+        source_ref
+            .as_object_mut()
+            .expect("source ref")
+            .insert("conversation_id".to_string(), Value::String(conversation_id.clone()));
+    }
+    if let Some(internet_message_id) = &metadata.internet_message_id {
+        source_ref
+            .as_object_mut()
+            .expect("source ref")
+            .insert(
+                "internet_message_id".to_string(),
+                Value::String(internet_message_id.clone()),
+            );
+    }
+    let mut correlation_keys = Vec::new();
+    if let Some(conversation_id) = &metadata.conversation_id {
+        correlation_keys.push(json!({
+            "kind":"mailbox_conversation",
+            "scope":metadata.mailbox_id,
+            "value":conversation_id
+        }));
+    }
+    if let Some(internet_message_id) = &metadata.internet_message_id {
+        correlation_keys.push(json!({
+            "kind":"internet_message_id",
+            "scope":"rfc5322",
+            "value":internet_message_id
+        }));
+    }
+    let summary = metadata
+        .subject
+        .as_ref()
+        .map(|subject| format!("Mailbox message: {subject}").chars().take(500).collect::<String>())
+        .unwrap_or_else(|| "Mailbox message".to_string());
+    let source = json!({
+        "source_kind":"mailbox_message",
+        "source_scope":metadata.mailbox_id,
+        "immutable_source_id":metadata.message_id,
+        "summary":summary,
+        "source_ref":source_ref,
+        "correlation_keys":correlation_keys
+    });
+    let decision = json!({
+        "schema":"narada.mailbox.message_admission_receipt.v2",
+        "admission_id":admission_id,
+        "decision":if evaluation.admitted { "admitted" } else { "rejected" },
+        "reason":evaluation.reason,
+        "policy_version":policy_version,
+        "source_event_id":source_event_id,
+        "scope_id":scope.scope_id,
+        "fact_id":fact_id,
+        "source":source,
+        "evaluated_metadata":{
+            "folder_refs":evaluation.folder_refs,
+            "sender_email":evaluation.sender_email
+        }
+    });
+    let event_topic = if evaluation.admitted {
+        "mailbox.message.admitted"
+    } else {
+        "mailbox.message.rejected"
+    };
+    let event_payload = json!({
+        "schema":if evaluation.admitted { "narada.mailbox.message_admitted.v1" } else { "narada.mailbox.message_rejected.v1" },
+        "admission_id":admission_id,
+        "source_event_id":source_event_id,
+        "scope_id":scope.scope_id,
+        "fact_id":fact_id,
+        "decision":if evaluation.admitted { "admitted" } else { "rejected" },
+        "reason":evaluation.reason,
+        "policy_version":policy_version,
+        "source":source
+    });
+    let now = now_iso_millis();
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|e| error("mailbox_domain_transaction_failed", &e.to_string()))?;
+    let result = (|| {
+        let existing: Option<(String, String, String)> = tx
+            .query_row(
+                "SELECT scope_id,fact_id,decision_json FROM mailbox_admission_receipts WHERE idempotency_key=?",
+                params![idempotency_key],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(|e| error("mailbox_admission_query_failed", &e.to_string()))?;
+        let (stored_decision, replayed) = if let Some((existing_scope, existing_fact, existing_json)) = existing {
+            if existing_scope != scope.scope_id || existing_fact != fact_id {
+                let code = format!("mailbox_admission_idempotency_conflict:{idempotency_key}");
+                return Err(error(&code, &code));
+            }
+            (
+                serde_json::from_str::<Value>(&existing_json)
+                    .map_err(|e| error("mailbox_admission_receipt_invalid", &e.to_string()))?,
+                true,
+            )
+        } else if let Some(existing_json) = tx
+            .query_row(
+                "SELECT decision_json FROM mailbox_admission_receipts WHERE scope_id=? AND fact_id=?",
+                params![scope.scope_id, fact_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|e| error("mailbox_admission_query_failed", &e.to_string()))?
+        {
+            (
+                serde_json::from_str::<Value>(&existing_json)
+                    .map_err(|e| error("mailbox_admission_receipt_invalid", &e.to_string()))?,
+                true,
+            )
+        } else {
+            tx.execute(
+                "INSERT INTO mailbox_admission_receipts(admission_id,idempotency_key,request_fingerprint,scope_id,fact_id,policy_version,decision_json,created_at) VALUES (?,?,?,?,?,?,?,?)",
+                params![admission_id,idempotency_key,request_fingerprint,scope.scope_id,fact_id,policy_version,serde_json::to_string(&decision).unwrap_or_else(|_| "{}".to_string()),now],
+            )
+            .map_err(|e| error("mailbox_admission_insert_failed", &e.to_string()))?;
+            let event_id = stable_id("mbe_", &format!("admission\0{}\0{fact_id}", scope.scope_id));
+            tx.execute(
+                "INSERT INTO mailbox_outbox(event_id,scope_id,topic,aggregate_id,aggregate_revision,schema_version,causation_id,idempotency_key,partition_key,occurred_at,payload_json) VALUES (?,?,?,?,1,1,?,?,?,?,?)",
+                params![event_id,scope.scope_id,event_topic,admission_id,source_event_id,event_id,admission_id,now,serde_json::to_string(&event_payload).unwrap_or_else(|_| "{}".to_string())],
+            )
+            .map_err(|e| error("mailbox_admission_event_insert_failed", &e.to_string()))?;
+            (decision.clone(), false)
+        };
+        let mut result = stored_decision;
+        result
+            .as_object_mut()
+            .expect("admission receipt")
+            .insert("idempotency_replayed".to_string(), Value::Bool(replayed));
+        Ok(json!({
+            "schema":"narada.domain_operation.v1",
+            "operation_ref":format!("mailbox-admission:{admission_id}"),
+            "outcome":"completed",
+            "result":result
+        }))
+    })();
+    match result {
+        Ok(value) => {
+            tx.commit()
+                .map_err(|e| error("mailbox_domain_transaction_commit_failed", &e.to_string()))?;
+            Ok(value)
+        }
+        Err(value) => Err(value),
+    }
+}
+
 fn filter_message(v: &Value, args: &Map<String, Value>) -> bool {
     for (key, field) in [("mailbox_id", "mailbox_id"), ("folder", "folder"), ("thread_id", "thread_id")] {
         if let Some(filter) = args.get(key).and_then(Value::as_str) {
@@ -1499,7 +2033,8 @@ mod tests {
                     "graph":{"user_id":"support@example.test","prefer_immutable_ids":true},
                     "scope":{"included_container_refs":["inbox"],"included_item_kinds":["message"]},
                     "normalize":{"attachment_policy":"metadata_only","body_policy":"text_only","include_headers":false,"tombstones_enabled":true},
-                    "runtime":{"polling_interval_ms":60000,"acquire_lock_timeout_ms":1000,"cleanup_tmp_on_startup":true,"rebuild_views_after_sync":false,"rebuild_search_after_sync":false}
+                    "runtime":{"polling_interval_ms":60000,"acquire_lock_timeout_ms":1000,"cleanup_tmp_on_startup":true,"rebuild_views_after_sync":false,"rebuild_search_after_sync":false},
+                    "admission":{"mail":{"included_folder_refs":["inbox"],"allowed_sender_domains":["allowed.test"],"unknown_sender_behavior":"ignore"}}
                 }]
             }))
             .expect("config json"),
@@ -1524,7 +2059,12 @@ mod tests {
                 "mailbox_id":"support",
                 "message_id":"message-1",
                 "event_kind":"upsert",
-                "payload":{"mailbox_id":"support","message_id":"message-1","conversation_id":"conversation-1"}
+                "payload":{
+                    "mailbox_id":"support","message_id":"message-1","conversation_id":"conversation-1",
+                    "internet_message_id":"<message-1@example.test>","subject":"Fixture subject",
+                    "from":{"email":"sender@allowed.test"},"folder_refs":["inbox"],
+                    "body":{"text":"secret body must not cross the admission receipt"}
+                }
             }
         });
         facts.execute(
@@ -1548,6 +2088,33 @@ mod tests {
         ).expect("event count");
         assert_eq!(count, 1);
         drop(db);
+        let source_event_id = stable_id("mbe_", &format!("first-observed\0support\0message-1"));
+        let admission_args = json!({
+            "idempotency_key":"admit-1",
+            "fact_id":"fact-1",
+            "source_event_id":source_event_id,
+            "scope_id":"support"
+        });
+        let admitted = admit_message(admission_args.as_object().unwrap(), &root).expect("admit");
+        assert_eq!(admitted["result"]["decision"], "admitted");
+        assert_eq!(admitted["result"]["reason"], "admitted");
+        assert_eq!(admitted["result"]["idempotency_replayed"], false);
+        assert!(!serde_json::to_string(&admitted).unwrap().contains("secret body"));
+        let replay = admit_message(
+            json!({"idempotency_key":"admit-2","fact_id":"fact-1","source_event_id":source_event_id,"scope_id":"support"})
+                .as_object()
+                .unwrap(),
+            &root,
+        )
+        .expect("canonical replay");
+        assert_eq!(replay["result"]["idempotency_replayed"], true);
+        let shown = admission_show(
+            json!({"scope_id":"support","fact_id":"fact-1"}).as_object().unwrap(),
+            &root,
+        )
+        .expect("admission show");
+        assert_eq!(shown["status"], "ok");
+        assert_eq!(shown["admission"]["admission_id"], admitted["result"]["admission_id"]);
         fs::remove_dir_all(root).expect("cleanup");
     }
 }
