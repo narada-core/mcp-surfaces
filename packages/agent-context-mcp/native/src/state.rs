@@ -185,6 +185,8 @@ fn start_session(context: &Context, args: &Value) -> Result<Value, String> {
             activation.as_ref(),
             &roster["role_binding"],
             &generated_at,
+            None,
+            None,
         )?;
         return persist_session_materialization(
             context, &identity, runtime, &cwd, &roster, &admission, compiled,
@@ -708,9 +710,6 @@ fn hydrate_current(context: &Context, args: &Value) -> Result<Value, String> {
             )
         }
     };
-    if args.get("checkpoint_id").is_some() {
-        return Err("agent_context_native_exact_checkpoint_hydration_not_implemented".into());
-    }
     let identity = admission
         .pointer("/agent_identity/local_agent_id")
         .and_then(Value::as_str)
@@ -733,16 +732,36 @@ fn hydrate_current(context: &Context, args: &Value) -> Result<Value, String> {
         "activation_receipt",
         "NARADA_CARRIER_SESSION_ACTIVATION_RECEIPT",
     )?;
+    let checkpoint_id = optional_string(args, "checkpoint_id")?;
+    let (checkpoint, portable) = if let Some(id) = checkpoint_id.as_deref() {
+        let selection = json!({"agent_id":identity,"checkpoint_id":id});
+        (
+            Some(rehydrate(context, &selection)?),
+            Some(continuation_read(context, &selection)?),
+        )
+    } else {
+        (None, None)
+    };
     let compiled = crate::materialization::compile(
         context,
         &admission,
         activation.as_ref(),
         &roster["role_binding"],
         &generated_at,
+        checkpoint.as_ref(),
+        portable.as_ref(),
     )?;
     let whoami = json!({"schema":"narada.agent_context.identity_resolution.v1","status":"ok","identity":identity,"canonical_agent_id":admission.pointer("/agent_identity/canonical_agent_id"),"confidence":"exact","source":"carrier_session_admission_receipt","admission_receipt_ref":admission["receipt_id"],"carrier_session":admission["coordinate"],"authority_readback_ref":admission["authority_readback_ref"],"hint_match":true});
+    let omitted =
+        json!({"status":"omitted","reason":"exact_checkpoint_not_selected","checkpoint_id":null});
+    let checkpoint_result = checkpoint.unwrap_or_else(|| omitted.clone());
+    let portable_result = portable.unwrap_or_else(|| omitted.clone());
+    let advisory = checkpoint_result
+        .get("next_intended_action")
+        .cloned()
+        .unwrap_or(Value::Null);
     Ok(
-        json!({"schema":"narada.agent_context.orientation_hydration.v1","status":if compiled.manifest["delivery"]=="deliverable"{"ok"}else{"blocked"},"source_mutation":false,"site_id":context.site_id,"site_root":path_text(&context.site_root),"hydrated_at":compiled.manifest["generated_at"],"whoami":whoami,"admission_receipt_ref":admission["receipt_id"],"orientation_manifest":compiled.manifest,"continuity_selection":{"mode":"omitted","checkpoint_id":null},"checkpoint":{"status":"omitted","reason":"exact_checkpoint_not_selected","checkpoint_id":null},"portable_continuation":{"status":"omitted","reason":"exact_checkpoint_not_selected","checkpoint_id":null},"continuity_advisory_next_action":null}),
+        json!({"schema":"narada.agent_context.orientation_hydration.v1","status":if compiled.manifest["delivery"]=="deliverable"{"ok"}else{"blocked"},"source_mutation":false,"site_id":context.site_id,"site_root":path_text(&context.site_root),"hydrated_at":compiled.manifest["generated_at"],"whoami":whoami,"admission_receipt_ref":admission["receipt_id"],"orientation_manifest":compiled.manifest,"continuity_selection":if let Some(id)=checkpoint_id{json!({"mode":"exact","checkpoint_id":id})}else{json!({"mode":"omitted","checkpoint_id":null})},"checkpoint":checkpoint_result,"portable_continuation":portable_result,"continuity_advisory_next_action":advisory}),
     )
 }
 
@@ -973,7 +992,14 @@ fn continuation_read(context: &Context, args: &Value) -> Result<Value, String> {
     let reference = checkpoint.get("continuation_ref").filter(|v| !v.is_null());
     if reference.is_none() {
         let has_continuation = checkpoint.get("continuation").is_some_and(|v| !v.is_null());
-        base.as_object_mut().unwrap().extend(json!({"status":if has_continuation{"unlinked"}else{"no_continuation"},"message":if has_continuation{"Canonical continuation exists in the latest checkpoint but has no portable Markdown reference."}else{"The latest checkpoint has no canonical continuation state."},"next_action":checkpoint.pointer("/continuation_projection/next_action").cloned().unwrap_or(Value::Null)}).as_object().unwrap().clone());
+        let selected = checkpoint_id.as_deref();
+        let message = match (has_continuation, selected) {
+            (true, Some(id)) => format!("Canonical continuation exists in the checkpoint {id} but has no portable Markdown reference."),
+            (true, None) => "Canonical continuation exists in the latest checkpoint but has no portable Markdown reference.".into(),
+            (false, Some(id)) => format!("The checkpoint {id} has no canonical continuation state."),
+            (false, None) => "The latest checkpoint has no canonical continuation state.".into(),
+        };
+        base.as_object_mut().unwrap().extend(json!({"status":if has_continuation{"unlinked"}else{"no_continuation"},"message":message,"next_action":checkpoint.pointer("/continuation_projection/next_action").cloned().unwrap_or(Value::Null)}).as_object().unwrap().clone());
         return Ok(base);
     }
     let reference = reference.unwrap();

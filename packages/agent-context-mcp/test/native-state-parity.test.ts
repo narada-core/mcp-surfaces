@@ -69,6 +69,13 @@ try {
       materializationCounts(rust.db), materializationCounts(ts.db),
       'session materialization persistence parity',
     );
+    const activation = parityActivation(admission);
+    const activatedArgs = { ...materializationArgs, activation_receipt: activation };
+    assert.deepEqual(
+      normalize(fullResult(rust, await rustClient.call('agent_context_start_session', activatedArgs)), rust),
+      normalize(fullResult(ts, await tsClient.call('agent_context_start_session', activatedArgs)), ts),
+      'activated session materialization parity',
+    );
     const countsBeforeHydration = materializationCounts(rust.db);
     const hydrationArgs = { admission_receipt: admission, generated_at: '2026-08-11T00:01:00.000Z' };
     const tsHydration = fullResult(ts, await tsClient.call('agent_context_hydrate_current', hydrationArgs));
@@ -93,6 +100,9 @@ try {
     const currentTs = await tsClient.call('agent_context_rehydrate', { agent_id: 'parity.builder' });
     const currentRust = await rustClient.call('agent_context_rehydrate', { agent_id: 'parity.builder' });
     assert.deepEqual(normalize(currentRust, rust), normalize(currentTs, ts), 'current checkpoint projection');
+    const exactTsHydration = fullResult(ts, await tsClient.call('agent_context_hydrate_current', { admission_receipt: admission, checkpoint_id: firstTs.checkpoint_id, generated_at: '2026-08-11T00:02:00.000Z' }));
+    const exactRustHydration = fullResult(rust, await rustClient.call('agent_context_hydrate_current', { admission_receipt: admission, checkpoint_id: firstRust.checkpoint_id, generated_at: '2026-08-11T00:02:00.000Z' }));
+    assert.deepEqual(normalize(exactRustHydration, rust), normalize(exactTsHydration, ts), 'exact-checkpoint hydration parity');
 
     const exportArgs = { agent_id: 'parity.builder', path: '.ai/continuations/parity.md' };
     const exportTs = await tsClient.call('agent_context_continuation_export', exportArgs);
@@ -215,12 +225,15 @@ function normalize(value: unknown, fixtureValue: ReturnType<typeof fixture>): un
       .replace(/mcp_output:o_[a-f0-9]{24}/g, '<output_ref>').replace(/o_[a-f0-9]{24}\.json/g, '<output_id>.json')
       .replace(/mcp_output%3Ao_[a-f0-9]{24}/g, '<encoded_output_ref>')
       .replace(/orientation-ack:carrier-parity:1:[a-f0-9]{16}/g, '<orientation_ack>')
+      .replace(/orientation:carrier-materialization-parity:1:[a-f0-9]{16}/g, '<orientation_manifest_id>')
+      .replace(/read:continuity:[a-f0-9]{16}/g, '<continuity_read_step>')
       .replace(/20\d\d-\d\d-\d\dT\d\d:\d\d:\d\d\.\d\d\dZ/g, '<timestamp>')
     : value;
   const result: Record<string, unknown> = {};
   for (const [key, entry] of Object.entries(value)) {
     if (['checkpoint_id', 'archived_prior', 'content_hash', 'agent_start_event'].includes(key)) result[key] = entry == null ? null : `<${key}>`;
     else if (key === 'event_id' && typeof entry === 'string' && /^evt-\d{4}-/.test(entry)) result[key] = '<agent_start_event>';
+    else if (key === 'manifest_bytes') result[key] = '<manifest_bytes>';
     else if (['checkpoint_at', 'created_at'].includes(key)) result[key] = '<timestamp>';
     else if (key === 'source_checkpoint_ref') result[key] = '<checkpoint-ref>';
     else result[key] = normalize(entry, fixtureValue);
@@ -235,6 +248,16 @@ function parityAdmission() {
     agent_identity: { source_authority_ref: 'agent-identity:parity', artifact_ref: 'agent:parity.builder@1', revision: '1', local_agent_id: 'parity.builder', canonical_agent_id: 'parity.builder' },
     carrier_kind: 'codex', admission_policy: { source_authority_ref: 'site-law:parity', artifact_ref: 'carrier-policy:parity', revision: '1' },
     issued_at: '2026-08-11T00:00:00.000Z', valid_until: null, authority_readback_ref: 'carrier-session-authority:materialization-parity', evidence_refs: [], reason_codes: [],
+  };
+}
+
+function parityActivation(admission: ReturnType<typeof parityAdmission>) {
+  return {
+    schema: 'narada.carrier_session.activation_receipt.v0', receipt_id: 'activation:materialization-parity:1',
+    decision: 'activated', state: 'active', coordinate: admission.coordinate,
+    admission_receipt_ref: admission.receipt_id,
+    runtime_binding: { source_authority_ref: 'runtime-host:windows', artifact_ref: 'runtime:codex:parity', revision: '1', owning_site_ref: 'site:parity', observed_at: '2026-08-11T00:00:00.000Z' },
+    issued_at: '2026-08-11T00:00:00.000Z', authority_readback_ref: 'carrier-session-authority:materialization-parity', evidence_refs: ['runtime-observation:parity'], reason_codes: [],
   };
 }
 

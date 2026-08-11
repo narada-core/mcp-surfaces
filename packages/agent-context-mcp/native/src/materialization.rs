@@ -37,12 +37,19 @@ pub fn compile(
     activation: Option<&Value>,
     role_binding: &Value,
     observed_at: &str,
+    exact_checkpoint: Option<&Value>,
+    portable_continuation: Option<&Value>,
 ) -> Result<Materialization, String> {
     validate_admission(context, admission, observed_at)?;
-    if activation.is_some() {
-        return Err("agent_context_native_activation_receipt_not_implemented".into());
-    }
-    let mut entries = projections(context, admission, role_binding, observed_at)?;
+    let runtime_binding = validate_activation(admission, activation, observed_at)?;
+    let mut entries = projections(
+        context,
+        admission,
+        role_binding,
+        observed_at,
+        exact_checkpoint,
+        portable_continuation,
+    )?;
     entries.sort_by(|left, right| projection_key(left).cmp(&projection_key(right)));
     let residuals = entries.iter().filter(|entry| {
         entry.get("projection_status").and_then(Value::as_str) != Some("available")
@@ -81,7 +88,7 @@ pub fn compile(
         "coordinate":admission["coordinate"],"admission_receipt_ref":admission["receipt_id"],
         "agent_identity":admission["agent_identity"],"carrier_kind":admission["carrier_kind"],
         "assembly_policy":{"source_authority_ref":"orientation-assembly-policy","artifact_ref":"orientation-policy:agent-context-compatibility","revision":"1"},
-        "runtime_binding":Value::Null,"readiness":readiness,"delivery":delivery,
+        "runtime_binding":runtime_binding,"readiness":readiness,"delivery":delivery,
         "action_admission":"separate_required","entries":entries,"residuals":residuals,
         "negative_claims":NEGATIVE_CLAIMS.iter().map(|(id, statement)| json!({"claim_id":id,"statement":statement,"source_authority_ref":"orientation-policy:agent-context-compatibility","revision":"1"})).collect::<Vec<_>>(),
         "reason_codes":reason_codes,
@@ -128,6 +135,8 @@ fn projections(
     admission: &Value,
     role_binding: &Value,
     observed_at: &str,
+    exact_checkpoint: Option<&Value>,
+    portable_continuation: Option<&Value>,
 ) -> Result<Vec<Value>, String> {
     let subject = json!({"site_ref":admission.pointer("/coordinate/site_ref"),"agent_ref":admission.pointer("/agent_identity/artifact_ref"),"carrier_session_id":admission.pointer("/coordinate/carrier_session_id")});
     let receipt = admission["receipt_id"].clone();
@@ -170,6 +179,40 @@ fn projections(
         entries.push(json!({"entry_id":"orientation:site-law","compartment":"law_and_constraints","entry_kind":"site_law","source_authority_ref":format!("site-law:{}",admission.pointer("/coordinate/site_ref").and_then(Value::as_str).unwrap_or("")),"artifact_ref":format!("site-file:{relative}"),"revision":revision,"observed_at":observed_at,"valid_until":null,"criticality":"required","projection_status":"available","revalidation_rule":"on_sha256_change","evidence_refs":[format!("sha256:{revision}")],"payload":{"site_relative_path":relative,"sha256":revision,"content_included":false,"read_required":true,"required_read_step_ids":["read:site-law"]},"rendered_text":format!("Applicable Site instructions: AGENTS.md (sha256 {revision})."),"subject":subject}));
     } else {
         entries.push(json!({"entry_id":"orientation:site-law","compartment":"law_and_constraints","entry_kind":"site_law","source_authority_ref":format!("site-law:{}",admission.pointer("/coordinate/site_ref").and_then(Value::as_str).unwrap_or("")),"artifact_ref":format!("site-file:{relative}"),"revision":"unavailable","observed_at":observed_at,"valid_until":null,"criticality":"required","projection_status":"unavailable","revalidation_rule":"before_orientation_delivery","evidence_refs":[],"payload":{"site_relative_path":relative,"missing":true},"rendered_text":null,"subject":subject}));
+    }
+    if let Some(checkpoint) = exact_checkpoint {
+        if checkpoint["status"] == "ok" {
+            let checkpoint_id = checkpoint["checkpoint_id"]
+                .as_str()
+                .ok_or("agent_context_exact_checkpoint_id_required")?;
+            let portable = portable_continuation.cloned().unwrap_or_else(|| json!({}));
+            let entry_id = format!("orientation:continuity:{checkpoint_id}");
+            let material = json!({"schema":"narada.agent_context.orientation_continuity_material.v1","selection_posture":"selected_at_carrier_entry_not_live_state","historical_advisory_only":true,"checkpoint":checkpoint,"portable_continuation":portable,"authority_posture":{"continuity":"historical_context_only","consequential_action":"owning_admission_still_required"}});
+            let rendered = format!(
+                "{}\n",
+                serde_json::to_string_pretty(&material).map_err(|e| e.to_string())?
+            );
+            let revision = sha256(&rendered);
+            let step_id = format!("read:continuity:{}", &sha256(&entry_id)[..16]);
+            let artifact_ref = format!(
+                "orientation-manifest-entry:{}",
+                entry_id.replace(':', "%3A")
+            );
+            let line_count = rendered.replace("\r\n", "\n").split('\n').count().max(1);
+            required_reads.push(json!({"step_id":step_id,"ordinal":required_reads.len()+1,"required":true,"source":{"source_authority_ref":format!("agent-continuity:{}",admission.pointer("/coordinate/site_ref").and_then(Value::as_str).unwrap_or("")),"artifact_ref":artifact_ref,"revision":revision},"tool":{"name":"agent_orientation_read","arguments":{"step_id":step_id}},"completion":{"kind":"tool_result_fields","expected_result":{"content_sha256":revision,"offset":1,"returned_lines":line_count},"evidence_fields":["content_sha256","content_window_sha256","offset","returned_lines"]}}));
+            let summary = continuity_summary(checkpoint);
+            let mut evidence_refs = vec![
+                json!(format!("checkpoint:{checkpoint_id}")),
+                json!(format!("sha256:{revision}")),
+            ];
+            if let Some(hash) = portable.pointer("/artifact/sha256").and_then(Value::as_str) {
+                evidence_refs.push(json!(format!("sha256:{hash}")))
+            }
+            entries.push(json!({"entry_id":entry_id,"compartment":"continuity","entry_kind":"exact_continuity","source_authority_ref":format!("agent-continuity:{}",admission.pointer("/coordinate/site_ref").and_then(Value::as_str).unwrap_or("")),"artifact_ref":format!("checkpoint:{checkpoint_id}"),"revision":revision,"observed_at":observed_at,"valid_until":null,"criticality":"required","projection_status":"available","revalidation_rule":"never_as_live_truth;verify_exact_hash_on_read","evidence_refs":evidence_refs,"payload":{"checkpoint":checkpoint,"portable_continuation":portable,"historical_advisory_only":true,"occupant_summary":summary,"inspection_call":null,"required_read_step_ids":[step_id]},"rendered_text":format!("Exact continuity checkpoint: {checkpoint_id}."),"subject":subject}));
+        } else if let Some(checkpoint_id) = checkpoint["checkpoint_id"].as_str() {
+            let unavailable = checkpoint["status"] == "checkpoint_not_found";
+            entries.push(json!({"entry_id":format!("orientation:continuity:{checkpoint_id}"),"compartment":"continuity","entry_kind":"exact_continuity","source_authority_ref":format!("agent-continuity:{}",admission.pointer("/coordinate/site_ref").and_then(Value::as_str).unwrap_or("")),"artifact_ref":format!("checkpoint:{checkpoint_id}"),"revision":"unavailable","observed_at":observed_at,"valid_until":null,"criticality":"required","projection_status":if unavailable{"unavailable"}else{"incompatible"},"revalidation_rule":"resolve_exact_checkpoint_before_reassembly","evidence_refs":[],"payload":{"requested_checkpoint_id":checkpoint_id,"source_status":checkpoint["status"].as_str().unwrap_or("unknown"),"source_message":checkpoint["message"].as_str().unwrap_or(""),"historical_advisory_only":true},"rendered_text":null,"subject":subject}));
+        }
     }
     entries.push(json!({"entry_id":"orientation:entry-procedure","compartment":"entry_procedure","entry_kind":"entry_procedure","source_authority_ref":"carrier-entry-procedure:agent-context","artifact_ref":"agent-context:orientation-entry-procedure","revision":"1","observed_at":observed_at,"valid_until":null,"criticality":"required","projection_status":"available","revalidation_rule":"on_entry_procedure_revision","evidence_refs":[receipt],"payload":{"required_reads":required_reads,"ordered_steps":[{"step":"complete_required_reads","effect":"read","required":true,"completion_evidence":"orientation_required_read_completion"},{"step":"inspect_named_live_authorities_before_work_mutation","effect":"read","required":true},{"step":"obtain_owner_specific_action_admission_before_consequence","effect":"separate_governed_crossing","required":true}],"self_referential_tool_call":false},"rendered_text":"Review this manifest, inspect live owners, and obtain separate admission before consequential action.","subject":subject}));
     let servers = mcp_servers(context);
@@ -215,6 +258,57 @@ fn build_brief(manifest: &Value) -> Result<Value, String> {
     Ok(unsigned)
 }
 
+fn continuity_summary(checkpoint: &Value) -> Value {
+    let continuation = checkpoint
+        .get("continuation")
+        .filter(|v| v.is_object())
+        .unwrap_or(&Value::Null);
+    let active = checkpoint
+        .get("active_task")
+        .filter(|v| v.is_object())
+        .unwrap_or(&Value::Null);
+    let choose = |values: &[Option<&Value>], limit: usize| {
+        values
+            .iter()
+            .flatten()
+            .find(|v| !v.is_null())
+            .and_then(|v| bounded_text(v, limit))
+    };
+    json!({
+        "checkpoint_id":checkpoint["checkpoint_id"],
+        "checkpoint_at":bounded_text(&checkpoint["checkpoint_at"],80),
+        "objective":choose(&[continuation.get("objective"),active.get("objective"),active.get("title")],320),
+        "current_state":choose(&[continuation.get("current_state"),checkpoint.get("tactical_resume_notes")],320),
+        "next_action":choose(&[continuation.get("next_action"),checkpoint.get("next_intended_action")],320),
+        "blocker_count":checkpoint["continuation_blockers"].as_array().map(Vec::len).unwrap_or(0),
+        "historical_advisory_only":true
+    })
+}
+
+fn bounded_text(value: &Value, max: usize) -> Option<String> {
+    if value.is_null() {
+        return None;
+    }
+    let text = value
+        .as_str()
+        .map(str::trim)
+        .map(str::to_string)
+        .unwrap_or_else(|| serde_json::to_string(value).unwrap_or_default());
+    if text.is_empty() {
+        None
+    } else if text.chars().count() <= max {
+        Some(text)
+    } else {
+        Some(format!(
+            "{}…",
+            text.chars()
+                .take(max.saturating_sub(1))
+                .collect::<String>()
+                .trim_end()
+        ))
+    }
+}
+
 fn validate_admission(context: &Context, a: &Value, at: &str) -> Result<(), String> {
     if a["schema"] != "narada.carrier_session.admission_receipt.v0" || a["decision"] != "admitted" {
         return Err("agent_context_exact_admission_receipt_required".into());
@@ -232,6 +326,45 @@ fn validate_admission(context: &Context, a: &Value, at: &str) -> Result<(), Stri
         }
     }
     Ok(())
+}
+
+fn validate_activation(
+    admission: &Value,
+    activation: Option<&Value>,
+    observed_at: &str,
+) -> Result<Value, String> {
+    let Some(value) = activation else {
+        return Ok(Value::Null);
+    };
+    if value["schema"] != "narada.carrier_session.activation_receipt.v0" {
+        return Err("agent_context_activation_receipt_invalid".into());
+    }
+    if value["coordinate"] != admission["coordinate"] {
+        return Err("agent_context_activation_session_binding_mismatch".into());
+    }
+    if value["admission_receipt_ref"] != admission["receipt_id"] {
+        return Err("agent_context_activation_admission_receipt_mismatch".into());
+    }
+    let issued = value["issued_at"]
+        .as_str()
+        .ok_or("agent_context_activation_receipt_invalid")?;
+    if issued < admission["issued_at"].as_str().unwrap_or("") || issued > observed_at {
+        return Err("agent_context_activation_receipt_temporally_invalid".into());
+    }
+    if value["decision"] != "activated" {
+        return Ok(Value::Null);
+    }
+    let binding = value
+        .get("runtime_binding")
+        .filter(|v| !v.is_null())
+        .ok_or("agent_context_activation_runtime_binding_required")?;
+    if binding["owning_site_ref"] != admission["coordinate"]["site_ref"] {
+        return Err("agent_context_runtime_binding_site_mismatch".into());
+    }
+    if binding["observed_at"].as_str().unwrap_or("") > issued {
+        return Err("agent_context_activation_runtime_observation_after_receipt".into());
+    }
+    Ok(binding.clone())
 }
 fn law_path(context: &Context) -> (PathBuf, String) {
     let direct = context.site_root.join("AGENTS.md");
