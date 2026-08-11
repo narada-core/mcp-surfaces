@@ -1102,7 +1102,6 @@ export function listTools() {
           surface_id: { type: 'string', description: 'Surface identifier, e.g. scheduler.' },
           projection_id: { type: 'string', description: 'Explicit surface projection identifier when the surface has more than one authority/runtime projection.' },
           site_id: { type: 'string', description: 'Site context for arg interpolation, e.g. sonar. Defaults to andrey-user.' },
-          runtime_profile: { type: 'string', enum: ['native', 'bun', 'node-compat'], description: 'Runtime implementation profile selected from the Narada implementation matrix.' },
         },
         required: ['carrier_id', 'surface_id'],
         additionalProperties: false,
@@ -1140,20 +1139,6 @@ export function listTools() {
         additionalProperties: false,
       },
       annotations: { title: 'registrar_sync', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
-      outputSchema: { type: 'object', additionalProperties: true },
-    },
-    {
-      name: 'registrar_materialize_all',
-      description: 'Generate and atomically replace every registered carrier-native MCP config. Normal materialization is always all-carrier; use the out-of-band CLI escape hatch only for targeted emergency recovery.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          output_dir: { type: 'string', description: 'Optional directory for inspection output. One config and generation sidecar is written for every registered carrier; omit to write canonical carrier paths.' },
-          runtime_profile: { type: 'string', enum: ['native', 'bun', 'node-compat'], description: 'Runtime implementation profile selected from the Narada implementation matrix.' },
-        },
-        additionalProperties: false,
-      },
-      annotations: { title: 'registrar_materialize_all', readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
       outputSchema: { type: 'object', additionalProperties: true },
     },
     {
@@ -1327,7 +1312,6 @@ async function callTool(params: JsonRecord, _state: RegistrarState) {
     case 'registrar_carrier_bind': result = await registrarCarrierBind(args); break;
     case 'registrar_carrier_unbind': result = await registrarCarrierUnbind(args); break;
     case 'registrar_sync': result = await registrarSync(args); break;
-    case 'registrar_materialize_all': result = await registrarMaterializeAll(args); break;
     case 'registrar_carrier_validate': result = registrarCarrierValidate(args); break;
     case 'registrar_carrier_diff': result = registrarCarrierDiff(args); break;
     case 'registrar_surface_usage': result = registrarSurfaceUsage(args); break;
@@ -5085,15 +5069,16 @@ async function registrarCarrierBind(args: JsonRecord): Promise<JsonRecord> {
     );
   }
   if (aggregateServerKeys.length > 0) {
-    const materialized = await registrarMaterializeAll(args.runtime_profile ? { runtime_profile: args.runtime_profile } : {});
-    return {
-      ...materialized,
-      status: 'applied',
-      surface_id: surfaceId,
-      projection_id: projection.id,
-      server_keys: aggregateServerKeys,
-      binding_model: 'aggregate_carrier_config',
-    };
+    throw diagnosticError(
+      'registrar_carrier_config_owned_by_native_materializer',
+      `registrar_carrier_config_owned_by_native_materializer:${carrierId}:${surfaceId}`,
+      {
+        carrier_id: carrierId,
+        surface_id: surfaceId,
+        server_keys: aggregateServerKeys,
+        remediation: 'Edit the external native carrier contract or the owning Site registry, then run pnpm materialize:carrier.',
+      },
+    );
   }
 
   type CarrierBindPreparation = { result: JsonRecord; content: string; structured: JsonRecord };
@@ -5151,7 +5136,7 @@ async function registrarCarrierUnbind(args: JsonRecord): Promise<JsonRecord> {
         carrier_id: carrierId,
         surface_id: surfaceId,
         server_keys: aggregateServerKeys,
-        remediation: 'This surface is produced by the aggregate carrier model. Remove it from the carrier site binding/source model, then run registrar_materialize_all.',
+        remediation: 'This surface is produced by the external native carrier contract. Remove it from that contract or the owning Site registry, then run pnpm materialize:carrier.',
       },
     );
   }
@@ -5398,66 +5383,12 @@ function writeJsonRpcResponse(response: JsonRecord, { framed }: { framed: boolea
 
 export type RegistrarCliOptions =
   | { mode: 'stdio' }
-  | { mode: 'help' }
-  | { mode: 'materialize-all'; outputDir: string | null; runtimeProxyImplementation: RuntimeProxyImplementation; runtimeProfile: RuntimeProfileKind; recoveryEscapeHatch: false }
-  | { mode: 'materialize-carrier'; carrierId: string; outputPath: string | null; allowSingleCarrier: true; runtimeProxyImplementation: RuntimeProxyImplementation; runtimeProfile: RuntimeProfileKind; recoveryEscapeHatch: boolean }
+  | { mode: 'help' };
 
 export function parseArgs(argv: string[]): RegistrarCliOptions {
-  let carrierId: string | null = null;
-  let outputPath: string | null = null;
-  let outputDir: string | null = null;
-  let materializeAll = false;
-  let allowSingleCarrier = false;
-  let recoveryEscapeHatch = false;
-  let selectedProxyImplementation: RuntimeProxyImplementation = defaultRuntimeProxyImplementation();
-  let selectedProxyImplementationExplicit = false;
-  let selectedRuntimeProfile: RuntimeProfileKind = (process.env.NARADA_RUNTIME_PROFILE?.trim() || 'native') as RuntimeProfileKind;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === '--help' || arg === '-h') return { mode: 'help' };
-    if (arg === '--materialize-all') {
-      materializeAll = true;
-      continue;
-    }
-    if (arg === '--materialize-carrier') {
-      const value = argv[++index];
-      if (!value || value.startsWith('--')) throw new Error('registrar_missing_carrier_id');
-      carrierId = value;
-      continue;
-    }
-    if (arg === '--output-path') {
-      const value = argv[++index];
-      if (!value || value.startsWith('--')) throw new Error('registrar_missing_output_path');
-      outputPath = value;
-      continue;
-    }
-    if (arg === '--output-dir') {
-      const value = argv[++index];
-      if (!value || value.startsWith('--')) throw new Error('registrar_missing_output_dir');
-      outputDir = value;
-      continue;
-    }
-    if (arg === '--allow-single-carrier') {
-      allowSingleCarrier = true;
-      continue;
-    }
-    if (arg === '--recovery-escape-hatch') {
-      recoveryEscapeHatch = true;
-      continue;
-    }
-    if (arg === '--runtime-profile') {
-      const value = argv[++index];
-      if (value !== 'native' && value !== 'bun' && value !== 'node-compat') throw new Error('registrar_invalid_runtime_profile');
-      selectedRuntimeProfile = value;
-      continue;
-    }
-    if (arg === '--runtime-proxy-implementation') {
-      const value = argv[++index];
-      if (value !== 'bun' && value !== 'node' && value !== 'native') throw new Error('registrar_invalid_runtime_proxy_implementation');
-      selectedProxyImplementation = value;
-      selectedProxyImplementationExplicit = true;
-      continue;
-    }
     // Keep the historical launch hint accepted by Site Fabric clients. The
     // registrar's authoritative roots are resolved from its environment and
     // generated fabric, so this compatibility argument does not alter
@@ -5469,52 +5400,14 @@ export function parseArgs(argv: string[]): RegistrarCliOptions {
     }
     throw new Error(`registrar_unknown_cli_argument:${arg}`);
   }
-  const selectedPlan = acceptedRuntimeMaterializationPlan(selectedRuntimeProfile);
-  const matrixProxyImplementation = runtimeProxyImplementationForResolvedPlan(selectedPlan);
-  if (!selectedProxyImplementationExplicit) {
-    selectedProxyImplementation = matrixProxyImplementation;
-  } else if (selectedProxyImplementation !== matrixProxyImplementation && !recoveryEscapeHatch) {
-    throw new Error('registrar_runtime_proxy_override_requires_recovery_escape_hatch');
-  }
-  if (materializeAll && carrierId) throw new Error('registrar_materialize_modes_are_mutually_exclusive');
-  if (materializeAll && allowSingleCarrier) throw new Error('registrar_allow_single_carrier_requires_materialize_carrier');
-  if (materializeAll && outputPath) throw new Error('registrar_output_path_requires_materialize_carrier');
-  if (carrierId && outputDir) throw new Error('registrar_output_dir_requires_materialize_all');
-  if (carrierId && !allowSingleCarrier) throw new Error('registrar_single_carrier_materialization_requires_explicit_escape_hatch');
-  if (!carrierId && allowSingleCarrier) throw new Error('registrar_allow_single_carrier_requires_materialize_carrier');
-  if (recoveryEscapeHatch && (!carrierId || !allowSingleCarrier)) throw new Error('registrar_recovery_escape_hatch_requires_single_carrier');
-  if (!materializeAll && !carrierId && (outputPath || outputDir)) throw new Error('registrar_output_requires_materialization_mode');
-  if (!materializeAll && !carrierId && selectedProxyImplementationExplicit && selectedProxyImplementation !== 'bun') throw new Error('registrar_runtime_proxy_implementation_requires_materialization_mode');
-  if (materializeAll) return { mode: 'materialize-all', outputDir, runtimeProxyImplementation: selectedProxyImplementation, runtimeProfile: selectedRuntimeProfile, recoveryEscapeHatch: false };
-  if (carrierId) return { mode: 'materialize-carrier', carrierId, outputPath, allowSingleCarrier: true, runtimeProxyImplementation: selectedProxyImplementation, runtimeProfile: selectedRuntimeProfile, recoveryEscapeHatch };
   return { mode: 'stdio' };
-}
-
-async function runDirectMaterialization(options: Extract<RegistrarCliOptions, { mode: 'materialize-all' | 'materialize-carrier' }>): Promise<void> {
-  process.env[FRESH_REGISTRAR_ENV] = '1';
-  setRuntimeMaterializationProfile(options.runtimeProfile);
-  runtimeProxyImplementation = options.runtimeProxyImplementation;
-  if (runtimeProxyImplementation === 'native' && !nativeRuntimeProxyAvailable()) {
-    throw new Error(process.platform === 'win32'
-      ? `registrar_native_runtime_proxy_missing:${nativeRuntimeProxyEntrypoint()}`
-      : `registrar_native_runtime_proxy_unsupported_platform:${process.platform}`);
-  }
-  const result = options.mode === 'materialize-all'
-    ? await registrarMaterializeAll({ ...(options.outputDir ? { output_dir: resolve(options.outputDir) } : {}), runtime_profile: options.runtimeProfile })
-    : await registrarSingleCarrierMaterialize({ carrier_id: options.carrierId, runtime_proxy_implementation: options.runtimeProxyImplementation, recovery_escape_hatch: options.recoveryEscapeHatch, ...(options.outputPath ? { output_path: resolve(options.outputPath) } : {}) });
-  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
 
 function printCliHelp(): void {
   process.stdout.write([
     'mcp-registrar MCP server',
     '',
-    'Out-of-band carrier recovery (works when the MCP registrar surface cannot start):',
-    '  mcp-registrar --materialize-all [--output-dir <directory>] [--runtime-profile native|bun|node-compat] [--runtime-proxy-implementation bun|node|native]',
-    '',
-    'Targeted recovery is intentionally difficult and is not an MCP operation:',
-    '  mcp-registrar --materialize-carrier <carrier-id> --allow-single-carrier [--output-path <carrier-config>] [--runtime-profile native|bun|node-compat] [--runtime-proxy-implementation bun|node|native] [--recovery-escape-hatch]',
-    '',
+    'Carrier materialization and recovery are owned by narada-mcp-materializer.',
     'Without arguments, mcp-registrar serves its MCP stdio protocol.',
     'Normal materialization writes every registered carrier config and its .narada-generation.json sidecar atomically.',
     '',
@@ -5523,9 +5416,7 @@ function printCliHelp(): void {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const options = parseArgs(process.argv.slice(2));
-  const run = options.mode === 'materialize-all' || options.mode === 'materialize-carrier'
-    ? runDirectMaterialization(options)
-    : options.mode === 'help'
+  const run = options.mode === 'help'
       ? Promise.resolve(printCliHelp())
       : runStdioServer(options);
   run.catch((error) => {

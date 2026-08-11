@@ -1,14 +1,20 @@
 # @narada-core/mcp-registrar
 
+## Verification
+
+```powershell
+pnpm --filter @narada-core/mcp-registrar test
+```
+
 MCP surface registrar for binding/unbinding surfaces across Narada sites and carriers (opencode, Kimi, Codex).
 
 ## Purpose
 
 Manages the surface-to-site-to-carrier weave so carrier and Site MCP config is generated rather than hand-maintained.
 
-The default runtime profile is `native`: task-lifecycle and work-lifecycle
-bindings resolve to their Rust-native adapters. Use the explicit `bun` or
-`node-compat` profile only for compatibility or rollback.
+Runtime selection is native. Carrier materialization is owned exclusively by
+the Rust `narada-mcp-materializer`; this package owns catalog and Site registry
+operations, not carrier configuration emission.
 
 ## V2 native catalog
 Every registered surface resolves from a package-owned `SurfaceDescriptorV2`.
@@ -93,7 +99,9 @@ Edits config files (JSON/TOML) but does not start or stop servers, mutate the su
 
 Carrier approval controls are treated as volatile carrier UX/admission mechanics, not Narada policy authority. The registrar may generate carrier availability metadata, such as Codex `approval_mode = "approve"`, so registered Narada MCP tools are available without redundant carrier prompts. Authorization, refusal, audit, and semantic constraints remain owned by the MCP surfaces themselves.
 
-This is the `CarrierAdmissionNeutralization` concept in Narada proper: `<src-root>/narada/packages/domains/concepts/records/carrier-admission-neutralization.concept.json`.
+This is the `CarrierAdmissionNeutralization` concept in Narada proper. The
+[cross-repository contract register](../../docs/cross-repository-contracts.md#contract-register)
+records the external source path and revision-evidence requirement.
 
 ## Wiring Surfaces
 
@@ -123,7 +131,7 @@ materialization:
 ```powershell
 $env:NARADA_CODEX_ENABLED_PLUGINS = 'my-plugin@personal'
 $env:NARADA_CODEX_DISABLED_PLUGINS = 'github@openai-curated-remote'
-pnpm materialize:carrier -- --materialize-all
+pnpm materialize:carrier
 ```
 
 The built-in `codex-andrey` carrier keeps the currently observed
@@ -154,24 +162,19 @@ The successful live turn is provider-level evidence that Moonshot accepted the c
 
 ## Recovery when MCP is unavailable
 
-The registrar also exposes an out-of-band carrier materialization CLI. Use it
-after a workspace build changes the artifact manifest, or when the registrar
-MCP surface is one of the surfaces that failed to start:
+Use the native materializer after a workspace build changes the artifact
+manifest, or when the registrar MCP surface is one of the surfaces that failed
+to start:
 
 ```powershell
-pnpm materialize:carrier -- --materialize-all
+pnpm materialize:carrier
 ```
 
-It atomically writes every registered carrier config and its
+It atomically writes every declared carrier config and its
 `<config>.narada-generation.json` sidecar. Then restart affected carriers or
-start new carrier sessions so they reload the generated configs. Pass
-`--output-dir <directory>` to write an inspection copy of every carrier config
-without changing canonical carrier paths. Targeted single-carrier
-materialization is deliberately not an MCP operation; it is an emergency-only
-direct CLI escape hatch requiring
-`--materialize-carrier <carrier-id> --allow-single-carrier`. `mcp-registrar
---help` describes both modes; without CLI arguments the package remains a
-normal MCP stdio server.
+start new carrier sessions so they reload the generated configs. The Registrar
+does not expose Bun, Node, or single-carrier materialization compatibility
+commands.
 
 ## Quick Start
 

@@ -47,26 +47,12 @@ const allCarrierInspection: any = inspectAllCarrierMaterialization((args) => ({
 assert.equal(allCarrierInspection.status, 'stale');
 assert.equal(allCarrierInspection.stale_carrier_count, 1);
 assert.deepEqual(allCarrierInspection.stale_carrier_ids, ['kimi-andrey']);
-const defaultMaterializationArgs = parseArgs(['--materialize-all']);
-assert.equal(defaultMaterializationArgs.mode, 'materialize-all');
-if (defaultMaterializationArgs.mode === 'materialize-all') {
-  assert.equal(defaultMaterializationArgs.runtimeProxyImplementation, nativeRuntimeArtifactAvailable ? 'native' : 'bun');
-}
-const explicitBunArgs = parseArgs(['--materialize-all', '--runtime-profile', 'bun', '--runtime-proxy-implementation', 'bun']);
-assert.equal(explicitBunArgs.mode, 'materialize-all');
-if (explicitBunArgs.mode === 'materialize-all') assert.equal(explicitBunArgs.runtimeProxyImplementation, 'bun');
-const mismatchedProxyImplementation = nativeRuntimeArtifactAvailable ? 'bun' : 'native';
 assert.throws(
-  () => parseArgs(['--materialize-all', '--runtime-proxy-implementation', mismatchedProxyImplementation]),
-  /registrar_runtime_proxy_override_requires_recovery_escape_hatch/,
+  () => parseArgs(['--materialize-all']),
+  /registrar_unknown_cli_argument:--materialize-all/,
 );
-const recoveryProxyArgs = parseArgs([
-  '--materialize-carrier', 'codex-andrey', '--allow-single-carrier',
-  '--runtime-proxy-implementation', mismatchedProxyImplementation,
-  '--recovery-escape-hatch',
-]);
-assert.equal(recoveryProxyArgs.mode, 'materialize-carrier');
-if (recoveryProxyArgs.mode === 'materialize-carrier') assert.equal(recoveryProxyArgs.recoveryEscapeHatch, true);
+assert.throws(() => parseArgs(['--runtime-profile', 'bun']), /registrar_unknown_cli_argument:--runtime-profile/);
+assert.equal(parseArgs(['--help']).mode, 'help');
 assert.equal(defaultSurfaceImplementation('local-filesystem', ['--mode', 'read'], true), 'native');
 assert.equal(defaultSurfaceImplementation('local-filesystem', ['--mode', 'write'], true), 'js');
 assert.equal(defaultSurfaceImplementation('local-filesystem', ['--mode', 'read'], false), 'js');
@@ -1035,65 +1021,6 @@ try {
     /registrar_progressive_binding_requires_explicit_bootstrap/,
   );
 
-  const materialize: any = await call('registrar_materialize_all', { output_dir: root, runtime_profile: 'bun' });
-  const matData: any = view(materialize);
-  assert.equal(matData.status, 'materialized_all');
-  assert.equal(matData.carrier_count, 3);
-  const kimiMaterialization: any = (matData.carriers as Array<Record<string, any>>).find((carrier) => carrier.carrier_id === 'kimi-andrey');
-  assert.ok(kimiMaterialization);
-  assert.ok(kimiMaterialization.byte_size > 0);
-  assert.deepEqual((kimiMaterialization.injection_scopes as Record<string, any>).counts, { host: 0, user_site: 3, local_site: 3 });
-  const materializedBinding: any = ((kimiMaterialization.injection_scopes as Record<string, any>).bindings as Array<Record<string, any>>).find((binding) => binding.site_id === 'andrey-user');
-  assert.equal(materializedBinding.loading_mode, 'progressive');
-  assert.deepEqual(materializedBinding.bootstrap_surface_ids, ['agent-context', 'local-filesystem', 'mcp-registrar', 'mcp-loader', 'task-lifecycle', 'surface-feedback']);
-  const materializedSurfaceIds: any = ((kimiMaterialization.injection_scopes as Record<string, any>).servers as Array<Record<string, any>>).map((server) => server.surface_id).sort();
-  assert.deepEqual(materializedSurfaceIds, ['agent-context', 'local-filesystem', 'mcp-loader', 'mcp-registrar', 'surface-feedback', 'task-lifecycle']);
-  const materializedPath: any = join(root, 'mcp.json');
-  assert.equal((matData.carriers as Array<Record<string, any>>).some((carrier) => carrier.output_path === materializedPath), true);
-  const materializedConfig: any = JSON.parse(readFileSync(materializedPath, 'utf8')) as Record<string, any>;
-  const materializedFilesystem: any = materializedConfig.mcpServers['narada-site-andrey-user-local-filesystem'];
-   assertRuntimeProxy(materializedFilesystem, workspacePath('packages', 'local-filesystem-mcp', 'dist', 'src', 'main.js'), 'bun', 'bun');
-  const materializedAgentContext: any = materializedConfig.mcpServers['narada-site-andrey-user-agent-context'];
-   assertRuntimeProxy(materializedAgentContext, workspacePath('packages', 'agent-context-mcp', 'dist', 'src', 'main.js'), 'bun', 'bun');
-  assert.ok(materializedConfig.mcpServers['narada-site-andrey-user-mcp-loader']);
-  assert.ok(materializedConfig.mcpServers['narada-site-andrey-user-mcp-registrar']);
-  assert.equal(materializedConfig.mcpServers['narada-site-andrey-user-site-loop'], undefined);
-  const generatedPaths: Record<string, string> = {
-    'codex-andrey': join(root, 'config.toml'),
-    'kimi-andrey': join(root, 'mcp.json'),
-    'opencode-andrey': join(root, 'opencode.jsonc'),
-  };
-  for (const carrierId of ['codex-andrey', 'kimi-andrey', 'opencode-andrey']) {
-    const generatedPath = generatedPaths[carrierId];
-    assert.equal((matData.carriers as Array<Record<string, any>>).some((carrier) => carrier.carrier_id === carrierId && carrier.output_path === generatedPath), true);
-    const generatedText: any = readFileSync(generatedPath, 'utf8');
-    const normalizedGeneratedText: any = generatedText.replace(/\\\\/g, '/').replace(/\\/g, '/');
-    assert.equal(normalizedGeneratedText.includes('mcp-loader-mcp/dist/src/main.js'), true);
-    assert.equal(normalizedGeneratedText.includes('--allowed-site-root'), true);
-    assert.equal(normalizedGeneratedText.includes(portableWorkspaceRoot), true);
-    for (const registeredSiteRoot of registeredSiteRoots) {
-      assert.equal(normalizedGeneratedText.includes(registeredSiteRoot), true);
-    }
-    assert.equal(normalizedGeneratedText.includes('local-filesystem-mcp/dist/src/main.js'), true);
-    assert.equal(normalizedGeneratedText.includes('agent-context-mcp/dist/src/main.js'), true);
-    assert.equal(normalizedGeneratedText.includes('mcp-registrar/dist/src/main.js'), true);
-    assert.equal(generatedText.includes('opencode-sonar'), false);
-    assert.equal(generatedText.includes('tools/typed-mcp/inbox-mcp-server.mjs'), false);
-    assert.equal(generatedText.includes('inbox_stage_submission_workflow'), false);
-    assert.equal(generatedText.includes('inbox_submit_typed_envelope'), false);
-    assert.equal(generatedText.includes('mcp_command_create'), false);
-    assert.equal(normalizedGeneratedText.includes('site-loop-mcp/dist/src/main.js'), false);
-    assert.equal(normalizedGeneratedText.includes('site-inbox-mcp/dist/src/main.js'), false);
-    assert.equal(normalizedGeneratedText.includes('speech-mcp/dist/src/main.js'), false);
-    assert.equal(normalizedGeneratedText.includes(registeredUserSiteRoot), true);
-    if (carrierId === 'codex-andrey') {
-      assert.match(generatedText, /\[features\]\r?\napps = false\r?\n/);
-      assert.equal(generatedText.includes('mcp_loader_open_surface'), true);
-      assert.equal(generatedText.includes('mcp_loader_call_tool'), true);
-      assert.equal(generatedText.includes('inbox_submit'), false);
-    }
-  }
-
   const progressiveBulk: any = await call('registrar_sync', { target: 'all_surfaces_to_carriers', carrier_id: 'kimi-andrey' });
   assert.equal(progressiveBulk.error?.data?.code, 'registrar_progressive_bulk_bind_refused');
 
@@ -1511,41 +1438,6 @@ try {
   assert.ok(staleProjectionFindings.some((finding: any) => finding.code === 'registrar_carrier_projection_missing_site_root' && finding.surface_id === 'delegated-task'));
   assert.ok(staleProjectionFindings.some((finding: any) => finding.code === 'registrar_site_fabric_duplicate_canonical_surface' && finding.canonical_surface_id === 'site-inbox'));
   assert.equal(staleProjectionValidation.carrier_projection_count, 2);
-
-  const allMaterialization: any = view(await call('registrar_materialize_all', { output_dir: root }));
-  assert.equal(allMaterialization.status, 'materialized_all');
-  assert.equal(allMaterialization.carrier_count, 3);
-  const contractGeneratedPaths: Record<string, string> = {
-    'opencode-andrey': join(root, 'opencode.jsonc'),
-    'kimi-andrey': join(root, 'mcp.json'),
-    'codex-andrey': join(root, 'config.toml'),
-  };
-  for (const carrierId of ['opencode-andrey', 'kimi-andrey', 'codex-andrey']) {
-    const outputPath = contractGeneratedPaths[carrierId];
-    assert.equal((allMaterialization.carriers as Array<Record<string, any>>).some((carrier) => carrier.carrier_id === carrierId && carrier.output_path === outputPath), true);
-    const content: any = readFileSync(outputPath, 'utf8');
-    assert.match(content, /mcp-loader/);
-    assert.match(content, /local-filesystem/);
-    assert.match(content, /agent-context/);
-    assert.match(content, /mcp-registrar/);
-    assert.match(content, /surface-feedback/);
-    assert.match(content, /--feedback-root/);
-    assert.match(content, /--canonical-feedback-root/);
-    assert.match(content, /--task-lifecycle-root/);
-    assert.match(content, /--site-id/);
-    assert.doesNotMatch(content, /--owned-surface-id/);
-    if (carrierId === 'codex-andrey') {
-      assert.match(content, /--anchored-allowed-root/);
-      assert.match(content, /user_home:\.codex/);
-      assert.match(content, /\[mcp_servers\.narada-site-andrey-user-local-filesystem\][\s\S]*?approval_mode = "approve"/);
-      assert.doesNotMatch(content, /\[mcp_servers\.narada-site-andrey-user-site-loop\]/);
-      assert.doesNotMatch(content, /\[mcp_servers\.narada-site-andrey-user-calendar\]/);
-      assert.match(content, /Generated carrier availability metadata\. Narada MCP surfaces own policy\./);
-      assert.match(content, /\[mcp_servers\.narada-site-andrey-user-local-filesystem\.tools\.fs_apply_patch\]\s+approval_mode = "approve"/);
-      assert.doesNotMatch(content, /\[mcp_servers\.narada-site-andrey-user-structured-command\.tools\.structured_command_execute\]/);
-      assert.doesNotMatch(content, /approval_mode = "auto"/);
-    }
-  }
 
   const aggregateSiteRoot: any = join(root, 'aggregate-site');
   mkdirSync(join(aggregateSiteRoot, '.ai', 'mcp'), { recursive: true });
