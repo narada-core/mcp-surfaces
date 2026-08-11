@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -54,6 +54,27 @@ try {
     const rustOutputUri = rustResources.resources.find((resource: any) => resource.uri.startsWith('mcp-output:'))?.uri;
     assert.ok(tsOutputUri && rustOutputUri);
     assert.deepEqual(normalize(await rustClient.request('resources/read', { uri: rustOutputUri }), rust), normalize(await tsClient.request('resources/read', { uri: tsOutputUri }), ts), 'resources/read protocol parity');
+    const admission = parityAdmission();
+    const materializationArgs = {
+      identity: 'parity.builder', runtime: 'codex',
+      generated_at: '2026-08-11T00:00:00.000Z', admission_receipt: admission,
+    };
+    const tsMaterialization = fullResult(ts, await tsClient.call('agent_context_start_session', materializationArgs));
+    const rustMaterialization = fullResult(rust, await rustClient.call('agent_context_start_session', materializationArgs));
+    assert.deepEqual(
+      normalize(rustMaterialization, rust), normalize(tsMaterialization, ts),
+      'agent_context_start_session materialization parity',
+    );
+    assert.deepEqual(
+      materializationCounts(rust.db), materializationCounts(ts.db),
+      'session materialization persistence parity',
+    );
+    const countsBeforeHydration = materializationCounts(rust.db);
+    const hydrationArgs = { admission_receipt: admission, generated_at: '2026-08-11T00:01:00.000Z' };
+    const tsHydration = fullResult(ts, await tsClient.call('agent_context_hydrate_current', hydrationArgs));
+    const rustHydration = fullResult(rust, await rustClient.call('agent_context_hydrate_current', hydrationArgs));
+    assert.deepEqual(normalize(rustHydration, rust), normalize(tsHydration, ts), 'receipt-based hydration parity');
+    assert.deepEqual(materializationCounts(rust.db), countsBeforeHydration, 'diagnostic hydration remains read-only');
     const checkpointArgs = {
       agent_id: 'parity.builder', session_id: 'session-1', active_task: { task: 42 },
       files_touched: ['alpha.ts'], key_decisions: ['native parity'], open_questions: ['orientation'], git_head: 'abc123',
@@ -198,12 +219,41 @@ function normalize(value: unknown, fixtureValue: ReturnType<typeof fixture>): un
     : value;
   const result: Record<string, unknown> = {};
   for (const [key, entry] of Object.entries(value)) {
-    if (['checkpoint_id', 'archived_prior', 'content_hash'].includes(key)) result[key] = entry == null ? null : `<${key}>`;
+    if (['checkpoint_id', 'archived_prior', 'content_hash', 'agent_start_event'].includes(key)) result[key] = entry == null ? null : `<${key}>`;
+    else if (key === 'event_id' && typeof entry === 'string' && /^evt-\d{4}-/.test(entry)) result[key] = '<agent_start_event>';
     else if (['checkpoint_at', 'created_at'].includes(key)) result[key] = '<timestamp>';
     else if (key === 'source_checkpoint_ref') result[key] = '<checkpoint-ref>';
     else result[key] = normalize(entry, fixtureValue);
   }
   return result;
+}
+
+function parityAdmission() {
+  return {
+    schema: 'narada.carrier_session.admission_receipt.v0', receipt_id: 'receipt:materialization-parity:1', decision: 'admitted', state: 'starting',
+    coordinate: { authority_scope: 'test', site_ref: 'site:parity', carrier_session_id: 'carrier-materialization-parity', authority_epoch: 1 },
+    agent_identity: { source_authority_ref: 'agent-identity:parity', artifact_ref: 'agent:parity.builder@1', revision: '1', local_agent_id: 'parity.builder', canonical_agent_id: 'parity.builder' },
+    carrier_kind: 'codex', admission_policy: { source_authority_ref: 'site-law:parity', artifact_ref: 'carrier-policy:parity', revision: '1' },
+    issued_at: '2026-08-11T00:00:00.000Z', valid_until: null, authority_readback_ref: 'carrier-session-authority:materialization-parity', evidence_refs: [], reason_codes: [],
+  };
+}
+
+function materializationCounts(path: string) {
+  const db = new DatabaseSync(path, { readOnly: true });
+  try {
+    return {
+      manifests: db.prepare('SELECT COUNT(*) AS count FROM orientation_manifest_generations').get()?.count,
+      briefs: db.prepare('SELECT COUNT(*) AS count FROM orientation_brief_generations').get()?.count,
+      starts: db.prepare('SELECT COUNT(*) AS count FROM agent_start_events').get()?.count,
+    };
+  } finally { db.close(); }
+}
+
+function fullResult(fixtureValue: ReturnType<typeof fixture>, value: any) {
+  if (!value?.output_ref) return value;
+  const outputId = String(value.output_ref).replace(/^mcp_output:/, '');
+  const record = JSON.parse(readFileSync(join(fixtureValue.root, '.ai', 'tmp', 'mcp-outputs', 'workspace', `${outputId}.json`), 'utf8'));
+  return record.full_output;
 }
 
 function dbCounts(path: string) {

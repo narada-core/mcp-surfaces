@@ -3,6 +3,7 @@ use std::env;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
+mod materialization;
 mod orientation;
 mod state;
 

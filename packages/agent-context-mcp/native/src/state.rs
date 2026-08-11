@@ -55,10 +55,43 @@ impl Context {
         db.execute_batch(MIGRATION_001).map_err(db_error)?;
         db.execute_batch(MIGRATION_002).map_err(db_error)?;
         db.execute_batch(MIGRATION_003).map_err(db_error)?;
+        ensure_agent_start_event_columns(&db)?;
         db.execute_batch("CREATE TABLE IF NOT EXISTS codex_session_admissions (admission_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, runtime TEXT NOT NULL DEFAULT 'codex', cwd TEXT NOT NULL, status TEXT NOT NULL CHECK (status IN ('creating','admitted','suspect','retired')), agent_start_event_id TEXT, codex_session_id TEXT, codex_session_file TEXT, evidence_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, verified_at TEXT); CREATE INDEX IF NOT EXISTS idx_codex_session_admissions_agent ON codex_session_admissions(agent_id,cwd,status,created_at DESC); CREATE INDEX IF NOT EXISTS idx_codex_session_admissions_session ON codex_session_admissions(codex_session_id);").map_err(db_error)?;
         ensure_checkpoint_tables(&db)?;
         Ok(db)
     }
+}
+
+fn ensure_agent_start_event_columns(db: &Connection) -> Result<(), String> {
+    let mut statement = db
+        .prepare("PRAGMA table_info(agent_start_events)")
+        .map_err(db_error)?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(db_error)?
+        .collect::<Result<std::collections::HashSet<_>, _>>()
+        .map_err(db_error)?;
+    drop(statement);
+    for (name, kind) in [
+        ("identity_id", "TEXT"),
+        ("runtime", "TEXT"),
+        ("created_at", "TEXT"),
+        ("status", "TEXT"),
+        ("resume_command", "TEXT"),
+        ("bootstrap_artifact_uri", "TEXT"),
+        ("carrier_session_id", "TEXT"),
+        ("admission_receipt_ref", "TEXT"),
+        ("authority_epoch", "INTEGER"),
+        ("orientation_manifest_id", "TEXT"),
+    ] {
+        if !columns.contains(name) {
+            db.execute_batch(&format!(
+                "ALTER TABLE agent_start_events ADD COLUMN {name} {kind}"
+            ))
+            .map_err(db_error)?;
+        }
+    }
+    Ok(())
 }
 
 pub fn call_tool(
@@ -83,7 +116,7 @@ pub fn call_tool(
         "agent_context_doctor" => doctor(context),
         "agent_context_guidance" => guidance(&args),
         "agent_context_whoami" => crate::orientation::whoami(context, &args),
-        "agent_context_hydrate_current" => hydrate_without_receipt(&args),
+        "agent_context_hydrate_current" => hydrate_current(context, &args),
         "agent_orientation_read" => crate::orientation::read(context, projection, &args),
         "agent_orientation_acknowledge" => crate::orientation::acknowledge_tool(context, &args),
         "agent_context_startup_sequence" => crate::orientation::startup(context, &args),
@@ -110,12 +143,161 @@ fn start_session(context: &Context, args: &Value) -> Result<Value, String> {
         .and_then(Value::as_str)
         .map(str::to_string)
         .unwrap_or_else(|| path_text(&context.site_root));
-    if args.get("dry_run") != Some(&Value::Bool(true)) {
-        return Err("agent_context_native_session_materialization_not_implemented".into());
-    }
     let roster = roster_projection(context, &identity);
+    if args.get("dry_run") != Some(&Value::Bool(true)) {
+        let admission = exact_evidence(
+            args,
+            "admission_receipt",
+            "NARADA_CARRIER_SESSION_ADMISSION_RECEIPT",
+        )?
+        .ok_or("agent_context_exact_admission_receipt_required")?;
+        if admission
+            .pointer("/agent_identity/local_agent_id")
+            .and_then(Value::as_str)
+            != Some(&identity)
+        {
+            return Err("agent_context_admission_identity_mismatch".into());
+        }
+        if let Ok(session) = env::var("NARADA_CARRIER_SESSION_ID") {
+            if admission
+                .pointer("/coordinate/carrier_session_id")
+                .and_then(Value::as_str)
+                != Some(session.as_str())
+            {
+                return Err("agent_context_admission_session_mismatch".into());
+            }
+        }
+        let activation = exact_evidence(
+            args,
+            "activation_receipt",
+            "NARADA_CARRIER_SESSION_ACTIVATION_RECEIPT",
+        )?;
+        let generated_at = match args.get("generated_at").and_then(Value::as_str) {
+            Some(value) => chrono::DateTime::parse_from_rfc3339(value)
+                .map_err(|_| "agent_context_invalid_generated_at")?
+                .with_timezone(&Utc)
+                .to_rfc3339_opts(SecondsFormat::Millis, true),
+            None => timestamp(),
+        };
+        let compiled = crate::materialization::compile(
+            context,
+            &admission,
+            activation.as_ref(),
+            &roster["role_binding"],
+            &generated_at,
+        )?;
+        return persist_session_materialization(
+            context, &identity, runtime, &cwd, &roster, &admission, compiled,
+        );
+    }
     Ok(
         json!({"schema":"narada.agent_context.session_start.v1","status":"dry_run","authority_claimed":false,"identity":identity,"role":roster["role"],"role_binding":roster["role_binding"],"runtime_request":runtime,"root_dir":path_text(&context.site_root),"cwd_request":cwd,"db_path":path_text(&context.db_path),"would_validate":{"roster_or_identity_projection":true,"exact_admission_receipt":true,"orientation_manifest":true},"would_write":["orientation_manifest_generations","agent_start_events_downstream_trace"],"orientation_manifest":null,"required_for_materialization":["site_id","carrier_session_admission_receipt"]}),
+    )
+}
+
+fn exact_evidence(args: &Value, field: &str, variable: &str) -> Result<Option<Value>, String> {
+    let supplied = args.get(field).filter(|v| !v.is_null()).cloned();
+    let inherited = env::var(variable)
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(|raw| {
+            serde_json::from_str::<Value>(&raw)
+                .map_err(|error| format!("orientation_environment_json_invalid:{variable}:{error}"))
+        })
+        .transpose()?;
+    if supplied.is_some() && inherited.is_some() && supplied != inherited {
+        return Err(format!("agent_context_conflicting_{}s", field));
+    }
+    Ok(supplied.or(inherited))
+}
+
+fn persist_session_materialization(
+    context: &Context,
+    identity: &str,
+    runtime: &str,
+    cwd: &str,
+    roster: &Value,
+    admission: &Value,
+    compiled: crate::materialization::Materialization,
+) -> Result<Value, String> {
+    let manifest = compiled.manifest;
+    let brief = compiled.brief;
+    let now = manifest["generated_at"]
+        .as_str()
+        .ok_or("agent_context_native_manifest_generated_at_missing")?;
+    let event_id = format!(
+        "evt-{}_{}",
+        now.replace([':', '.'], "-")
+            .replace('T', "_")
+            .chars()
+            .take(19)
+            .collect::<String>(),
+        &Uuid::new_v4().to_string()[..8]
+    );
+    let event_status = if manifest["delivery"] == "deliverable" {
+        "materialized"
+    } else {
+        "orientation_blocked"
+    };
+    let manifest_json = serde_json::to_string(&manifest).map_err(|e| e.to_string())?;
+    let brief_json = brief
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|e| e.to_string())?;
+    let mut db = context.open_db()?;
+    let tx = db.transaction().map_err(db_error)?;
+    let existing: Option<String> = tx
+        .query_row(
+            "SELECT manifest_json FROM orientation_manifest_generations WHERE manifest_id=?1",
+            [manifest["manifest_id"].as_str()],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(db_error)?;
+    if existing.as_deref().is_some_and(|v| v != manifest_json) {
+        return Err("agent_context_orientation_manifest_generation_conflict".into());
+    }
+    if existing.is_none() {
+        tx.execute("INSERT INTO orientation_manifest_generations (manifest_id,admission_receipt_ref,carrier_session_id,authority_epoch,readiness,delivery,manifest_json,generated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",params![manifest["manifest_id"].as_str(),admission["receipt_id"].as_str(),admission.pointer("/coordinate/carrier_session_id").and_then(Value::as_str),admission.pointer("/coordinate/authority_epoch").and_then(Value::as_i64),manifest["readiness"].as_str(),manifest["delivery"].as_str(),manifest_json,now]).map_err(db_error)?;
+    }
+    if let (Some(value), Some(text)) = (&brief, &brief_json) {
+        let existing: Option<String> = tx
+            .query_row(
+                "SELECT brief_json FROM orientation_brief_generations WHERE brief_id=?1",
+                [value["brief_id"].as_str()],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(db_error)?;
+        if existing.as_deref().is_some_and(|v| v != text) {
+            return Err("agent_context_orientation_brief_generation_conflict".into());
+        }
+        if existing.is_none() {
+            tx.execute("INSERT INTO orientation_brief_generations (brief_id,manifest_id,brief_digest,brief_json,generated_at) VALUES (?1,?2,?3,?4,?5)",params![value["brief_id"].as_str(),manifest["manifest_id"].as_str(),value["brief_digest"].as_str(),text,value["generated_at"].as_str()]).map_err(db_error)?;
+        }
+    }
+    tx.execute("INSERT INTO agent_start_events (event_id,identity_id,runtime,created_at,status,resume_command,bootstrap_artifact_uri,carrier_session_id,admission_receipt_ref,authority_epoch,orientation_manifest_id) VALUES (?1,?2,?3,?4,?5,NULL,NULL,?6,?7,?8,?9)",params![event_id,identity,runtime,now,event_status,admission.pointer("/coordinate/carrier_session_id").and_then(Value::as_str),admission["receipt_id"].as_str(),admission.pointer("/coordinate/authority_epoch").and_then(Value::as_i64),manifest["manifest_id"].as_str()]).map_err(db_error)?;
+    tx.commit().map_err(db_error)?;
+    let persisted = if brief.is_some() {
+        json!([
+            "orientation_manifest_generations",
+            "orientation_brief_generations",
+            "agent_start_events"
+        ])
+    } else {
+        json!(["orientation_manifest_generations", "agent_start_events"])
+    };
+    let manifest_ref=brief.as_ref().map(|v|v["manifest_ref"].clone()).unwrap_or_else(||json!({"source_authority_ref":"agent-context:orientation-manifest-store","artifact_ref":format!("agent-context:orientation_manifest_generations:{}",manifest["manifest_id"].as_str().unwrap_or("")),"revision":manifest["manifest_digest"],"manifest_id":manifest["manifest_id"],"manifest_digest":manifest["manifest_digest"]}));
+    let entry_procedure = manifest["entries"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|v| v["compartment"] == "entry_procedure")
+        .cloned()
+        .collect::<Vec<_>>();
+    Ok(
+        json!({"schema":"narada.agent_context.session_start.v1","status":if manifest["delivery"]=="deliverable"{"materialized"}else{"blocked"},"compatibility_facade":{"authority":"none","event_posture":"downstream_trace","source_authority_mutation":false,"local_persistence":true,"persisted_records":persisted},"agent_start_event":event_id,"identity":identity,"role":roster["role"],"role_binding":roster["role_binding"],"runtime_request":runtime,"cwd_request":cwd,"db_path":path_text(&context.db_path),"carrier_session":admission["coordinate"],"admission_receipt":admission,"admission_receipt_ref":admission["receipt_id"],"orientation_manifest":manifest,"orientation_brief":brief,"orientation_manifest_ref":manifest_ref,"entry_procedure":entry_procedure}),
     )
 }
 fn roster_projection(context: &Context, identity: &str) -> Value {
@@ -508,19 +690,59 @@ fn guidance(args: &Value) -> Result<Value, String> {
     Ok(result)
 }
 
-fn hydrate_without_receipt(args: &Value) -> Result<Value, String> {
+fn hydrate_current(context: &Context, args: &Value) -> Result<Value, String> {
     if args.get("checkpoint_startup") == Some(&Value::Bool(true)) {
         return Ok(
             json!({"schema":"narada.agent_context.orientation_hydration.v1","status":"blocked","reason":"orientation_assembly_read_only","required_next_step":"Use agent_context_checkpoint as a separate explicit mutation."}),
         );
     }
-    if args.get("admission_receipt").is_some()
-        || env::var_os("NARADA_CARRIER_SESSION_ADMISSION_RECEIPT").is_some()
-    {
-        return Err("agent_context_native_admission_receipt_not_implemented".into());
+    let admission = match exact_evidence(
+        args,
+        "admission_receipt",
+        "NARADA_CARRIER_SESSION_ADMISSION_RECEIPT",
+    )? {
+        Some(value) => value,
+        None => {
+            return Ok(
+                json!({"schema":"narada.agent_context.orientation_hydration.v1","status":"blocked","reason":"agent_context_exact_admission_receipt_required","rejected_fallbacks":["latest_checkpoint","latest_start_event","identity_name_inference"]}),
+            )
+        }
+    };
+    if args.get("checkpoint_id").is_some() {
+        return Err("agent_context_native_exact_checkpoint_hydration_not_implemented".into());
     }
+    let identity = admission
+        .pointer("/agent_identity/local_agent_id")
+        .and_then(Value::as_str)
+        .ok_or("agent_context_admission_identity_mismatch")?;
+    if let Ok(expected) = env::var("NARADA_AGENT_ID") {
+        if expected != identity {
+            return Err("agent_context_admission_identity_mismatch".into());
+        }
+    }
+    let generated_at = match args.get("generated_at").and_then(Value::as_str) {
+        Some(value) => chrono::DateTime::parse_from_rfc3339(value)
+            .map_err(|_| "agent_context_invalid_generated_at")?
+            .with_timezone(&Utc)
+            .to_rfc3339_opts(SecondsFormat::Millis, true),
+        None => timestamp(),
+    };
+    let roster = roster_projection(context, identity);
+    let activation = exact_evidence(
+        args,
+        "activation_receipt",
+        "NARADA_CARRIER_SESSION_ACTIVATION_RECEIPT",
+    )?;
+    let compiled = crate::materialization::compile(
+        context,
+        &admission,
+        activation.as_ref(),
+        &roster["role_binding"],
+        &generated_at,
+    )?;
+    let whoami = json!({"schema":"narada.agent_context.identity_resolution.v1","status":"ok","identity":identity,"canonical_agent_id":admission.pointer("/agent_identity/canonical_agent_id"),"confidence":"exact","source":"carrier_session_admission_receipt","admission_receipt_ref":admission["receipt_id"],"carrier_session":admission["coordinate"],"authority_readback_ref":admission["authority_readback_ref"],"hint_match":true});
     Ok(
-        json!({"schema":"narada.agent_context.orientation_hydration.v1","status":"blocked","reason":"agent_context_exact_admission_receipt_required","rejected_fallbacks":["latest_checkpoint","latest_start_event","identity_name_inference"]}),
+        json!({"schema":"narada.agent_context.orientation_hydration.v1","status":if compiled.manifest["delivery"]=="deliverable"{"ok"}else{"blocked"},"source_mutation":false,"site_id":context.site_id,"site_root":path_text(&context.site_root),"hydrated_at":compiled.manifest["generated_at"],"whoami":whoami,"admission_receipt_ref":admission["receipt_id"],"orientation_manifest":compiled.manifest,"continuity_selection":{"mode":"omitted","checkpoint_id":null},"checkpoint":{"status":"omitted","reason":"exact_checkpoint_not_selected","checkpoint_id":null},"portable_continuation":{"status":"omitted","reason":"exact_checkpoint_not_selected","checkpoint_id":null},"continuity_advisory_next_action":null}),
     )
 }
 
