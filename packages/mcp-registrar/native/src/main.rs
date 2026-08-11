@@ -73,6 +73,13 @@ fn dispatch(request: &Value) -> Value {
                     guidance.as_object_mut().unwrap().insert("requested".into(),json!({"workflow":args.get("workflow").and_then(Value::as_str).filter(|v|!v.trim().is_empty()).map(str::trim),"tool":args.get("tool").and_then(Value::as_str).filter(|v|!v.trim().is_empty()).map(str::trim)}));
                 }
                 json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":serde_json::to_string_pretty(&guidance).unwrap()}],"structuredContent":guidance}})
+            } else if name == "registrar_surface_tool_inventory_check" {
+                let args = request
+                    .pointer("/params/arguments")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
+                let result = surface_tool_inventory(&contract, &args);
+                json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":serde_json::to_string_pretty(&result).unwrap()}],"structuredContent":result}})
             } else {
                 error(
                     id,
@@ -82,6 +89,71 @@ fn dispatch(request: &Value) -> Value {
         }
         method => error(id, format!("unsupported_mcp_method:{method}")),
     }
+}
+fn surface_tool_inventory(contract: &Value, args: &Value) -> Value {
+    let observed = args.get("observed_tools").and_then(Value::as_object);
+    let include_ok = args.get("include_ok") == Some(&Value::Bool(true));
+    let items = contract
+        .pointer("/read_models/registrar_surface_list/items")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut findings = vec![];
+    let mut checked = 0;
+    for surface in &items {
+        let id = surface["id"].as_str().unwrap_or("");
+        let Some(input) = observed.and_then(|value| value.get(id)) else {
+            continue;
+        };
+        checked += 1;
+        let registered = unique(
+            surface["tools"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str),
+        );
+        let actual = unique(
+            input
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str),
+        );
+        let missing = actual
+            .iter()
+            .filter(|value| !registered.contains(value))
+            .cloned()
+            .collect::<Vec<_>>();
+        let extra = registered
+            .iter()
+            .filter(|value| !actual.contains(value))
+            .cloned()
+            .collect::<Vec<_>>();
+        let status = if missing.is_empty() && extra.is_empty() {
+            "ok"
+        } else {
+            "drift"
+        };
+        if status != "ok" || include_ok {
+            findings.push(json!({"surface_id":id,"package":surface["package"],"status":status,"registered_count":registered.len(),"observed_count":actual.len(),"missing_from_registrar":missing,"extra_in_registrar":extra}));
+        }
+    }
+    let without = items
+        .iter()
+        .filter_map(|value| value["id"].as_str())
+        .filter(|id| observed.is_none_or(|value| !value.contains_key(*id)))
+        .collect::<Vec<_>>();
+    json!({"schema":"narada.registrar.surface_tool_inventory_check.v1","status":if findings.iter().any(|value|value["status"]=="drift"){"drift"}else{"ok"},"checked_count":checked,"surfaces_without_observations":without,"findings":findings})
+}
+fn unique<'a>(values: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut result = vec![];
+    for value in values {
+        if !result.iter().any(|existing| existing == value) {
+            result.push(value.to_string());
+        }
+    }
+    result
 }
 fn error(id: Value, message: String) -> Value {
     json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":message}})
