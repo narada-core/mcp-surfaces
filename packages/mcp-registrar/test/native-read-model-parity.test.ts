@@ -33,7 +33,12 @@ async function dynamicRegistryParity(){
   writeFileSync(join(siteRoot,'.narada','config.json'),JSON.stringify({surface_overrides:{'agent-context':{enabled:true,surface_implementation:'native'}}}));
   const db=new DatabaseSync(registry);db.exec('CREATE TABLE site_registry (site_id TEXT, site_root TEXT, lifecycle_status TEXT, created_at TEXT)');
   db.prepare('INSERT INTO site_registry VALUES (?, ?, ?, ?)').run('fixture-site',siteRoot,'active','2026-08-11T00:00:00Z');db.close();
+  mkdirSync(join(siteRoot,'.narada','capabilities'),{recursive:true});
+  writeFileSync(join(siteRoot,'.narada','capabilities','mcp-surfaces.json'),JSON.stringify({surfaces:[{surface_id:'git',server_name:'fixture-git',catalog_surface_id:'git',registered_live_tools:['git_status'],tool_contract:{read_only_tools:[],mutating_tools:[],refused_tools:[]}}]}));
   const environment={NARADA_SITE_REGISTRY_DB:registry};const tsFixture=client(process.execPath,[tsEntrypoint],environment);const rustFixture=client(rustEntrypoint,[],environment);
-  try{assert.deepEqual(await rustFixture.call('registrar_site_list',{}),await tsFixture.call('registrar_site_list',{}),'registrar_site_list dynamic SQLite parity')}
+  try{
+    assert.deepEqual(await rustFixture.call('registrar_site_list',{}),await tsFixture.call('registrar_site_list',{}),'registrar_site_list dynamic SQLite parity');
+    assert.deepEqual(await rustFixture.call('registrar_site_output_reader_closure_check',{site_root:siteRoot,include_ok:true}),await tsFixture.call('registrar_site_output_reader_closure_check',{site_root:siteRoot,include_ok:true}),'registrar_site_output_reader_closure_check parity');
+  }
   finally{await Promise.all([tsFixture.stop(),rustFixture.stop()]);rmSync(root,{recursive:true,force:true})}
 }
