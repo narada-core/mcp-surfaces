@@ -51,13 +51,22 @@ fn dispatch(request: &Value) -> Value {
                 .pointer("/params/name")
                 .and_then(Value::as_str)
                 .unwrap_or("");
-            if name == "registrar_guidance" {
-                let mut guidance = contract["guidance"].clone();
+            if matches!(
+                name,
+                "registrar_guidance" | "registrar_surface_list" | "registrar_carrier_list"
+            ) {
+                let mut guidance = if name == "registrar_guidance" {
+                    contract["guidance"].clone()
+                } else {
+                    contract["read_models"][name].clone()
+                };
                 let args = request
                     .pointer("/params/arguments")
                     .cloned()
                     .unwrap_or_else(|| json!({}));
-                guidance.as_object_mut().unwrap().insert("requested".into(),json!({"workflow":args.get("workflow").and_then(Value::as_str).filter(|v|!v.trim().is_empty()).map(str::trim),"tool":args.get("tool").and_then(Value::as_str).filter(|v|!v.trim().is_empty()).map(str::trim)}));
+                if name == "registrar_guidance" {
+                    guidance.as_object_mut().unwrap().insert("requested".into(),json!({"workflow":args.get("workflow").and_then(Value::as_str).filter(|v|!v.trim().is_empty()).map(str::trim),"tool":args.get("tool").and_then(Value::as_str).filter(|v|!v.trim().is_empty()).map(str::trim)}));
+                }
                 json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":serde_json::to_string_pretty(&guidance).unwrap()}],"structuredContent":guidance}})
             } else {
                 error(
