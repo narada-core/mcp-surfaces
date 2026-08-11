@@ -708,7 +708,10 @@ fn run_server(options: Options) -> Result<(), Diagnostic> {
         .and_then(Path::parent)
         .and_then(Path::parent)
         .ok_or_else(|| Diagnostic::new("runtime_path_unavailable", "runtime_path_unavailable"))?;
-    let package_root = native_dir.parent().unwrap_or(native_dir);
+    let package_root = native_dir
+        .parent()
+        .and_then(Path::parent)
+        .unwrap_or(native_dir);
     let surface_root = normalize_path(
         &package_root
             .parent()

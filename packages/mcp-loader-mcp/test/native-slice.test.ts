@@ -61,6 +61,9 @@ process.stdin.on('data', (chunk) => {
     assert.equal(initialized.result.serverInfo.name, 'mcp-loader-mcp');
     const listed = await call('tools/list', {}, 2);
     assert.ok(listed.result.tools.some((tool: any) => tool.name === 'mcp_loader_attach_surface'));
+    const freshness = await call('tools/call', { name: 'mcp_loader_runtime_status', arguments: {} }, 20);
+    assert.equal(freshness.result.structuredContent.source_entrypoint.exists, true);
+    assert.doesNotMatch(freshness.result.structuredContent.source_entrypoint.path, /packages\/packages/);
     const attached = await call('tools/call', { name: 'mcp_loader_attach_surface', arguments: { entrypoint: child, surface_id: 'echo' } }, 3);
     const attachedData = attached.result.structuredContent;
     assert.equal(attachedData.schema, 'narada.mcp_loader.surface_attached.v1');
