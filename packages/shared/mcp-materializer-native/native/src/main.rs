@@ -493,12 +493,15 @@ fn json_field_string<'a>(value: &'a Value, field: &'static str) -> Result<&'a st
 }
 
 fn publish_self(artifact_root: &Path) -> Result<Value, Failure> {
-    if !artifact_root.is_absolute() {
-        return Err(Failure::new(
-            "materializer_artifact_root_not_absolute",
-            path_text(artifact_root),
-        ));
-    }
+    let artifact_root = if artifact_root.is_absolute() {
+        artifact_root.to_path_buf()
+    } else {
+        env::current_dir()
+            .map_err(|error| {
+                Failure::new("materializer_working_directory_failed", error.to_string())
+            })?
+            .join(artifact_root)
+    };
     let executable = env::current_exe()
         .map_err(|error| Failure::new("materializer_executable_unresolved", error.to_string()))?;
     let bytes = fs::read(&executable)
