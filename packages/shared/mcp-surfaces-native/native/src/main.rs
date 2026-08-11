@@ -23,6 +23,7 @@ mod host_contracts;
 mod site_coherence;
 mod site_loop;
 mod surface_feedback;
+mod scheduler_activation;
 mod sop;
 
 const LEGACY_PROTOCOL_VERSION: &str = "2024-11-05";
