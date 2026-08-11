@@ -193,6 +193,33 @@ fn dispatch(request: &Value) -> Value {
                     }
                     Err(message) => error(id, message),
                 }
+            } else if name == "registrar_carrier_bind" || name == "registrar_carrier_unbind" {
+                let args = request
+                    .pointer("/params/arguments")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
+                let result = if name == "registrar_carrier_bind" {
+                    carrier_bind(&contract, &args)
+                } else {
+                    carrier_unbind(&contract, &args)
+                };
+                match result {
+                    Ok(value) => {
+                        json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":serde_json::to_string_pretty(&value).unwrap()}],"structuredContent":value}})
+                    }
+                    Err(failure) => carrier_mutation_error(id, failure),
+                }
+            } else if name == "registrar_sync" {
+                let args = request
+                    .pointer("/params/arguments")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
+                match registrar_sync(&contract, &args) {
+                    Ok(value) => {
+                        json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":serde_json::to_string_pretty(&value).unwrap()}],"structuredContent":value}})
+                    }
+                    Err(message) => sync_error(id, message),
+                }
             } else {
                 error(
                     id,
@@ -202,6 +229,258 @@ fn dispatch(request: &Value) -> Value {
         }
         method => error(id, format!("unsupported_mcp_method:{method}")),
     }
+}
+
+fn carrier_record<'a>(contract: &'a Value, carrier_id: &str) -> Result<&'a Value, String> {
+    contract
+        .pointer("/read_models/registrar_carrier_list/items")
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|carrier| carrier["carrier_id"] == carrier_id)
+        })
+        .ok_or_else(|| format!("registrar_unknown_carrier:{carrier_id}"))
+}
+fn ensure_surface<'a>(contract: &'a Value, surface_id: &str) -> Result<&'a Value, String> {
+    contract
+        .pointer("/read_models/registrar_surface_list/items")
+        .and_then(Value::as_array)
+        .and_then(|items| items.iter().find(|surface| surface["id"] == surface_id))
+        .ok_or_else(|| format!("registrar_unknown_surface:{surface_id}"))
+}
+fn carrier_surface_keys(contract: &Value, carrier_id: &str, surface_id: &str) -> Vec<String> {
+    contract
+        .pointer(&format!(
+            "/read_models/registrar_carrier_validation_plans/{carrier_id}/servers"
+        ))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|server| server["surface_id"] == surface_id)
+        .filter_map(|server| server["server_key"].as_str().map(str::to_string))
+        .collect()
+}
+struct MutationFailure {
+    code: String,
+    message: String,
+    details: Value,
+}
+fn mutation_failure(code: &str, message: String, details: Value) -> MutationFailure {
+    MutationFailure {
+        code: code.into(),
+        message,
+        details,
+    }
+}
+fn carrier_mutation_error(id: Value, failure: MutationFailure) -> Value {
+    let child_data = json!({"schema":"narada.registrar.error.v1","code":failure.code,"message":failure.message,"details":failure.details});
+    let child_error = json!({"code":-32000,"message":failure.message,"data":child_data});
+    let entrypoint = workspace_repo_root()
+        .map(|root| {
+            path_text(&root.join("packages/mcp-registrar/dist/src/main.js")).replace('\\', "/")
+        })
+        .unwrap_or_else(|| "packages/mcp-registrar/dist/src/main.js".into());
+    json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":failure.message,"data":{"schema":"narada.registrar.error.v1","code":"registrar_fresh_materialization_failed","message":failure.message,"details":{"entrypoint":entrypoint,"stderr_tail":"","exit_code":0,"signal":null,"child_error":child_error}}}})
+}
+fn sync_error(id: Value, message: String) -> Value {
+    if let Some(suffix) = message.strip_prefix("registrar_progressive_bulk_bind_refused:") {
+        let remediation = if suffix == "all_carriers" {
+            "Progressive carriers expose only their explicit bootstrap allowlists; use mcp-loader for runtime attachment or switch the bindings to static loading."
+        } else {
+            "Progressive carriers expose only their explicit bootstrap allowlist; use mcp-loader for runtime attachment or switch the binding to static loading."
+        };
+        let mut details = json!({"remediation":remediation});
+        if suffix != "all_carriers" {
+            details
+                .as_object_mut()
+                .unwrap()
+                .insert("carrier_id".into(), json!(suffix));
+        }
+        return json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":message,"data":{"schema":"narada.registrar.error.v1","code":"registrar_progressive_bulk_bind_refused","message":message,"details":details}}});
+    }
+    error(id, message)
+}
+fn carrier_bind(contract: &Value, args: &Value) -> Result<Value, MutationFailure> {
+    let carrier_id = required_argument(args, "carrier_id", "registrar_requires_carrier_id")
+        .map_err(|message| mutation_failure("registrar_requires_carrier_id", message, json!({})))?;
+    let surface_id = required_argument(args, "surface_id", "registrar_requires_surface_id")
+        .map_err(|message| mutation_failure("registrar_requires_surface_id", message, json!({})))?;
+    let carrier = carrier_record(contract, &carrier_id)
+        .map_err(|message| mutation_failure("registrar_unknown_carrier", message, json!({})))?;
+    let surface = ensure_surface(contract, &surface_id)
+        .map_err(|message| mutation_failure("registrar_unknown_surface", message, json!({})))?;
+    if let Some(projection_id) = args
+        .get("projection_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    {
+        if !surface["projections"].as_array().is_some_and(|items| {
+            items
+                .iter()
+                .any(|projection| projection["id"] == projection_id)
+        }) {
+            return Err(mutation_failure(
+                "registrar_unknown_surface_projection",
+                format!("registrar_unknown_surface_projection:{surface_id}:{projection_id}"),
+                json!({"surface_id":surface_id,"projection_id":projection_id}),
+            ));
+        }
+    }
+    let site_id = args
+        .get("site_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("andrey-user");
+    let binding = carrier["site_bindings"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|binding| binding["site_id"] == site_id);
+    let keys = carrier_surface_keys(contract, &carrier_id, &surface_id);
+    if binding.is_some_and(|value| value["loading_mode"] == "progressive") && keys.is_empty() {
+        return Err(mutation_failure(
+            "registrar_progressive_surface_bind_refused",
+            format!("registrar_progressive_surface_bind_refused:{carrier_id}:{surface_id}"),
+            json!({"carrier_id":carrier_id,"site_id":site_id,"surface_id":surface_id,"loading_mode":"progressive","remediation":"Use mcp-loader to attach this surface at runtime, or explicitly add it to the progressive bootstrap allowlist before materializing the carrier."}),
+        ));
+    }
+    if !keys.is_empty() {
+        return Err(mutation_failure(
+            "registrar_carrier_config_owned_by_native_materializer",
+            format!(
+                "registrar_carrier_config_owned_by_native_materializer:{carrier_id}:{surface_id}"
+            ),
+            json!({"carrier_id":carrier_id,"surface_id":surface_id,"server_keys":keys,"remediation":"Edit the external native carrier contract or the owning Site registry, then run pnpm materialize:carrier."}),
+        ));
+    }
+    Err(mutation_failure(
+        "registrar_native_carrier_bind_unreachable",
+        format!("registrar_native_carrier_bind_unreachable:{carrier_id}:{surface_id}"),
+        json!({}),
+    ))
+}
+fn carrier_unbind(contract: &Value, args: &Value) -> Result<Value, MutationFailure> {
+    let carrier_id = required_argument(args, "carrier_id", "registrar_requires_carrier_id")
+        .map_err(|message| mutation_failure("registrar_requires_carrier_id", message, json!({})))?;
+    let surface_id = required_argument(args, "surface_id", "registrar_requires_surface_id")
+        .map_err(|message| mutation_failure("registrar_requires_surface_id", message, json!({})))?;
+    let carrier = carrier_record(contract, &carrier_id)
+        .map_err(|message| mutation_failure("registrar_unknown_carrier", message, json!({})))?;
+    let keys = carrier_surface_keys(contract, &carrier_id, &surface_id);
+    if !keys.is_empty() {
+        return Err(mutation_failure(
+            "registrar_carrier_unbind_refused_aggregate_surface",
+            format!("registrar_carrier_unbind_refused_aggregate_surface:{surface_id}"),
+            json!({"carrier_id":carrier_id,"surface_id":surface_id,"server_keys":keys,"remediation":"This surface is produced by the external native carrier contract. Remove it from that contract or the owning Site registry, then run pnpm materialize:carrier."}),
+        ));
+    }
+    let kind = carrier["kind"].as_str().unwrap_or("");
+    if kind == "opencode" {
+        return Err(mutation_failure(
+            "registrar_single_surface_unbind_unsupported_for_opencode_aggregate",
+            "registrar_single_surface_unbind_unsupported_for_opencode_aggregate".into(),
+            json!({}),
+        ));
+    }
+    let path = carrier["config_path"].as_str().unwrap_or("");
+    let content = fs::read_to_string(path).map_err(|_| {
+        mutation_failure(
+            "registrar_config_not_found",
+            format!("registrar_config_not_found:{path}"),
+            json!({}),
+        )
+    })?;
+    let bound = if kind == "kimi" {
+        parse_jsonc(&content)
+            .and_then(|value| value["mcpServers"].as_object().cloned())
+            .is_some_and(|servers| {
+                servers.contains_key(&format!("narada-site-andrey-user-{surface_id}"))
+            })
+    } else {
+        content.contains(&format!("[mcp_servers.{surface_id}]"))
+    };
+    if !bound {
+        return Ok(json!({"status":"not_bound","carrier_id":carrier_id,"surface_id":surface_id}));
+    }
+    Err(mutation_failure(
+        "registrar_native_carrier_unbind_generation_required",
+        format!("registrar_native_carrier_unbind_generation_required:{carrier_id}:{surface_id}"),
+        json!({}),
+    ))
+}
+fn registrar_sync(contract: &Value, args: &Value) -> Result<Value, String> {
+    let target = required_argument(args, "target", "registrar_requires_target")?;
+    let carriers = contract
+        .pointer("/read_models/registrar_carrier_list/items")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if target == "all_surfaces_to_carriers" {
+        let carrier_id = required_argument(
+            args,
+            "carrier_id",
+            "registrar_requires_carrier_id_for_target",
+        )?;
+        let carrier = carrier_record(contract, &carrier_id)?;
+        if carrier["site_bindings"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|binding| binding["loading_mode"] == "progressive")
+        {
+            return Err(format!(
+                "registrar_progressive_bulk_bind_refused:{carrier_id}"
+            ));
+        }
+    }
+    if target == "all_surfaces_to_all_carriers"
+        && carriers.iter().any(|carrier| {
+            carrier["site_bindings"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|binding| binding["loading_mode"] == "progressive")
+        })
+    {
+        return Err("registrar_progressive_bulk_bind_refused:all_carriers".into());
+    }
+    if target == "all_surfaces_to_carriers" || target == "all_surfaces_to_all_carriers" {
+        return Err(format!("registrar_native_sync_unreachable:{target}"));
+    }
+    let surface_id = required_argument(args, "surface_id", "registrar_requires_surface_id")?;
+    ensure_surface(contract, &surface_id)?;
+    let mut results = vec![];
+    if target == "all_sites" || target == "all" {
+        for site in site_list(contract)["items"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            let site_id = site["site_id"].as_str().unwrap_or("");
+            let call = json!({"site_id":site_id,"surface_id":surface_id,"projection_id":args.get("projection_id"),"runtime_kind":args.get("runtime_kind"),"allow_sidecar":args["allow_sidecar"]==true});
+            match site_bind(contract, &call) {
+                Ok(value) => results.push(value),
+                Err(message) => {
+                    results.push(json!({"site_id":site_id,"surface_id":surface_id,"error":message}))
+                }
+            }
+        }
+    }
+    if target == "all_carriers" || target == "all" {
+        for carrier in &carriers {
+            let carrier_id = carrier["carrier_id"].as_str().unwrap_or("");
+            match carrier_bind(
+                contract,
+                &json!({"carrier_id":carrier_id,"surface_id":surface_id,"projection_id":args.get("projection_id")}),
+            ) {
+                Ok(value) => results.push(value),
+                Err(failure) => results
+                    .push(json!({"carrier_id":carrier_id,"surface_id":surface_id,"error":failure.message})),
+            }
+        }
+    }
+    Ok(json!({"surface_id":surface_id,"target":target,"count":results.len(),"results":results}))
 }
 
 fn site_registry_conformance_check(contract: &Value, args: &Value) -> Result<Value, String> {
