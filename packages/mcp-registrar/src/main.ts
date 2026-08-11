@@ -211,8 +211,15 @@ const MCP_RUNTIME_IMPLEMENTATION_MATRIX_PATH = resolve(runtimeImplementationMatr
 const MCP_MCP_LOADER_PACKAGE_ROOT = resolve(MCP_SURFACES_ROOT, 'mcp-loader-mcp');
 const MCP_NATIVE_MCP_LOADER_ENTRYPOINT = portablePathLiteral(join(MCP_MCP_LOADER_PACKAGE_ROOT, 'dist', 'native', `narada-mcp-loader${process.platform === 'win32' ? '.exe' : ''}`));
 const MCP_LIFECYCLE_NATIVE_PACKAGE_ROOT = resolve(MCP_SURFACES_ROOT, 'shared', 'mcp-lifecycle-native');
-const MCP_NATIVE_TASK_LIFECYCLE_ENTRYPOINT = portablePathLiteral(join(MCP_LIFECYCLE_NATIVE_PACKAGE_ROOT, 'dist', 'native', 'narada-task-lifecycle-mcp' + (process.platform === 'win32' ? '.exe' : '')));
-const MCP_NATIVE_WORK_LIFECYCLE_ENTRYPOINT = portablePathLiteral(join(MCP_LIFECYCLE_NATIVE_PACKAGE_ROOT, 'dist', 'native', 'narada-work-lifecycle-mcp' + (process.platform === 'win32' ? '.exe' : '')));
+const MCP_NATIVE_TASK_LIFECYCLE_ARTIFACT_NAME = 'narada-task-lifecycle-mcp' + (process.platform === 'win32' ? '.exe' : '');
+const MCP_NATIVE_WORK_LIFECYCLE_ARTIFACT_NAME = 'narada-work-lifecycle-mcp' + (process.platform === 'win32' ? '.exe' : '');
+function resolveNativeLifecycleEntrypoint(componentKind: string): string {
+  const artifactName = componentKind === 'task-lifecycle-mcp'
+    ? MCP_NATIVE_TASK_LIFECYCLE_ARTIFACT_NAME
+    : MCP_NATIVE_WORK_LIFECYCLE_ARTIFACT_NAME;
+  const legacy = join(MCP_LIFECYCLE_NATIVE_PACKAGE_ROOT, 'dist', 'native', artifactName);
+  return portablePathLiteral(resolveNativeArtifact(MCP_LIFECYCLE_NATIVE_PACKAGE_ROOT, artifactName) ?? legacy);
+}
 const MCP_SHARED_SURFACES_NATIVE_PACKAGE_ROOT = resolve(MCP_SURFACES_ROOT, 'shared', 'mcp-surfaces-native');
 const MCP_NATIVE_SHARED_SURFACES_ARTIFACT_NAME = 'narada-mcp-surfaces' + (process.platform === 'win32' ? '.exe' : '');
 const MCP_NATIVE_SHARED_SURFACES_LEGACY_ENTRYPOINT = portablePathLiteral(join(MCP_SHARED_SURFACES_NATIVE_PACKAGE_ROOT, 'dist', 'native', MCP_NATIVE_SHARED_SURFACES_ARTIFACT_NAME));
@@ -2086,7 +2093,7 @@ function carrierLaunchCommand(
   const useNativeSharedSurface = selectedEngine === 'rust' && (surfaceId === 'catalog-observation' || surfaceId === 'operator-routing' || surfaceId === 'site-inbox' || surfaceId === 'site-lifecycle' || surfaceId === 'site-registry' || surfaceId === 'project-state' || surfaceId === 'runtime-introspection' || surfaceId === 'site-coherence' || surfaceId === 'launcher' || surfaceId === 'mailbox' || surfaceId === 'graph-mail' || surfaceId === 'calendar' || surfaceId === 'site-loop' || surfaceId === 'worker-delegation' || surfaceId === 'delegated-task' || surfaceId === 'sop' || surfaceId === 'scheduler' || surfaceId === 'surface-feedback' || surfaceId === 'speech' || surfaceId === 'artifacts' || surfaceId === 'nars-session' || surfaceId === 'quota-meter' || surfaceId === 'operator-console-overlay' || surfaceId === 'browser-control' || surfaceId === 'cloudflare-carrier');
   const nativeApplet = useNativeFilesystemApplet ? 'filesystem' : useNativeStructuredCommandApplet ? 'structured-command' : useNativeGitApplet ? 'git' : null;
   const nativeSharedSurfaceEntrypoint = nativeSharedSurfacesEntrypoint();
-  const nativeLifecycleEntrypoint = componentKind === 'task-lifecycle-mcp' ? MCP_NATIVE_TASK_LIFECYCLE_ENTRYPOINT : MCP_NATIVE_WORK_LIFECYCLE_ENTRYPOINT;
+  const nativeLifecycleEntrypoint = resolveNativeLifecycleEntrypoint(componentKind);
   if (useNativeLifecycle && !existsSync(nativeLifecycleEntrypoint)) {
     throw diagnosticError(
       'registrar_native_lifecycle_missing',
@@ -3058,7 +3065,7 @@ function registrarSiteMcpFabricValidate(args: JsonRecord): JsonRecord {
   return validateSiteMcpFabric(site, args.include_ok === true);
 }
 
-function registrarCarrierDiff(args: JsonRecord): JsonRecord {
+export function registrarCarrierDiff(args: JsonRecord): JsonRecord {
   const carrierId = requiredString(args.carrier_id, 'registrar_requires_carrier_id');
   const carrier = lookupCarrier(carrierId);
   const currentPath = carrier.config_path;
@@ -3085,6 +3092,21 @@ function registrarCarrierDiff(args: JsonRecord): JsonRecord {
     }),
     runtime_contract_version: MCP_RUNTIME_CONTRACT_VERSION,
     materialization_validation: materializationValidation,
+  };
+}
+
+export function inspectAllCarrierMaterialization(
+  carrierDiff: (args: JsonRecord) => JsonRecord = registrarCarrierDiff,
+): JsonRecord {
+  const carriers = CARRIERS.map((carrier) => carrierDiff({ carrier_id: carrier.carrier_id }));
+  const stale = carriers.filter((carrier) => carrier.status !== 'clean');
+  return {
+    schema: 'narada.registrar.all_carrier_materialization_inspection.v1',
+    status: stale.length === 0 ? 'current' : 'stale',
+    carrier_count: carriers.length,
+    stale_carrier_count: stale.length,
+    stale_carrier_ids: stale.map((carrier) => carrier.carrier_id),
+    carriers,
   };
 }
 

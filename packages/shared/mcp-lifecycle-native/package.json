@@ -22,8 +22,12 @@
   "naradaRuntimeArtifacts": {
     "win32": [
       "./dist/native/narada-task-lifecycle-mcp.exe",
-      "./dist/native/narada-work-lifecycle-mcp.exe"
+      "./dist/native/narada-work-lifecycle-mcp.exe",
+      "./dist/native/versions/*"
     ]
+  },
+  "dependencies": {
+    "@narada-core/mcp-runtime-proxy": "workspace:*"
   },
   "files": [
     "catalog/",

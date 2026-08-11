@@ -8,7 +8,7 @@ import { DatabaseSync } from '@narada-core/sqlite';
 import { resolveNativeArtifact } from '@narada-core/mcp-runtime-proxy/native-artifact';
 import { payloadCreate } from '@narada-core/mcp-transport';
 import { buildGuidanceResult } from '../src/guidance.js';
-import { appendLoaderAllowedSiteRoots, buildSiteBindConfig, buildSiteSurfaceRegistry, canonicalSiteIdForRoot, checkOutputReaderClosureForRegistry, checkSiteRegistryConformance, checkSiteRegistryConformanceFromObservation, compareCarrierProjection, createServerState, defaultRuntimeProxyImplementation, defaultSurfaceImplementation, handleRequest, parseArgs, readCodexPluginOverrides, readSiteSurfaceOverrides, refreshRegistrarOwnedSiteFabric, sharedSurfaceIdsForBinding, siteBindSidecarRefusal, siteSurfaceServerKey, transactionalWriteFiles, validateSiteMcpFabric, validateSiteToolInventoryObservation } from '../src/main.js';
+import { appendLoaderAllowedSiteRoots, buildSiteBindConfig, buildSiteSurfaceRegistry, canonicalSiteIdForRoot, checkOutputReaderClosureForRegistry, checkSiteRegistryConformance, checkSiteRegistryConformanceFromObservation, compareCarrierProjection, inspectAllCarrierMaterialization, createServerState, defaultRuntimeProxyImplementation, defaultSurfaceImplementation, handleRequest, parseArgs, readCodexPluginOverrides, readSiteSurfaceOverrides, refreshRegistrarOwnedSiteFabric, sharedSurfaceIdsForBinding, siteBindSidecarRefusal, siteSurfaceServerKey, transactionalWriteFiles, validateSiteMcpFabric, validateSiteToolInventoryObservation } from '../src/main.js';
 
 function findWorkspaceRoot(start: string): string {
   let current = resolve(start);
@@ -40,6 +40,13 @@ assert.equal(
   defaultRuntimeProxyImplementation(process.platform, nativeRuntimeArtifactAvailable),
   nativeRuntimeArtifactAvailable ? 'native' : 'bun',
 );
+const allCarrierInspection: any = inspectAllCarrierMaterialization((args) => ({
+  carrier_id: args.carrier_id,
+  status: args.carrier_id === 'kimi-andrey' ? 'different' : 'clean',
+}));
+assert.equal(allCarrierInspection.status, 'stale');
+assert.equal(allCarrierInspection.stale_carrier_count, 1);
+assert.deepEqual(allCarrierInspection.stale_carrier_ids, ['kimi-andrey']);
 const defaultMaterializationArgs = parseArgs(['--materialize-all']);
 assert.equal(defaultMaterializationArgs.mode, 'materialize-all');
 if (defaultMaterializationArgs.mode === 'materialize-all') {

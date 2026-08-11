@@ -702,6 +702,12 @@ importers:
         specifier: ^5.8.3
         version: 5.9.3
 
+  packages/shared/mcp-lifecycle-native:
+    dependencies:
+      '@narada-core/mcp-runtime-proxy':
+        specifier: workspace:*
+        version: link:../mcp-runtime-proxy
+
   packages/shared/mcp-protocol:
     devDependencies:
       '@types/node':
