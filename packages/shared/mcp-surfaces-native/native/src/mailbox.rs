@@ -1,7 +1,9 @@
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
+use time::{format_description::well_known::Rfc3339, OffsetDateTime, UtcOffset};
 
 const MAX_FILES: usize = 5_000;
 const MAX_BYTES: u64 = 10 * 1024 * 1024;
@@ -22,7 +24,7 @@ const MUTATING_NAMES: &[&str] = &[
 pub fn list_tools() -> Vec<Value> {
     let mut tools = vec![guidance_tool()];
     for name in READ_NAMES { tools.push(tool(name, "Read the bounded site-local mailbox projection.", schema(name), true)); }
-    for name in MUTATING_NAMES { tools.push(tool(name, "Mailbox projection mutation remains owned by the mailbox authority.", json!({"type":"object","additionalProperties":true}), false)); }
+    for name in MUTATING_NAMES { tools.push(tool(name, "Mutate the durable mailbox projection authority.", schema(name), false)); }
     tools
 }
 pub fn auxiliary(method: &str, params: &Map<String, Value>) -> Result<Value, Value> { match method { "prompts/list" => Ok(json!({"prompts":[{"name":"mailbox_read_workflow","title":"Mailbox Workflow","description":"Inspect finite site-local mailbox projection reads before synchronization or admission.","arguments":[]}]})), "prompts/get" => { if params.get("name").and_then(Value::as_str)!=Some("mailbox_read_workflow"){return Err(error("unknown_prompt","unknown_prompt"));} Ok(json!({"description":"Inspect finite site-local mailbox projection reads before synchronization or admission.","messages":[{"role":"user","content":{"type":"text","text":"Use mailbox_doctor, mailbox_accounts_list, mailbox_messages_list, mailbox_message_show, mailbox_search, and mailbox_thread_show for bounded local reads. Keep sync, admission, and outbox writes with the owning authority."}}]})) }, "completion/complete" => { let values=if params.get("argument").and_then(Value::as_object).and_then(|v|v.get("name")).and_then(Value::as_str)==Some("name"){list_tools().iter().filter_map(|v|v.get("name").cloned()).take(100).collect::<Vec<_>>()}else{Vec::new()}; Ok(json!({"completion":{"values":values,"total":values.len(),"hasMore":false}})) }, "logging/setLevel"=>Ok(json!({})), _=>Err(error("unsupported_mcp_method",&format!("unsupported_mcp_method:{method}"))), } }
@@ -39,6 +41,8 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<V
         "mailbox_generation_show" => generation_show(args, root),
         "mailbox_outbox_consumer_show" => outbox_consumer_show(args, root),
         "mailbox_outbox_list" => outbox_list(args, root),
+        "mailbox_outbox_consumer_register" => outbox_consumer_register(args, root),
+        "mailbox_outbox_ack" => outbox_ack(args, root),
         name if READ_NAMES.contains(&name) => Err(authority_boundary(name)),
         name if MUTATING_NAMES.contains(&name) => Err(authority_boundary(name)),
         _ => Err(error("unknown_tool", &format!("unknown_tool:{name}"))),
@@ -221,9 +225,342 @@ fn thread_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
 fn output_show(args:&Map<String,Value>,root:&Path)->Result<Value,Value>{let reference=args.get("ref").or_else(||args.get("output_ref")).and_then(Value::as_str).ok_or_else(||error("output_ref_required","output_ref_required"))?;let id=reference.strip_prefix("mcp_output:").ok_or_else(||error("output_ref_invalid","output_ref_invalid"))?;if id.is_empty()||id.len()>100||!id.chars().all(|c|c.is_ascii_alphanumeric()||c=='-'||c=='_'){return Err(error("output_ref_invalid","output_ref_invalid"));}let path=root.join(".ai/tmp/mcp-outputs/workspace").join(format!("{id}.json"));let value=read_bounded(&path)?;Ok(json!({"schema":"narada.mcp_output_page.v1","status":"ok","ref":reference,"output":value,"native_read_only":true}))}
 fn domain_db_path(root:&Path)->PathBuf{root.join(DOMAIN_DB_RELATIVE)}
 fn open_domain_db(root:&Path)->Result<Option<Connection>,Value>{let path=domain_db_path(root);if !path.exists(){return Ok(None);}Connection::open_with_flags(path,OpenFlags::SQLITE_OPEN_READ_ONLY).map(Some).map_err(|e|error("mailbox_domain_store_open_failed",&e.to_string()))}
+fn open_domain_db_write(root: &Path) -> Result<Connection, Value> {
+    let path = domain_db_path(root);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| error("mailbox_domain_store_directory_failed", &e.to_string()))?;
+    }
+    let db = Connection::open(path)
+        .map_err(|e| error("mailbox_domain_store_open_failed", &e.to_string()))?;
+    db.pragma_update(None, "journal_mode", "WAL")
+        .map_err(|e| error("mailbox_domain_store_pragma_failed", &e.to_string()))?;
+    db.pragma_update(None, "foreign_keys", true)
+        .map_err(|e| error("mailbox_domain_store_pragma_failed", &e.to_string()))?;
+    init_outbox_schema(&db)?;
+    Ok(db)
+}
+
+fn init_outbox_schema(db: &Connection) -> Result<(), Value> {
+    db.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS mailbox_outbox(
+          event_id TEXT PRIMARY KEY,
+          scope_id TEXT NOT NULL,
+          topic TEXT NOT NULL,
+          aggregate_id TEXT NOT NULL,
+          aggregate_revision INTEGER NOT NULL,
+          schema_version INTEGER NOT NULL,
+          causation_id TEXT NOT NULL,
+          idempotency_key TEXT NOT NULL UNIQUE,
+          partition_key TEXT NOT NULL,
+          occurred_at TEXT NOT NULL,
+          payload_json TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS mailbox_outbox_consumers(
+          consumer_id TEXT PRIMARY KEY,
+          scope_id TEXT,
+          topics_json TEXT,
+          start_at TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS mailbox_outbox_receipts(
+          consumer_id TEXT NOT NULL REFERENCES mailbox_outbox_consumers(consumer_id),
+          event_id TEXT NOT NULL REFERENCES mailbox_outbox(event_id),
+          receipt_fingerprint TEXT NOT NULL,
+          receipt_json TEXT NOT NULL,
+          acknowledged_at TEXT NOT NULL,
+          PRIMARY KEY(consumer_id, event_id)
+        );
+        CREATE INDEX IF NOT EXISTS mailbox_outbox_order_idx
+          ON mailbox_outbox(occurred_at, event_id);
+        CREATE INDEX IF NOT EXISTS mailbox_outbox_subscription_idx
+          ON mailbox_outbox(scope_id, topic, occurred_at, event_id);
+        "#,
+    )
+    .map_err(|e| error("mailbox_domain_schema_failed", &e.to_string()))?;
+    Ok(())
+}
+
 fn generation_show(args:&Map<String,Value>,root:&Path)->Result<Value,Value>{let id=required(args,"generation_id")?;let Some(db)=open_domain_db(root)? else{return Ok(json!({"schema":"narada.mailbox.sync_generation.v1","status":"not_found","generation_id":id}));};let row:Option<Value>=db.query_row("SELECT generation_id,idempotency_key,scope_id,config_fingerprint,status,parent_cursor,next_cursor,batch_sha256,batch_record_count,staged_at,error_message,created_at,updated_at,completed_at FROM mailbox_sync_generations WHERE generation_id=? LIMIT 1",params![id],|row|Ok(json!({"generation_id":row.get::<_,String>(0)?,"idempotency_key":row.get::<_,String>(1)?,"scope_id":row.get::<_,String>(2)?,"config_fingerprint":row.get::<_,String>(3)?,"status":row.get::<_,String>(4)?,"parent_cursor_sha256":row.get::<_,Option<String>>(5)?.map(|v|v.len()),"next_cursor_sha256":row.get::<_,Option<String>>(6)?.map(|v|v.len()),"batch_sha256":row.get::<_,Option<String>>(7)?,"batch_record_count":row.get::<_,i64>(8)?,"staged_at":row.get::<_,Option<String>>(9)?,"error_present":row.get::<_,Option<String>>(10)?.is_some(),"created_at":row.get::<_,String>(11)?,"updated_at":row.get::<_,String>(12)?,"completed_at":row.get::<_,Option<String>>(13)?}))).optional().map_err(|e|error("mailbox_generation_query_failed",&e.to_string()))?;Ok(json!({"schema":"narada.mailbox.sync_generation.v1","status":if row.is_some(){"ok"}else{"not_found"},"generation":row,"metadata_only":true}))}
-fn outbox_consumer_show(args:&Map<String,Value>,root:&Path)->Result<Value,Value>{let id=required(args,"consumer_id")?;let Some(db)=open_domain_db(root)? else{return Ok(json!({"schema":"narada.mailbox.outbox_consumer_lookup.v1","status":"not_found","consumer_id":id}));};let row:Option<Value>=db.query_row("SELECT consumer_id,scope_id,topics_json,start_at,created_at FROM mailbox_outbox_consumers WHERE consumer_id=? LIMIT 1",params![id],|row|{let topics:String=row.get(2)?;Ok(json!({"consumer_id":row.get::<_,String>(0)?,"scope_id":row.get::<_,Option<String>>(1)?,"topics":serde_json::from_str::<Value>(&topics).unwrap_or(Value::Null),"start_at":row.get::<_,String>(3)?,"created_at":row.get::<_,String>(4)?}))}).optional().map_err(|e|error("mailbox_outbox_consumer_query_failed",&e.to_string()))?;Ok(json!({"schema":"narada.mailbox.outbox_consumer_lookup.v1","status":if row.is_some(){"ok"}else{"not_found"},"consumer_id":id,"consumer":row,"metadata_only":true}))}
-fn outbox_list(args:&Map<String,Value>,root:&Path)->Result<Value,Value>{let id=required(args,"consumer_id")?;let limit=args.get("limit").and_then(Value::as_u64).unwrap_or(100).clamp(1,100) as usize;let Some(db)=open_domain_db(root)? else{return Ok(json!({"schema":"narada.mailbox.outbox_list.v2","status":"not_found","consumer_id":id,"items":[],"has_more":false}));};let consumer:Option<(Option<String>,String,String)>=db.query_row("SELECT scope_id,topics_json,start_at FROM mailbox_outbox_consumers WHERE consumer_id=?",params![id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional().map_err(|e|error("mailbox_outbox_consumer_query_failed",&e.to_string()))?;let Some((scope,topics_json,start_at))=consumer else{return Ok(json!({"schema":"narada.mailbox.outbox_list.v2","status":"not_found","consumer_id":id,"items":[],"has_more":false}));};let topics:Vec<String>=serde_json::from_str(&topics_json).unwrap_or_default();let mut statement=db.prepare("SELECT event_id,scope_id,topic,aggregate_id,aggregate_revision,schema_version,causation_id,idempotency_key,partition_key,occurred_at FROM mailbox_outbox event WHERE event.occurred_at>=? AND (? IS NULL OR event.scope_id=?) AND NOT EXISTS (SELECT 1 FROM mailbox_outbox_receipts receipt WHERE receipt.consumer_id=? AND receipt.event_id=event.event_id) ORDER BY event.occurred_at,event.event_id LIMIT 500").map_err(|e|error("mailbox_outbox_query_failed",&e.to_string()))?;let rows=statement.query_map(params![start_at,scope,scope,id],|row|Ok(json!({"schema":"narada.mailbox.outbox_event.v1","event_id":row.get::<_,String>(0)?,"scope_id":row.get::<_,String>(1)?,"topic":row.get::<_,String>(2)?,"aggregate_id":row.get::<_,String>(3)?,"aggregate_revision":row.get::<_,i64>(4)?,"schema_version":row.get::<_,i64>(5)?,"causation_id":row.get::<_,String>(6)?,"idempotency_key":row.get::<_,String>(7)?,"partition_key":row.get::<_,String>(8)?,"occurred_at":row.get::<_,String>(9)?,"metadata_only":true}))).map_err(|e|error("mailbox_outbox_query_failed",&e.to_string()))?;let mut items=Vec::new();for row in rows{let value=row.map_err(|e|error("mailbox_outbox_row_failed",&e.to_string()))?;if topics.is_empty()||topics.iter().any(|topic|value.get("topic").and_then(Value::as_str)==Some(topic)){items.push(value);if items.len()>limit{break;}}}let has_more=items.len()>limit;if has_more{items.truncate(limit);}Ok(json!({"schema":"narada.mailbox.outbox_list.v2","status":"ok","consumer_id":id,"count":items.len(),"items":items,"has_more":has_more,"metadata_only":true}))}
+fn outbox_consumer_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let consumer_id = required_bounded(args, "consumer_id", "mailbox_outbox_consumer_id_required", 256)?;
+    let Some(db) = open_domain_db(root)? else {
+        return Ok(json!({"schema":"narada.mailbox.outbox_consumer_lookup.v1","status":"not_found","consumer_id":consumer_id}));
+    };
+    let row: Option<(String, Option<String>, Option<String>, String, String)> = db
+        .query_row(
+            "SELECT consumer_id,scope_id,topics_json,start_at,created_at FROM mailbox_outbox_consumers WHERE consumer_id=?",
+            params![consumer_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        )
+        .optional()
+        .map_err(|e| error("mailbox_outbox_consumer_query_failed", &e.to_string()))?;
+    let Some((consumer_id, scope_id, topics_json, start_at, created_at)) = row else {
+        return Ok(json!({"schema":"narada.mailbox.outbox_consumer_lookup.v1","status":"not_found","consumer_id":consumer_id}));
+    };
+    let topics = parsed_topics(topics_json.as_deref(), &consumer_id)?;
+    Ok(json!({
+        "schema":"narada.mailbox.outbox_consumer_lookup.v1",
+        "status":"ok",
+        "consumer":{
+            "consumer_id":consumer_id,
+            "scope_id":scope_id,
+            "topics":topics,
+            "start_at":start_at,
+            "created_at":created_at
+        }
+    }))
+}
+
+fn outbox_consumer_register(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let consumer_id = required_bounded(args, "consumer_id", "mailbox_outbox_consumer_id_required", 256)?;
+    let scope_id = required_bounded(args, "scope_id", "mailbox_outbox_scope_id_required", 256)?;
+    let topics = required_topics(args.get("topics"))?;
+    let start_at = required_timestamp(args, "start_at", "mailbox_outbox_start_at_required")?;
+    let topics_json = canonical_json(&Value::Array(topics.iter().cloned().map(Value::String).collect()));
+    let now = now_iso_millis();
+    let mut db = open_domain_db_write(root)?;
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|e| error("mailbox_domain_transaction_failed", &e.to_string()))?;
+    let result = (|| {
+        let existing: Option<(Option<String>, Option<String>, String, String)> = tx
+            .query_row(
+                "SELECT scope_id,topics_json,start_at,created_at FROM mailbox_outbox_consumers WHERE consumer_id=?",
+                params![consumer_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+            .map_err(|e| error("mailbox_outbox_consumer_query_failed", &e.to_string()))?;
+        let created_at = if let Some((existing_scope, existing_topics, existing_start, created_at)) = existing {
+            if existing_scope.is_none() && existing_topics.is_none() {
+                tx.execute(
+                    "UPDATE mailbox_outbox_consumers SET scope_id=?,topics_json=? WHERE consumer_id=?",
+                    params![scope_id, topics_json, consumer_id],
+                )
+                .map_err(|e| error("mailbox_outbox_consumer_update_failed", &e.to_string()))?;
+                created_at
+            } else {
+                if existing_scope.as_deref() != Some(scope_id.as_str())
+                    || existing_topics.as_deref() != Some(topics_json.as_str())
+                    || existing_start != start_at
+                {
+                    return Err(error(
+                        &format!("mailbox_outbox_consumer_conflict:{consumer_id}"),
+                        &format!("mailbox_outbox_consumer_conflict:{consumer_id}"),
+                    ));
+                }
+                created_at
+            }
+        } else {
+            tx.execute(
+                "INSERT INTO mailbox_outbox_consumers(consumer_id,scope_id,topics_json,start_at,created_at) VALUES (?,?,?,?,?)",
+                params![consumer_id, scope_id, topics_json, start_at, now],
+            )
+            .map_err(|e| error("mailbox_outbox_consumer_insert_failed", &e.to_string()))?;
+            now.clone()
+        };
+        Ok(json!({
+            "schema":"narada.mailbox.outbox_consumer.v2",
+            "consumer":{
+                "consumer_id":consumer_id,
+                "scope_id":scope_id,
+                "topics_json":topics_json,
+                "start_at":start_at,
+                "created_at":created_at
+            }
+        }))
+    })();
+    match result {
+        Ok(value) => {
+            tx.commit()
+                .map_err(|e| error("mailbox_domain_transaction_commit_failed", &e.to_string()))?;
+            Ok(value)
+        }
+        Err(value) => Err(value),
+    }
+}
+
+fn outbox_list(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let consumer_id = required_bounded(args, "consumer_id", "mailbox_outbox_consumer_id_required", 256)?;
+    let limit = bounded_integer(args.get("limit"), 100, 1, 100)? as usize;
+    let Some(db) = open_domain_db(root)? else {
+        return Err(error(
+            &format!("mailbox_outbox_consumer_not_registered:{consumer_id}"),
+            &format!("mailbox_outbox_consumer_not_registered:{consumer_id}"),
+        ));
+    };
+    let consumer: Option<(Option<String>, Option<String>, String)> = db
+        .query_row(
+            "SELECT scope_id,topics_json,start_at FROM mailbox_outbox_consumers WHERE consumer_id=?",
+            params![consumer_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(|e| error("mailbox_outbox_consumer_query_failed", &e.to_string()))?;
+    let Some((Some(scope_id), Some(topics_json), start_at)) = consumer else {
+        let code = if consumer.is_some() {
+            format!("mailbox_outbox_consumer_v2_registration_required:{consumer_id}")
+        } else {
+            format!("mailbox_outbox_consumer_not_registered:{consumer_id}")
+        };
+        return Err(error(&code, &code));
+    };
+    let _topics = parsed_topics(Some(&topics_json), &consumer_id)?;
+    let mut statement = db
+        .prepare(
+            "SELECT event_id,scope_id,topic,aggregate_id,aggregate_revision,schema_version,causation_id,idempotency_key,partition_key,occurred_at,payload_json FROM mailbox_outbox event WHERE event.occurred_at>=? AND event.scope_id=? AND event.topic IN (SELECT value FROM json_each(?)) AND NOT EXISTS (SELECT 1 FROM mailbox_outbox_receipts receipt WHERE receipt.consumer_id=? AND receipt.event_id=event.event_id) ORDER BY event.occurred_at,event.event_id LIMIT ?",
+        )
+        .map_err(|e| error("mailbox_outbox_query_failed", &e.to_string()))?;
+    let rows = statement
+        .query_map(
+            params![start_at, scope_id, topics_json, consumer_id, limit + 1],
+            |row| {
+                let payload_json: String = row.get(10)?;
+                let payload = serde_json::from_str::<Value>(&payload_json).unwrap_or(Value::Null);
+                Ok(json!({
+                    "schema":"narada.mailbox.outbox_event.v1",
+                    "event_id":row.get::<_,String>(0)?,
+                    "scope_id":row.get::<_,String>(1)?,
+                    "topic":row.get::<_,String>(2)?,
+                    "aggregate_id":row.get::<_,String>(3)?,
+                    "aggregate_revision":row.get::<_,i64>(4)?,
+                    "schema_version":row.get::<_,i64>(5)?,
+                    "causation_id":row.get::<_,String>(6)?,
+                    "idempotency_key":row.get::<_,String>(7)?,
+                    "partition_key":row.get::<_,String>(8)?,
+                    "occurred_at":row.get::<_,String>(9)?,
+                    "payload":payload
+                }))
+            },
+        )
+        .map_err(|e| error("mailbox_outbox_query_failed", &e.to_string()))?;
+    let mut items = Vec::new();
+    for row in rows {
+        items.push(row.map_err(|e| error("mailbox_outbox_row_failed", &e.to_string()))?);
+    }
+    let has_more = items.len() > limit;
+    if has_more {
+        items.truncate(limit);
+    }
+    Ok(json!({
+        "schema":"narada.mailbox.outbox_list.v2",
+        "consumer_id":consumer_id,
+        "count":items.len(),
+        "items":items,
+        "has_more":has_more
+    }))
+}
+
+fn outbox_ack(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let consumer_id = required_bounded(args, "consumer_id", "mailbox_outbox_consumer_id_required", 256)?;
+    let event_id = required_bounded(args, "event_id", "mailbox_outbox_event_id_required", 256)?;
+    let raw_receipt = args
+        .get("receipt")
+        .and_then(Value::as_object)
+        .ok_or_else(|| error("mailbox_outbox_receipt_required", "mailbox_outbox_receipt_required"))?;
+    if raw_receipt
+        .keys()
+        .any(|key| !matches!(key.as_str(), "schema" | "outcome" | "effect_ref"))
+    {
+        return Err(error(
+            "mailbox_outbox_receipt_fields_invalid",
+            "mailbox_outbox_receipt_fields_invalid",
+        ));
+    }
+    let receipt = json!({
+        "schema":required_bounded(raw_receipt, "schema", "mailbox_outbox_receipt_schema_required", 128)?,
+        "outcome":required_bounded(raw_receipt, "outcome", "mailbox_outbox_receipt_outcome_required", 64)?,
+        "effect_ref":required_bounded(raw_receipt, "effect_ref", "mailbox_outbox_receipt_effect_ref_required", 512)?
+    });
+    let receipt_json = serde_json::to_string(&receipt)
+        .map_err(|e| error("mailbox_outbox_receipt_encode_failed", &e.to_string()))?;
+    let receipt_fingerprint = sha256_hex(canonical_json(&receipt).as_bytes());
+    let now = now_iso_millis();
+    let mut db = open_domain_db_write(root)?;
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|e| error("mailbox_domain_transaction_failed", &e.to_string()))?;
+    let result = (|| {
+        let consumer: Option<(Option<String>, Option<String>)> = tx
+            .query_row(
+                "SELECT scope_id,topics_json FROM mailbox_outbox_consumers WHERE consumer_id=?",
+                params![consumer_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|e| error("mailbox_outbox_consumer_query_failed", &e.to_string()))?;
+        let Some((Some(scope_id), Some(topics_json))) = consumer else {
+            let code = if consumer.is_some() {
+                format!("mailbox_outbox_consumer_v2_registration_required:{consumer_id}")
+            } else {
+                format!("mailbox_outbox_consumer_not_registered:{consumer_id}")
+            };
+            return Err(error(&code, &code));
+        };
+        let topics = parsed_topics(Some(&topics_json), &consumer_id)?;
+        let event: Option<(String, String)> = tx
+            .query_row(
+                "SELECT scope_id,topic FROM mailbox_outbox WHERE event_id=?",
+                params![event_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|e| error("mailbox_outbox_event_query_failed", &e.to_string()))?;
+        let Some((event_scope, event_topic)) = event else {
+            let code = format!("mailbox_outbox_event_not_found:{event_id}");
+            return Err(error(&code, &code));
+        };
+        if event_scope != scope_id || !topics.iter().any(|topic| topic == &event_topic) {
+            let code = format!("mailbox_outbox_event_not_subscribed:{consumer_id}:{event_id}");
+            return Err(error(&code, &code));
+        }
+        let existing: Option<(String, String)> = tx
+            .query_row(
+                "SELECT receipt_fingerprint,receipt_json FROM mailbox_outbox_receipts WHERE consumer_id=? AND event_id=?",
+                params![consumer_id, event_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|e| error("mailbox_outbox_receipt_query_failed", &e.to_string()))?;
+        if let Some((existing_fingerprint, existing_json)) = existing {
+            if existing_fingerprint != receipt_fingerprint {
+                let code = format!("mailbox_outbox_ack_conflict:{consumer_id}:{event_id}");
+                return Err(error(&code, &code));
+            }
+            let existing_receipt = serde_json::from_str::<Value>(&existing_json)
+                .map_err(|e| error("mailbox_outbox_receipt_invalid", &e.to_string()))?;
+            return Ok(json!({
+                "schema":"narada.mailbox.outbox_ack.v1",
+                "consumer_id":consumer_id,
+                "event_id":event_id,
+                "replayed":true,
+                "receipt":existing_receipt
+            }));
+        }
+        tx.execute(
+            "INSERT INTO mailbox_outbox_receipts(consumer_id,event_id,receipt_fingerprint,receipt_json,acknowledged_at) VALUES (?,?,?,?,?)",
+            params![consumer_id, event_id, receipt_fingerprint, receipt_json, now],
+        )
+        .map_err(|e| error("mailbox_outbox_receipt_insert_failed", &e.to_string()))?;
+        Ok(json!({
+            "schema":"narada.mailbox.outbox_ack.v1",
+            "consumer_id":consumer_id,
+            "event_id":event_id,
+            "replayed":false,
+            "receipt":receipt
+        }))
+    })();
+    match result {
+        Ok(value) => {
+            tx.commit()
+                .map_err(|e| error("mailbox_domain_transaction_commit_failed", &e.to_string()))?;
+            Ok(value)
+        }
+        Err(value) => Err(value),
+    }
+}
 fn filter_message(v: &Value, args: &Map<String, Value>) -> bool {
     for (key, field) in [("mailbox_id", "mailbox_id"), ("folder", "folder"), ("thread_id", "thread_id")] {
         if let Some(filter) = args.get(key).and_then(Value::as_str) {
@@ -298,6 +635,151 @@ fn first_str(o:&Map<String,Value>,keys:&[&str])->Option<String>{keys.iter().find
 fn normalize_text(s:&str)->String{s.replace("\r\n","\n").split_whitespace().collect::<Vec<_>>().join(" ").chars().take(5000).collect()}
 fn as_array(v:Option<&Value>)->Vec<Value>{match v{Some(Value::Array(a))=>a.clone(),Some(v)=>vec![v.clone()],None=>Vec::new()}}
 fn required(args:&Map<String,Value>,key:&str)->Result<String,Value>{args.get(key).and_then(Value::as_str).map(str::trim).filter(|v|!v.is_empty()).map(str::to_string).ok_or_else(||error(&format!("{key}_required"),&format!("{key}_required")))}
+fn required_bounded(
+    args: &Map<String, Value>,
+    key: &str,
+    code: &str,
+    max: usize,
+) -> Result<String, Value> {
+    let value = args
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| error(code, code))?;
+    if value.chars().count() > max {
+        return Err(error(&format!("{code}_too_long"), &format!("{code}_too_long")));
+    }
+    Ok(value.to_string())
+}
+
+fn required_topics(value: Option<&Value>) -> Result<Vec<String>, Value> {
+    let values = value
+        .and_then(Value::as_array)
+        .ok_or_else(|| error("mailbox_outbox_topics_required", "mailbox_outbox_topics_required"))?;
+    if values.is_empty() || values.len() > 16 {
+        return Err(error("mailbox_outbox_topics_required", "mailbox_outbox_topics_required"));
+    }
+    let mut topics = Vec::with_capacity(values.len());
+    for value in values {
+        let topic = value
+            .as_str()
+            .map(str::trim)
+            .filter(|topic| !topic.is_empty())
+            .ok_or_else(|| error("mailbox_outbox_topics_required", "mailbox_outbox_topics_required"))?;
+        if topic.chars().count() > 256 {
+            return Err(error(
+                "mailbox_outbox_topics_required_too_long",
+                "mailbox_outbox_topics_required_too_long",
+            ));
+        }
+        topics.push(topic.to_string());
+    }
+    topics.sort();
+    if topics.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(error(
+            "mailbox_outbox_topics_required_duplicate",
+            "mailbox_outbox_topics_required_duplicate",
+        ));
+    }
+    Ok(topics)
+}
+
+fn parsed_topics(value: Option<&str>, consumer_id: &str) -> Result<Vec<String>, Value> {
+    let Some(value) = value else {
+        let code = format!("mailbox_outbox_consumer_v2_registration_required:{consumer_id}");
+        return Err(error(&code, &code));
+    };
+    let topics = serde_json::from_str::<Vec<String>>(value).map_err(|_| {
+        let code = format!("mailbox_outbox_consumer_topics_invalid:{consumer_id}");
+        error(&code, &code)
+    })?;
+    if topics.is_empty() {
+        let code = format!("mailbox_outbox_consumer_topics_invalid:{consumer_id}");
+        return Err(error(&code, &code));
+    }
+    Ok(topics)
+}
+
+fn required_timestamp(
+    args: &Map<String, Value>,
+    key: &str,
+    code: &str,
+) -> Result<String, Value> {
+    let value = required_bounded(args, key, code, 64)?;
+    let parsed = OffsetDateTime::parse(&value, &Rfc3339)
+        .map_err(|_| error(&format!("{code}_invalid"), &format!("{code}_invalid")))?;
+    Ok(iso_millis(parsed.to_offset(UtcOffset::UTC)))
+}
+
+fn bounded_integer(
+    value: Option<&Value>,
+    fallback: i64,
+    min: i64,
+    max: i64,
+) -> Result<i64, Value> {
+    let resolved = match value {
+        None | Some(Value::Null) => fallback,
+        Some(value) => value
+            .as_i64()
+            .ok_or_else(|| error("mailbox_integer_argument_invalid", "mailbox_integer_argument_invalid"))?,
+    };
+    if resolved < min || resolved > max {
+        return Err(error("mailbox_integer_argument_invalid", "mailbox_integer_argument_invalid"));
+    }
+    Ok(resolved)
+}
+
+fn iso_millis(value: OffsetDateTime) -> String {
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        value.year(),
+        u8::from(value.month()),
+        value.day(),
+        value.hour(),
+        value.minute(),
+        value.second(),
+        value.nanosecond() / 1_000_000
+    )
+}
+
+fn now_iso_millis() -> String {
+    iso_millis(OffsetDateTime::now_utc())
+}
+
+fn canonical_json(value: &Value) -> String {
+    match value {
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {
+            serde_json::to_string(value).unwrap_or_else(|_| "null".to_string())
+        }
+        Value::Array(values) => format!(
+            "[{}]",
+            values.iter().map(canonical_json).collect::<Vec<_>>().join(",")
+        ),
+        Value::Object(object) => {
+            let mut keys = object.keys().collect::<Vec<_>>();
+            keys.sort();
+            let entries = keys
+                .into_iter()
+                .map(|key| {
+                    format!(
+                        "{}:{}",
+                        serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string()),
+                        canonical_json(object.get(key).unwrap_or(&Value::Null))
+                    )
+                })
+                .collect::<Vec<_>>();
+            format!("{{{}}}", entries.join(","))
+        }
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
 fn is_within(path:&Path,root:&Path)->bool{let p=path.canonicalize().unwrap_or_else(|_|path.to_path_buf());let r=root.canonicalize().unwrap_or_else(|_|root.to_path_buf());p==r||p.starts_with(&r)}
 fn read_bounded(path:&Path)->Result<Value,Value>{if fs::metadata(path).map_err(|_|error("output_ref_not_found","output_ref_not_found"))?.len()>MAX_BYTES{return Err(error("output_ref_too_large","output_ref_too_large"));}let text=fs::read_to_string(path).map_err(|_|error("output_ref_read_failed","output_ref_read_failed"))?;serde_json::from_str(&text).map_err(|_|error("output_ref_invalid_json","output_ref_invalid_json"))}
 fn authority_boundary(name:&str)->Value{json!({"schema":"narada.mailbox.authority_boundary.v1","status":"unavailable","tool_name":name,"reason":"mailbox_projection_authority_not_enabled_in_native_read_slice","remediation":"Use the configured mailbox authority for synchronization, admission, and outbox operations."})}
@@ -320,6 +802,28 @@ fn schema(name: &str) -> Value {
         "mailbox_generation_show" => json!({"type":"object","properties":{"generation_id":{"type":"string"}},"required":["generation_id"],"additionalProperties":false}),
         "mailbox_outbox_consumer_show" => json!({"type":"object","properties":{"consumer_id":{"type":"string"}},"required":["consumer_id"],"additionalProperties":false}),
         "mailbox_outbox_list" => json!({"type":"object","properties":{"consumer_id":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":100}},"required":["consumer_id"],"additionalProperties":false}),
+        "mailbox_outbox_consumer_register" => json!({"type":"object","properties":{
+            "consumer_id":{"type":"string"},"scope_id":{"type":"string"},
+            "topics":{"type":"array","minItems":1,"maxItems":16,"items":{"type":"string"}},
+            "start_at":{"type":"string"}
+        },"required":["consumer_id","scope_id","topics","start_at"],"additionalProperties":false}),
+        "mailbox_outbox_ack" => json!({"type":"object","properties":{
+            "consumer_id":{"type":"string"},"event_id":{"type":"string"},
+            "receipt":{"type":"object","additionalProperties":false,"required":["schema","outcome","effect_ref"],"properties":{
+                "schema":{"type":"string"},"outcome":{"type":"string"},"effect_ref":{"type":"string"}
+            }}
+        },"required":["consumer_id","event_id","receipt"],"additionalProperties":false}),
+        "mailbox_sync_generation" => json!({"type":"object","properties":{
+            "idempotency_key":{"type":"string"},"scope_id":{"type":"string"},"config_path":{"type":"string"}
+        },"required":["idempotency_key"],"additionalProperties":false}),
+        "mailbox_reconcile_first_observations" => json!({"type":"object","properties":{
+            "idempotency_key":{"type":"string"},"generation_id":{"type":"string"},"scope_id":{"type":"string"},
+            "config_path":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":100}
+        },"required":["idempotency_key","generation_id"],"additionalProperties":false}),
+        "mailbox_message_admit" => json!({"type":"object","properties":{
+            "idempotency_key":{"type":"string"},"fact_id":{"type":"string"},"source_event_id":{"type":"string"},
+            "scope_id":{"type":"string"},"policy_version":{"type":"string"},"config_path":{"type":"string"}
+        },"required":["idempotency_key","fact_id","source_event_id"],"additionalProperties":false}),
         "mailbox_output_show" => json!({"type":"object","properties":{"ref":{"type":"string"},"output_ref":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":0}},"additionalProperties":false}),
         _ => json!({"type":"object","additionalProperties":false}),
     }
@@ -354,25 +858,60 @@ mod tests {
     }
 
     #[test]
-    fn native_mailbox_domain_reads_are_metadata_only() {
+    fn native_mailbox_outbox_authority_is_scoped_and_idempotent() {
         let root = std::env::temp_dir().join(format!("narada-mailbox-db-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(root.join(".narada/runtime/mailbox-domain")).expect("root");
-        let db = Connection::open(domain_db_path(&root)).expect("db");
+        let db = open_domain_db_write(&root).expect("db");
         db.execute_batch(r##"
             CREATE TABLE mailbox_sync_generations (generation_id TEXT,idempotency_key TEXT,scope_id TEXT,config_fingerprint TEXT,status TEXT,parent_cursor TEXT,next_cursor TEXT,batch_sha256 TEXT,batch_record_count INTEGER,staged_at TEXT,error_message TEXT,created_at TEXT,updated_at TEXT,completed_at TEXT);
-            CREATE TABLE mailbox_outbox_consumers (consumer_id TEXT,scope_id TEXT,topics_json TEXT,start_at TEXT,created_at TEXT);
-            CREATE TABLE mailbox_outbox (event_id TEXT,scope_id TEXT,topic TEXT,aggregate_id TEXT,aggregate_revision INTEGER,schema_version INTEGER,causation_id TEXT,idempotency_key TEXT,partition_key TEXT,occurred_at TEXT);
-            CREATE TABLE mailbox_outbox_receipts (consumer_id TEXT,event_id TEXT);
             INSERT INTO mailbox_sync_generations VALUES ('g1','k1','scope','cfg','completed',NULL,NULL,'hash',1,NULL,NULL,'2026-01-01','2026-01-01','2026-01-01');
-            INSERT INTO mailbox_outbox_consumers VALUES ('c1','scope','["topic"]','2026-01-01','2026-01-01');
-            INSERT INTO mailbox_outbox VALUES ('e1','scope','topic','a1',1,1,'c','k','p','2026-01-01');
+            INSERT INTO mailbox_outbox(event_id,scope_id,topic,aggregate_id,aggregate_revision,schema_version,causation_id,idempotency_key,partition_key,occurred_at,payload_json)
+            VALUES ('e1','scope','topic','a1',1,1,'c','k','p','2026-01-01T00:00:00.000Z','{"value":1}');
         "##).expect("schema");
         drop(db);
+        let registration = json!({
+            "consumer_id":"c1",
+            "scope_id":"scope",
+            "topics":["topic"],
+            "start_at":"2026-01-01T00:00:00Z"
+        });
+        let registered = outbox_consumer_register(registration.as_object().unwrap(), &root)
+            .expect("register");
+        assert_eq!(registered["consumer"]["start_at"], "2026-01-01T00:00:00.000Z");
+        assert_eq!(registered["consumer"]["topics_json"], "[\"topic\"]");
+        let replay = outbox_consumer_register(registration.as_object().unwrap(), &root)
+            .expect("registration replay");
+        assert_eq!(replay["consumer"]["consumer_id"], "c1");
+        let conflict = outbox_consumer_register(
+            json!({"consumer_id":"c1","scope_id":"scope","topics":["other"],"start_at":"2026-01-01T00:00:00Z"})
+                .as_object()
+                .unwrap(),
+            &root,
+        )
+        .expect_err("registration conflict");
+        assert_eq!(conflict["code"], "mailbox_outbox_consumer_conflict:c1");
         assert_eq!(generation_show(&json!({"generation_id":"g1"}).as_object().unwrap(), &root).expect("generation")["status"], "ok");
         assert_eq!(outbox_consumer_show(&json!({"consumer_id":"c1"}).as_object().unwrap(), &root).expect("consumer")["status"], "ok");
         let page = outbox_list(&json!({"consumer_id":"c1","limit":1}).as_object().unwrap(), &root).expect("outbox");
         assert_eq!(page["count"], 1);
-        assert!(page["items"][0].get("metadata_only").and_then(Value::as_bool).unwrap_or(false));
+        assert_eq!(page["items"][0]["payload"]["value"], 1);
+        let acknowledgement = json!({
+            "consumer_id":"c1",
+            "event_id":"e1",
+            "receipt":{"schema":"fixture.receipt.v1","outcome":"completed","effect_ref":"effect:1"}
+        });
+        let first_ack = outbox_ack(acknowledgement.as_object().unwrap(), &root).expect("ack");
+        assert_eq!(first_ack["replayed"], false);
+        let replayed_ack = outbox_ack(acknowledgement.as_object().unwrap(), &root).expect("ack replay");
+        assert_eq!(replayed_ack["replayed"], true);
+        assert_eq!(outbox_list(&json!({"consumer_id":"c1"}).as_object().unwrap(), &root).expect("drained")["count"], 0);
+        let ack_conflict = outbox_ack(
+            json!({"consumer_id":"c1","event_id":"e1","receipt":{"schema":"fixture.receipt.v1","outcome":"failed","effect_ref":"effect:2"}})
+                .as_object()
+                .unwrap(),
+            &root,
+        )
+        .expect_err("ack conflict");
+        assert_eq!(ack_conflict["code"], "mailbox_outbox_ack_conflict:c1:e1");
         fs::remove_dir_all(root).expect("cleanup");
     }
 }

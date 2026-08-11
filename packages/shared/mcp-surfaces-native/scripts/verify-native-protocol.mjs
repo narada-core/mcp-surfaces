@@ -223,6 +223,97 @@ function runMailboxParity() {
   }
 }
 
+function seedMailboxOutbox(root) {
+  const directory = join(root, '.narada', 'runtime', 'mailbox-domain');
+  mkdirSync(directory, { recursive: true });
+  const db = new DatabaseSync(join(directory, 'mailbox-domain.db'));
+  try {
+    db.exec(`
+      create table mailbox_outbox(
+        event_id text primary key,
+        scope_id text not null,
+        topic text not null,
+        aggregate_id text not null,
+        aggregate_revision integer not null,
+        schema_version integer not null,
+        causation_id text not null,
+        idempotency_key text not null unique,
+        partition_key text not null,
+        occurred_at text not null,
+        payload_json text not null
+      );
+      create table mailbox_outbox_consumers(
+        consumer_id text primary key,
+        scope_id text,
+        topics_json text,
+        start_at text not null,
+        created_at text not null
+      );
+      create table mailbox_outbox_receipts(
+        consumer_id text not null references mailbox_outbox_consumers(consumer_id),
+        event_id text not null references mailbox_outbox(event_id),
+        receipt_fingerprint text not null,
+        receipt_json text not null,
+        acknowledged_at text not null,
+        primary key(consumer_id, event_id)
+      );
+    `);
+    db.prepare(`
+      insert into mailbox_outbox(
+        event_id,scope_id,topic,aggregate_id,aggregate_revision,schema_version,
+        causation_id,idempotency_key,partition_key,occurred_at,payload_json
+      ) values (?,?,?,?,?,?,?,?,?,?,?)
+    `).run(
+      'event-1', 'support', 'topic.alpha', 'aggregate-1', 1, 1,
+      'cause-1', 'event-key-1', 'partition-1', '2026-08-01T00:00:00.000Z',
+      JSON.stringify({ schema: 'fixture.event.v1', value: 1 }),
+    );
+  } finally {
+    db.close();
+  }
+}
+
+function runMailboxOutboxMutationParity() {
+  const workspaceRoot = resolve(packageRoot, '..', '..', '..');
+  const bunEntrypoint = join(workspaceRoot, 'packages', 'mailbox-mcp', 'src', 'main.ts');
+  const bunRoot = mkdtempSync(join(tmpdir(), 'narada-mailbox-outbox-bun-'));
+  const rustRoot = mkdtempSync(join(tmpdir(), 'narada-mailbox-outbox-rust-'));
+  try {
+    seedMailboxOutbox(bunRoot);
+    seedMailboxOutbox(rustRoot);
+    const requests = [
+      { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'mailbox_outbox_consumer_register', arguments: { consumer_id: 'consumer-1', scope_id: 'support', topics: ['topic.beta', 'topic.alpha'], start_at: '2026-08-01T00:00:00.000Z' } } },
+      { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'mailbox_outbox_consumer_show', arguments: { consumer_id: 'consumer-1' } } },
+      { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'mailbox_outbox_list', arguments: { consumer_id: 'consumer-1', limit: 10 } } },
+      { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'mailbox_outbox_ack', arguments: { consumer_id: 'consumer-1', event_id: 'event-1', receipt: { schema: 'fixture.receipt.v1', outcome: 'completed', effect_ref: 'effect:1' } } } },
+      { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'mailbox_outbox_ack', arguments: { consumer_id: 'consumer-1', event_id: 'event-1', receipt: { schema: 'fixture.receipt.v1', outcome: 'completed', effect_ref: 'effect:1' } } } },
+      { jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'mailbox_outbox_list', arguments: { consumer_id: 'consumer-1', limit: 10 } } },
+    ];
+    const bun = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', [bunEntrypoint, '--site-root', bunRoot], requests, workspaceRoot);
+    const rust = runMailbox(executable, ['--surface-id', 'mailbox', '--site-root', rustRoot], requests, workspaceRoot);
+    const bunRegistered = mailboxStructured(bun, 1, 'bun');
+    const rustRegistered = mailboxStructured(rust, 1, 'rust');
+    for (const field of ['consumer_id', 'scope_id', 'topics_json', 'start_at']) {
+      assertSame('mailbox.outbox.register.' + field, bunRegistered.consumer?.[field], rustRegistered.consumer?.[field]);
+    }
+    if (!/^\d{4}-\d{2}-\d{2}T/.test(String(rustRegistered.consumer?.created_at))) throw new Error('mailbox_outbox_rust_created_at_invalid');
+    const bunShown = mailboxStructured(bun, 2, 'bun');
+    const rustShown = mailboxStructured(rust, 2, 'rust');
+    for (const field of ['status']) assertSame('mailbox.outbox.show.' + field, bunShown[field], rustShown[field]);
+    for (const field of ['consumer_id', 'scope_id', 'topics', 'start_at']) {
+      assertSame('mailbox.outbox.show.consumer.' + field, bunShown.consumer?.[field], rustShown.consumer?.[field]);
+    }
+    assertSame('mailbox.outbox.list', mailboxStructured(bun, 3, 'bun'), mailboxStructured(rust, 3, 'rust'));
+    assertSame('mailbox.outbox.ack', mailboxStructured(bun, 4, 'bun'), mailboxStructured(rust, 4, 'rust'));
+    assertSame('mailbox.outbox.ack_replay', mailboxStructured(bun, 5, 'bun'), mailboxStructured(rust, 5, 'rust'));
+    assertSame('mailbox.outbox.drained', mailboxStructured(bun, 6, 'bun'), mailboxStructured(rust, 6, 'rust'));
+    return { status: 'passed', fixture: 'durable_scoped_outbox', compared: ['consumer_register', 'consumer_show', 'list', 'ack', 'ack_replay', 'drained'] };
+  } finally {
+    rmSync(bunRoot, { recursive: true, force: true });
+    rmSync(rustRoot, { recursive: true, force: true });
+  }
+}
+
 function runDelegatedTaskParity() {
   const workspaceRoot = resolve(packageRoot, '..', '..', '..');
   const bunEntrypoint = join(workspaceRoot, 'packages', 'delegated-task-mcp', 'src', 'main.ts');
@@ -1601,6 +1692,7 @@ function runSchedulerParity() {
 }
 
 const mailboxParity = runMailboxParity();
+const mailboxOutboxMutationParity = runMailboxOutboxMutationParity();
 const delegatedTaskParity = runDelegatedTaskParity();
 const workerDelegationParity = runWorkerDelegationParity();
 const artifactsParity = runArtifactsParity();
@@ -1633,6 +1725,7 @@ process.stdout.write(JSON.stringify({
   modern: '2026-07-28',
   defaults_changed: false,
   mailbox_parity: mailboxParity,
+  mailbox_outbox_mutation_parity: mailboxOutboxMutationParity,
   delegated_task_parity: delegatedTaskParity,
   worker_delegation_parity: workerDelegationParity,
   artifacts_parity: artifactsParity,
