@@ -32,7 +32,7 @@ async function dynamicRegistryParity(){
   const root=mkdtempSync(join(tmpdir(),'narada-registrar-native-'));
   const siteRoot=join(root,'fixture-site');const registry=join(root,'registry.db');
   mkdirSync(join(siteRoot,'.narada'),{recursive:true});
-  writeFileSync(join(siteRoot,'.narada','config.json'),JSON.stringify({surface_overrides:{'agent-context':{enabled:true,surface_implementation:'native'}},structural_config:{agent_execution_policy:{allowed_mcp_entrypoints:[{surface_id:'fixture.local',command:'fixture',path:'fixture.exe'}]}}}));
+  writeFileSync(join(siteRoot,'.narada','config.json'),JSON.stringify({surface_overrides:{'agent-context':{enabled:true,surface_implementation:'native'},'quota-meter':{enabled:false}},structural_config:{agent_execution_policy:{allowed_mcp_entrypoints:[{surface_id:'fixture.local',command:'fixture',path:'fixture.exe'}]}}}));
   const db=new DatabaseSync(registry);db.exec('CREATE TABLE site_registry (site_id TEXT, site_root TEXT, lifecycle_status TEXT, created_at TEXT)');
   db.prepare('INSERT INTO site_registry VALUES (?, ?, ?, ?)').run('andrey-user',join(process.env.USERPROFILE??'', 'Narada'),'active','2026-08-10T00:00:00Z');
   db.prepare('INSERT INTO site_registry VALUES (?, ?, ?, ?)').run('fixture-site',siteRoot,'active','2026-08-11T00:00:00Z');db.close();
@@ -48,6 +48,12 @@ async function dynamicRegistryParity(){
     const tsSync=await tsFixture.call('registrar_site_surface_registry_sync',{site_id:'fixture-site'});const tsRegistry=JSON.parse(readFileSync(join(siteRoot,'.narada','capabilities','mcp-surfaces.json'),'utf8'));
     const rustSync=await rustFixture.call('registrar_site_surface_registry_sync',{site_id:'fixture-site'});const rustRegistry=JSON.parse(readFileSync(join(siteRoot,'.narada','capabilities','mcp-surfaces.json'),'utf8'));
     delete tsRegistry.generated_at;delete rustRegistry.generated_at;assert.deepEqual(rustSync,tsSync,'registrar_site_surface_registry_sync write result parity');assert.deepEqual(rustRegistry,tsRegistry,'registrar_site_surface_registry_sync write artifact parity');
+    const boundFile=join(siteRoot,'.ai','mcp','narada-fixture-site-structured-command-mcp.json');
+    const tsBind=await tsFixture.call('registrar_site_bind',{site_id:'fixture-site',surface_id:'structured-command'});const tsBound=JSON.parse(readFileSync(boundFile,'utf8'));const tsBoundRegistry=JSON.parse(readFileSync(join(siteRoot,'.narada','capabilities','mcp-surfaces.json'),'utf8'));rmSync(boundFile);
+    const rustBind=await rustFixture.call('registrar_site_bind',{site_id:'fixture-site',surface_id:'structured-command'});const rustBound=JSON.parse(readFileSync(boundFile,'utf8'));const rustBoundRegistry=JSON.parse(readFileSync(join(siteRoot,'.narada','capabilities','mcp-surfaces.json'),'utf8'));delete tsBoundRegistry.generated_at;delete rustBoundRegistry.generated_at;assert.deepEqual(rustBind,tsBind,'registrar_site_bind result parity');assert.deepEqual(rustBound,tsBound,'registrar_site_bind artifact parity');assert.deepEqual(rustBoundRegistry,tsBoundRegistry,'registrar_site_bind registry parity');
+    const tsUnbind=await tsFixture.call('registrar_site_unbind',{site_id:'fixture-site',surface_id:'structured-command'});await rustFixture.call('registrar_site_bind',{site_id:'fixture-site',surface_id:'structured-command'});const rustUnbind=await rustFixture.call('registrar_site_unbind',{site_id:'fixture-site',surface_id:'structured-command'});assert.deepEqual(rustUnbind,tsUnbind,'registrar_site_unbind parity');
+    assert.deepEqual(await rustFixture.call('registrar_site_bind',{site_id:'fixture-site',surface_id:'quota-meter'}),await tsFixture.call('registrar_site_bind',{site_id:'fixture-site',surface_id:'quota-meter'}),'registrar_site_bind disabled refusal parity');
+    const aggregate=join(siteRoot,'.ai','mcp','fixture-site-mcp.json');writeFileSync(aggregate,JSON.stringify({mcpServers:{}}));assert.deepEqual(await rustFixture.call('registrar_site_bind',{site_id:'fixture-site',surface_id:'structured-command'}),await tsFixture.call('registrar_site_bind',{site_id:'fixture-site',surface_id:'structured-command'}),'registrar_site_bind aggregate refusal parity');rmSync(aggregate);
   }
   finally{await Promise.all([tsFixture.stop(),rustFixture.stop()]);rmSync(root,{recursive:true,force:true})}
 }

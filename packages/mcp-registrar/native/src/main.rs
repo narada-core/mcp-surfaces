@@ -132,6 +132,22 @@ fn dispatch(request: &Value) -> Value {
                     }
                     Err(message) => error(id, message),
                 }
+            } else if name == "registrar_site_bind" || name == "registrar_site_unbind" {
+                let args = request
+                    .pointer("/params/arguments")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
+                let result = if name == "registrar_site_bind" {
+                    site_bind(&contract, &args)
+                } else {
+                    site_unbind(&contract, &args)
+                };
+                match result {
+                    Ok(value) => {
+                        json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":serde_json::to_string_pretty(&value).unwrap()}],"structuredContent":value}})
+                    }
+                    Err(message) => error(id, message),
+                }
             } else {
                 error(
                     id,
@@ -975,6 +991,649 @@ fn parse_jsonc(text: &str) -> Option<Value> {
     }
     serde_json::from_str(&output).ok()
 }
+fn site_bind(contract: &Value, args: &Value) -> Result<Value, String> {
+    let site_id = required_argument(args, "site_id", "registrar_requires_site_id")?;
+    let surface_id = required_argument(args, "surface_id", "registrar_requires_surface_id")?;
+    let catalog = site_list(contract);
+    let sites = catalog["items"].as_array().cloned().unwrap_or_default();
+    let site = lookup_site_value(&sites, &site_id)?;
+    let surfaces = contract
+        .pointer("/read_models/registrar_surface_list/items")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let surface = surfaces
+        .iter()
+        .find(|surface| surface["id"] == surface_id)
+        .ok_or_else(|| format!("registrar_unknown_surface:{surface_id}"))?;
+    if site
+        .pointer(&format!("/surface_overrides/{surface_id}/enabled"))
+        .and_then(Value::as_bool)
+        == Some(false)
+        && args.get("allow_disabled_sidecar").and_then(Value::as_bool) != Some(true)
+    {
+        return Ok(
+            json!({"status":"refused","reason_code":"registrar_site_bind_refused_surface_disabled","site_id":site_id,"surface_id":surface_id,"sidecar_state":"disabled_by_site_override","reason":"This Site explicitly disables the requested surface, so registrar_site_bind will not materialize a sidecar for it.","required_next_step":"Enable the surface in the Site override or pass allow_disabled_sidecar=true only for an intentional compatibility sidecar."}),
+        );
+    }
+    let config_dir = site_mcp_control_root(Path::new(site["root"].as_str().unwrap_or("")))
+        .join(".ai")
+        .join("mcp");
+    let aggregate = format!("{site_id}-mcp.json");
+    let aggregate_exists = config_dir.join(&aggregate).exists();
+    if aggregate_exists && args.get("allow_sidecar").and_then(Value::as_bool) != Some(true) {
+        return Ok(
+            json!({"status":"refused","reason_code":"registrar_site_bind_refused_aggregate_fabric_exists","site_id":site_id,"surface_id":surface_id,"aggregate_file":aggregate,"reason":"This Site has an authoritative aggregate MCP fabric. registrar_site_bind would create a sidecar snippet, so it is refused unless allow_sidecar is explicitly true.","required_next_step":"Update the aggregate MCP fabric through the Site materialization path, or pass allow_sidecar=true only for an intentional compatibility sidecar."}),
+        );
+    }
+    let projection_id = args
+        .get("projection_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    let runtime_kind = args
+        .get("runtime_kind")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    let projection = select_projection(surface, projection_id, runtime_kind)?;
+    fs::create_dir_all(&config_dir).map_err(|error| error.to_string())?;
+    let prefix = site_prefix(&site_id);
+    let server_key = format!("{prefix}-{surface_id}");
+    let file_name = format!("{prefix}-{surface_id}-mcp.json");
+    let config = build_bind_config(
+        contract,
+        &site,
+        surface,
+        projection,
+        runtime_kind,
+        &server_key,
+    )?;
+    fs::write(
+        config_dir.join(&file_name),
+        serde_json::to_string_pretty(&config).map_err(|error| error.to_string())? + "\n",
+    )
+    .map_err(|error| error.to_string())?;
+    let registry_result = write_site_registry(contract, &site)?;
+    Ok(
+        json!({"status":"bound","site_id":site_id,"surface_id":surface_id,"projection_id":projection["id"],"file":file_name,"server_key":server_key,"registry":registry_result}),
+    )
+}
+
+fn site_unbind(contract: &Value, args: &Value) -> Result<Value, String> {
+    let site_id = required_argument(args, "site_id", "registrar_requires_site_id")?;
+    let surface_id = required_argument(args, "surface_id", "registrar_requires_surface_id")?;
+    let catalog = site_list(contract);
+    let sites = catalog["items"].as_array().cloned().unwrap_or_default();
+    let site = lookup_site_value(&sites, &site_id)?;
+    let directory = site_mcp_control_root(Path::new(site["root"].as_str().unwrap_or("")))
+        .join(".ai")
+        .join("mcp");
+    if !directory.exists() {
+        return Ok(json!({"status":"not_found","site_id":site_id,"surface_id":surface_id}));
+    }
+    let key = format!("{}-{surface_id}", site_prefix(&site_id));
+    if let Ok(entries) = fs::read_dir(&directory) {
+        for entry in entries.filter_map(Result::ok) {
+            if entry.path().extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(config) = fs::read_to_string(entry.path())
+                .ok()
+                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            else {
+                continue;
+            };
+            if config["mcpServers"].get(&key).is_some() {
+                let file = entry.file_name().to_string_lossy().to_string();
+                fs::remove_file(entry.path()).map_err(|error| error.to_string())?;
+                let registry = write_site_registry(contract, &site)?;
+                return Ok(
+                    json!({"status":"unbound","site_id":site_id,"surface_id":surface_id,"file":file,"registry":registry}),
+                );
+            }
+        }
+    }
+    Ok(json!({"status":"not_bound","site_id":site_id,"surface_id":surface_id}))
+}
+
+fn write_site_registry(contract: &Value, site: &Value) -> Result<Value, String> {
+    let registry = build_site_surface_registry(contract, site)?;
+    let path = capability_registry_path(Path::new(site["root"].as_str().unwrap_or("")));
+    fs::create_dir_all(
+        path.parent()
+            .ok_or("registrar_site_registry_path_invalid")?,
+    )
+    .map_err(|error| error.to_string())?;
+    fs::write(
+        &path,
+        serde_json::to_string_pretty(&registry).map_err(|error| error.to_string())? + "\n",
+    )
+    .map_err(|error| error.to_string())?;
+    let surfaces = registry["surfaces"].as_array().cloned().unwrap_or_default();
+    let tools = surfaces
+        .iter()
+        .map(|surface| {
+            surface["registered_live_tools"]
+                .as_array()
+                .map_or(0, Vec::len)
+        })
+        .sum::<usize>();
+    Ok(
+        json!({"status":"synced","site_id":site["site_id"],"path":path_text(&path),"surface_count":surfaces.len(),"tool_count":tools}),
+    )
+}
+
+fn required_argument(args: &Value, name: &str, code: &str) -> Result<String, String> {
+    args.get(name)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| code.to_string())
+}
+fn site_prefix(site_id: &str) -> String {
+    if site_id == "andrey-user" {
+        "narada-site-andrey-user".into()
+    } else if site_id.starts_with("narada-") {
+        site_id.into()
+    } else {
+        format!("narada-{site_id}")
+    }
+}
+
+fn select_projection<'a>(
+    surface: &'a Value,
+    projection_id: Option<&str>,
+    runtime_kind: Option<&str>,
+) -> Result<&'a Value, String> {
+    let projections = surface["projections"]
+        .as_array()
+        .ok_or("registrar_surface_projection_required")?;
+    if let Some(id) = projection_id {
+        return projections
+            .iter()
+            .find(|projection| projection["id"] == id)
+            .ok_or_else(|| {
+                format!(
+                    "registrar_unknown_surface_projection:{}:{id}",
+                    surface["id"].as_str().unwrap_or("")
+                )
+            });
+    }
+    if let Some(kind) = runtime_kind {
+        let matches = projections
+            .iter()
+            .filter(|projection| {
+                projection["runtime_requirements"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|value| value == kind)
+            })
+            .collect::<Vec<_>>();
+        if matches.len() == 1 {
+            return Ok(matches[0]);
+        }
+        let neutral = projections
+            .iter()
+            .filter(|projection| {
+                projection["runtime_requirements"]
+                    .as_array()
+                    .map_or(true, Vec::is_empty)
+            })
+            .collect::<Vec<_>>();
+        if neutral.len() == 1 {
+            return Ok(neutral[0]);
+        }
+    }
+    if projections.len() == 1 {
+        return Ok(&projections[0]);
+    }
+    Err(format!(
+        "registrar_surface_projection_required:{}",
+        surface["id"].as_str().unwrap_or("")
+    ))
+}
+
+fn build_bind_config(
+    _contract: &Value,
+    site: &Value,
+    surface: &Value,
+    projection: &Value,
+    runtime_kind: Option<&str>,
+    server_key: &str,
+) -> Result<Value, String> {
+    let site_id = site["site_id"].as_str().unwrap_or("");
+    let surface_id = surface["id"].as_str().unwrap_or("");
+    let root = canonical_root(PathBuf::from(site["root"].as_str().unwrap_or("")));
+    let workspace = site_workspace_root(site);
+    let source_args = projection
+        .get("args")
+        .and_then(Value::as_array)
+        .or_else(|| surface["args"].as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut child_args = source_args
+        .iter()
+        .filter_map(Value::as_str)
+        .map(|value| interpolate(value, site_id, &root, &workspace))
+        .collect::<Vec<_>>();
+    if projection["id"] == "user-site-operator" {
+        child_args.extend(
+            [
+                "--projection",
+                "user-site-operator",
+                "--user-site-root",
+                &path_text(&user_site_root()),
+                "--source-kind",
+                "operator",
+                "--operator-id",
+                &default_operator_id(),
+            ]
+            .map(str::to_string),
+        );
+    }
+    let entrypoint_template = projection["entrypoint"]
+        .as_str()
+        .or_else(|| surface["entrypoint"].as_str())
+        .unwrap_or("");
+    let child_entrypoint = canonical_root(PathBuf::from(interpolate(
+        entrypoint_template,
+        site_id,
+        &root,
+        &workspace,
+    )));
+    let implementation = site
+        .pointer(&format!(
+            "/surface_overrides/{surface_id}/surface_implementation"
+        ))
+        .and_then(Value::as_str);
+    let launch = site_launch(
+        surface_id,
+        projection,
+        implementation,
+        &path_text(&child_entrypoint),
+        &child_args,
+    )?;
+    let exposed = projection["exposed_tools"]
+        .as_array()
+        .cloned()
+        .unwrap_or_else(|| surface["tools"].as_array().cloned().unwrap_or_default());
+    let scope = scope_metadata(projection, &root);
+    let mut envs = surface["env_vars"].as_array().cloned().unwrap_or_default();
+    envs.extend(
+        projection["env_vars"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default(),
+    );
+    let envs = unique(envs.iter().filter_map(Value::as_str));
+    let projection_metadata = projection_metadata(surface, projection, runtime_kind);
+    Ok(
+        json!({"schema":"narada.mcp.client_config.v0","site_id":site_id,"description":format!("{} MCP surface bound by registrar.",surface["package"].as_str().unwrap_or("")),"mcpServers":{server_key:{"transport":"stdio","command":launch.0,"args":launch.1,"tools":exposed,"env_vars":envs,"surface_id":surface_id,"projection_id":projection["id"],"surface_projection":projection_metadata,"authority_posture":if scope["injection_scope"]=="local_site"{"site_local_mcp_surface"}else{"injected_mcp_surface"},"injection_scope":scope["injection_scope"],"authority_locus":scope["authority_locus"],"mutation_locus":scope["mutation_locus"],"restart_owner":scope["restart_owner"],"bound_into_site":site_id,"narada_scope":{"injection_scope":scope["injection_scope"],"authority_locus":scope["authority_locus"],"mutation_locus":scope["mutation_locus"],"restart_owner":scope["restart_owner"],"bound_into_site":site_id,"scope_source":"registrar_surface_catalog"}}}}),
+    )
+}
+
+fn site_workspace_root(site: &Value) -> PathBuf {
+    let config = site["config_path"]
+        .as_str()
+        .and_then(|path| fs::read_to_string(path).ok())
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+    let configured = config.as_ref().and_then(|value| {
+        value["workspace_root"].as_str().or_else(|| {
+            value
+                .pointer("/site/workspace_root")
+                .and_then(Value::as_str)
+        })
+    });
+    canonical_root(PathBuf::from(
+        configured.unwrap_or_else(|| site["root"].as_str().unwrap_or("")),
+    ))
+}
+fn interpolate(value: &str, site_id: &str, root: &Path, workspace: &Path) -> String {
+    let control = if root
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case(".narada"))
+    {
+        root.to_path_buf()
+    } else {
+        root.join(".narada")
+    };
+    value
+        .replace(
+            "{mcp_surfaces_root}",
+            &workspace_repo_root()
+                .map(|root| path_text(&root.join("packages")))
+                .unwrap_or_default(),
+        )
+        .replace("{site_root}", &path_text(root))
+        .replace("{site_control_root}", &path_text(&control))
+        .replace("{site_runtime_root}", &path_text(&control.join("runtime")))
+        .replace("{workspace_root}", &path_text(workspace))
+        .replace("{site_id}", site_id)
+}
+fn default_operator_id() -> String {
+    user_site_root()
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|value| value.to_str())
+        .unwrap_or("operator")
+        .to_ascii_lowercase()
+}
+fn workspace_repo_root() -> Option<PathBuf> {
+    let executable = env::current_exe().ok()?;
+    executable
+        .ancestors()
+        .find(|root| root.join("packages").join("mcp-registrar").exists())
+        .map(Path::to_path_buf)
+}
+
+fn scope_metadata(projection: &Value, root: &Path) -> Value {
+    let injection = projection["injection_scope"]
+        .as_str()
+        .unwrap_or("local_site");
+    let locus = if injection == "host" {
+        json!({"kind":"host"})
+    } else if injection == "user_site" {
+        json!({"kind":"user_site","site_root":path_text(&user_site_root())})
+    } else {
+        json!({"kind":"local_site","site_root":path_text(root)})
+    };
+    json!({"injection_scope":injection,"authority_locus":locus,"mutation_locus":locus,"restart_owner":projection["restart_owner"].as_str().unwrap_or(injection)})
+}
+fn projection_metadata(surface: &Value, projection: &Value, runtime_kind: Option<&str>) -> Value {
+    let tools = projection["exposed_tools"]
+        .as_array()
+        .cloned()
+        .unwrap_or_else(|| surface["tools"].as_array().cloned().unwrap_or_default());
+    let descriptor = &surface["descriptor"];
+    let mut value = json!({"surface_id":surface["id"],"projection_id":projection["id"],"injection_scope":projection["injection_scope"],"runtime_requirements":projection.get("runtime_requirements").cloned().unwrap_or_else(||json!([])),"exposed_tools":tools,"execution":projection["execution"],"descriptor_digest":surface["descriptor_digest"],"tool_contract_digest":surface["tool_contract_digest"],"surface_descriptor":descriptor});
+    for key in ["default_injection"] {
+        if let Some(item) = projection.get(key) {
+            value
+                .as_object_mut()
+                .unwrap()
+                .insert(key.into(), item.clone());
+        }
+    }
+    if let Some(kind) = runtime_kind {
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("runtime_kind".into(), json!(kind));
+    }
+    if let Some(lifecycle) = descriptor["projections"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|candidate| candidate["id"] == projection["id"])
+        .and_then(|candidate| candidate.get("lifecycle"))
+    {
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("lifecycle".into(), lifecycle.clone());
+    }
+    value
+}
+
+fn site_launch(
+    surface_id: &str,
+    projection: &Value,
+    implementation: Option<&str>,
+    entrypoint: &str,
+    args: &[String],
+) -> Result<(String, Vec<String>), String> {
+    let component = component_kind(surface_id);
+    let engine = runtime_engine(&component, implementation)?;
+    let proxy = native_proxy_entrypoint().ok_or("registrar_native_runtime_proxy_missing")?;
+    let mut effective_command = if engine == "rust" {
+        projection["command"].as_str().unwrap_or("node").to_string()
+    } else {
+        runtime_executable(&engine)?
+    };
+    let mut effective_entrypoint = entrypoint.to_string();
+    let mut effective_args = args.to_vec();
+    let mut invocation = None;
+    let mut applet = None;
+    let shared = [
+        "catalog-observation",
+        "operator-routing",
+        "site-inbox",
+        "site-lifecycle",
+        "site-registry",
+        "project-state",
+        "runtime-introspection",
+        "site-coherence",
+        "launcher",
+        "mailbox",
+        "graph-mail",
+        "calendar",
+        "site-loop",
+        "worker-delegation",
+        "delegated-task",
+        "sop",
+        "scheduler",
+        "surface-feedback",
+        "speech",
+        "artifacts",
+        "nars-session",
+        "quota-meter",
+        "operator-console-overlay",
+        "browser-control",
+        "cloudflare-carrier",
+    ]
+    .contains(&surface_id);
+    if engine == "rust" {
+        if ["local-filesystem", "structured-command", "git"].contains(&surface_id) {
+            effective_command = proxy.clone();
+            effective_entrypoint = proxy.clone();
+            invocation = Some("native_applet");
+            applet = Some(if surface_id == "local-filesystem" {
+                "filesystem"
+            } else {
+                surface_id
+            });
+        } else if surface_id == "mcp-loader" {
+            let path = native_artifact_entrypoint("mcp-loader-mcp", "narada-mcp-loader.exe")
+                .ok_or("registrar_native_mcp_loader_missing")?;
+            effective_command = path.clone();
+            effective_entrypoint = path;
+            invocation = Some("native_entrypoint");
+        } else if surface_id == "task-lifecycle" || surface_id == "work-lifecycle" {
+            let artifact = if surface_id == "task-lifecycle" {
+                "narada-task-lifecycle-mcp.exe"
+            } else {
+                "narada-work-lifecycle-mcp.exe"
+            };
+            let path = native_artifact_entrypoint("shared/mcp-lifecycle-native", artifact)
+                .ok_or("registrar_native_lifecycle_missing")?;
+            effective_command = path.clone();
+            effective_entrypoint = path;
+            invocation = Some("native_entrypoint");
+        } else if surface_id == "agent-context" && projection["id"] == "default" {
+            let path =
+                native_artifact_entrypoint("agent-context-mcp", "narada-agent-context-mcp.exe")
+                    .ok_or("registrar_native_agent_context_missing")?;
+            effective_command = path.clone();
+            effective_entrypoint = path;
+            invocation = Some("native_entrypoint");
+        } else if shared {
+            let path =
+                native_artifact_entrypoint("shared/mcp-surfaces-native", "narada-mcp-surfaces.exe")
+                    .ok_or("registrar_native_shared_surface_missing")?;
+            effective_command = path.clone();
+            effective_entrypoint = path;
+            effective_args = native_shared_args(surface_id, args);
+            invocation = Some("native_entrypoint");
+        } else if surface_id == "mcp-registrar" {
+            let path = native_artifact_entrypoint("mcp-registrar", "narada-mcp-registrar.exe")
+                .ok_or("registrar_native_registrar_missing")?;
+            effective_command = path.clone();
+            effective_entrypoint = path;
+            invocation = Some("native_entrypoint");
+        }
+    }
+    let mut proxy_args = vec![
+        "proxy".into(),
+        "--surface-id".into(),
+        surface_id.into(),
+        "--child-command".into(),
+        effective_command,
+        "--artifact-manifest".into(),
+        workspace_repo_root()
+            .map(|root| {
+                root.join(".ai/runtime/workspace-artifact-manifest.json")
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .unwrap_or_default(),
+        "--runtime-contract-version".into(),
+        "6".into(),
+        "--entrypoint".into(),
+        effective_entrypoint,
+    ];
+    if let Some(kind) = invocation {
+        proxy_args.extend(["--child-invocation-kind", kind].map(str::to_string));
+        if kind == "native_applet" {
+            proxy_args
+                .extend(["--child-applet", applet.unwrap_or("filesystem")].map(str::to_string));
+        }
+    }
+    proxy_args.push("--".into());
+    proxy_args.extend(effective_args);
+    Ok((proxy, proxy_args))
+}
+
+fn native_shared_args(surface_id: &str, args: &[String]) -> Vec<String> {
+    let mut result = vec!["--surface-id".into(), surface_id.into()];
+    if surface_id == "calendar" || surface_id == "graph-mail" {
+        result.push("--native-authority".into())
+    }
+    let roots = [
+        "--site-root",
+        "--narada-root",
+        "--feedback-root",
+        "--output-root",
+        "--user-site-root",
+        "--repo-root",
+        "--sop-root",
+        "--task-root",
+        "--allowed-root",
+    ];
+    let forwarded = [
+        "--log-root",
+        "--registry-path",
+        "--projection-id",
+        "--canonical-feedback-root",
+        "--task-lifecycle-root",
+        "--feedback-discovery-root",
+        "--site-id",
+        "--owned-surface-id",
+        "--projection",
+        "--source-kind",
+        "--operator-id",
+        "--run-root",
+        "--sops-dir",
+        "--provider-registry-path",
+        "--server-name",
+    ];
+    let mut index = 0;
+    while index < args.len() {
+        let key = &args[index];
+        if (roots.contains(&key.as_str()) || forwarded.contains(&key.as_str()))
+            && index + 1 < args.len()
+            && !args[index + 1].starts_with("--")
+        {
+            result.push(key.clone());
+            result.push(args[index + 1].clone());
+            index += 2
+        } else {
+            index += 1
+        }
+    }
+    result
+}
+fn component_kind(surface: &str) -> String {
+    match surface {
+        "mcp-loader" => "mcp-loader-mcp",
+        "local-filesystem" => "filesystem-mcp",
+        "structured-command" => "structured-command-mcp",
+        "git" => "git-mcp",
+        "agent-context" => "agent-context-mcp",
+        "mcp-registrar" => "mcp-registrar",
+        "task-lifecycle" => "task-lifecycle-mcp",
+        "work-lifecycle" => "work-lifecycle-mcp",
+        value => return format!("{value}-mcp"),
+    }
+    .into()
+}
+fn runtime_engine(component: &str, implementation: Option<&str>) -> Result<String, String> {
+    let workspace = workspace_repo_root().ok_or("registrar_workspace_root_unavailable")?;
+    let path=workspace.parent().unwrap_or(&workspace).join("narada/packages/operator-surface-runtime-contract/contracts/runtime-implementation-matrix.json");
+    let matrix: Value =
+        serde_json::from_str(&fs::read_to_string(path).map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+    let component = if implementation == Some("js") {
+        "mcp-javascript-surface"
+    } else {
+        component
+    };
+    let row = matrix["rows"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|row| row["component_kind"] == component)
+        .ok_or_else(|| format!("registrar_runtime_implementation_unavailable:{component}"))?;
+    let engine = if implementation == Some("native") {
+        "rust"
+    } else {
+        row.pointer("/profile_runtime_engine_kinds/native")
+            .and_then(Value::as_str)
+            .unwrap_or("bun")
+    };
+    if row
+        .pointer(&format!("/implementations/{engine}/status"))
+        .and_then(Value::as_str)
+        != Some("admitted")
+    {
+        return Err(format!(
+            "registrar_runtime_implementation_unavailable:{component}"
+        ));
+    }
+    Ok(engine.into())
+}
+fn runtime_executable(engine: &str) -> Result<String, String> {
+    let override_name = if engine == "bun" {
+        "NARADA_BUN_EXECUTABLE"
+    } else {
+        "NARADA_NODE_EXECUTABLE"
+    };
+    let candidates = env::var_os(override_name)
+        .map(PathBuf::from)
+        .into_iter()
+        .chain(env::var_os("PATH").into_iter().flat_map(|path| {
+            env::split_paths(&path)
+                .map(|dir| dir.join(format!("{engine}.exe")))
+                .collect::<Vec<_>>()
+        }))
+        .chain(if engine == "bun" {
+            Some(
+                user_site_root()
+                    .parent()
+                    .unwrap_or(Path::new(""))
+                    .join(".bun/bin/bun.exe"),
+            )
+        } else {
+            None
+        });
+    for path in candidates {
+        if path.exists() {
+            return Ok(path.to_string_lossy().replace('\\', "/"));
+        }
+    }
+    Err(format!("registrar_runtime_executable_unresolved:{engine}"))
+}
+
 fn site_surface_registry_sync(contract: &Value, args: &Value) -> Result<Value, String> {
     let requested = args
         .get("site_id")
