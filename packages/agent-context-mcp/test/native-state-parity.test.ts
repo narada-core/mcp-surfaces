@@ -16,6 +16,18 @@ try {
   const tsClient = client(process.execPath, [tsEntrypoint, '--site-root', ts.root, '--site-id', 'parity', '--tool-projection', 'admin'], ts);
   const rustClient = client(rustEntrypoint, ['--site-root', rust.root, '--site-id', 'parity', '--tool-projection', 'admin'], rust);
   try {
+    for (const [tool, argumentsValue] of [
+      ['agent_context_guidance', { workflow: 'checkpoint', tool: 'agent_context_checkpoint' }],
+      ['agent_context_whoami', {}],
+      ['agent_context_hydrate_current', {}],
+      ['agent_context_hydrate_current', { checkpoint_startup: true }],
+    ] as const) {
+      assert.deepEqual(
+        normalize(await rustClient.call(tool, argumentsValue), rust),
+        normalize(await tsClient.call(tool, argumentsValue), ts),
+        `${tool} refusal/read-only projection`,
+      );
+    }
     const checkpointArgs = {
       agent_id: 'parity.builder', session_id: 'session-1', active_task: { task: 42 },
       files_touched: ['alpha.ts'], key_decisions: ['native parity'], open_questions: ['orientation'], git_head: 'abc123',
@@ -105,6 +117,7 @@ function normalize(value: unknown, fixtureValue: ReturnType<typeof fixture>): un
   if (!value || typeof value !== 'object') return typeof value === 'string'
     ? value.replaceAll(fixtureValue.root, '<site>').replaceAll(fixtureValue.db, '<db>')
       .replace(/chk_[a-f0-9]{32}/g, '<checkpoint_id>').replace(/[a-f0-9]{64}/g, '<sha256>')
+      .replace(/mcp_output:o_[a-f0-9]{24}/g, '<output_ref>').replace(/o_[a-f0-9]{24}\.json/g, '<output_id>.json')
       .replace(/20\d\d-\d\d-\d\dT\d\d:\d\d:\d\d\.\d\d\dZ/g, '<timestamp>')
     : value;
   const result: Record<string, unknown> = {};

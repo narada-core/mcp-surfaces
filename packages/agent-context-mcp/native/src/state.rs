@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 const MIGRATION_001: &str = include_str!("../../migrations/001-agent-context-materializations.sql");
 const MIGRATION_002: &str = include_str!("../../migrations/002-agent-events.sql");
+const NATIVE_CONTRACT: &str = include_str!("../tool-catalog.json");
 
 pub struct Context {
     pub site_root: PathBuf,
@@ -78,12 +79,214 @@ pub fn call_tool(
     }
     match name {
         "agent_context_doctor" => doctor(context),
+        "agent_context_guidance" => guidance(&args),
+        "agent_context_whoami" => whoami_without_receipt(&args),
+        "agent_context_hydrate_current" => hydrate_without_receipt(&args),
+        "mcp_output_show" => output_show(context, &args),
         "agent_context_checkpoint" => checkpoint(context, &args),
         "agent_context_rehydrate" => rehydrate(context, &args),
         "agent_context_continuation_export" => continuation_export(context, &args),
         "agent_context_continuation_read" => continuation_read(context, &args),
         _ => Err(format!("agent_context_native_tool_not_implemented:{name}")),
     }
+}
+
+pub fn bounded_tool_result(context: &Context, tool: &str, value: Value) -> Result<Value, String> {
+    let text = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
+    let structured = if text.chars().count() <= 6000 {
+        value
+    } else {
+        materialize_output(context, tool, value, &text)?
+    };
+    let content = serde_json::to_string_pretty(&structured).map_err(|e| e.to_string())?;
+    Ok(
+        json!({"resultType":"complete","content":[{"type":"text","text":content,"annotations":{"audience":["assistant"]}}],"structuredContent":structured}),
+    )
+}
+
+fn materialize_output(
+    context: &Context,
+    tool: &str,
+    value: Value,
+    full_text: &str,
+) -> Result<Value, String> {
+    use sha2::{Digest, Sha256};
+    let output_id = format!(
+        "o_{}",
+        Uuid::new_v4()
+            .simple()
+            .to_string()
+            .chars()
+            .take(24)
+            .collect::<String>()
+    );
+    let reference = format!("mcp_output:{output_id}");
+    let created_at = timestamp();
+    let record = json!({"schema":"narada.mcp_output_ref.v1","ref":reference,"output_id":output_id,"tool_name":tool,"created_at":created_at,"created_by":env::var("NARADA_AGENT_ID").ok(),"content_type":"application/json","inline_char_limit":6000,"full_output_char_length":full_text.chars().count(),"truncated":true,"sha256":format!("{:x}",Sha256::digest(stable_json(&value).as_bytes())),"max_bytes":10*1024*1024,"full_output":value});
+    let serialized = format!(
+        "{}\n",
+        serde_json::to_string(&record).map_err(|e| e.to_string())?
+    );
+    if serialized.len() > 10 * 1024 * 1024 {
+        return Err(format!(
+            "mcp_output_too_large: {} > {}",
+            serialized.len(),
+            10 * 1024 * 1024
+        ));
+    }
+    let directory = context.site_root.join(".ai/tmp/mcp-outputs/workspace");
+    fs::create_dir_all(&directory).map_err(|e| format!("mcp_output_write_failed:{e}"))?;
+    fs::write(directory.join(format!("{output_id}.json")), serialized)
+        .map_err(|e| format!("mcp_output_write_failed:{e}"))?;
+    let status = record["full_output"]
+        .get("status")
+        .and_then(Value::as_str)
+        .filter(|v| v.len() <= 32)
+        .unwrap_or("ok");
+    let mut preview = take_chars(full_text, 6000);
+    loop {
+        let next = if preview.chars().count() < full_text.chars().count() {
+            Some(preview.chars().count())
+        } else {
+            None
+        };
+        let envelope = json!({"schema":"narada.producer_output_page.v1","status":status,"truncated":true,"output_ref":reference,"ref":reference,"result_materialized":true,"tool_name":tool,"offset":0,"limit":6000,"next_offset":next,"transport_offset":0,"transport_limit":6000,"transport_next_offset":next,"output_text":preview,"output_truncated":next.is_some(),"reader_tool":"mcp_output_show","site_root":path_text(&context.site_root),"read_command":format!("mcp_output_show({{ \"ref\": \"{reference}\", \"offset\": 0, \"limit\": 10000 }})"),"remediation":format!("Use mcp_output_show with output_ref/ref={reference} to read the bounded produced JSON pages; continue with the returned next_offset."),"inline_limit":6000,"full_output_char_length":full_text.chars().count()});
+        let compact = serde_json::to_string(&envelope).map_err(|e| e.to_string())?;
+        if compact.chars().count() <= 6000
+            && compact.len() + serde_json::to_vec(&envelope).unwrap().len() <= 32768
+        {
+            return Ok(envelope);
+        }
+        let next_len = ((preview.chars().count() as f64) * 0.75).floor() as usize;
+        if next_len == 0 {
+            return Err("inline_output_envelope_limit_too_small".into());
+        }
+        preview = take_chars(full_text, next_len)
+    }
+}
+
+fn output_show(context: &Context, args: &Value) -> Result<Value, String> {
+    let reference = args
+        .get("ref")
+        .or_else(|| args.get("output_ref"))
+        .and_then(Value::as_str)
+        .filter(|v| !v.trim().is_empty())
+        .ok_or("output_show_requires_ref")?;
+    let output_id = reference
+        .strip_prefix("mcp_output:")
+        .filter(|v| {
+            v.len() >= 3
+                && v.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        })
+        .ok_or_else(|| format!("output_ref_invalid: {reference}"))?;
+    let path = context
+        .site_root
+        .join(format!(".ai/tmp/mcp-outputs/workspace/{output_id}.json"));
+    let bytes = fs::read(&path).map_err(|_| format!("output_ref_not_found: {reference}"))?;
+    let record: Value =
+        serde_json::from_slice(&bytes).map_err(|e| format!("output_ref_invalid_json: {e}"))?;
+    if record.get("schema").and_then(Value::as_str) != Some("narada.mcp_output_ref.v1")
+        || record.get("ref").and_then(Value::as_str) != Some(reference)
+    {
+        return Err(format!("output_ref_metadata_mismatch: {reference}"));
+    }
+    let full = serde_json::to_string_pretty(&record["full_output"]).map_err(|e| e.to_string())?;
+    let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
+    let limit = args
+        .get("limit")
+        .or_else(|| args.get("output_limit"))
+        .and_then(Value::as_u64)
+        .unwrap_or(10000) as usize;
+    if limit == 0 {
+        return Err("output_limit_must_be_positive_integer".into());
+    }
+    if limit > 20000 {
+        return Err(format!(
+            "output_limit_exceeds_transport_maximum: {limit} > 20000"
+        ));
+    }
+    let total = full.chars().count();
+    let chunk = take_chars_from(&full, offset, limit);
+    let end = (offset + chunk.chars().count()).min(total);
+    Ok(
+        json!({"schema":"narada.mcp_output_page.v1","status":"ok","ref":reference,"tool_name":record["tool_name"],"full_output_char_length":total,"byte_size":bytes.len(),"original_truncated":true,"path":format!(".ai/tmp/mcp-outputs/workspace/{output_id}.json"),"offset":offset,"limit":limit,"next_offset":if end<total{Some(end)}else{None},"output_limit":limit,"output_truncated":end<total,"output_text":chunk}),
+    )
+}
+
+fn take_chars(value: &str, count: usize) -> String {
+    value.chars().take(count).collect()
+}
+fn take_chars_from(value: &str, offset: usize, count: usize) -> String {
+    value.chars().skip(offset).take(count).collect()
+}
+fn stable_json(value: &Value) -> String {
+    match value {
+        Value::Array(v) => {
+            serde_json::to_string(&v.iter().map(sort_json).collect::<Vec<_>>()).unwrap()
+        }
+        Value::Object(_) => serde_json::to_string(&sort_json(value)).unwrap(),
+        _ => serde_json::to_string(value).unwrap(),
+    }
+}
+fn sort_json(value: &Value) -> Value {
+    match value {
+        Value::Array(v) => Value::Array(v.iter().map(sort_json).collect()),
+        Value::Object(v) => {
+            let mut keys = v.keys().collect::<Vec<_>>();
+            keys.sort();
+            let mut out = serde_json::Map::new();
+            for key in keys {
+                out.insert(key.clone(), sort_json(&v[key]));
+            }
+            Value::Object(out)
+        }
+        _ => value.clone(),
+    }
+}
+
+fn guidance(args: &Value) -> Result<Value, String> {
+    let contract: Value = serde_json::from_str(NATIVE_CONTRACT)
+        .map_err(|e| format!("agent_context_native_contract_invalid:{e}"))?;
+    let mut result = contract
+        .get("guidance")
+        .cloned()
+        .ok_or("agent_context_native_guidance_missing")?;
+    let requested = json!({
+        "workflow": args.get("workflow").and_then(Value::as_str).filter(|v|!v.trim().is_empty()).map(str::trim),
+        "tool": args.get("tool").and_then(Value::as_str).filter(|v|!v.trim().is_empty()).map(str::trim)
+    });
+    result
+        .as_object_mut()
+        .ok_or("agent_context_native_guidance_invalid")?
+        .insert("requested".into(), requested);
+    Ok(result)
+}
+
+fn whoami_without_receipt(args: &Value) -> Result<Value, String> {
+    if args.get("admission_receipt").is_some()
+        || env::var_os("NARADA_CARRIER_SESSION_ADMISSION_RECEIPT").is_some()
+    {
+        return Err("agent_context_native_admission_receipt_not_implemented".into());
+    }
+    Ok(
+        json!({"schema":"narada.agent_context.identity_resolution.v1","status":"blocked","reason":"agent_context_exact_admission_receipt_required","rejected_fallbacks":["latest_checkpoint","latest_start_event","identity_name_inference"]}),
+    )
+}
+fn hydrate_without_receipt(args: &Value) -> Result<Value, String> {
+    if args.get("checkpoint_startup") == Some(&Value::Bool(true)) {
+        return Ok(
+            json!({"schema":"narada.agent_context.orientation_hydration.v1","status":"blocked","reason":"orientation_assembly_read_only","required_next_step":"Use agent_context_checkpoint as a separate explicit mutation."}),
+        );
+    }
+    if args.get("admission_receipt").is_some()
+        || env::var_os("NARADA_CARRIER_SESSION_ADMISSION_RECEIPT").is_some()
+    {
+        return Err("agent_context_native_admission_receipt_not_implemented".into());
+    }
+    Ok(
+        json!({"schema":"narada.agent_context.orientation_hydration.v1","status":"blocked","reason":"agent_context_exact_admission_receipt_required","rejected_fallbacks":["latest_checkpoint","latest_start_event","identity_name_inference"]}),
+    )
 }
 
 fn doctor(context: &Context) -> Result<Value, String> {

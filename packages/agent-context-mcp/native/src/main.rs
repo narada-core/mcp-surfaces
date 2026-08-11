@@ -43,7 +43,19 @@ fn run() -> Result<(), String> {
                 &projection,
                 request.get("params").unwrap_or(&Value::Null),
             ) {
-                Ok(value) => json!({"jsonrpc":"2.0","id":id,"result":tool_result(value)}),
+                Ok(value) => match state::bounded_tool_result(
+                    &context,
+                    request
+                        .pointer("/params/name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown_tool"),
+                    value,
+                ) {
+                    Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
+                    Err(error) => {
+                        json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":error}})
+                    }
+                },
                 Err(error) => {
                     json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":error}})
                 }
@@ -59,15 +71,6 @@ fn run() -> Result<(), String> {
             .map_err(|error| format!("agent_context_native_flush_failed:{error}"))?;
     }
     Ok(())
-}
-
-fn tool_result(value: Value) -> Value {
-    let text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| "null".into());
-    json!({
-        "resultType": "complete",
-        "content": [{"type":"text","text":text,"annotations":{"audience":["assistant"]}}],
-        "structuredContent": value
-    })
 }
 
 fn read_message(reader: &mut impl BufRead) -> Result<Option<Vec<u8>>, String> {
