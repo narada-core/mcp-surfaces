@@ -93,8 +93,62 @@ pub fn call_tool(
         "agent_context_continuation_export" => continuation_export(context, &args),
         "agent_context_continuation_read" => continuation_read(context, &args),
         "agent_context_list_sessions" => list_sessions(context, &args),
+        "agent_context_start_session" => start_session(context, &args),
         _ => Err(format!("agent_context_native_tool_not_implemented:{name}")),
     }
+}
+
+fn start_session(context: &Context, args: &Value) -> Result<Value, String> {
+    let identity = required_string(args, "identity")?;
+    validate_identity(context, &identity)?;
+    let runtime = args
+        .get("runtime")
+        .and_then(Value::as_str)
+        .unwrap_or("codex");
+    let cwd = args
+        .get("cwd")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| path_text(&context.site_root));
+    if args.get("dry_run") != Some(&Value::Bool(true)) {
+        return Err("agent_context_native_session_materialization_not_implemented".into());
+    }
+    let roster = roster_projection(context, &identity);
+    Ok(
+        json!({"schema":"narada.agent_context.session_start.v1","status":"dry_run","authority_claimed":false,"identity":identity,"role":roster["role"],"role_binding":roster["role_binding"],"runtime_request":runtime,"root_dir":path_text(&context.site_root),"cwd_request":cwd,"db_path":path_text(&context.db_path),"would_validate":{"roster_or_identity_projection":true,"exact_admission_receipt":true,"orientation_manifest":true},"would_write":["orientation_manifest_generations","agent_start_events_downstream_trace"],"orientation_manifest":null,"required_for_materialization":["site_id","carrier_session_admission_receipt"]}),
+    )
+}
+fn roster_projection(context: &Context, identity: &str) -> Value {
+    let path = context.site_root.join(".ai/agents/roster.json");
+    if let Ok(bytes) = fs::read(path) {
+        if let Ok(roster) = serde_json::from_slice::<Value>(&bytes) {
+            if let Some(agent) = roster
+                .get("agents")
+                .and_then(Value::as_array)
+                .and_then(|items| {
+                    items
+                        .iter()
+                        .find(|item| item.get("agent_id").and_then(Value::as_str) == Some(identity))
+                })
+            {
+                let role = agent.get("role").cloned().unwrap_or(Value::Null);
+                return json!({"role":role,"role_binding":role_binding(identity,&role,"static_roster_config","agent_roster")});
+            }
+            if roster.get("enforce_session_roster") == Some(&Value::Bool(true)) {
+                return json!({"role":null,"role_binding":role_binding(identity,&Value::Null,"unavailable","unavailable")});
+            }
+        }
+    }
+    let suffix = identity
+        .rsplit('.')
+        .next()
+        .filter(|v| matches!(*v, "architect" | "builder" | "builder2" | "resident"));
+    let role = suffix.map(Value::from).unwrap_or(Value::Null);
+    json!({"role":role,"role_binding":role_binding(identity,&role,"identity_inference_non_authoritative","identity_inference_non_authoritative")})
+}
+fn role_binding(agent: &str, role: &Value, source: &str, authority: &str) -> Value {
+    let semantics=match authority{"agent_roster"=>"Roster role binding is used for identity read models, routing, and eligibility; it is not activation authority or a capability grant.","identity_inference_non_authoritative"=>"Role was inferred from identity shape because the Site has not opted into session roster enforcement; this is a read-model hint, not activation authority or a capability grant.",_=>"No authoritative role binding was available. This residual projection cannot create identity, block an owner-issued admission, or grant capability."};
+    json!({"schema":"narada.agent.role_binding.v0","agent_id":agent,"role_name":role,"binding_source":source,"binding_authority":authority,"semantics":semantics,"capability_policy_ref":"capability_policy"})
 }
 
 fn list_sessions(context: &Context, args: &Value) -> Result<Value, String> {

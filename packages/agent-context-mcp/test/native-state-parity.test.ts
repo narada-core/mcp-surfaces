@@ -24,6 +24,7 @@ try {
       ['agent_context_whoami', {}],
       ['agent_context_hydrate_current', {}],
       ['agent_context_hydrate_current', { checkpoint_startup: true }],
+      ['agent_context_start_session', { identity: 'parity.builder', runtime: 'codex', dry_run: true }],
     ] as const) {
       assert.deepEqual(
         normalize(await rustClient.call(tool, argumentsValue), rust),
