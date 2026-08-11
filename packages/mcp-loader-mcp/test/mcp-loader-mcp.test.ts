@@ -311,6 +311,16 @@ try {
   assert.equal(emptyOwnership?.host_process_reconciliation?.status, 'not_available');
   assert.equal(emptyOwnership?.host_process_reconciliation?.conhost_descendants, 'not_enumerated');
   assert.match(String(emptyOwnership?.external_process_policy), /not_enumerated_or_terminated/);
+  const emptyTopology = await call('tools/call', { name: 'mcp_loader_topology_diagnostics', arguments: {} }, 9001);
+  assert.equal(emptyTopology?.schema, 'narada.mcp_loader.topology_diagnostics.v1');
+  assert.equal(emptyTopology?.status, 'ok');
+  assert.equal(emptyTopology?.topology?.transport, 'stdio');
+  assert.equal(emptyTopology?.topology?.instance_scope, 'per_loader_session_surface');
+  assert.equal(emptyTopology?.topology?.counts?.loader_processes, 1);
+  assert.equal(emptyTopology?.topology?.counts?.child_processes, 0);
+  assert.deepEqual(emptyTopology?.diagnostics?.duplicate_instance_keys, []);
+  assert.equal(emptyTopology?.memory?.measurement_status, 'loader_process_only');
+  assert.equal(emptyTopology?.consolidation?.shared_mode?.default, false);
 
   const listResult = await call('tools/call', { name: 'mcp_loader_list_site_surfaces', arguments: { site_root: root } }, 3);
   assert.equal(listResult?.schema, 'narada.mcp_loader.site_surfaces.v1');
@@ -495,6 +505,11 @@ try {
   assert.equal(liveOwnershipEntry?.status, 'live');
   assert.equal(liveOwnershipEntry?.descendant_scope, 'direct_child_process_only');
   assert.equal(liveOwnershipEntry?.cleanup?.status, 'not_eligible');
+  const liveTopology = await call('tools/call', { name: 'mcp_loader_topology_diagnostics', arguments: {} }, 9002);
+  assert.equal(liveTopology?.topology?.counts?.live_child_processes >= 1, true);
+  assert.equal(liveTopology?.topology?.by_surface?.restartable >= 1, true);
+  assert.equal(liveTopology?.memory?.children?.[0]?.memory_status, 'not_available_from_loader');
+  assert.equal(liveTopology?.diagnostics?.host_process_reconciliation?.status, 'not_available');
   const runtimeObservation = await call('tools/call', { name: 'mcp_loader_runtime_observation', arguments: { connection_id: fabricAttach?.connection_id, carrier_kind: 'codex' } }, 38);
   assert.equal(runtimeObservation?.schema_version, '2.0', JSON.stringify(runtimeObservation));
   assert.equal(runtimeObservation?.carrier_kind, 'codex');
