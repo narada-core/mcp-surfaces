@@ -1,0 +1,19 @@
+[package]
+name = "narada-mcp-registrar"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "narada-mcp-registrar"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = { version = "1", features = ["preserve_order"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "z"
+panic = "abort"
+strip = true

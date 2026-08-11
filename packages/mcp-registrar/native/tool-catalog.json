@@ -1,0 +1,702 @@
+{
+  "schema": "narada.mcp_registrar.native_tool_catalog.v1",
+  "tools": [
+    {
+      "name": "registrar_guidance",
+      "description": "Show model-facing operating guidance for mcp-registrar MCP workflows.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "workflow": {
+            "type": "string",
+            "description": "Optional workflow name or area to focus guidance on."
+          },
+          "tool": {
+            "type": "string",
+            "description": "Optional tool name for tool-specific guidance."
+          }
+        },
+        "additionalProperties": false
+      },
+      "annotations": {
+        "title": "registrar_guidance",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "registrar_surface_list",
+      "description": "List all known MCP surfaces with their packages, tools, and entrypoints.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "annotations": {
+        "title": "registrar_surface_list",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "registrar_site_list",
+      "description": "List all known Narada sites with their root paths.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "annotations": {
+        "title": "registrar_site_list",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "registrar_site_surfaces",
+      "description": "Show which surfaces are bound to a site.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "site_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "site_id"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "title": "registrar_site_surfaces",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "registrar_site_bind",
+      "description": "Bind a surface to a Narada site MCP config. Creates or updates the site config file.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "site_id": {
+            "type": "string",
+            "description": "Site identifier, e.g. narada-sonar."
+          },
+          "surface_id": {
+            "type": "string",
+            "description": "Surface identifier, e.g. scheduler."
+          },
+          "projection_id": {
+            "type": "string",
+            "description": "Explicit surface projection identifier when the surface has more than one authority/runtime projection."
+          },
+          "runtime_kind": {
+            "type": "string",
+            "enum": [
+              "nars"
+            ],
+            "description": "Explicit selected runtime kind. Required when selecting a runtime-affined projection without naming projection_id."
+          },
+          "allow_sidecar": {
+            "type": "boolean",
+            "description": "Allow creating a compatibility sidecar even when an authoritative aggregate MCP fabric exists."
+          },
+          "allow_disabled_sidecar": {
+            "type": "boolean",
+            "description": "Allow binding a surface explicitly disabled by site override; intended only for compatibility repair."
+          }
+        },
+        "required": [
+          "site_id",
+          "surface_id"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "title": "registrar_site_bind",
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "registrar_site_unbind",
+      "description": "Remove a surface from a Narada site MCP config.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "site_id": {
+            "type": "string"
+          },
+          "surface_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "site_id",
+          "surface_id"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "title": "registrar_site_unbind",
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "registrar_carrier_list",
+      "description": "List all known carriers with their config paths.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "annotations": {
+        "title": "registrar_carrier_list",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "registrar_carrier_bind",
+      "description": "Bind a surface to a carrier config (opencode, Kimi, or Codex).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "carrier_id": {
+            "type": "string",
+            "description": "Carrier identifier, e.g. codex-andrey."
+          },
+          "surface_id": {
+            "type": "string",
+            "description": "Surface identifier, e.g. scheduler."
+          },
+          "projection_id": {
+            "type": "string",
+            "description": "Explicit surface projection identifier when the surface has more than one authority/runtime projection."
+          },
+          "site_id": {
+            "type": "string",
+            "description": "Site context for arg interpolation, e.g. sonar. Defaults to andrey-user."
+          }
+        },
+        "required": [
+          "carrier_id",
+          "surface_id"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "title": "registrar_carrier_bind",
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "registrar_carrier_unbind",
+      "description": "Remove a surface from a carrier config.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "carrier_id": {
+            "type": "string"
+          },
+          "surface_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "carrier_id",
+          "surface_id"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "title": "registrar_carrier_unbind",
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "registrar_sync",
+      "description": "Bind a surface to all sites/carriers, or bind all surfaces to carriers.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "surface_id": {
+            "type": "string",
+            "description": "Surface identifier. Required unless target is all_surfaces_to_carriers or all_surfaces_to_all_carriers."
+          },
+          "projection_id": {
+            "type": "string",
+            "description": "Explicit projection identifier for the selected surface."
+          },
+          "runtime_kind": {
+            "type": "string",
+            "enum": [
+              "nars"
+            ],
+            "description": "Explicit selected runtime kind for site materialization."
+          },
+          "target": {
+            "type": "string",
+            "enum": [
+              "all_sites",
+              "all_carriers",
+              "all",
+              "all_surfaces_to_carriers",
+              "all_surfaces_to_all_carriers"
+            ],
+            "description": "all_sites/all_carriers/all: bind one surface. all_surfaces_to_carriers: bind all surfaces to a specific carrier. all_surfaces_to_all_carriers: bind all surfaces to all carriers."
+          },
+          "carrier_id": {
+            "type": "string",
+            "description": "Required when target is all_surfaces_to_carriers."
+          },
+          "site_filter": {
+            "type": "string",
+            "description": "Optional prefix filter for site IDs, e.g. narada-."
+          },
+          "allow_sidecar": {
+            "type": "boolean",
+            "description": "Allow explicit compatibility sidecar creation for sites with authoritative aggregate MCP fabric."
+          }
+        },
+        "required": [
+          "target"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "title": "registrar_sync",
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "registrar_carrier_validate",
+      "description": "Validate a carrier configuration without writing it: report missing entrypoints, duplicate server keys, missing required flags, and local/shared collisions.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "carrier_id": {
+            "type": "string",
+            "description": "Carrier identifier, e.g. kimi-andrey."
+          },
+          "include_ok": {
+            "type": "boolean",
+            "description": "Include passing checks in output."
+          }
+        },
+        "required": [
+          "carrier_id"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "title": "registrar_carrier_validate",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "registrar_carrier_diff",
+      "description": "Compare the generated carrier config against the current carrier config file and report additions, removals, and changes.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "carrier_id": {
+            "type": "string",
+            "description": "Carrier identifier, e.g. kimi-andrey."
+          }
+        },
+        "required": [
+          "carrier_id"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "title": "registrar_carrier_diff",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "registrar_surface_usage",
+      "description": "Report which sites and carriers include a given MCP surface (shared surface id or site-local surface id ending in .local).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "surface_id": {
+            "type": "string",
+            "description": "Surface identifier, e.g. site-inbox, local-filesystem, or inbox-mcp.local."
+          }
+        },
+        "required": [
+          "surface_id"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "title": "registrar_surface_usage",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "registrar_site_mcp_fabric_validate",
+      "description": "Validate a site-local MCP fabric (.ai/mcp/*.json): entrypoints exist, required flags present, duplicate server keys.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "site_id": {
+            "type": "string",
+            "description": "Site identifier, e.g. narada-proper."
+          },
+          "include_ok": {
+            "type": "boolean",
+            "description": "Include passing checks in output."
+          }
+        },
+        "required": [
+          "site_id"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "title": "registrar_site_mcp_fabric_validate",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "registrar_site_surface_registry_sync",
+      "description": "Regenerate a site action-admission MCP surface registry from the site MCP fabric and registrar surface catalog.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "site_id": {
+            "type": "string",
+            "description": "Site identifier, e.g. narada-sonar."
+          },
+          "dry_run": {
+            "type": "boolean",
+            "description": "Return the generated registry without writing it."
+          }
+        },
+        "required": [
+          "site_id"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "title": "registrar_site_surface_registry_sync",
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "registrar_surface_tool_inventory_check",
+      "description": "Compare registrar surface tool metadata with observed MCP tools/list names and report per-surface drift.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "observed_tools": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "description": "Map of surface id to observed tools/list names."
+          },
+          "include_ok": {
+            "type": "boolean",
+            "description": "Include passing surfaces in the output."
+          }
+        },
+        "additionalProperties": false
+      },
+      "annotations": {
+        "title": "registrar_surface_tool_inventory_check",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "registrar_site_registry_conformance_check",
+      "description": "Prove materialized site MCP registry conformance from an immutable Loader observation ref across live tools/list, site fabric, registrar catalog, and admission classification.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "site_id": {
+            "type": "string",
+            "description": "Known site identifier, e.g. smart-scheduling."
+          },
+          "observation_ref": {
+            "type": "string",
+            "description": "Immutable mcp_payload ref returned by mcp_loader_site_tool_inventory_check for this Site."
+          },
+          "include_ok": {
+            "type": "boolean",
+            "description": "Include passing per-surface findings."
+          }
+        },
+        "required": [
+          "site_id",
+          "observation_ref"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "title": "registrar_site_registry_conformance_check",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "registrar_site_output_reader_closure_check",
+      "description": "Check materialized site MCP surface registries for output-ref producer tools whose required reader tools are missing from live or read-only admission metadata.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "site_id": {
+            "type": "string",
+            "description": "Single known site identifier to inspect."
+          },
+          "site_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Known site identifiers to inspect."
+          },
+          "site_root": {
+            "type": "string",
+            "description": "Single explicit site root to inspect."
+          },
+          "site_roots": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Explicit site roots to inspect."
+          },
+          "include_ok": {
+            "type": "boolean",
+            "description": "Include passing site summaries in output."
+          }
+        },
+        "additionalProperties": false
+      },
+      "annotations": {
+        "title": "registrar_site_output_reader_closure_check",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    }
+  ],
+  "guidance": {
+    "schema": "narada.mcp_surface.guidance.v0",
+    "status": "ok",
+    "surface_id": "mcp-registrar",
+    "guidance_tool": "registrar_guidance",
+    "purpose": "MCP surface registrar for site/carrier binding and materialized Site registry conformance.",
+    "requested": {
+      "workflow": null,
+      "tool": null
+    },
+    "first_use": [
+      "Validate the Site fabric with registrar_site_mcp_fabric_validate before regenerating its materialized registry.",
+      "Use mcp_loader_site_tool_inventory_check to obtain an immutable observation_ref from actual child tools/list responses.",
+      "Pass observation_ref unchanged to registrar_site_registry_conformance_check; the Registrar resolves it against the target Site root.",
+      "Preserve structuredContent as authoritative evidence; text content is for assistant readability."
+    ],
+    "tool_preference": [
+      {
+        "step": "validate_fabric",
+        "guidance": "Call registrar_site_mcp_fabric_validate for the target Site."
+      },
+      {
+        "step": "observe_live",
+        "guidance": "Call mcp_loader_site_tool_inventory_check against the same Site root. Every live tool must explicitly declare readOnlyHint=true or false."
+      },
+      {
+        "step": "materialize_carriers",
+        "guidance": "Run pnpm materialize:carrier from the mcp-surfaces workspace. The installed native materializer is the sole carrier-config authority."
+      },
+      {
+        "step": "materialize",
+        "guidance": "Call registrar_site_surface_registry_sync only when the Site fabric and catalog are intentional."
+      },
+      {
+        "step": "prove",
+        "guidance": "Call registrar_site_registry_conformance_check with the Loader observation_ref. Status ok is the authority projection proof."
+      },
+      {
+        "step": "repair",
+        "guidance": "Repair drift at its owning layer: surface annotations, Site fabric, registrar catalog, or materialized registry generation."
+      }
+    ],
+    "examples": [
+      {
+        "intent": "First use",
+        "call": "registrar_guidance({})"
+      },
+      {
+        "intent": "Validate Site fabric",
+        "call": "registrar_site_mcp_fabric_validate({ site_id: \"<site_id>\" })"
+      },
+      {
+        "intent": "Materialize Site registry",
+        "call": "registrar_site_surface_registry_sync({ site_id: \"<site_id>\", dry_run: false })"
+      },
+      {
+        "intent": "Prove conformance",
+        "call": "registrar_site_registry_conformance_check({ site_id: \"<site_id>\", observation_ref: \"<ref from Loader>\" })"
+      }
+    ],
+    "anti_patterns": [
+      "Do not infer mutation semantics from tool names. The live surface must declare readOnlyHint explicitly.",
+      "Do not treat a tools/list name match as full conformance; classification, provenance, partition, projection, and output-reader closure must also pass.",
+      "Do not copy or hand-build observation maps; pass the immutable Loader observation_ref.",
+      "Do not regenerate a registry to conceal drift in a surface annotation or Site fabric declaration.",
+      "Do not bypass the owning surface with shell scripts when a governed MCP tool exists.",
+      "Do not edit a carrier config paired with .narada-generation.json. Use mcp-loader for progressive attachment or Registrar binding tools for an intentional static binding; direct edits invalidate the shared carrier generation."
+    ],
+    "recovery": [
+      "For unknown_tool, call tools/list and this guidance command again after restart.",
+      "For missing live observations, rerun mcp_loader_site_tool_inventory_check and pass its new observation_ref.",
+      "For live_tool_semantics_partition_incomplete, add an explicit boolean readOnlyHint at the owning surface; do not default it.",
+      "For registry drift, repair the named layer and then rematerialize and rerun the full proof.",
+      "If mcp-registrar itself cannot start because carrier materialization is stale, use the direct native bootstrap recovery (not an MCP call): run pnpm materialize:carrier from the mcp-surfaces workspace. It invokes the installed immutable Rust authority without building the JavaScript workspace; restart affected carrier sessions afterward.",
+      "Canonical native recovery always rematerializes the complete declared carrier set transactionally. It has no single-carrier escape hatch.",
+      "For unclear behavior, submit surface_feedback_submit with reproduction steps, expected behavior, and impact."
+    ],
+    "feedback": {
+      "surface_id": "mcp-registrar",
+      "tool": "surface_feedback_submit",
+      "when": [
+        "guidance is missing, stale, or contradicted by live behavior",
+        "schema shape makes correct usage hard",
+        "errors hide the actionable refusal or recovery path"
+      ]
+    },
+    "boundaries": [
+      "The registrar materializes and verifies authority declarations; it does not infer policy from names.",
+      "MCP Loader owns fresh child attachment and live tools/list observation.",
+      "Observation created_by and payload-id checks are declarative lineage guards, not cryptographic provenance or authority.",
+      "Each owning MCP surface remains authoritative for execution policy and domain enforcement."
+    ]
+  }
+}

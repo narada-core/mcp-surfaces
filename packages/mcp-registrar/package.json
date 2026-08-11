@@ -20,6 +20,9 @@
   },
   "scripts": {
     "build": "tsc -b",
+    "build:native:catalog": "node --import tsx scripts/emit-native-tool-catalog.ts",
+    "build:native": "tsx scripts/build-native.ts",
+    "test:native:contract": "pnpm run build:native && pnpm build && node dist/test/native-tool-catalog-parity.test.js",
     "typecheck": "tsc -b --pretty false",
     "test": "pnpm run test:bun",
     "test:bun": "pnpm -w build && pnpm run test:kimi-contract:run:bun && bun test dist/test/mcp-fabric-v2-native.test.js && bun dist/test/site-local-descriptor.test.js && bun dist/test/mcp-registrar.test.js && bun dist/test/protocol-smoke.test.js && bun test --timeout 30000 dist/test/materialization-contract-e2e.test.js && bun dist/test/site-fabric-loader-e2e.test.js && bun dist/test/site-fabric-catalog-e2e.test.js",
@@ -31,6 +34,11 @@
     "test:kimi-contract:node": "pnpm -w build && pnpm run test:kimi-contract:run:node",
     "test:kimi-live": "pnpm -w build && node dist/test/kimi-carrier-live-e2e.test.js",
     "test:default-lifecycle": "pnpm build && node --import tsx scripts/assert-native-lifecycle-default.ts"
+  },
+  "naradaRuntimeArtifacts": {
+    "win32": ["./dist/native/current.json", "./dist/native/versions/*"],
+    "linux": ["./dist/native/current.json", "./dist/native/versions/*"],
+    "darwin": ["./dist/native/current.json", "./dist/native/versions/*"]
   },
   "dependencies": {
     "@narada-core/sqlite": "workspace:*",

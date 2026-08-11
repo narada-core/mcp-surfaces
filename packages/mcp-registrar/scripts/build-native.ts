@@ -1,0 +1,20 @@
+import { existsSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { publishImmutableNativeArtifacts, resolveNativeArtifact } from '@narada-core/mcp-runtime-proxy/native-artifact';
+import './emit-native-tool-catalog.js';
+
+const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const nativeRoot = join(packageRoot, 'native');
+const executableName = `narada-mcp-registrar${process.platform === 'win32' ? '.exe' : ''}`;
+const source = join(nativeRoot, 'target', 'release', executableName);
+if (!['win32', 'linux', 'darwin'].includes(process.platform)) process.exit(0);
+const result = spawnSync('cargo', ['build', '--release', '--locked', '--manifest-path', join(nativeRoot, 'Cargo.toml')], { cwd: packageRoot, stdio: 'inherit', windowsHide: true });
+if (result.error) throw result.error;
+if (result.status !== 0) throw new Error(`mcp_registrar_native_build_failed:${result.status ?? 'signal'}`);
+if (!existsSync(source)) throw new Error(`mcp_registrar_native_artifact_missing:${source}`);
+const pointer = publishImmutableNativeArtifacts({ packageRoot, artifacts: [{ name: executableName, source }] });
+const executable = resolveNativeArtifact(packageRoot, executableName);
+if (!executable) throw new Error('mcp_registrar_native_artifact_publication_missing');
+process.stdout.write(JSON.stringify({ schema: 'narada.mcp_registrar.native_build.v1', status: 'built', executable, pointer_path: join(packageRoot, 'dist', 'native', 'current.json'), build_fingerprint: pointer.build_fingerprint, platform: process.platform, architecture: process.arch }) + '\n');
