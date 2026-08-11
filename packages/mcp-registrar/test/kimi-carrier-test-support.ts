@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { dirname } from 'node:path';
-import { createServerState, handleRequest } from '../src/main.js';
+import { spawnSync } from 'node:child_process';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join, relative, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 export type KimiMcpServerConfig = {
   transport: 'stdio';
@@ -16,14 +17,44 @@ export type KimiCarrierConfig = {
 };
 
 export async function materializeKimiCarrierConfig(outputPath: string): Promise<KimiCarrierConfig> {
-  const response = await ((handleRequest({
-    jsonrpc: '2.0', id: 1, method: 'tools/call',
-    params: { name: 'registrar_materialize_all', arguments: { output_dir: dirname(outputPath) } },
-  }, createServerState({}))) as any) as any as Record<string, any>;
-  assert.equal(response.error, undefined, JSON.stringify(response.error));
-  const result = response.result?.structuredContent as Record<string, unknown> | undefined;
-  assert.equal(result?.status, 'materialized_all');
-  assert.ok((result?.carriers as Array<Record<string, unknown>>)?.some((carrier) => carrier.carrier_id === 'kimi-andrey'));
+  const workspace = resolve(fileURLToPath(new URL('../../../..', import.meta.url)));
+  const profile = process.env.USERPROFILE?.trim();
+  assert.ok(profile, 'USERPROFILE is required for the native carrier contract fixture');
+  const packageRoot = join(workspace, 'packages', 'shared', 'mcp-materializer-native');
+  const pointer = JSON.parse(readFileSync(join(packageRoot, 'dist', 'native', 'current.json'), 'utf8')) as {
+    artifacts: Record<string, string>;
+  };
+  const executable = resolve(packageRoot, 'dist', 'native', pointer.artifacts['narada-mcp-materializer.exe']);
+  const carrierHome = dirname(outputPath);
+  mkdirSync(carrierHome, { recursive: true });
+  const contractPath = join(carrierHome, 'carrier-materialization.json');
+  const installedIndex = join(carrierHome, 'installed-carriers.json');
+  writeFileSync(contractPath, JSON.stringify({
+    schema: 'narada.native_carrier_contract.v2',
+    sites: [{
+      site_id: 'andrey-user',
+      registry_path: join(profile, 'Narada', '.narada', 'capabilities', 'mcp-surfaces.json'),
+      surface_ids: ['agent-context', 'local-filesystem', 'mcp-registrar', 'mcp-loader', 'task-lifecycle', 'surface-feedback'],
+    }],
+    carriers: [{
+      carrier_id: 'kimi-test',
+      carrier_kind: 'kimi',
+      config_relative_path: relative(carrierHome, outputPath).replace(/\\/g, '/'),
+    }],
+  }, null, 2), 'utf8');
+  const run = spawnSync(executable, [
+    'materialize-site',
+    '--contract', contractPath,
+    '--workspace-root', workspace,
+    '--home', carrierHome,
+    '--matrix', resolve(workspace, '..', 'narada', 'packages', 'operator-surface-runtime-contract', 'contracts', 'runtime-implementation-matrix.json'),
+    '--installed-index', installedIndex,
+  ], { cwd: workspace, encoding: 'utf8', windowsHide: true });
+  assert.equal(run.status, 0, run.stderr || run.stdout);
+  const verification = spawnSync(executable, [
+    'verify-all', '--installed-index', installedIndex,
+  ], { cwd: workspace, encoding: 'utf8', windowsHide: true });
+  assert.equal(verification.status, 0, verification.stderr || verification.stdout);
   const parsed = JSON.parse(readFileSync(outputPath, 'utf8')) as Record<string, unknown>;
   assert.ok(isRecord(parsed.mcpServers), 'materialized Kimi config must contain mcpServers');
   assert.ok(Object.keys(parsed.mcpServers).length > 0, 'materialized Kimi config must contain at least one server');
