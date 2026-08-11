@@ -13,7 +13,7 @@ flate2 = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
-time = { version = "0.3", features = ["formatting", "parsing"] }
+time = { version = "0.3", features = ["formatting", "macros", "parsing"] }
 
 [profile.release]
 codegen-units = 1

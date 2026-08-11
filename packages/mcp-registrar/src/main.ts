@@ -4186,6 +4186,14 @@ export function nativeCarrierProjectionPlans(): JsonRecord {
       runtimeMaterializationPlan,
       compilation.plan,
     ).validation;
+    const recovery_unbind = Object.fromEntries(SURFACES.map((surface) => {
+      const recoveryPlan = buildRecoveryCarrierRuntimeMaterializationPlan(carrier, carrier.config_path, 'unbind', surface.id);
+      const finalized = validateCarrierMaterialization(carrier, generated, carrier.config_path, runtimeMaterializationPlan, recoveryPlan);
+      const generation = { ...finalized.generation } as JsonRecord;
+      delete generation.generated_at;
+      delete generation.generation_fingerprint;
+      return [surface.id, { runtime_materialization_plan: recoveryPlan, materialization_validation: finalized.validation, generation_unsigned: generation }];
+    }));
     return [carrier.carrier_id, {
       kind: carrier.kind,
       config_path: carrier.config_path,
@@ -4193,6 +4201,7 @@ export function nativeCarrierProjectionPlans(): JsonRecord {
       generated_structured: generated.structured,
       runtime_contract_version: MCP_RUNTIME_CONTRACT_VERSION,
       materialization_validation,
+      recovery_unbind,
     }];
   }));
 }

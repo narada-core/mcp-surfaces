@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -6,6 +7,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { payloadCreate } from '@narada-core/mcp-transport';
+import { nativeCarrierProjectionPlans } from '../src/main.js';
 
 const tsEntrypoint=fileURLToPath(new URL('../src/main.js',import.meta.url));
 const rustEntrypoint=fileURLToPath(new URL(`../../native/target/release/narada-mcp-registrar${process.platform==='win32'?'.exe':''}`,import.meta.url));
@@ -27,6 +29,7 @@ try{
   if(sites.items[0]){const rustRegistry=await rust.call('registrar_site_surface_registry_sync',{site_id:sites.items[0].site_id,dry_run:true}) as any;const tsRegistry=await ts.call('registrar_site_surface_registry_sync',{site_id:sites.items[0].site_id,dry_run:true}) as any;delete rustRegistry.registry.generated_at;delete tsRegistry.registry.generated_at;assert.deepEqual(rustRegistry,tsRegistry,'registrar_site_surface_registry_sync dry-run parity')}
   for(const surface_id of ['agent-context','fixture.local']) assert.deepEqual(await rust.call('registrar_surface_usage',{surface_id}),await ts.call('registrar_surface_usage',{surface_id}),`registrar_surface_usage ${surface_id} parity`);
   await dynamicRegistryParity();
+  await carrierUnbindMutationParity();
   console.log('mcp-registrar native read model parity ok');
 }finally{await Promise.all([ts.stop(),rust.stop()])}
 
@@ -78,3 +81,17 @@ async function dynamicRegistryParity(){
   }
   finally{await Promise.all([tsFixture.stop(),rustFixture.stop()]);rmSync(root,{recursive:true,force:true})}
 }
+
+async function carrierUnbindMutationParity(){
+  const root=mkdtempSync(join(tmpdir(),'narada-registrar-unbind-'));const live=join(process.env.USERPROFILE??'', '.kimi-code','mcp.json');const source=JSON.parse((nativeCarrierProjectionPlans() as any)['kimi-andrey'].generated_content);const tsPath=join(root,'ts-mcp.json');const rustPath=join(root,'rust-mcp.json');
+  for(const target of [tsPath,rustPath]){const fixture=replacePathStrings(structuredClone(source),live,target);fixture.mcpServers['narada-site-andrey-user-quota-meter']={transport:'stdio',command:'fixture',args:[]};writeFileSync(target,JSON.stringify(fixture,null,2)+'\n')}
+  const tsFixture=client(process.execPath,[tsEntrypoint],{NARADA_KIMI_CONFIG_PATH:tsPath});const rustFixture=client(rustEntrypoint,[],{NARADA_KIMI_CONFIG_PATH:rustPath});
+  try{const tsResult:any=await tsFixture.call('registrar_carrier_unbind',{carrier_id:'kimi-andrey',surface_id:'quota-meter'});const rustResult:any=await rustFixture.call('registrar_carrier_unbind',{carrier_id:'kimi-andrey',surface_id:'quota-meter'});assert.deepEqual(normalizeUnbind(rustResult,rustPath),normalizeUnbind(tsResult,tsPath),'registrar_carrier_unbind mutation result parity');assert.deepEqual(replacePathStrings(JSON.parse(readFileSync(rustPath,'utf8')),rustPath,'<config>'),replacePathStrings(JSON.parse(readFileSync(tsPath,'utf8')),tsPath,'<config>'),'registrar_carrier_unbind config artifact parity');for(const path of [tsPath,rustPath])verifyGenerationArtifacts(path);assert.deepEqual(normalizePlan(JSON.parse(readFileSync(rustPath+'.narada-runtime-plan.json','utf8')),rustPath),normalizePlan(JSON.parse(readFileSync(tsPath+'.narada-runtime-plan.json','utf8')),tsPath),'registrar_carrier_unbind runtime plan artifact parity');assert.deepEqual(normalizeGeneration(JSON.parse(readFileSync(rustPath+'.narada-generation.json','utf8')),rustPath),normalizeGeneration(JSON.parse(readFileSync(tsPath+'.narada-generation.json','utf8')),tsPath),'registrar_carrier_unbind generation artifact parity');}
+  finally{await Promise.all([tsFixture.stop(),rustFixture.stop()]);rmSync(root,{recursive:true,force:true})}
+}
+function replacePathStrings(value:any,from:string,to:string):any{if(typeof value==='string')return value.replaceAll(from,to).replaceAll(from.replaceAll('\\','/'),to);if(Array.isArray(value))return value.map(item=>replacePathStrings(item,from,to));if(value&&typeof value==='object')for(const key of Object.keys(value))value[key]=replacePathStrings(value[key],from,to);return value}
+function normalizeUnbind(value:any,path:string){const result=replacePathStrings(structuredClone(value),path,'<config>');delete result.materialization_generation.generated_at;delete result.materialization_generation.generation_fingerprint;delete result.materialization_generation.config_sha256;delete result.materialization_generation.runtime_materialization_plan_fingerprint;delete result.runtime_materialization_plan.plan_fingerprint;return result}
+function normalizePlan(value:any,path:string){const result=replacePathStrings(structuredClone(value),path,'<config>');delete result.plan_fingerprint;return result}
+function normalizeGeneration(value:any,path:string){const result=replacePathStrings(structuredClone(value),path,'<config>');delete result.generated_at;delete result.generation_fingerprint;delete result.config_sha256;delete result.runtime_materialization_plan_fingerprint;return result}
+function verifyGenerationArtifacts(path:string){const plan=JSON.parse(readFileSync(path+'.narada-runtime-plan.json','utf8'));const expectedPlan=plan.plan_fingerprint;delete plan.plan_fingerprint;assert.equal(expectedPlan,sha(JSON.stringify(plan)),'runtime plan fingerprint');const generation=JSON.parse(readFileSync(path+'.narada-generation.json','utf8'));const expectedGeneration=generation.generation_fingerprint;delete generation.generation_fingerprint;assert.equal(expectedGeneration,sha(JSON.stringify(generation)),'generation fingerprint');assert.equal(generation.config_sha256,sha(readFileSync(path,'utf8').replace(/\r\n?/g,'\n')),'Kimi config fingerprint')}
+function sha(value:string){return createHash('sha256').update(value,'utf8').digest('hex')}
