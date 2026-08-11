@@ -466,6 +466,186 @@ function runMailboxReconciliationParity() {
   }
 }
 
+function runMailboxSyncParity() {
+  const workspaceRoot = resolve(packageRoot, '..', '..', '..');
+  const naradaRoot = resolve(workspaceRoot, '..', 'narada');
+  const bunEntrypoint = join(workspaceRoot, 'packages', 'mailbox-mcp', 'src', 'main.ts');
+  const root = mkdtempSync(join(tmpdir(), 'narada-mailbox-sync-native-'));
+  const siteRoot = join(root, 'site');
+  const fixtureScript = join(root, 'mailbox-sync-fixture.mjs');
+  const fixture = String.raw`import { createServer } from 'node:http';
+import { createHash } from 'node:crypto';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { spawn } from 'node:child_process';
+import { DatabaseSync } from 'node:sqlite';
+
+const [nativeExecutable, bunEntrypoint, bunCommand, siteRoot, naradaRoot, workspaceRoot] = process.argv.slice(2);
+const received = [];
+let origin = '';
+const server = createServer((request, response) => {
+  received.push({ method: request.method, url: request.url, authorization: request.headers.authorization ?? null, prefer: request.headers.prefer ?? null });
+  const url = request.url ?? '';
+  let payload;
+  if (url.includes('/messages/message-1/attachments')) {
+    payload = { value: [{ '@odata.type': '#microsoft.graph.fileAttachment', id: 'attachment-1', name: 'note.txt', contentType: 'text/plain', size: 5, contentBytes: 'SGVsbG8=', isInline: false }] };
+  } else if (url.includes('/messages/delta')) {
+    payload = { value: [{
+      id: 'message-1', changeKey: 'version-1', conversationId: 'conversation-1', internetMessageId: '<message-1@example.test>',
+      receivedDateTime: '2026-08-01T10:00:00.000Z', sentDateTime: '2026-08-01T09:59:00.000Z', subject: 'Native sync fixture',
+      body: { contentType: 'text', content: 'Needle body\r\nsecond line' }, bodyPreview: 'Needle body',
+      from: { emailAddress: { name: 'Fixture Sender', address: 'Sender@Example.Test' } },
+      toRecipients: [{ emailAddress: { name: 'Support', address: 'support@example.test' } }], ccRecipients: [], bccRecipients: [], replyTo: [],
+      parentFolderId: 'folder-id', categories: ['beta', 'alpha'], isRead: false, isDraft: false, hasAttachments: true,
+      importance: 'normal', flag: { flagStatus: 'flagged' }, webLink: 'https://example.test/message-1',
+    }], '@odata.deltaLink': origin + '/v1.0/delta/1' };
+  } else if (url.includes('/delta/')) {
+    payload = { value: [], '@odata.deltaLink': origin + '/v1.0/delta/2' };
+  } else {
+    response.statusCode = 404;
+    payload = { error: { code: 'fixture_not_found', message: url } };
+  }
+  response.setHeader('content-type', 'application/json');
+  response.end(JSON.stringify(payload));
+});
+
+function writeConfig() {
+  const projectionRoot = join(siteRoot, '.narada', 'runtime', 'mailboxes', 'support');
+  mkdirSync(projectionRoot, { recursive: true });
+  mkdirSync(join(siteRoot, 'config'), { recursive: true });
+  writeFileSync(join(siteRoot, 'package.json'), JSON.stringify({ name: 'mailbox-sync-parity', private: true }));
+  writeFileSync(join(siteRoot, 'config', 'config.json'), JSON.stringify({
+    root_dir: '.narada/runtime/mailboxes/support',
+    scopes: [{
+      scope_id: 'support', root_dir: '.narada/runtime/mailboxes/support', sources: [{ type: 'graph' }],
+      graph: { user_id: 'fixture@example.test', base_url: origin + '/v1.0', prefer_immutable_ids: true },
+      scope: { included_container_refs: ['inbox'], included_item_kinds: ['message'] },
+      normalize: { attachment_policy: 'metadata_only', body_policy: 'text_only', include_headers: false, tombstones_enabled: true },
+      runtime: { polling_interval_ms: 60000, acquire_lock_timeout_ms: 1000, cleanup_tmp_on_startup: true, rebuild_views_after_sync: false, rebuild_search_after_sync: false },
+      policy: { primary_charter: 'fixture', allowed_actions: ['no_action'] },
+    }],
+  }));
+}
+
+function requests() {
+  const generationId = 'mbg_' + createHash('sha256').update('sync-parity-1').digest('hex').slice(0, 40);
+  return [
+    { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'mailbox_sync_generation', arguments: { idempotency_key: 'sync-parity-1', scope_id: 'support' } } },
+    { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'mailbox_sync_generation', arguments: { idempotency_key: 'sync-parity-1', scope_id: 'support' } } },
+    { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'mailbox_generation_show', arguments: { generation_id: generationId } } },
+    { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'mailbox_message_fact_find', arguments: { scope_id: 'support', message_id: 'message-1' } } },
+  ];
+}
+
+function canonical(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
+  return '{' + Object.keys(value).sort().filter((key) => value[key] !== undefined).map((key) => JSON.stringify(key) + ':' + canonical(value[key])).join(',') + '}';
+}
+
+function configFingerprintMaterial() {
+  return canonical({
+    schema: 'narada.mailbox.sync_config.v1', scope_id: 'support', root_dir: join(siteRoot, '.narada', 'runtime', 'mailboxes', 'support'),
+    source: { type: 'graph', mailbox_id: undefined, user_id: 'fixture@example.test', base_url: origin + '/v1.0', prefer_immutable_ids: true },
+    scope: { included_container_refs: ['inbox'], included_item_kinds: ['message'] },
+    normalize: { attachment_policy: 'metadata_only', body_policy: 'text_only', include_headers: false, tombstones_enabled: true },
+  });
+}
+
+function run(command, args, env) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { cwd: workspaceRoot, env, windowsHide: true });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    const timer = setTimeout(() => { child.kill(); reject(new Error('mailbox_sync_fixture_timeout:' + command)); }, 30000);
+    child.on('error', (error) => { clearTimeout(timer); reject(error); });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code !== 0) { reject(new Error('mailbox_sync_fixture_exit:' + command + ':' + code + ':' + stderr.slice(-1500))); return; }
+      try { resolve(stdout.trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line))); }
+      catch (error) { reject(new Error('mailbox_sync_fixture_output_invalid:' + error.message + ':' + stdout.slice(-1000))); }
+    });
+    child.stdin.end(requests().map((request) => JSON.stringify(request)).join('\n') + '\n');
+  });
+}
+
+function snapshot() {
+  const projectionRoot = join(siteRoot, '.narada', 'runtime', 'mailboxes', 'support');
+  const domain = new DatabaseSync(join(siteRoot, '.narada', 'runtime', 'mailbox-domain', 'mailbox-domain.db'));
+  const facts = new DatabaseSync(join(projectionRoot, '.narada', 'facts.db'));
+  try {
+    const generation = domain.prepare('select generation_id,scope_id,config_fingerprint,status,parent_cursor,next_cursor,batch_record_count from mailbox_sync_generations').get();
+    const generationRecord = domain.prepare('select record_id,event_kind,message_id,mailbox_id,conversation_id,source_version,application_status from mailbox_sync_generation_records').get();
+    const fact = facts.prepare('select fact_type,source_id,source_record_id,source_version,source_cursor,provenance_json,payload_json from facts').get();
+    const provenance = JSON.parse(String(fact.provenance_json)); delete provenance.observed_at;
+    const factPayload = JSON.parse(String(fact.payload_json)); delete factPayload.ordinal; delete factPayload.event.observed_at;
+    const message = JSON.parse(readFileSync(join(projectionRoot, 'messages', 'message-1', 'record.json'), 'utf8')); delete message._checksum;
+    const cursor = JSON.parse(readFileSync(join(projectionRoot, 'state', 'cursor.json'), 'utf8')); delete cursor.committed_at;
+    return { generation, generationRecord, fact: { ...fact, provenance_json: provenance, payload_json: factPayload }, message, cursor };
+  } finally { domain.close(); facts.close(); }
+}
+
+server.listen(0, '127.0.0.1', async () => {
+  try {
+    origin = 'http://127.0.0.1:' + server.address().port;
+    const env = { ...process.env, GRAPH_ACCESS_TOKEN: 'fixture-token', NARADA_NATIVE_GRAPH_ALLOW_INSECURE_TEST: '1' };
+    for (const key of ['GRAPH_TENANT_ID', 'GRAPH_CLIENT_ID', 'GRAPH_CLIENT_SECRET']) delete env[key];
+    writeConfig();
+    const bunFirst = await run(bunCommand, [bunEntrypoint, '--site-root', siteRoot, '--control-plane-root', naradaRoot], env);
+    const rustReplay = await run(nativeExecutable, ['--surface-id', 'mailbox', '--site-root', siteRoot], env);
+    let bunSnapshot;
+    try { bunSnapshot = snapshot(); } catch (error) { throw new Error('mailbox_sync_bun_snapshot_failed:' + error.message + ':bun=' + JSON.stringify(bunFirst) + ':rust_replay=' + JSON.stringify(rustReplay)); }
+    rmSync(siteRoot, { recursive: true, force: true });
+    writeConfig();
+    const rustFirst = await run(nativeExecutable, ['--surface-id', 'mailbox', '--site-root', siteRoot], env);
+    const bunReplay = await run(bunCommand, [bunEntrypoint, '--site-root', siteRoot, '--control-plane-root', naradaRoot], env);
+    let rustSnapshot;
+    try { rustSnapshot = snapshot(); } catch (error) { throw new Error('mailbox_sync_rust_snapshot_failed:' + error.message + ':rust=' + JSON.stringify(rustFirst) + ':bun_replay=' + JSON.stringify(bunReplay)); }
+    server.close(() => process.stdout.write(JSON.stringify({ bunFirst, rustReplay, rustFirst, bunReplay, bunSnapshot, rustSnapshot, received, configFingerprintMaterial: configFingerprintMaterial() }) + '\n'));
+  } catch (error) {
+    server.close(() => { process.stderr.write(String(error.stack ?? error) + '\n'); process.exit(1); });
+  }
+});
+`;
+  writeFileSync(fixtureScript, fixture, 'utf8');
+  try {
+    const cleanEnv = { ...process.env };
+    for (const key of ['GRAPH_ACCESS_TOKEN', 'GRAPH_TENANT_ID', 'GRAPH_CLIENT_ID', 'GRAPH_CLIENT_SECRET', 'NARADA_NATIVE_GRAPH_ALLOW_INSECURE_TEST']) delete cleanEnv[key];
+    const result = spawnSync(process.execPath, [fixtureScript, executable, bunEntrypoint, process.env.NARADA_BUN_EXECUTABLE ?? 'bun', siteRoot, naradaRoot, workspaceRoot], {
+      cwd: workspaceRoot, env: cleanEnv, encoding: 'utf8', timeout: 90_000, maxBuffer: 4 * 1024 * 1024, windowsHide: true,
+    });
+    if (result.error) throw new Error('mailbox_sync_fixture_spawn_failed:' + result.error.message);
+    if (result.status !== 0) throw new Error('mailbox_sync_fixture_exit:' + result.status + ':' + String(result.stderr).slice(-2000));
+    const payload = JSON.parse(String(result.stdout).trim());
+    const stableResult = (responses, command) => {
+      const value = JSON.parse(JSON.stringify(mailboxStructured(responses, 1, command)));
+      delete value.result_ref;
+      delete value.result.completed_at;
+      delete value.result.idempotency_replayed;
+      return value;
+    };
+    const bunFingerprint = stableResult(payload.bunFirst, 'bun').result?.config_fingerprint;
+    const rustFingerprint = stableResult(payload.rustFirst, 'rust').result?.config_fingerprint;
+    if (bunFingerprint !== rustFingerprint) throw new Error('mailbox_sync_config_fingerprint_mismatch:bun=' + bunFingerprint + ':rust=' + rustFingerprint + ':material=' + payload.configFingerprintMaterial + ':material_sha256=' + createHash('sha256').update(payload.configFingerprintMaterial).digest('hex'));
+    assertSame('mailbox.sync.result', stableResult(payload.bunFirst, 'bun'), stableResult(payload.rustFirst, 'rust'));
+    assertSame('mailbox.sync.snapshot', payload.bunSnapshot, payload.rustSnapshot);
+    if (mailboxStructured(payload.bunFirst, 2, 'bun').result?.idempotency_replayed !== true) throw new Error('mailbox_sync_bun_local_replay_missing');
+    if (mailboxStructured(payload.rustFirst, 2, 'rust').result?.idempotency_replayed !== true) throw new Error('mailbox_sync_rust_local_replay_missing');
+    if (mailboxStructured(payload.rustReplay, 1, 'rust').result?.idempotency_replayed !== true) throw new Error('mailbox_sync_rust_cross_runtime_replay_missing');
+    if (mailboxStructured(payload.bunReplay, 1, 'bun').result?.idempotency_replayed !== true) throw new Error('mailbox_sync_bun_cross_runtime_replay_missing');
+    assertSame('mailbox.sync.rust_reads_node_generation', mailboxStructured(payload.bunFirst, 3, 'bun'), mailboxStructured(payload.rustReplay, 3, 'rust'));
+    assertSame('mailbox.sync.node_reads_rust_generation', mailboxStructured(payload.rustFirst, 3, 'rust'), mailboxStructured(payload.bunReplay, 3, 'bun'));
+    assertSame('mailbox.sync.graph_methods', payload.received.map((request) => request.method), ['GET', 'GET', 'GET', 'GET']);
+    if (payload.received.some((request) => request.authorization !== 'Bearer fixture-token')) throw new Error('mailbox_sync_graph_authorization_mismatch');
+    if (payload.received.some((request) => request.prefer !== 'IdType="ImmutableId"')) throw new Error('mailbox_sync_graph_prefer_header_mismatch');
+    return { status: 'passed', fixture: 'loopback_graph_generation_authority', compared: ['sync_receipt', 'generation_state', 'normalized_fact', 'message_projection', 'cursor', 'same_runtime_replay', 'cross_runtime_replay'] };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 function runDelegatedTaskParity() {
   const workspaceRoot = resolve(packageRoot, '..', '..', '..');
   const bunEntrypoint = join(workspaceRoot, 'packages', 'delegated-task-mcp', 'src', 'main.ts');
@@ -1846,6 +2026,7 @@ function runSchedulerParity() {
 const mailboxParity = runMailboxParity();
 const mailboxOutboxMutationParity = runMailboxOutboxMutationParity();
 const mailboxReconciliationParity = runMailboxReconciliationParity();
+const mailboxSyncParity = runMailboxSyncParity();
 const delegatedTaskParity = runDelegatedTaskParity();
 const workerDelegationParity = runWorkerDelegationParity();
 const artifactsParity = runArtifactsParity();
@@ -1880,6 +2061,7 @@ process.stdout.write(JSON.stringify({
   mailbox_parity: mailboxParity,
   mailbox_outbox_mutation_parity: mailboxOutboxMutationParity,
   mailbox_reconciliation_parity: mailboxReconciliationParity,
+  mailbox_sync_parity: mailboxSyncParity,
   delegated_task_parity: delegatedTaskParity,
   worker_delegation_parity: workerDelegationParity,
   artifacts_parity: artifactsParity,

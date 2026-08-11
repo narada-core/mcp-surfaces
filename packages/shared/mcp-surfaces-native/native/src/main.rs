@@ -16,6 +16,7 @@ mod delegated_task;
 mod worker_delegation;
 mod local_admin;
 mod mailbox;
+mod mailbox_sync;
 mod host_contracts;
 mod runtime_introspection;
 mod simple_surfaces;

@@ -28,7 +28,7 @@ pub fn list_tools() -> Vec<Value> {
     for name in MUTATING_NAMES { tools.push(tool(name, "Mutate the durable mailbox projection authority.", schema(name), false)); }
     tools
 }
-pub fn auxiliary(method: &str, params: &Map<String, Value>) -> Result<Value, Value> { match method { "prompts/list" => Ok(json!({"prompts":[{"name":"mailbox_read_workflow","title":"Mailbox Workflow","description":"Inspect finite site-local mailbox projection reads before synchronization or admission.","arguments":[]}]})), "prompts/get" => { if params.get("name").and_then(Value::as_str)!=Some("mailbox_read_workflow"){return Err(error("unknown_prompt","unknown_prompt"));} Ok(json!({"description":"Inspect finite site-local mailbox projection reads before synchronization or admission.","messages":[{"role":"user","content":{"type":"text","text":"Use mailbox_doctor, mailbox_accounts_list, mailbox_messages_list, mailbox_message_show, mailbox_search, and mailbox_thread_show for bounded local reads. Keep sync, admission, and outbox writes with the owning authority."}}]})) }, "completion/complete" => { let values=if params.get("argument").and_then(Value::as_object).and_then(|v|v.get("name")).and_then(Value::as_str)==Some("name"){list_tools().iter().filter_map(|v|v.get("name").cloned()).take(100).collect::<Vec<_>>()}else{Vec::new()}; Ok(json!({"completion":{"values":values,"total":values.len(),"hasMore":false}})) }, "logging/setLevel"=>Ok(json!({})), _=>Err(error("unsupported_mcp_method",&format!("unsupported_mcp_method:{method}"))), } }
+pub fn auxiliary(method: &str, params: &Map<String, Value>) -> Result<Value, Value> { match method { "prompts/list" => Ok(json!({"prompts":[{"name":"mailbox_workflow","title":"Mailbox Workflow","description":"Inspect finite site-local mailbox state and use governed synchronization, admission, and outbox operations.","arguments":[]}]})), "prompts/get" => { if params.get("name").and_then(Value::as_str)!=Some("mailbox_workflow"){return Err(error("unknown_prompt","unknown_prompt"));} Ok(json!({"description":"Inspect finite site-local mailbox state and use governed synchronization, admission, and outbox operations.","messages":[{"role":"user","content":{"type":"text","text":"Use bounded mailbox reads for discovery. Before mutation, inspect the exact target and policy; after synchronization, admission, or outbox acknowledgement, read back the durable state."}}]})) }, "completion/complete" => { let values=if params.get("argument").and_then(Value::as_object).and_then(|v|v.get("name")).and_then(Value::as_str)==Some("name"){list_tools().iter().filter_map(|v|v.get("name").cloned()).take(100).collect::<Vec<_>>()}else{Vec::new()}; Ok(json!({"completion":{"values":values,"total":values.len(),"hasMore":false}})) }, "logging/setLevel"=>Ok(json!({})), _=>Err(error("unsupported_mcp_method",&format!("unsupported_mcp_method:{method}"))), } }
 pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     match name {
         "mailbox_guidance" => Ok(guidance(args)),
@@ -47,17 +47,16 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<V
         "mailbox_outbox_list" => outbox_list(args, root),
         "mailbox_outbox_consumer_register" => outbox_consumer_register(args, root),
         "mailbox_outbox_ack" => outbox_ack(args, root),
+        "mailbox_sync_generation" => crate::mailbox_sync::sync_generation(args, root),
         "mailbox_reconcile_first_observations" => reconcile_first_observations(args, root),
         "mailbox_message_admit" => admit_message(args, root),
-        name if READ_NAMES.contains(&name) => Err(authority_boundary(name)),
-        name if MUTATING_NAMES.contains(&name) => Err(authority_boundary(name)),
         _ => Err(error("unknown_tool", &format!("unknown_tool:{name}"))),
     }
 }
 
 fn guidance_tool() -> Value { tool("mailbox_guidance","Show model-facing operating guidance for mailbox MCP workflows.",json!({"type":"object","properties":{"workflow":{"type":"string"},"tool":{"type":"string"}},"additionalProperties":false}),true) }
-fn guidance(args: &Map<String, Value>) -> Value { json!({"schema":"narada.mailbox.guidance.v1","status":"ok","surface_id":"mailbox","requested":args,"first_use":["Call mailbox_doctor.","Read accounts/messages/search/thread with bounded limits.","Keep synchronization, admission, and outbox writes with the owning authority."],"native_read_only":true}) }
-fn doctor(root: &Path) -> Value { let scan=scan(root); json!({"schema":"narada.mailbox_mcp.doctor.v1","status":"ok","site_root":root.to_string_lossy(),"roots":scan.roots,"scanned_files":scan.scanned_files,"skipped_non_message_records":scan.skipped,"message_count":scan.messages.len(),"invalid_count":scan.invalid.len(),"invalid_records":scan.invalid,"server_name":"mailbox-mcp","native_read_only":true}) }
+fn guidance(args: &Map<String, Value>) -> Value { json!({"schema":"narada.mailbox.guidance.v1","status":"ok","surface_id":"mailbox","requested":args,"first_use":["Call mailbox_doctor.","Use bounded list/search/show tools for discovery.","Inspect policy and the exact target before mutation; read back durable state after synchronization, admission, or outbox acknowledgement."]}) }
+fn doctor(root: &Path) -> Value { let scan=scan(root); json!({"schema":"narada.mailbox_mcp.doctor.v1","status":"ok","site_root":root.to_string_lossy(),"roots":scan.roots,"scanned_files":scan.scanned_files,"skipped_non_message_records":scan.skipped,"message_count":scan.messages.len(),"invalid_count":scan.invalid.len(),"invalid_records":scan.invalid,"server_name":"mailbox-mcp"}) }
 struct Scan { roots: Vec<PathBuf>, messages: Vec<Value>, scanned_files: usize, skipped: usize, invalid: Vec<Value> }
 fn scan(root: &Path) -> Scan {
     let roots = configured_roots(root);
@@ -172,7 +171,6 @@ fn messages(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
         },
         "count": count,
         "messages": rows,
-        "native_read_only": true,
     }))
 }
 
@@ -197,7 +195,7 @@ fn accounts(root: &Path) -> Result<Value, Value> {
         "folders": folders.into_iter().collect::<Vec<_>>(),
         "latest_message_at": latest_message_at,
     })).collect::<Vec<_>>();
-    Ok(json!({"schema":"narada.mailbox_mcp.accounts.v1","status":"ok","site_root":root.to_string_lossy(),"count":accounts.len(),"accounts":accounts,"native_read_only":true}))
+    Ok(json!({"schema":"narada.mailbox_mcp.accounts.v1","status":"ok","site_root":root.to_string_lossy(),"count":accounts.len(),"accounts":accounts}))
 }
 
 fn message_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
@@ -207,7 +205,7 @@ fn message_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> 
             && args.get("mailbox_id").and_then(Value::as_str).map(|mailbox| value.get("mailbox_id").and_then(Value::as_str) == Some(mailbox)).unwrap_or(true)
     );
     let message = row.as_ref().map(|value| summarize_message(value, true, args.get("include_html").and_then(Value::as_bool).unwrap_or(false), args.get("include_raw").and_then(Value::as_bool).unwrap_or(false)));
-    Ok(json!({"schema":"narada.mailbox_mcp.message.v1","status":if row.is_some(){"ok"}else{"not_found"},"site_root":root.to_string_lossy(),"message_id":id,"message":message,"native_read_only":true}))
+    Ok(json!({"schema":"narada.mailbox_mcp.message.v1","status":if row.is_some(){"ok"}else{"not_found"},"site_root":root.to_string_lossy(),"message_id":id,"message":message}))
 }
 
 fn thread_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
@@ -226,9 +224,9 @@ fn thread_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     });
     let count = values.len();
     let messages = values.into_iter().take(limit).map(|value| summarize_message(&value, include_body, false, false)).collect::<Vec<_>>();
-    Ok(json!({"schema":"narada.mailbox_mcp.thread.v1","status":if count > 0{"ok"}else{"not_found"},"site_root":root.to_string_lossy(),"thread_id":id,"count":count,"messages":messages,"native_read_only":true}))
+    Ok(json!({"schema":"narada.mailbox_mcp.thread.v1","status":if count > 0{"ok"}else{"not_found"},"site_root":root.to_string_lossy(),"thread_id":id,"count":count,"messages":messages}))
 }
-fn output_show(args:&Map<String,Value>,root:&Path)->Result<Value,Value>{let reference=args.get("ref").or_else(||args.get("output_ref")).and_then(Value::as_str).ok_or_else(||error("output_ref_required","output_ref_required"))?;let id=reference.strip_prefix("mcp_output:").ok_or_else(||error("output_ref_invalid","output_ref_invalid"))?;if id.is_empty()||id.len()>100||!id.chars().all(|c|c.is_ascii_alphanumeric()||c=='-'||c=='_'){return Err(error("output_ref_invalid","output_ref_invalid"));}let path=root.join(".ai/tmp/mcp-outputs/workspace").join(format!("{id}.json"));let value=read_bounded(&path)?;Ok(json!({"schema":"narada.mcp_output_page.v1","status":"ok","ref":reference,"output":value,"native_read_only":true}))}
+fn output_show(args:&Map<String,Value>,root:&Path)->Result<Value,Value>{let reference=args.get("ref").or_else(||args.get("output_ref")).and_then(Value::as_str).ok_or_else(||error("output_ref_required","output_ref_required"))?;let id=reference.strip_prefix("mcp_output:").ok_or_else(||error("output_ref_invalid","output_ref_invalid"))?;if id.is_empty()||id.len()>100||!id.chars().all(|c|c.is_ascii_alphanumeric()||c=='-'||c=='_'){return Err(error("output_ref_invalid","output_ref_invalid"));}let path=root.join(".ai/tmp/mcp-outputs/workspace").join(format!("{id}.json"));let value=read_bounded(&path)?;Ok(json!({"schema":"narada.mcp_output_page.v1","status":"ok","ref":reference,"output":value}))}
 fn domain_db_path(root:&Path)->PathBuf{root.join(DOMAIN_DB_RELATIVE)}
 fn open_domain_db(root:&Path)->Result<Option<Connection>,Value>{let path=domain_db_path(root);if !path.exists(){return Ok(None);}Connection::open_with_flags(path,OpenFlags::SQLITE_OPEN_READ_ONLY).map(Some).map_err(|e|error("mailbox_domain_store_open_failed",&e.to_string()))}
 fn open_domain_db_write(root: &Path) -> Result<Connection, Value> {
@@ -2110,7 +2108,6 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 fn is_within(path:&Path,root:&Path)->bool{let p=path.canonicalize().unwrap_or_else(|_|path.to_path_buf());let r=root.canonicalize().unwrap_or_else(|_|root.to_path_buf());p==r||p.starts_with(&r)}
 fn read_bounded(path:&Path)->Result<Value,Value>{if fs::metadata(path).map_err(|_|error("output_ref_not_found","output_ref_not_found"))?.len()>MAX_BYTES{return Err(error("output_ref_too_large","output_ref_too_large"));}let text=fs::read_to_string(path).map_err(|_|error("output_ref_read_failed","output_ref_read_failed"))?;serde_json::from_str(&text).map_err(|_|error("output_ref_invalid_json","output_ref_invalid_json"))}
-fn authority_boundary(name:&str)->Value{json!({"schema":"narada.mailbox.authority_boundary.v1","status":"unavailable","tool_name":name,"reason":"mailbox_projection_authority_not_enabled_in_native_read_slice","remediation":"Use the configured mailbox authority for synchronization, admission, and outbox operations."})}
 fn error(code:&str,message:&str)->Value{json!({"schema":"narada.mailbox.error.v1","code":code,"message":message})}
 fn schema(name: &str) -> Value {
     match name {
