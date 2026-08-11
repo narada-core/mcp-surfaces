@@ -60,6 +60,22 @@ fn run() -> Result<(), String> {
                     json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":error}})
                 }
             },
+            "resources/list"
+            | "resources/read"
+            | "prompts/list"
+            | "prompts/get"
+            | "completion/complete"
+            | "logging/setLevel" => match state::protocol_request(
+                &context,
+                &projection,
+                method,
+                request.get("params").unwrap_or(&Value::Null),
+            ) {
+                Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
+                Err(error) => {
+                    json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":error}})
+                }
+            },
             "notifications/initialized" => continue,
             _ => {
                 json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":format!("agent_context_native_method_not_implemented:{method}")}})

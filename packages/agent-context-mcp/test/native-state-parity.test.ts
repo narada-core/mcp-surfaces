@@ -28,6 +28,21 @@ try {
         `${tool} refusal/read-only projection`,
       );
     }
+    for (const [method, params] of [
+      ['prompts/list', {}],
+      ['prompts/get', { name: 'agent_context_startup' }],
+      ['completion/complete', { argument: { name: 'name', value: '' }, ref: { type: 'ref/prompt', name: 'agent_context_startup' } }],
+      ['logging/setLevel', { level: 'info' }],
+    ] as const) {
+      assert.deepEqual(normalize(await rustClient.request(method, params), rust), normalize(await tsClient.request(method, params), ts), `${method} protocol parity`);
+    }
+    const tsResources = await tsClient.request('resources/list', {});
+    const rustResources = await rustClient.request('resources/list', {});
+    assert.deepEqual(normalize(rustResources, rust), normalize(tsResources, ts), 'resources/list protocol parity');
+    const tsOutputUri = tsResources.resources.find((resource: any) => resource.uri.startsWith('mcp-output:'))?.uri;
+    const rustOutputUri = rustResources.resources.find((resource: any) => resource.uri.startsWith('mcp-output:'))?.uri;
+    assert.ok(tsOutputUri && rustOutputUri);
+    assert.deepEqual(normalize(await rustClient.request('resources/read', { uri: rustOutputUri }), rust), normalize(await tsClient.request('resources/read', { uri: tsOutputUri }), ts), 'resources/read protocol parity');
     const checkpointArgs = {
       agent_id: 'parity.builder', session_id: 'session-1', active_task: { task: 42 },
       files_touched: ['alpha.ts'], key_decisions: ['native parity'], open_questions: ['orientation'], git_head: 'abc123',
@@ -85,6 +100,14 @@ function client(executable: string, args: string[], fixtureValue: ReturnType<typ
   child.stdout.on('data', (chunk) => { output = Buffer.concat([output, chunk]); });
   child.stderr.setEncoding('utf8'); child.stderr.on('data', (chunk) => { stderr += chunk; });
   return {
+    async request(method: string, params: unknown) {
+      const requestId = ++id;
+      const body = Buffer.from(JSON.stringify({ jsonrpc: '2.0', id: requestId, method, params }));
+      child.stdin.write(`Content-Length: ${body.length}\r\n\r\n`); child.stdin.write(body);
+      const response = await waitFor(requestId);
+      assert.equal(response.error, undefined, response.error?.message ?? stderr);
+      return response.result;
+    },
     async call(name: string, argumentsValue: unknown) {
       const requestId = ++id;
       const body = Buffer.from(JSON.stringify({ jsonrpc: '2.0', id: requestId, method: 'tools/call', params: { name, arguments: argumentsValue } }));
@@ -118,6 +141,7 @@ function normalize(value: unknown, fixtureValue: ReturnType<typeof fixture>): un
     ? value.replaceAll(fixtureValue.root, '<site>').replaceAll(fixtureValue.db, '<db>')
       .replace(/chk_[a-f0-9]{32}/g, '<checkpoint_id>').replace(/[a-f0-9]{64}/g, '<sha256>')
       .replace(/mcp_output:o_[a-f0-9]{24}/g, '<output_ref>').replace(/o_[a-f0-9]{24}\.json/g, '<output_id>.json')
+      .replace(/mcp_output%3Ao_[a-f0-9]{24}/g, '<encoded_output_ref>')
       .replace(/20\d\d-\d\d-\d\dT\d\d:\d\d:\d\d\.\d\d\dZ/g, '<timestamp>')
     : value;
   const result: Record<string, unknown> = {};

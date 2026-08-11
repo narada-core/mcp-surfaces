@@ -91,6 +91,119 @@ pub fn call_tool(
     }
 }
 
+pub fn protocol_request(
+    context: &Context,
+    projection: &str,
+    method: &str,
+    params: &Value,
+) -> Result<Value, String> {
+    match method {
+        "resources/list" => {
+            if projection == "occupant" {
+                return Ok(json!({"resources":[]}));
+            }
+            let directory = context.site_root.join(".ai/tmp/mcp-outputs/workspace");
+            let mut resources = if directory.exists() {
+                fs::read_dir(directory).map_err(|e|format!("output_resource_list_failed:{e}"))?.filter_map(Result::ok).filter_map(|entry|{let name=entry.file_name().to_string_lossy().to_string();let id=name.strip_suffix(".json")?;let reference=format!("mcp_output:{id}");Some(json!({"uri":format!("mcp-output:{}",percent_encode(&reference)),"name":reference,"title":reference,"description":"Materialized MCP output ref.","mimeType":"application/json"}))}).collect::<Vec<_>>()
+            } else {
+                vec![]
+            };
+            resources.sort_by_key(|v| v["name"].as_str().unwrap_or("").to_string());
+            Ok(
+                json!({"resources":resources,"offset":0,"limit":100,"next_offset":null,"nextCursor":null,"has_more":false}),
+            )
+        }
+        "resources/read" => {
+            if projection == "occupant" {
+                return Err("agent_context_resources_not_exposed_in_occupant_projection".into());
+            }
+            let uri = params.get("uri").and_then(Value::as_str).unwrap_or("");
+            let encoded = uri
+                .strip_prefix("mcp-output:")
+                .ok_or_else(|| format!("output_resource_uri_invalid: {uri}"))?;
+            let reference = percent_decode(encoded)?;
+            let page = output_show(context, &json!({"ref":reference,"offset":0,"limit":10000}))?;
+            Ok(
+                json!({"contents":[{"uri":uri,"mimeType":"application/json","text":serde_json::to_string_pretty(&page).unwrap()}]}),
+            )
+        }
+        "prompts/list" => Ok(
+            json!({"prompts":if projection=="occupant"{vec![]}else{vec![json!({"name":"agent_context_startup","title":"Agent Context Startup","description":"Guidance for exact admitted Orientation Manifest delivery and bounded continuity.","arguments":[]})]}}),
+        ),
+        "prompts/get" => {
+            if projection == "occupant" {
+                return Err("agent_context_prompts_not_exposed_in_occupant_projection".into());
+            }
+            let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+            if name != "agent_context_startup" {
+                return Err(format!("unknown_prompt: {name}"));
+            }
+            Ok(
+                json!({"description":"Guidance for exact admitted Orientation Manifest delivery and bounded continuity.","messages":[{"role":"user","content":{"type":"text","text":"This is the enforced Carrier-entry orientation turn. Call agent_orientation_read({}) and then execute each returned next_call exactly. A continuation is opaque: never inspect or alter it. Stop only when status=ready and ordinary_work_gate=open. Agent Context retains required-read and acknowledgement evidence. The inline brief names exact continuity and work entry snapshots or explicit omissions and carries one canonical manifest_ref. Acknowledgement proves delivery and completed reads, not comprehension or authority for a later action."}}]}),
+            )
+        }
+        "completion/complete" => {
+            let argument = params
+                .pointer("/argument/name")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let values = if argument == "name" {
+                let contract: Value =
+                    serde_json::from_str(NATIVE_CONTRACT).map_err(|e| e.to_string())?;
+                contract
+                    .pointer(&format!("/projections/{projection}"))
+                    .and_then(Value::as_array)
+                    .unwrap_or(&vec![])
+                    .iter()
+                    .filter_map(|v| v.get("name").and_then(Value::as_str))
+                    .take(100)
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            } else {
+                vec![]
+            };
+            Ok(json!({"completion":{"values":values,"total":values.len(),"hasMore":false}}))
+        }
+        "logging/setLevel" => Ok(json!({})),
+        _ => Err(format!("unsupported_method: {method}")),
+    }
+}
+
+fn percent_encode(value: &str) -> String {
+    value
+        .bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
+}
+fn percent_decode(value: &str) -> Result<String, String> {
+    let bytes = value.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 2 >= bytes.len() {
+                return Err("output_resource_uri_invalid_encoding".into());
+            }
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3])
+                .map_err(|_| "output_resource_uri_invalid_encoding")?;
+            out.push(
+                u8::from_str_radix(hex, 16).map_err(|_| "output_resource_uri_invalid_encoding")?,
+            );
+            i += 3
+        } else {
+            out.push(bytes[i]);
+            i += 1
+        }
+    }
+    String::from_utf8(out).map_err(|_| "output_resource_uri_invalid_encoding".into())
+}
+
 pub fn bounded_tool_result(context: &Context, tool: &str, value: Value) -> Result<Value, String> {
     let text = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
     let structured = if text.chars().count() <= 6000 {
