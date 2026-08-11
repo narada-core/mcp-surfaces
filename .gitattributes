@@ -1,0 +1,2 @@
+# Generated dependency lock must remain byte-stable across Windows and Unix.
+pnpm-lock.yaml text eol=lf

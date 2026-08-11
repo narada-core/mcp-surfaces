@@ -869,7 +869,7 @@ try {
     observedConformanceTools,
     observedConformanceReadOnlyTools,
     observedConformanceMutatingTools,
-  )).has('catalog_surface_missing'));
+  )).has('site_local_descriptor_missing'));
 
   const conformanceFabricPath: any = join(conformanceSiteRoot, '.ai', 'mcp', 'fixture-mailbox-mcp.json');
   const duplicateFabricConfig: any = JSON.parse(readFileSync(conformanceFabricPath, 'utf8'));
@@ -1247,9 +1247,9 @@ try {
     },
   );
   const mailboxServer: any = (mailboxBindConfig.config.mcpServers as Record<string, any>)['narada-sonar-mailbox'];
-  assertRuntimeProxy(mailboxServer, workspacePath('packages', 'mailbox-mcp', 'dist', 'src', 'main.js'), 'node');
+  assertRuntimeProxy(mailboxServer, nativeSharedSurfaceEntrypoint, 'narada-mcp-surfaces');
   const mailboxChildArgs = mailboxServer.args.slice(mailboxServer.args.indexOf('--') + 1);
-  assert.deepEqual(mailboxChildArgs, ['--site-root', root]);
+  assert.deepEqual(mailboxChildArgs, ['--surface-id', 'mailbox', '--site-root', root]);
   assert.equal(schedServer.narada_scope.bound_into_site, 'narada-sonar');
 
   const smartSchedulingBindConfig: any = buildSiteBindConfig(

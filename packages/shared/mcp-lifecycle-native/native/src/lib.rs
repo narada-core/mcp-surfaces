@@ -1297,7 +1297,6 @@ impl LifecycleServer {
     }
 
     fn task_audit(&self, args: Value) -> Result<Value, String> {
-        let connection = self.connection()?;
         let limit = args
             .get("limit")
             .and_then(Value::as_i64)
@@ -1317,7 +1316,6 @@ impl LifecycleServer {
     }
 
     fn task_obligations(&self, args: Value) -> Result<Value, String> {
-        let connection = self.connection()?;
         let agent = required_string(&args, "agent_id")?;
         let limit = args
             .get("limit")
@@ -1645,7 +1643,6 @@ impl LifecycleServer {
             .ok_or("authority_basis_required")?;
         let connection = self.connection()?;
         let definition: Value=connection.query_row("select definition_json from recurring_task_definitions where recurrence_id=?1 and status not in ('suspended','retired')",params![id],|r|{let text:String=r.get(0)?;Ok(serde_json::from_str(&text).unwrap_or_else(|_|json!({})))}).optional().map_err(db_error)?.ok_or_else(||format!("recurring_definition_not_found:{id}"))?;
-        drop(connection);
         let due_key = now();
         let payload = json!({"title":definition.get("title"),"goal":definition.get("goal"),"context":definition.get("context"),"required_work":definition.get("required_work"),"non_goals":definition.get("non_goals"),"acceptance_criteria":definition.get("acceptance_criteria").cloned().unwrap_or_else(||json!([])),"tags":definition.get("tags").cloned().unwrap_or_else(||json!([])),"preferred_role":definition.get("preferred_role"),"target_role":definition.get("target_role"),"idempotency_key":format!("recurring-run:{id}:{due_key}")});
         let created = self.task_create(payload)?;
@@ -2104,7 +2101,6 @@ impl LifecycleServer {
         let connection = self.connection_mut()?;
         connection.execute("insert into criteria_proofs(proof_id,task_id,task_number,proved_by,proved_at,criteria_json,verification_binding_json) values(?1,?2,?3,?4,?5,?6,?7)",params![&proof_id,&task_id,number,&agent,timestamp,criteria_value.to_string(),json!({"source":"native","tool":"task_lifecycle_prove_criteria"}).to_string()]).map_err(db_error)?;
         connection.execute("insert into task_lifecycle_events(event_id,task_id,task_number,event_type,payload_json,created_at) values(?1,?2,?3,'task.criteria.proved',?4,?5)",params![format!("task-event-{}",Uuid::new_v4()),&task_id,number,json!({"proof_id":proof_id,"criteria":criteria_value}).to_string(),timestamp]).map_err(db_error)?;
-        drop(connection);
         let admission = match self.task_admit_evidence(json!({"task_number":number,"agent_id":agent,"methods":["criteria_proof"],"acceptance_criteria":criteria_value})) {
             Ok(value) => value,
             Err(error) => { let _ = fs::write(&path, original); return Err(error); }
@@ -3183,166 +3179,6 @@ impl LifecycleServer {
         }
         Ok(result)
     }
-    fn ticket_list(&self, args: Value) -> Result<Value, String> {
-        let connection = self.connection()?;
-        let limit = args
-            .get("limit")
-            .and_then(Value::as_i64)
-            .unwrap_or(100)
-            .clamp(1, 500);
-        let mut stmt = connection
-            .prepare("select * from tickets order by ticket_number desc limit ?1")
-            .map_err(db_error)?;
-        let rows = stmt
-            .query_map(params![limit], |r| ticket_row(r))
-            .map_err(db_error)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(db_error)?;
-        Ok(
-            json!({"schema":"narada.work_lifecycle.ticket_list.v1","count":rows.len(),"tickets":rows}),
-        )
-    }
-    fn ticket_show(&self, args: Value) -> Result<Value, String> {
-        let connection = self.connection()?;
-        let ticket = if let Some(id) = string_arg(&args, "ticket_id") {
-            connection
-                .query_row(
-                    "select * from tickets where ticket_id=?1",
-                    params![id],
-                    |r| ticket_row(r),
-                )
-                .optional()
-                .map_err(db_error)?
-        } else if let Some(n) = args.get("ticket_number").and_then(Value::as_i64) {
-            connection
-                .query_row(
-                    "select * from tickets where ticket_number=?1",
-                    params![n],
-                    |r| ticket_row(r),
-                )
-                .optional()
-                .map_err(db_error)?
-        } else {
-            return Err("ticket_identity_required".to_string());
-        };
-        let ticket = ticket.ok_or("ticket_not_found")?;
-        let id = ticket
-            .get("ticket_id")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let sources = self.query_objects(
-            "select * from ticket_sources where ticket_id=?1",
-            params![id],
-        )?;
-        let links = self.query_objects(
-            "select * from ticket_task_links where ticket_id=?1",
-            params![id],
-        )?;
-        Ok(
-            json!({"schema":"narada.work_lifecycle.ticket.v1","ticket":ticket,"sources":sources,"task_links":links,"draft_refs":[]}),
-        )
-    }
-    fn ticket_sources(&self, args: Value) -> Result<Value, String> {
-        let id = required_string(&args, "ticket_id")?;
-        Ok(
-            json!({"schema":"narada.work_lifecycle.ticket_sources.v1","ticket_id":id,"sources":self.query_objects("select * from ticket_sources where ticket_id=?1",params![id])?}),
-        )
-    }
-    fn ticket_admit_source(&mut self, args: Value) -> Result<Value, String> {
-        let connection = self.connection_mut()?;
-        let idem = required_string(&args, "idempotency_key")?;
-        if let Some(result) = connection
-            .query_row(
-                "select result_json from work_operations where operation_key=?1",
-                params![idem],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(db_error)?
-        {
-            return serde_json::from_str(&result).map_err(|e| e.to_string());
-        }
-        let n:i64=connection.query_row("update work_sequences set next_value=next_value+1 where sequence_name='ticket' returning next_value-1",[],|r|r.get(0)).map_err(db_error)?;
-        let id = format!("ticket-{}", Uuid::new_v4());
-        let event = format!("event-{}", Uuid::new_v4());
-        let receipt = format!("receipt-{}", Uuid::new_v4());
-        let nowv = now();
-        let summary = required_string(&args, "summary")?;
-        connection.execute("insert into tickets(ticket_id,ticket_number,status,revision,summary,resolution_code,blocker_code,created_at,updated_at,terminal_at) values(?1,?2,'actionable',1,?3,null,null,?4,?4,null)",params![id,n,summary,nowv]).map_err(db_error)?;
-        connection.execute("insert into ticket_sources(source_id,ticket_id,source_kind,source_scope,immutable_source_id,source_ref_json,policy_version,receipt_id,admitted_at) values(?1,?2,?3,?4,?5,?6,?7,?8,?9)",params![format!("source-{}",Uuid::new_v4()),id,required_string(&args,"source_kind")?,required_string(&args,"source_scope")?,required_string(&args,"immutable_source_id")?,args.get("source_ref").cloned().unwrap_or_else(||json!({})).to_string(),required_string(&args,"policy_version")?,receipt,nowv]).map_err(db_error)?;
-        let topic = if args.get("work_due_policy").and_then(Value::as_str) == Some("inline") {
-            "work.ticket-inline-processing.v1"
-        } else {
-            "work.ticket-work-due.v1"
-        };
-        let event_payload = json!({"ticket_id":id,"ticket_number":n,"status":"actionable","revision":1,"summary":summary});
-        connection.execute("insert into work_lifecycle_events(event_id,aggregate_kind,aggregate_id,aggregate_revision,event_type,schema_version,causation_id,idempotency_key,payload_json,created_at) values(?1,'ticket',?2,1,'ticket.source.admitted',1,?3,?4,?5,?6)",params![event,id,required_string(&args,"causation_id")?,format!("event:{idem}"),event_payload.to_string(),nowv]).map_err(db_error)?;
-        connection.execute("insert into work_outbox(event_id,topic,partition_key,aggregate_kind,aggregate_id,aggregate_revision,schema_version,causation_id,idempotency_key,payload_json,created_at,available_at,compacted_at) values(?1,?2,?3,'ticket',?3,1,1,?4,?5,?6,?7,?7,null)",params![event,topic,id,required_string(&args,"causation_id")?,format!("event:{idem}"),event_payload.to_string(),nowv]).map_err(db_error)?;
-        let result = json!({"schema":"narada.domain_operation.v1","operation_key":idem,"outcome":"completed","event_id":event,"ticket_id":id,"result":{"status":"created","ticket_id":id,"ticket_number":n,"event_id":event,"receipt_id":receipt}});
-        connection.execute("insert into work_operations(operation_key,operation_kind,request_digest,aggregate_kind,aggregate_id,aggregate_revision,result_json,created_at) values(?1,'ticket_admit_source',?2,'ticket',?3,1,?4,?5)",params![idem,digest(&args),id,result.to_string(),nowv]).map_err(db_error)?;
-        Ok(result)
-    }
-    fn ticket_processing_context(&self, args: Value) -> Result<Value, String> {
-        let id = required_string(&args, "ticket_id")?;
-        let event_id = required_string(&args, "triggering_event_id")?;
-        let connection = self.connection()?;
-        let ticket = connection
-            .query_row(
-                "select * from tickets where ticket_id=?1",
-                params![id],
-                |r| ticket_row(r),
-            )
-            .optional()
-            .map_err(db_error)?
-            .ok_or("ticket_not_found")?;
-        let event = self
-            .query_one(
-                "select * from work_lifecycle_events where event_id=?1",
-                params![event_id],
-            )?
-            .ok_or("triggering_event_not_found")?;
-        Ok(
-            json!({"schema":"narada.domain_operation.v1","operation_key":args.get("idempotency_key"),"outcome":"completed","result":{"ticket":ticket,"triggering_event":event}}),
-        )
-    }
-    fn ticket_admit_proposal(&mut self, _args: Value) -> Result<Value, String> {
-        Ok(
-            json!({"schema":"narada.domain_operation.v1","outcome":"completed","result":{"status":"accepted"}}),
-        )
-    }
-    fn outbox_list(&self, args: Value) -> Result<Value, String> {
-        let consumer = required_string(&args, "consumer_id")?;
-        let rows=self.query_objects("select * from work_outbox where event_id not in(select event_id from work_outbox_receipts where consumer_id=?1) order by created_at limit 100",params![consumer])?;
-        Ok(json!({"schema":"narada.work_lifecycle.outbox.v1","count":rows.len(),"events":rows}))
-    }
-    fn outbox_register(&mut self, args: Value) -> Result<Value, String> {
-        let c = self.connection_mut()?;
-        c.execute("insert or ignore into work_outbox_consumer_requirements(topic,consumer_id,registered_at) values(?1,?2,?3)",params![required_string(&args,"topic")?,required_string(&args,"consumer_id")?,now()]).map_err(db_error)?;
-        Ok(json!({"status":"registered"}))
-    }
-    fn outbox_ack(&mut self, args: Value) -> Result<Value, String> {
-        let c = self.connection_mut()?;
-        c.execute("insert or replace into work_outbox_receipts(event_id,consumer_id,processed_at,receipt_json) values(?1,?2,?3,?4)",params![required_string(&args,"event_id")?,required_string(&args,"consumer_id")?,now(),args.get("receipt").cloned().unwrap_or_else(||json!({})).to_string()]).map_err(db_error)?;
-        Ok(json!({"status":"acknowledged"}))
-    }
-    fn storage_inspect(&self) -> Result<Value, String> {
-        let c = self.connection()?;
-        let tables = [
-            "task_lifecycle",
-            "tickets",
-            "work_lifecycle_events",
-            "work_outbox",
-            "work_operations",
-        ];
-        let mut counts = Map::new();
-        for table in tables {
-            let count: i64 = c
-                .query_row(&format!("select count(*) from {table}"), [], |r| r.get(0))
-                .unwrap_or(0);
-            counts.insert(table.to_string(), json!(count));
-        }
-        Ok(json!({"schema":"narada.work_lifecycle.storage.v1","status":"ok","tables":counts}))
-    }
     fn query_objects(
         &self,
         sql: &str,
@@ -3370,9 +3206,6 @@ impl LifecycleServer {
         self.connection
             .as_mut()
             .ok_or_else(|| "lifecycle_runtime_not_open".to_string())
-    }
-    fn database_path(&self) -> PathBuf {
-        self.options.database_path()
     }
 }
 
@@ -3660,9 +3493,6 @@ fn row_to_object(r: &Row<'_>) -> rusqlite::Result<Value> {
         m.insert(name, sql_value(v));
     }
     Ok(Value::Object(m))
-}
-fn ticket_row(r: &Row<'_>) -> rusqlite::Result<Value> {
-    row_to_object(r)
 }
 fn sql_value(v: rusqlite::types::Value) -> Value {
     match v {
@@ -3963,17 +3793,6 @@ fn append_task_body(root: &Path, number: i64, summary: &str) -> Result<(), Strin
         }
     }
     Ok(())
-}
-fn name_is_close(args: &Value) -> bool {
-    args.get("mode")
-        .and_then(Value::as_str)
-        .map(|v| {
-            matches!(
-                v,
-                "operator_direct" | "peer_reviewed" | "agent_finish" | "emergency"
-            )
-        })
-        .unwrap_or(false)
 }
 fn tool_result(payload: Value, is_error: bool) -> Value {
     let text = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());

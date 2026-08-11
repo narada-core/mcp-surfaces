@@ -92,15 +92,35 @@ node scripts/recover-carrier-materialization.mjs
 It inspects the workspace artifact manifest first, runs the workspace build only
 when artifacts are stale, inspects every registered carrier projection, and
 invokes transactional `--materialize-all` only when at least one projection
-differs. A current workspace is a true no-op. Project Site bootstrap can invoke
-this gate before its first write via `--mcp-workspace-root` or
-`NARADA_MCP_WORKSPACE_ROOT`.
+differs. A current workspace is a true no-op. Standard output is a compact
+operator summary. The complete inspection and materialization record is written
+atomically under `.ai/runtime/carrier-materialization-recovery/`; the summary
+returns its evidence reference and SHA-256.
+
+Project Site bootstrap can invoke this gate before its first write. Workspace
+discovery prefers an explicit CLI root, `NARADA_MCP_WORKSPACE_ROOT`, or
+`NARADA_SRC_ROOT`; it then consults the installed Codex carrier generation
+sidecar before trying bounded checkout conventions. `NARADA_MCP_AUTO_DISCOVERY=0`
+disables inferred candidates. A host with no installed/materialized MCP checkout
+reports recovery as unavailable rather than downloading or fabricating one.
+
+For a composed recovery plus controlled activation of one managed carrier, use:
+
+```powershell
+narada carrier recover --carrier-id <carrier-id> --site-root <site-root> --site-id <site-id> --carrier-session-id <session-id> --operation-id <operation-id> --requested-by <principal> --expected-state-json <json> --reason <reason> --mutating-authorized <token>
+```
+
+Materialization still converges every registered carrier. The lifecycle phase
+restarts only the selected carrier through the PC-owned successor/drain
+supervisor and reports affected sibling carriers as outstanding; it cannot
+silently restart carrier sessions outside the command's authority.
 
 Native lifecycle executables are published into content-addressed
 `dist/native/versions/<fingerprint>/` directories with an atomically updated
 `current.json`. Builds therefore do not overwrite executables held open by
 running Windows MCP processes. Existing processes keep their immutable binary;
 new materialization resolves the current version.
+
 ## Emergency single-carrier escape
 
 The registrar deliberately makes a single-carrier operation difficult. The
