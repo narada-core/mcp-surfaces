@@ -1,11 +1,12 @@
 use jsonschema::validator_for;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
+use time::{Duration, OffsetDateTime, UtcOffset};
 use uuid::Uuid;
 
 const DB_RELATIVE: &str = ".sop/sop.db";
@@ -14,6 +15,11 @@ const MAX_RUN_STATE_BYTES: usize = 128 * 1024;
 const MAX_TEMPLATE_DEFINITION_BYTES: usize = 128 * 1024;
 const MAX_TEMPLATE_FILE_BYTES: u64 = 512 * 1024;
 const MAX_STEPS: usize = 128;
+const MAX_OUTBOX_PAYLOAD_BYTES: usize = 16 * 1024;
+const MAX_OUTBOX_RECEIPT_BYTES: usize = 8 * 1024;
+const MIN_LEASE_MS: i64 = 1_000;
+const MAX_LEASE_MS: i64 = 5 * 60_000;
+const SOP_TERMINAL_TOPIC: &str = "sop.run.terminal.v1";
 const TEMPLATE_SCHEMA: &str = include_str!("../../../../sop-mcp/sops/sop-template.schema.json");
 
 pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
@@ -23,6 +29,12 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<V
         "sop_template_deprecate" => template_deprecate(args, root),
         "sop_template_unimport" => template_unimport(args, root),
         "sop_template_import_yaml" => template_import_yaml(args, root),
+        "sop_handoff_claim" => handoff_claim(args, root),
+        "sop_handoff_renew" => handoff_renew(args, root),
+        "sop_handoff_release" => handoff_release(args, root),
+        "sop_outbox_consumer_register" => outbox_consumer_register(args, root),
+        "sop_outbox_ack" => outbox_ack(args, root),
+        "sop_outbox_compact" => outbox_compact(args, root),
         _ => Err(authority_boundary(name)),
     }
 }
@@ -597,6 +609,861 @@ fn template_import_yaml(args: &Map<String, Value>, root: &Path) -> Result<Value,
             .unwrap_or(0)),
     );
     Ok(Value::Object(response))
+}
+
+fn handoff_claim(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    transactional(root, |db| {
+        let consumer_id = required_string(
+            args.get("consumer_id"),
+            "sop_handoff_consumer_id_required",
+            512,
+        )?;
+        let requested_handoff_id = optional_string(args.get("handoff_id"));
+        let executor = match optional_string(args.get("executor")) {
+            Some(value) => Some(normalize_handoff_executor(&value)?),
+            None => None,
+        };
+        let lease_ms = bounded_integer_arg(
+            args.get("lease_ms"),
+            60_000,
+            MIN_LEASE_MS,
+            MAX_LEASE_MS,
+            "sop_handoff_lease_ms_invalid",
+        )?;
+        let now = OffsetDateTime::now_utc();
+        let now_text = format_iso(now);
+        let mut conditions = vec![
+            "(handoff.status = 'pending' OR (handoff.status = 'leased' AND handoff.lease_expires_at <= ?))",
+            "run.status NOT IN ('completed', 'failed', 'cancelled')",
+        ];
+        let mut values = vec![now_text.clone()];
+        if let Some(handoff_id) = requested_handoff_id.as_ref() {
+            conditions.push("handoff.handoff_id = ?");
+            values.push(handoff_id.clone());
+        }
+        if let Some(executor) = executor.as_ref() {
+            conditions.push("handoff.executor = ?");
+            values.push(executor.clone());
+        }
+        let sql = format!(
+            "SELECT handoff.* FROM sop_handoffs handoff JOIN sop_runs run ON run.run_id = handoff.run_id WHERE {} ORDER BY handoff.created_at, handoff.handoff_id LIMIT 1",
+            conditions.join(" AND ")
+        );
+        let candidate = db
+            .query_row(&sql, rusqlite::params_from_iter(values.iter()), row_json)
+            .optional()
+            .map_err(|error| {
+                diagnostic("sop_handoff_query_failed", &error.to_string(), json!({}))
+            })?;
+        let Some(candidate) = candidate else {
+            return Ok(json!({
+                "schema":"narada.sop.handoff_claim.v1",
+                "status":"empty",
+                "handoff":null
+            }));
+        };
+        let handoff_id = required_string(candidate.get("handoff_id"), "sop_handoff_corrupt", 512)?;
+        let lease_token = Uuid::new_v4().to_string();
+        let lease_expires_at = format_iso(now + Duration::milliseconds(lease_ms));
+        let changes = db
+            .execute(
+                "UPDATE sop_handoffs SET status = 'leased', lease_owner = ?, lease_token = ?, lease_expires_at = ?, attempt_count = attempt_count + 1, last_error = CASE WHEN status = 'leased' THEN 'lease_expired' ELSE last_error END, updated_at = ? WHERE handoff_id = ? AND (status = 'pending' OR (status = 'leased' AND lease_expires_at <= ?))",
+                params![consumer_id, lease_token, lease_expires_at, now_text, handoff_id, now_text],
+            )
+            .map_err(|error| diagnostic("sop_handoff_claim_failed", &error.to_string(), json!({})))?;
+        if changes != 1 {
+            return Err(diagnostic(
+                "sop_handoff_claim_race",
+                "sop_handoff_claim_race",
+                json!({"handoff_id":handoff_id}),
+            ));
+        }
+        let handoff = public_handoff(get_handoff(db, &handoff_id)?, true);
+        Ok(json!({
+            "schema":"narada.sop.handoff_claim.v1",
+            "status":"claimed",
+            "handoff":handoff
+        }))
+    })
+}
+
+fn handoff_renew(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    transactional(root, |db| {
+        let now = OffsetDateTime::now_utc();
+        let handoff = require_lease(db, args, now, false)?;
+        let lease_ms = bounded_integer_arg(
+            args.get("lease_ms"),
+            60_000,
+            MIN_LEASE_MS,
+            MAX_LEASE_MS,
+            "sop_handoff_lease_ms_invalid",
+        )?;
+        let handoff_id = handoff
+            .get("handoff_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let lease_expires_at = format_iso(now + Duration::milliseconds(lease_ms));
+        db.execute(
+            "UPDATE sop_handoffs SET lease_expires_at = ?, updated_at = ? WHERE handoff_id = ?",
+            params![lease_expires_at, format_iso(now), handoff_id],
+        )
+        .map_err(|error| diagnostic("sop_handoff_renew_failed", &error.to_string(), json!({})))?;
+        Ok(public_handoff(get_handoff(db, handoff_id)?, true))
+    })
+}
+
+fn handoff_release(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    transactional(root, |db| {
+        let now = OffsetDateTime::now_utc();
+        let handoff = require_lease(db, args, now, true)?;
+        let handoff_id = handoff
+            .get("handoff_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let error_message = optional_bounded_string(
+            args.get("error_message"),
+            "sop_handoff_error_message_too_long",
+            4096,
+        )?;
+        db.execute(
+            "UPDATE sop_handoffs SET status = 'pending', lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL, last_error = ?, updated_at = ? WHERE handoff_id = ?",
+            params![error_message, format_iso(now), handoff_id],
+        )
+        .map_err(|error| diagnostic("sop_handoff_release_failed", &error.to_string(), json!({})))?;
+        Ok(public_handoff(get_handoff(db, handoff_id)?, false))
+    })
+}
+
+fn require_lease(
+    db: &Connection,
+    args: &Map<String, Value>,
+    now: OffsetDateTime,
+    allow_expired: bool,
+) -> Result<Value, Value> {
+    let handoff_id = required_string(args.get("handoff_id"), "sop_handoff_id_required", 512)?;
+    let consumer_id = required_string(
+        args.get("consumer_id"),
+        "sop_handoff_consumer_id_required",
+        512,
+    )?;
+    let lease_token = required_string(
+        args.get("lease_token"),
+        "sop_handoff_lease_token_required",
+        512,
+    )?;
+    let handoff = get_handoff(db, &handoff_id)?;
+    let status = handoff
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if status != "leased" {
+        return Err(diagnostic(
+            "sop_handoff_not_leased",
+            "sop_handoff_not_leased",
+            json!({"handoff_id":handoff_id,"status":status}),
+        ));
+    }
+    if handoff.get("lease_owner").and_then(Value::as_str) != Some(consumer_id.as_str())
+        || handoff.get("lease_token").and_then(Value::as_str) != Some(lease_token.as_str())
+    {
+        return Err(diagnostic(
+            "sop_handoff_lease_mismatch",
+            "sop_handoff_lease_mismatch",
+            json!({"handoff_id":handoff_id,"lease_owner":handoff.get("lease_owner")}),
+        ));
+    }
+    if !allow_expired {
+        let lease_expires_at = handoff
+            .get("lease_expires_at")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                diagnostic(
+                    "sop_handoff_lease_corrupt",
+                    "sop_handoff_lease_corrupt",
+                    json!({"handoff_id":handoff_id}),
+                )
+            })?;
+        let expires = parse_iso(lease_expires_at).ok_or_else(|| {
+            diagnostic(
+                "sop_handoff_lease_corrupt",
+                "sop_handoff_lease_corrupt",
+                json!({"handoff_id":handoff_id}),
+            )
+        })?;
+        if expires <= now {
+            return Err(diagnostic(
+                "sop_handoff_lease_expired",
+                "sop_handoff_lease_expired",
+                json!({"handoff_id":handoff_id,"lease_expires_at":lease_expires_at}),
+            ));
+        }
+    }
+    Ok(handoff)
+}
+
+fn get_handoff(db: &Connection, handoff_id: &str) -> Result<Value, Value> {
+    let row = db
+        .query_row(
+            "SELECT * FROM sop_handoffs WHERE handoff_id = ?",
+            params![handoff_id],
+            row_json,
+        )
+        .optional()
+        .map_err(|error| diagnostic("sop_handoff_query_failed", &error.to_string(), json!({})))?
+        .ok_or_else(|| {
+            diagnostic(
+                "sop_handoff_not_found",
+                "sop_handoff_not_found",
+                json!({"handoff_id":handoff_id}),
+            )
+        })?;
+    hydrate_handoff(row)
+}
+
+fn hydrate_handoff(row: Value) -> Result<Value, Value> {
+    let object = row
+        .as_object()
+        .ok_or_else(|| diagnostic("sop_handoff_corrupt", "sop_handoff_corrupt", json!({})))?;
+    let run_id = required_string(object.get("run_id"), "sop_handoff_corrupt", 512)?;
+    let step_id = required_string(object.get("step_id"), "sop_handoff_corrupt", 512)?;
+    let handoff_id = required_string(object.get("handoff_id"), "sop_handoff_corrupt", 512)?;
+    let occurrence_key = required_string(object.get("occurrence_key"), "sop_handoff_corrupt", 512)?;
+    let identity = format!("{run_id}\0{step_id}");
+    let expected_handoff_id = deterministic_id("soh_", &identity);
+    let expected_occurrence_key = deterministic_id("sop_handoff_", &identity);
+    if handoff_id != expected_handoff_id || occurrence_key != expected_occurrence_key {
+        return Err(diagnostic(
+            "sop_handoff_identity_mismatch",
+            "sop_handoff_identity_mismatch",
+            json!({"handoff_id":handoff_id,"expected_handoff_id":expected_handoff_id}),
+        ));
+    }
+    let sop_id = required_string(object.get("sop_id"), "sop_handoff_corrupt", 512)?;
+    let sop_version = positive_integer_member(object.get("sop_version"), "sop_handoff_corrupt")?;
+    let executor = normalize_handoff_executor(
+        object
+            .get("executor")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+    )?;
+    let title = required_string(object.get("title"), "sop_handoff_corrupt", 512)?;
+    let instructions =
+        required_string(object.get("instructions"), "sop_handoff_corrupt", 16 * 1024)?;
+    let input = object.get("input_json").cloned().unwrap_or(Value::Null);
+    let input_ref = object.get("input_ref_json").cloned().unwrap_or(Value::Null);
+    let result_schema = object
+        .get("result_schema_json")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let request_fingerprint = required_string(
+        object.get("request_fingerprint"),
+        "sop_handoff_corrupt",
+        512,
+    )?;
+    let actual_request_fingerprint = fingerprint(&json!({
+        "run_id":run_id,"step_id":step_id,"sop_id":sop_id,"sop_version":sop_version,
+        "executor":executor,"title":title,"instructions":instructions,"input":input,
+        "input_ref":input_ref,"result_schema":result_schema
+    }));
+    if request_fingerprint != actual_request_fingerprint {
+        return Err(diagnostic(
+            "sop_handoff_request_fingerprint_mismatch",
+            "sop_handoff_request_fingerprint_mismatch",
+            json!({"handoff_id":handoff_id}),
+        ));
+    }
+    let status = normalize_handoff_status(
+        object
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+    )?;
+    let lease_owner = optional_string(object.get("lease_owner"));
+    let lease_token = optional_string(object.get("lease_token"));
+    let lease_expires_at = optional_string(object.get("lease_expires_at"));
+    if status == "leased" {
+        if lease_owner.is_none() || lease_token.is_none() || lease_expires_at.is_none() {
+            return Err(diagnostic(
+                "sop_handoff_lease_corrupt",
+                "sop_handoff_lease_corrupt",
+                json!({"handoff_id":handoff_id}),
+            ));
+        }
+    } else if lease_owner.is_some() || lease_token.is_some() || lease_expires_at.is_some() {
+        return Err(diagnostic(
+            "sop_handoff_lease_corrupt",
+            "sop_handoff_lease_corrupt",
+            json!({"handoff_id":handoff_id,"status":status}),
+        ));
+    }
+    let attempt_count = nonnegative_integer_member(
+        object.get("attempt_count"),
+        "sop_handoff_attempt_count_invalid",
+    )?;
+    let completion_key = optional_string(object.get("completion_key"));
+    let completion_fingerprint = optional_string(object.get("completion_fingerprint"));
+    let principal = optional_string(object.get("principal"));
+    let result = object
+        .get("result_json")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    if !result.is_object() {
+        return Err(diagnostic(
+            "sop_handoff_result_corrupt",
+            "sop_handoff_result_corrupt",
+            json!({"handoff_id":handoff_id}),
+        ));
+    }
+    let result_ref = object
+        .get("result_ref_json")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let error_message = optional_string(object.get("error_message"));
+    if let Some(recorded) = completion_fingerprint.as_ref() {
+        if completion_key.is_none()
+            || principal.is_none()
+            || !matches!(status.as_str(), "completed" | "failed")
+        {
+            return Err(diagnostic(
+                "sop_handoff_completion_identity_invalid",
+                "sop_handoff_completion_identity_invalid",
+                json!({"handoff_id":handoff_id,"status":status}),
+            ));
+        }
+        let actual = fingerprint(&json!({
+            "completion_key":completion_key,"outcome":status,"principal":principal,
+            "result":result,"result_ref":result_ref,"error_message":error_message
+        }));
+        if recorded != &actual {
+            return Err(diagnostic(
+                "sop_handoff_completion_fingerprint_mismatch",
+                "sop_handoff_completion_fingerprint_mismatch",
+                json!({"handoff_id":handoff_id}),
+            ));
+        }
+    } else if completion_key.is_some()
+        || principal.is_some()
+        || matches!(status.as_str(), "completed" | "failed")
+    {
+        return Err(diagnostic(
+            "sop_handoff_completion_identity_invalid",
+            "sop_handoff_completion_identity_invalid",
+            json!({"handoff_id":handoff_id,"status":status}),
+        ));
+    }
+    Ok(json!({
+        "schema":"narada.sop.handoff.v1","handoff_id":handoff_id,"run_id":run_id,
+        "step_id":step_id,"occurrence_key":occurrence_key,"sop_id":sop_id,
+        "sop_version":sop_version,"executor":executor,"title":title,
+        "instructions":instructions,"input":input,"input_ref":input_ref,
+        "result_schema":result_schema,"request_fingerprint":request_fingerprint,
+        "status":status,"lease_owner":lease_owner,"lease_token":lease_token,
+        "lease_expires_at":lease_expires_at,"attempt_count":attempt_count,
+        "last_error":optional_string(object.get("last_error")),"completion_key":completion_key,
+        "completion_fingerprint":completion_fingerprint,"principal":principal,"result":result,
+        "result_ref":result_ref,"error_message":error_message,
+        "created_at":required_string(object.get("created_at"),"sop_handoff_corrupt",512)?,
+        "updated_at":required_string(object.get("updated_at"),"sop_handoff_corrupt",512)?,
+        "completed_at":optional_string(object.get("completed_at"))
+    }))
+}
+
+fn public_handoff(mut handoff: Value, include_lease_token: bool) -> Value {
+    if !include_lease_token {
+        if let Some(object) = handoff.as_object_mut() {
+            object.remove("lease_token");
+        }
+    }
+    handoff
+}
+
+fn outbox_consumer_register(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    transactional(root, |db| {
+        let topic = normalize_outbox_topic(
+            optional_string(args.get("topic"))
+                .as_deref()
+                .unwrap_or(SOP_TERMINAL_TOPIC),
+        )?;
+        let consumer_id = required_string(
+            args.get("consumer_id"),
+            "sop_outbox_consumer_id_required",
+            512,
+        )?;
+        let now = OffsetDateTime::now_utc();
+        let start_at = match optional_string(args.get("start_at")) {
+            Some(value) => normalize_timestamp(&value, "sop_outbox_start_at_invalid")?,
+            None => format_iso(now),
+        };
+        let existing = db
+            .query_row(
+                "SELECT * FROM sop_outbox_consumer_requirements WHERE topic = ? AND consumer_id = ?",
+                params![topic, consumer_id],
+                row_json,
+            )
+            .optional()
+            .map_err(|error| {
+                diagnostic(
+                    "sop_outbox_consumer_query_failed",
+                    &error.to_string(),
+                    json!({}),
+                )
+            })?;
+        if let Some(existing) = existing {
+            let recorded_start_at = existing
+                .get("start_at")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if recorded_start_at != start_at {
+                return Err(diagnostic(
+                    "sop_outbox_consumer_registration_conflict",
+                    "sop_outbox_consumer_registration_conflict",
+                    json!({
+                        "topic":topic,"consumer_id":consumer_id,
+                        "recorded_start_at":recorded_start_at,"supplied_start_at":start_at
+                    }),
+                ));
+            }
+            return Ok(json!({
+                "schema":"narada.sop.outbox_consumer.v1",
+                "topic":existing.get("topic").cloned().unwrap_or(Value::Null),
+                "consumer_id":existing.get("consumer_id").cloned().unwrap_or(Value::Null),
+                "start_at":existing.get("start_at").cloned().unwrap_or(Value::Null),
+                "registered_at":existing.get("registered_at").cloned().unwrap_or(Value::Null),
+                "registration_replayed":true
+            }));
+        }
+        let compacted = db
+            .query_row(
+                "SELECT event_id, created_at FROM sop_outbox WHERE topic = ? AND created_at >= ? AND compacted_at IS NOT NULL ORDER BY created_at LIMIT 1",
+                params![topic, start_at],
+                row_json,
+            )
+            .optional()
+            .map_err(|error| diagnostic("sop_outbox_query_failed", &error.to_string(), json!({})))?;
+        if let Some(compacted) = compacted {
+            return Err(diagnostic(
+                "sop_outbox_registration_history_compacted",
+                "sop_outbox_registration_history_compacted",
+                json!({
+                    "topic":topic,"consumer_id":consumer_id,"start_at":start_at,
+                    "first_compacted_event_id":compacted.get("event_id"),
+                    "first_compacted_event_created_at":compacted.get("created_at")
+                }),
+            ));
+        }
+        let registered_at = format_iso(now);
+        db.execute(
+            "INSERT INTO sop_outbox_consumer_requirements(topic, consumer_id, start_at, registered_at) VALUES (?, ?, ?, ?)",
+            params![topic, consumer_id, start_at, registered_at],
+        )
+        .map_err(|error| diagnostic("sop_outbox_consumer_insert_failed", &error.to_string(), json!({})))?;
+        Ok(json!({
+            "schema":"narada.sop.outbox_consumer.v1","topic":topic,
+            "consumer_id":consumer_id,"start_at":start_at,"registered_at":registered_at,
+            "registration_replayed":false
+        }))
+    })
+}
+
+fn outbox_ack(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let receipt = args.get("receipt").cloned().ok_or_else(|| {
+        diagnostic(
+            "sop_outbox_receipt_must_be_object",
+            "sop_outbox_receipt_must_be_object",
+            json!({}),
+        )
+    })?;
+    if !receipt.is_object() {
+        return Err(diagnostic(
+            "sop_outbox_receipt_must_be_object",
+            "sop_outbox_receipt_must_be_object",
+            json!({}),
+        ));
+    }
+    assert_bound(&receipt, "sop_outbox_receipt", MAX_OUTBOX_RECEIPT_BYTES)?;
+    transactional(root, |db| {
+        let event_id = required_string(args.get("event_id"), "sop_outbox_event_id_required", 512)?;
+        let consumer_id = required_string(
+            args.get("consumer_id"),
+            "sop_outbox_consumer_id_required",
+            512,
+        )?;
+        let receipt_json = canonical_json(&receipt);
+        let event = require_outbox_event(db, &event_id)?;
+        let topic = event
+            .get("topic")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let requirement = db
+            .query_row(
+                "SELECT * FROM sop_outbox_consumer_requirements WHERE topic = ? AND consumer_id = ?",
+                params![topic, consumer_id],
+                row_json,
+            )
+            .optional()
+            .map_err(|error| {
+                diagnostic(
+                    "sop_outbox_consumer_query_failed",
+                    &error.to_string(),
+                    json!({}),
+                )
+            })?
+            .ok_or_else(|| {
+                diagnostic(
+                    "sop_outbox_consumer_not_registered",
+                    "sop_outbox_consumer_not_registered",
+                    json!({"consumer_id":consumer_id,"topic":topic}),
+                )
+            })?;
+        let event_created_at = event
+            .get("created_at")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let start_at = requirement
+            .get("start_at")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if event_created_at < start_at {
+            return Err(diagnostic(
+                "sop_outbox_event_before_consumer_start",
+                "sop_outbox_event_before_consumer_start",
+                json!({"event_id":event_id,"consumer_id":consumer_id,"start_at":start_at}),
+            ));
+        }
+        let existing = db
+            .query_row(
+                "SELECT * FROM sop_outbox_receipts WHERE event_id = ? AND consumer_id = ?",
+                params![event_id, consumer_id],
+                row_json,
+            )
+            .optional()
+            .map_err(|error| {
+                diagnostic(
+                    "sop_outbox_receipt_query_failed",
+                    &error.to_string(),
+                    json!({}),
+                )
+            })?;
+        if let Some(existing) = existing {
+            let recorded = existing.get("receipt_json").cloned().unwrap_or(Value::Null);
+            if !recorded.is_object() {
+                return Err(diagnostic(
+                    "sop_outbox_receipt_corrupt",
+                    "sop_outbox_receipt_corrupt",
+                    json!({"event_id":event_id,"consumer_id":consumer_id}),
+                ));
+            }
+            if canonical_json(&recorded) != receipt_json {
+                return Err(diagnostic(
+                    "sop_outbox_receipt_conflict",
+                    "sop_outbox_receipt_conflict",
+                    json!({"event_id":event_id,"consumer_id":consumer_id}),
+                ));
+            }
+            return Ok(json!({
+                "schema":"narada.sop.outbox_ack.v1","event_id":event_id,
+                "consumer_id":consumer_id,
+                "processed_at":existing.get("processed_at").cloned().unwrap_or(Value::Null),
+                "acknowledgement_replayed":true
+            }));
+        }
+        let processed_at = now_iso();
+        db.execute(
+            "INSERT INTO sop_outbox_receipts(event_id, consumer_id, processed_at, receipt_json) VALUES (?, ?, ?, ?)",
+            params![event_id, consumer_id, processed_at, receipt_json],
+        )
+        .map_err(|error| diagnostic("sop_outbox_receipt_insert_failed", &error.to_string(), json!({})))?;
+        Ok(json!({
+            "schema":"narada.sop.outbox_ack.v1","event_id":event_id,
+            "consumer_id":consumer_id,"processed_at":processed_at,
+            "acknowledgement_replayed":false
+        }))
+    })
+}
+
+fn outbox_compact(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    transactional(root, |db| {
+        let before = required_string(
+            args.get("before"),
+            "sop_outbox_compact_before_required",
+            512,
+        )?;
+        let cutoff = normalize_timestamp(&before, "sop_outbox_compact_before_invalid")?;
+        let compacted_at = now_iso();
+        let compacted = db
+            .execute(
+                "UPDATE sop_outbox AS outbox SET payload_json = '{}', compacted_at = ? WHERE outbox.compacted_at IS NULL AND outbox.created_at < ? AND EXISTS (SELECT 1 FROM sop_outbox_consumer_requirements requirement WHERE requirement.topic = outbox.topic AND requirement.start_at <= outbox.created_at) AND NOT EXISTS (SELECT 1 FROM sop_outbox_consumer_requirements requirement WHERE requirement.topic = outbox.topic AND requirement.start_at <= outbox.created_at AND NOT EXISTS (SELECT 1 FROM sop_outbox_receipts receipt WHERE receipt.event_id = outbox.event_id AND receipt.consumer_id = requirement.consumer_id))",
+                params![compacted_at, cutoff],
+            )
+            .map_err(|error| diagnostic("sop_outbox_compaction_failed", &error.to_string(), json!({})))?;
+        Ok(json!({
+            "schema":"narada.sop.outbox_compaction.v1","before":cutoff,
+            "compacted_at":compacted_at,"compacted":compacted
+        }))
+    })
+}
+
+fn require_outbox_event(db: &Connection, event_id: &str) -> Result<Value, Value> {
+    let row = db
+        .query_row(
+            "SELECT * FROM sop_outbox WHERE event_id = ?",
+            params![event_id],
+            row_json,
+        )
+        .optional()
+        .map_err(|error| diagnostic("sop_outbox_query_failed", &error.to_string(), json!({})))?
+        .ok_or_else(|| {
+            diagnostic(
+                "sop_outbox_event_not_found",
+                "sop_outbox_event_not_found",
+                json!({"event_id":event_id}),
+            )
+        })?;
+    hydrate_outbox_event(row)
+}
+
+fn hydrate_outbox_event(row: Value) -> Result<Value, Value> {
+    let object = row.as_object().ok_or_else(|| {
+        diagnostic(
+            "sop_outbox_event_corrupt",
+            "sop_outbox_event_corrupt",
+            json!({}),
+        )
+    })?;
+    let outcome = required_string(object.get("outcome"), "sop_outbox_event_corrupt", 64)?;
+    if !matches!(outcome.as_str(), "completed" | "failed" | "cancelled") {
+        return Err(diagnostic(
+            "sop_outbox_outcome_corrupt",
+            "sop_outbox_outcome_corrupt",
+            json!({"outcome":outcome}),
+        ));
+    }
+    let topic = normalize_outbox_topic(
+        object
+            .get("topic")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+    )?;
+    let payload = object.get("payload_json").cloned().unwrap_or(Value::Null);
+    if !payload.is_object() {
+        return Err(diagnostic(
+            "sop_outbox_payload_corrupt",
+            "sop_outbox_payload_corrupt",
+            json!({}),
+        ));
+    }
+    assert_bound(&payload, "sop_outbox_payload", MAX_OUTBOX_PAYLOAD_BYTES)?;
+    Ok(json!({
+        "schema":"narada.sop.outbox_event.v1",
+        "event_id":required_string(object.get("event_id"),"sop_outbox_event_corrupt",512)?,
+        "topic":topic,
+        "partition_key":required_string(object.get("partition_key"),"sop_outbox_event_corrupt",512)?,
+        "run_id":required_string(object.get("run_id"),"sop_outbox_event_corrupt",512)?,
+        "sop_id":required_string(object.get("sop_id"),"sop_outbox_event_corrupt",512)?,
+        "sop_version":positive_integer_member(object.get("sop_version"),"sop_outbox_event_corrupt")?,
+        "occurrence_key":required_string(object.get("occurrence_key"),"sop_outbox_event_corrupt",512)?,
+        "outcome":outcome,"payload":payload,
+        "created_at":required_string(object.get("created_at"),"sop_outbox_event_corrupt",512)?,
+        "available_at":required_string(object.get("available_at"),"sop_outbox_event_corrupt",512)?,
+        "compacted_at":optional_string(object.get("compacted_at"))
+    }))
+}
+
+fn transactional<F>(root: &Path, work: F) -> Result<Value, Value>
+where
+    F: FnOnce(&Connection) -> Result<Value, Value>,
+{
+    let mut db = open_db(root)?;
+    let transaction = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| {
+            diagnostic(
+                "sop_transaction_begin_failed",
+                &error.to_string(),
+                json!({}),
+            )
+        })?;
+    match work(&transaction) {
+        Ok(value) => {
+            transaction.commit().map_err(|error| {
+                diagnostic(
+                    "sop_transaction_commit_failed",
+                    &error.to_string(),
+                    json!({}),
+                )
+            })?;
+            Ok(value)
+        }
+        Err(error) => {
+            let _ = transaction.rollback();
+            Err(error)
+        }
+    }
+}
+
+fn row_json(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+    let mut object = Map::new();
+    for index in 0..row.as_ref().column_count() {
+        let name = row
+            .as_ref()
+            .column_name(index)
+            .unwrap_or("column")
+            .to_string();
+        let value = match row.get_ref(index)? {
+            rusqlite::types::ValueRef::Null => Value::Null,
+            rusqlite::types::ValueRef::Integer(value) => json!(value),
+            rusqlite::types::ValueRef::Real(value) => json!(value),
+            rusqlite::types::ValueRef::Text(value) => {
+                let text = String::from_utf8_lossy(value).to_string();
+                if name.ends_with("_json") {
+                    serde_json::from_str(&text).unwrap_or(Value::String(text))
+                } else {
+                    Value::String(text)
+                }
+            }
+            rusqlite::types::ValueRef::Blob(value) => json!({"byte_length":value.len()}),
+        };
+        object.insert(name, value);
+    }
+    Ok(Value::Object(object))
+}
+
+fn normalize_handoff_executor(value: &str) -> Result<String, Value> {
+    if !matches!(value, "agent" | "operator") {
+        return Err(diagnostic(
+            "sop_handoff_executor_invalid",
+            "sop_handoff_executor_invalid",
+            json!({"executor":value}),
+        ));
+    }
+    Ok(value.to_string())
+}
+
+fn normalize_handoff_status(value: &str) -> Result<String, Value> {
+    if !matches!(
+        value,
+        "pending" | "leased" | "completed" | "failed" | "cancelled"
+    ) {
+        return Err(diagnostic(
+            "sop_handoff_status_invalid",
+            "sop_handoff_status_invalid",
+            json!({"status":value}),
+        ));
+    }
+    Ok(value.to_string())
+}
+
+fn normalize_outbox_topic(value: &str) -> Result<String, Value> {
+    let topic = value.trim();
+    if topic.is_empty() {
+        return Err(diagnostic(
+            "sop_outbox_topic_required",
+            "sop_outbox_topic_required",
+            json!({}),
+        ));
+    }
+    if topic.chars().count() > 256 {
+        return Err(diagnostic(
+            "sop_outbox_topic_required_too_long",
+            "sop_outbox_topic_required_too_long",
+            json!({"max_length":256}),
+        ));
+    }
+    if topic != SOP_TERMINAL_TOPIC {
+        return Err(diagnostic(
+            "sop_outbox_topic_unsupported",
+            "sop_outbox_topic_unsupported",
+            json!({"topic":topic,"allowed":[SOP_TERMINAL_TOPIC]}),
+        ));
+    }
+    Ok(topic.to_string())
+}
+
+fn bounded_integer_arg(
+    value: Option<&Value>,
+    default: i64,
+    min: i64,
+    max: i64,
+    code: &str,
+) -> Result<i64, Value> {
+    let parsed = match value {
+        None | Some(Value::Null) => default,
+        Some(value) => value
+            .as_i64()
+            .ok_or_else(|| diagnostic(code, code, json!({"value":value,"min":min,"max":max})))?,
+    };
+    if parsed < min || parsed > max {
+        return Err(diagnostic(
+            code,
+            code,
+            json!({"value":value,"min":min,"max":max}),
+        ));
+    }
+    Ok(parsed)
+}
+
+fn positive_integer_member(value: Option<&Value>, code: &str) -> Result<i64, Value> {
+    let parsed = value
+        .and_then(Value::as_i64)
+        .ok_or_else(|| diagnostic(code, code, json!({})))?;
+    if parsed < 1 {
+        return Err(diagnostic(code, code, json!({"value":parsed,"min":1})));
+    }
+    Ok(parsed)
+}
+
+fn nonnegative_integer_member(value: Option<&Value>, code: &str) -> Result<i64, Value> {
+    let parsed = value
+        .and_then(Value::as_i64)
+        .ok_or_else(|| diagnostic(code, code, json!({})))?;
+    if parsed < 0 {
+        return Err(diagnostic(code, code, json!({"value":parsed,"min":0})));
+    }
+    Ok(parsed)
+}
+
+fn optional_bounded_string(
+    value: Option<&Value>,
+    code: &str,
+    max: usize,
+) -> Result<Option<String>, Value> {
+    let Some(text) = optional_string(value) else {
+        return Ok(None);
+    };
+    if text.chars().count() > max {
+        return Err(diagnostic(
+            code,
+            code,
+            json!({"length":text.chars().count(),"max_length":max}),
+        ));
+    }
+    Ok(Some(text))
+}
+
+fn normalize_timestamp(value: &str, code: &str) -> Result<String, Value> {
+    parse_iso(value)
+        .map(format_iso)
+        .ok_or_else(|| diagnostic(code, code, json!({"value":value})))
+}
+
+fn parse_iso(value: &str) -> Option<OffsetDateTime> {
+    OffsetDateTime::parse(value.trim(), &Rfc3339)
+        .ok()
+        .map(|timestamp| timestamp.to_offset(UtcOffset::UTC))
+}
+
+fn format_iso(value: OffsetDateTime) -> String {
+    let value = value.to_offset(UtcOffset::UTC);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        value.year(),
+        u8::from(value.month()),
+        value.day(),
+        value.hour(),
+        value.minute(),
+        value.second(),
+        value.nanosecond() / 1_000_000
+    )
 }
 
 #[allow(clippy::too_many_arguments)]

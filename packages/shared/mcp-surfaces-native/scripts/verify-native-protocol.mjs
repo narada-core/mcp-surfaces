@@ -1255,6 +1255,177 @@ function runSopOutboxParity() {
   }
 }
 
+function runSopDurabilityMutationParity() {
+  const workspaceRoot = resolve(packageRoot, '..', '..', '..');
+  const nodeEntrypoint = join(workspaceRoot, 'packages', 'sop-mcp', 'dist', 'src', 'main.js');
+  if (!existsSync(nodeEntrypoint)) throw new Error('sop_durability_parity_node_entrypoint_missing:' + nodeEntrypoint);
+  const root = mkdtempSync(join(tmpdir(), 'narada-sop-durability-native-parity-'));
+  const nodeRoot = join(root, 'node');
+  const rustRoot = join(root, 'rust');
+  const runNode = (runtimeRoot, requests) => runMailbox(process.env.NARADA_NODE_EXECUTABLE ?? 'node', [nodeEntrypoint, '--sop-root', runtimeRoot], requests, workspaceRoot);
+  const runRust = (runtimeRoot, requests) => runMailbox(executable, ['--surface-id', 'sop', '--sop-root', runtimeRoot], requests, workspaceRoot);
+  const canonical = (value) => {
+    if (Array.isArray(value)) return value.map(canonical);
+    if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right)).map(([key, entry]) => [key, canonical(entry)]));
+    return value;
+  };
+  const fingerprint = (value) => createHash('sha256').update(JSON.stringify(canonical(value)), 'utf8').digest('hex');
+  const deterministicId = (prefix, value) => `${prefix}${createHash('sha256').update(value, 'utf8').digest('hex').slice(0, 24)}`;
+  const normalize = (value) => {
+    if (Array.isArray(value)) return value.map(normalize);
+    if (!value || typeof value !== 'object') return value;
+    return Object.fromEntries(Object.entries(value)
+      .filter(([key]) => !['lease_token', 'lease_expires_at', 'created_at', 'updated_at', 'registered_at', 'processed_at', 'compacted_at'].includes(key))
+      .map(([key, child]) => [key, normalize(child)]));
+  };
+  const structured = (responses, id, runtime) => mailboxStructured(responses, id, runtime);
+  const code = (responses, id, runtime) => {
+    const response = responses.find((candidate) => candidate.id === id);
+    const diagnosticCode = response?.error?.data?.code;
+    if (typeof diagnosticCode !== 'string') throw new Error('sop_durability_diagnostic_missing:' + runtime + ':' + id + ':' + JSON.stringify(response).slice(0, 500));
+    return diagnosticCode;
+  };
+  const assertStructured = (label, node, rust, id) => assertSame(label, normalize(structured(node, id, 'node')), normalize(structured(rust, id, 'rust')));
+  const bootstrap = (runtimeRoot, runner, sopId) => {
+    const response = runner(runtimeRoot, [{
+      jsonrpc: '2.0', id: 1, method: 'tools/call', params: {
+        name: 'sop_template_create',
+        arguments: { sop_id: sopId, title: 'Durability fixture', steps: [{ id: 'step', executor: 'engine', title: 'Step', instructions: 'Step' }] },
+      },
+    }]);
+    structured(response, 1, sopId);
+  };
+  const insertRun = (db, runId, status, createdAt) => {
+    db.prepare(`INSERT INTO sop_runs (
+      run_id,sop_id,sop_version,sop_title,status,occurrence_key,request_fingerprint,
+      definition_fingerprint,definition_json,input_json,output_json,step_states_json,
+      trigger_source_kind,trigger_source_ref,triggered_by,created_at,updated_at,completed_at
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+      runId, 'durability-template', 1, 'Durability fixture', status, 'occ-' + runId, '', '', '{}', '{}', '{}', '[]',
+      'manual', '', 'native-parity', createdAt, createdAt,
+      ['completed', 'failed', 'cancelled'].includes(status) ? createdAt : null,
+    );
+  };
+  const seedHandoff = (runtimeRoot) => {
+    const db = new DatabaseSync(join(runtimeRoot, '.sop', 'sop.db'));
+    try {
+      insertRun(db, 'run-handoff', 'running', '2026-01-01T00:00:00.000Z');
+      const runId = 'run-handoff';
+      const stepId = 'approve';
+      const identity = `${runId}\0${stepId}`;
+      const input = { ticket_id: 'T-1' };
+      const resultSchema = { type: 'object', properties: { approved: { type: 'boolean' } } };
+      db.prepare(`INSERT INTO sop_handoffs (
+        handoff_id,run_id,step_id,occurrence_key,sop_id,sop_version,executor,title,instructions,
+        input_json,input_ref_json,result_schema_json,request_fingerprint,status,created_at,updated_at
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?)`).run(
+        deterministicId('soh_', identity), runId, stepId, deterministicId('sop_handoff_', identity),
+        'durability-template', 1, 'operator', 'Approve', 'Approve ticket', JSON.stringify(input), null,
+        JSON.stringify(resultSchema), fingerprint({
+          run_id: runId, step_id: stepId, sop_id: 'durability-template', sop_version: 1,
+          executor: 'operator', title: 'Approve', instructions: 'Approve ticket', input,
+          input_ref: null, result_schema: resultSchema,
+        }), '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z',
+      );
+    } finally {
+      db.close();
+    }
+  };
+  const seedOutbox = (runtimeRoot) => {
+    const db = new DatabaseSync(join(runtimeRoot, '.sop', 'sop.db'));
+    try {
+      const events = [
+        ['event-before-start', '2025-12-31T00:00:00.000Z', { outcome: 'before' }],
+        ['event-1', '2026-01-02T00:00:00.000Z', { outcome: 'one' }],
+        ['event-2', '2026-01-03T00:00:00.000Z', { outcome: 'two' }],
+      ];
+      const insertEvent = db.prepare(`INSERT INTO sop_outbox (
+        event_id,topic,partition_key,run_id,sop_id,sop_version,occurrence_key,outcome,
+        payload_json,created_at,available_at
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?)`);
+      for (const [eventId, createdAt, payload] of events) {
+        const runId = 'run-' + eventId;
+        insertRun(db, runId, 'completed', createdAt);
+        insertEvent.run(eventId, 'sop.run.terminal.v1', 'durability-template', runId, 'durability-template', 1,
+          'occ-' + eventId, 'completed', JSON.stringify(payload), createdAt, createdAt);
+      }
+    } finally {
+      db.close();
+    }
+  };
+  try {
+    mkdirSync(nodeRoot, { recursive: true });
+    mkdirSync(rustRoot, { recursive: true });
+    bootstrap(nodeRoot, runNode, 'durability-template');
+    bootstrap(rustRoot, runRust, 'durability-template');
+    seedHandoff(nodeRoot);
+    seedHandoff(rustRoot);
+    seedOutbox(nodeRoot);
+    seedOutbox(rustRoot);
+
+    const handoffId = deterministicId('soh_', 'run-handoff\0approve');
+    const claimRequest = [{ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'sop_handoff_claim', arguments: { consumer_id: 'consumer-1', handoff_id: handoffId, executor: 'operator', lease_ms: 60_000 } } }];
+    const nodeClaim = runNode(nodeRoot, claimRequest);
+    const rustClaim = runRust(rustRoot, claimRequest);
+    assertStructured('sop.handoff_claim', nodeClaim, rustClaim, 1);
+    const nodeToken = structured(nodeClaim, 1, 'node').handoff?.lease_token;
+    const rustToken = structured(rustClaim, 1, 'rust').handoff?.lease_token;
+    if (typeof nodeToken !== 'string' || typeof rustToken !== 'string') throw new Error('sop_handoff_parity_lease_token_missing');
+
+    const nodeRenew = runNode(nodeRoot, [{ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'sop_handoff_renew', arguments: { handoff_id: handoffId, consumer_id: 'consumer-1', lease_token: nodeToken, lease_ms: 120_000 } } }]);
+    const rustRenew = runRust(rustRoot, [{ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'sop_handoff_renew', arguments: { handoff_id: handoffId, consumer_id: 'consumer-1', lease_token: rustToken, lease_ms: 120_000 } } }]);
+    assertStructured('sop.handoff_renew', nodeRenew, rustRenew, 2);
+    const badRenew = (runtimeRoot, runner) => runner(runtimeRoot, [{ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'sop_handoff_renew', arguments: { handoff_id: handoffId, consumer_id: 'consumer-1', lease_token: 'wrong-token' } } }]);
+    assertSame('sop.handoff_lease_mismatch', code(badRenew(nodeRoot, runNode), 3, 'node'), code(badRenew(rustRoot, runRust), 3, 'rust'));
+
+    const nodeRelease = runNode(nodeRoot, [{ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'sop_handoff_release', arguments: { handoff_id: handoffId, consumer_id: 'consumer-1', lease_token: nodeToken, error_message: 'worker unavailable' } } }]);
+    const rustRelease = runRust(rustRoot, [{ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'sop_handoff_release', arguments: { handoff_id: handoffId, consumer_id: 'consumer-1', lease_token: rustToken, error_message: 'worker unavailable' } } }]);
+    assertStructured('sop.handoff_release', nodeRelease, rustRelease, 4);
+    const emptyRequest = [{ jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'sop_handoff_claim', arguments: { consumer_id: 'consumer-2', handoff_id: 'soh_missing', executor: 'operator' } } }];
+    assertStructured('sop.handoff_claim_empty', runNode(nodeRoot, emptyRequest), runRust(rustRoot, emptyRequest), 5);
+
+    const outboxRequests = [
+      { jsonrpc: '2.0', id: 10, method: 'tools/call', params: { name: 'sop_outbox_consumer_register', arguments: { consumer_id: 'consumer-main', start_at: '2026-01-01T00:00:00Z' } } },
+      { jsonrpc: '2.0', id: 11, method: 'tools/call', params: { name: 'sop_outbox_consumer_register', arguments: { consumer_id: 'consumer-main', start_at: '2026-01-01T00:00:00Z' } } },
+      { jsonrpc: '2.0', id: 12, method: 'tools/call', params: { name: 'sop_outbox_consumer_register', arguments: { consumer_id: 'consumer-main', start_at: '2026-01-02T00:00:00Z' } } },
+      { jsonrpc: '2.0', id: 13, method: 'tools/call', params: { name: 'sop_outbox_list', arguments: { consumer_id: 'consumer-main' } } },
+      { jsonrpc: '2.0', id: 14, method: 'tools/call', params: { name: 'sop_outbox_ack', arguments: { event_id: 'event-1', consumer_id: 'consumer-main', receipt: { disposition: 'processed', attempt: 1 } } } },
+      { jsonrpc: '2.0', id: 15, method: 'tools/call', params: { name: 'sop_outbox_ack', arguments: { event_id: 'event-1', consumer_id: 'consumer-main', receipt: { disposition: 'processed', attempt: 1 } } } },
+      { jsonrpc: '2.0', id: 16, method: 'tools/call', params: { name: 'sop_outbox_ack', arguments: { event_id: 'event-1', consumer_id: 'consumer-main', receipt: { disposition: 'different' } } } },
+      { jsonrpc: '2.0', id: 17, method: 'tools/call', params: { name: 'sop_outbox_compact', arguments: { before: '2026-02-01T00:00:00Z' } } },
+      { jsonrpc: '2.0', id: 18, method: 'tools/call', params: { name: 'sop_outbox_list', arguments: { consumer_id: 'consumer-main' } } },
+      { jsonrpc: '2.0', id: 19, method: 'tools/call', params: { name: 'sop_outbox_consumer_register', arguments: { consumer_id: 'consumer-late', start_at: '2026-01-01T00:00:00Z' } } },
+      { jsonrpc: '2.0', id: 20, method: 'tools/call', params: { name: 'sop_outbox_ack', arguments: { event_id: 'event-before-start', consumer_id: 'consumer-main', receipt: {} } } },
+      { jsonrpc: '2.0', id: 21, method: 'tools/call', params: { name: 'sop_outbox_list', arguments: { consumer_id: 'consumer-missing' } } },
+    ];
+    const nodeOutbox = runNode(nodeRoot, outboxRequests);
+    const rustOutbox = runRust(rustRoot, outboxRequests);
+    for (const id of [10, 11, 13, 14, 15, 17, 18]) assertStructured('sop.outbox_mutation.' + id, nodeOutbox, rustOutbox, id);
+    for (const id of [12, 16, 19, 20, 21]) assertSame('sop.outbox_diagnostic.' + id, code(nodeOutbox, id, 'node'), code(rustOutbox, id, 'rust'));
+
+    const snapshot = (runtimeRoot) => {
+      const db = new DatabaseSync(join(runtimeRoot, '.sop', 'sop.db'), { readOnly: true });
+      try {
+        return normalize({
+          handoffs: db.prepare('SELECT * FROM sop_handoffs ORDER BY handoff_id').all().map((row) => Object.fromEntries(Object.entries(row).map(([key, value]) => [key, key.endsWith('_json') && value !== null ? JSON.parse(String(value)) : value]))),
+          consumers: db.prepare('SELECT * FROM sop_outbox_consumer_requirements ORDER BY topic,consumer_id').all(),
+          receipts: db.prepare('SELECT * FROM sop_outbox_receipts ORDER BY event_id,consumer_id').all().map((row) => ({ ...row, receipt_json: JSON.parse(String(row.receipt_json)) })),
+          outbox: db.prepare('SELECT * FROM sop_outbox ORDER BY event_id').all().map((row) => ({ ...row, payload_json: JSON.parse(String(row.payload_json)) })),
+        });
+      } finally {
+        db.close();
+      }
+    };
+    assertSame('sop.durability_snapshot', snapshot(nodeRoot), snapshot(rustRoot));
+    return {
+      status: 'passed', fixture: 'independent_handoff_and_outbox_authorities',
+      compared: ['claim', 'renew', 'lease_mismatch', 'release', 'empty_claim', 'consumer_register', 'registration_replay', 'registration_conflict', 'list', 'ack', 'ack_replay', 'ack_conflict', 'compaction', 'history_compacted_refusal', 'before_start_refusal', 'unregistered_refusal', 'sqlite_snapshot'],
+    };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 function runSurfaceFeedbackParity() {
   const workspaceRoot = resolve(packageRoot, '..', '..', '..');
   const bunEntrypoint = join(workspaceRoot, 'packages', 'surface-feedback-mcp', 'src', 'main.ts');
@@ -2120,6 +2291,7 @@ const sopRunStatusParity = runSopRunStatusParity();
 const sopHandoffParity = runSopHandoffParity();
 const sopRunCoverageParity = runSopRunCoverageParity();
 const sopOutboxParity = runSopOutboxParity();
+const sopDurabilityMutationParity = runSopDurabilityMutationParity();
 const surfaceFeedbackParity = runSurfaceFeedbackParity();
 const siteLoopParity = runSiteLoopParity();
 const calendarParity = runCalendarParity();
@@ -2155,6 +2327,7 @@ process.stdout.write(JSON.stringify({
   sop_handoff_parity: sopHandoffParity,
   sop_run_coverage_parity: sopRunCoverageParity,
   sop_outbox_parity: sopOutboxParity,
+  sop_durability_mutation_parity: sopDurabilityMutationParity,
   surface_feedback_parity: surfaceFeedbackParity,
   site_loop_parity: siteLoopParity,
   calendar_parity: calendarParity,
