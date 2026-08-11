@@ -1993,7 +1993,7 @@ impl LifecycleServer {
         .map_err(db_error)?;
         tx.execute("insert into task_lifecycle_events(event_id,task_id,task_number,event_type,payload_json,created_at) values(?1,?2,?3,'task.claimed',?4,?5)",params![format!("task-event-{}",Uuid::new_v4()),&task_id,number,json!({"agent_id":agent,"assignment_id":assignment_id}).to_string(),timestamp]).map_err(db_error)?;
         tx.commit().map_err(db_error)?;
-        project_task_status(&self.options.site_root, number, "claimed")?;
+        project_task_status(&self.options.site_root, &task_id, number, "claimed")?;
         Ok(
             json!({"status":"claimed","assignment_id":assignment_id,"task_number":number,"agent_id":agent}),
         )
@@ -2024,7 +2024,7 @@ impl LifecycleServer {
         let changed=connection.execute("update task_assignments set released_at=?1,release_reason=?2 where assignment_id=?3 and released_at is null",params![timestamp,&reason,&assignment_id]).map_err(db_error)?;
         connection.execute("update task_lifecycle set status='opened',revision=revision+1,updated_at=?1 where task_id=?2 and status='claimed'",params![timestamp,&task_id]).map_err(db_error)?;
         connection.execute("insert into task_lifecycle_events(event_id,task_id,task_number,event_type,payload_json,created_at) values(?1,?2,?3,'task.unclaimed',?4,?5)",params![format!("task-event-{}",Uuid::new_v4()),&task_id,number,json!({"reason":reason,"released":changed}).to_string(),timestamp]).map_err(db_error)?;
-        project_task_status(&self.options.site_root, number, "opened")?;
+        project_task_status(&self.options.site_root, &task_id, number, "opened")?;
         Ok(json!({"status":"unclaimed","task_number":number,"released":changed,"assignment_id":assignment_id,"agent_id":current_agent,"claimed_at":claimed_at}))
     }
     fn task_transition(&mut self, args: Value, status: &str) -> Result<Value, String> {
@@ -2059,7 +2059,7 @@ impl LifecycleServer {
             return Err(format!("task_not_found: {number}"));
         }
         connection.execute("insert into task_lifecycle_events(event_id,task_id,task_number,event_type,payload_json,created_at) values(?1,?2,?3,?4,?5,?6)",params![format!("task-event-{}",Uuid::new_v4()),&task_id,number,format!("task.status.{status}"),json!({"new_status":status,"reason":args.get("reason")}).to_string(),timestamp]).map_err(db_error)?;
-        project_task_status(&self.options.site_root, number, status)?;
+        project_task_status(&self.options.site_root, &task_id, number, status)?;
         Ok(json!({"status":"success","task_number":number,"new_status":status}))
     }
     fn task_prove_criteria(&mut self, args: Value) -> Result<Value, String> {
@@ -3721,28 +3721,23 @@ fn task_file_body(root: &Path, number: i64) -> Option<String> {
     }
     None
 }
-fn project_task_status(root: &Path, number: i64, status: &str) -> Result<(), String> {
-    let dir = root.join(".ai/do-not-open/tasks");
-    let entries = fs::read_dir(&dir).map_err(|e| format!("task_projection_read_failed:{e}"))?;
-    for entry in entries.flatten().take(200) {
-        let path = entry.path();
-        if path.extension().and_then(|v| v.to_str()) != Some("md") { continue; }
-        let text = fs::read_to_string(&path).map_err(|e| format!("task_projection_read_failed:{e}"))?;
-        if !text.lines().any(|line| line.trim() == format!("number: {number}")) { continue; }
-        let mut replaced = false;
-        let mut output = String::with_capacity(text.len() + status.len());
-        for line in text.lines() {
-            if line.starts_with("status:") && !replaced {
-                output.push_str(&format!("status: {status}"));
-                replaced = true;
-            } else { output.push_str(line); }
-            output.push('\n');
-        }
-        if !replaced { output = format!("status: {status}\n{output}"); }
-        fs::write(path, output).map_err(|e| format!("task_projection_write_failed:{e}"))?;
-        return Ok(());
+fn project_task_status(root: &Path, task_id: &str, number: i64, status: &str) -> Result<(), String> {
+    let path = root.join(".ai/do-not-open/tasks").join(format!("{task_id}.md"));
+    let text = fs::read_to_string(&path).map_err(|e| format!("task_projection_read_failed:{e}"))?;
+    if !text.lines().any(|line| line.trim() == format!("number: {number}")) {
+        return Err(format!("task_projection_number_mismatch:{task_id}:{number}"));
     }
-    Ok(())
+    let mut replaced = false;
+    let mut output = String::with_capacity(text.len() + status.len());
+    for line in text.lines() {
+        if line.starts_with("status:") && !replaced {
+            output.push_str(&format!("status: {status}"));
+            replaced = true;
+        } else { output.push_str(line); }
+        output.push('\n');
+    }
+    if !replaced { output = format!("status: {status}\n{output}"); }
+    fs::write(path, output).map_err(|e| format!("task_projection_write_failed:{e}"))
 }
 fn write_task_file(
     root: &Path,
@@ -4141,5 +4136,21 @@ mod modern_protocol_tests {
         params["protocolVersion"] = json!(MODERN_PROTOCOL_VERSION);
         let initialize = server.handle_request(json!({"jsonrpc":"2.0","id":4,"method":"initialize","params":params})).expect("error response");
         assert_eq!(initialize["error"]["data"]["code"], "initialize_removed");
+    }
+
+    #[test]
+    fn status_projection_uses_the_authoritative_task_id() {
+        let root = std::env::temp_dir().join(format!("narada-native-projection-{}", Uuid::new_v4()));
+        let task_dir = root.join(".ai/do-not-open/tasks");
+        fs::create_dir_all(&task_dir).expect("create task projection directory");
+        let task_id = "task-authoritative-id";
+        let path = task_dir.join(format!("{task_id}.md"));
+        fs::write(&path, "---\nnumber: 2469\nstatus: claimed\n---\n# Task\n").expect("write task projection");
+
+        project_task_status(&root, task_id, 2469, "closed").expect("project status");
+
+        let projected = fs::read_to_string(&path).expect("read task projection");
+        assert!(projected.lines().any(|line| line == "status: closed"));
+        fs::remove_dir_all(root).expect("remove task projection fixture");
     }
 }
