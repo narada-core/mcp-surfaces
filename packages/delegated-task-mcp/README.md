@@ -94,7 +94,7 @@ Cancellation marks the delegated task cancelled and annotates running child work
 
 The live worker integration test is separate from deterministic tests. It skips with a diagnostic when the local Codex runtime is unavailable, and passes when a real worker can be launched through `worker-delegation-mcp`.
 
-The Site-fabric E2E test (`test/site-fabric-worker-e2e.test.ts`) is the bounded B1-B3 local production-boundary proof. It starts the built `mcp-loader-mcp` child, attaches the built delegated-task surface from generated Site fabric, runs a task through a real worker-runtime child, and verifies MCP admission, policy binding, durable task/event records, worker artifacts, review acceptance, and child cleanup. It uses a deterministic controlled runtime authority (A0). The controlled W1 launcher proof lives in Narada at `packages/agent-web-ui/test/live-delegated-task-launcher-e2e.mjs`; it crosses the real launcher, local NARS carrier, Site fabric, `nars-session-mcp`, delegated-task surface, worker carrier, and durable evidence boundary. Neither proof claims live external-provider account authority (A1/A2).
+The Site-fabric E2E test (`test/site-fabric-worker-e2e.test.ts`) is the bounded B1-B3 local production-boundary proof. It starts the built `mcp-loader-mcp` child, attaches the built delegated-task surface from generated Site fabric, runs a task through a real worker-runtime child, and verifies MCP admission, policy binding, durable task/event records, worker artifacts, review acceptance, and child cleanup. It uses a deterministic controlled runtime authority (A0). The external Narada W1 launcher proof at `NARADA_REPO_ROOT/packages/agent-web-ui/test/live-delegated-task-launcher-e2e.mjs` crosses the real launcher, local NARS carrier, Site fabric, `nars-session-mcp`, delegated-task surface, worker carrier, and durable evidence boundary. Neither proof claims live external-provider account authority (A1/A2). See the [cross-repository contract register](../../docs/cross-repository-contracts.md#contract-register) for the external checkout and authority boundary.
 
 ## Condition Language
 
@@ -138,6 +138,11 @@ There are two deliberate schema layers at this boundary:
 - Site Loop translates that envelope into Task Governance's canonical persisted `narada.task_executability_assessment.v1` record, which carries the normalized provenance as `evaluator`. Task Lifecycle MCP transport responses remain versioned `*.v0` compatibility envelopes.
 
 Do not submit the worker envelope directly to Task Lifecycle admission. The Site Loop reconciliation adapter is the owner of this translation and preserves the worker/provider/model evidence while deriving the canonical verdict.
+
+External Agent Web UI and task-executability references are external Narada
+contracts. Use the [cross-repository contract
+register](../../docs/cross-repository-contracts.md#contract-register) for
+ownership and revision evidence.
 
 ## Verification
 

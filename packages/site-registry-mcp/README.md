@@ -1,8 +1,16 @@
 # @narada-core/site-registry-mcp
 
+## Verification
+
+```powershell
+pnpm --filter @narada-core/site-registry-mcp test
+```
+
 User Site MCP surface for the canonical Narada Site Registry.
 
 It exposes read-only registry inspection and reconciliation planning:
+
+## Tools
 
 - `site_registry_guidance`
 - `site_registry_doctor`

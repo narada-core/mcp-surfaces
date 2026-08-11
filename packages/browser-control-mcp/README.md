@@ -20,3 +20,22 @@ reader.
 
 The browser lifecycle remains owned by the operator/browser host. Detaching
 only closes this MCP connection.
+
+## Tools
+
+- `browser_control_guidance` - workflow, policy, and boundary guidance.
+- `browser_control_attach` / `browser_control_detach` - bind and release an
+  explicitly selected CDP session.
+- `browser_control_status` / `browser_control_session_inventory` - inspect
+  connection and bounded host-session state.
+- `browser_control_navigate`, `browser_control_wait`, `browser_control_click`,
+  `browser_control_fill`, and `browser_control_assert` - perform allowlisted,
+  bounded DOM actions.
+- `browser_control_accessibility_snapshot` and `browser_control_screenshot` -
+  obtain bounded UX evidence.
+
+## Verification
+
+```powershell
+pnpm --filter @narada-core/browser-control-mcp test
+```

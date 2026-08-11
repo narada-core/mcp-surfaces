@@ -13,3 +13,20 @@ projection and its reconnect posture.
 ## Telemetry
 
 Telemetry is optional and disabled unless the site enables `.ai/mcp-telemetry.json`. When enabled, this surface emits metadata-only tool status events and does not persist registry records, launch plans, or other raw result payloads.
+
+## Tools
+
+- `launcher_guidance` / `launcher_doctor` - describe the surface and current
+  projection posture.
+- `launcher_options_list` / `launcher_option_matrix` - inspect admitted launch
+  options and their compatibility matrix.
+- `launcher_registry_list` / `launcher_plan` - read the registry and produce
+  a bounded startup plan.
+- `launcher_coherence_check` - validate the read-only registry/plan
+  relationship.
+
+## Verification
+
+```powershell
+pnpm --filter @narada-core/launcher-mcp test
+```

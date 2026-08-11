@@ -1,5 +1,11 @@
 # @narada-core/surface-feedback-mcp
 
+## Verification
+
+```powershell
+pnpm --filter @narada-core/surface-feedback-mcp test
+```
+
 Cross-site MCP surface feedback intake and routing. Any site may submit feedback about any surface — bugs, improvements, gaps, observations.
 
 ## Purpose

@@ -75,3 +75,9 @@ assistant content.
 When only an artifact id is known, prefer `artifact_read` before
 `artifact_message_part_create`; the latter creates an unverified reference and is
 intended for recovery or bridging code that already has trusted metadata.
+
+## Verification
+
+```powershell
+pnpm --filter @narada-core/artifacts-mcp test
+```

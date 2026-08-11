@@ -1,5 +1,11 @@
 # @narada-core/mcp-fabric-compiler
 
+## Verification
+
+```powershell
+pnpm --filter @narada-core/mcp-fabric-compiler test
+```
+
 Pure MCP Fabric V2 compilation from package-owned surface descriptors and
 resolved bindings to one immutable manifest and deterministic Codex, Kimi, and
 OpenCode carrier artifacts.

@@ -1,5 +1,11 @@
 # @narada-core/speech-mcp
 
+## Verification
+
+```powershell
+pnpm --filter @narada-core/speech-mcp test
+```
+
 Host-level speech MCP surface for text-to-speech, bounded microphone capture, transcript-returning remote transcription, prompt-response workflows, and bounded local listen sessions.
 
 ## Tools

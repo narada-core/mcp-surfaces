@@ -1,5 +1,11 @@
 # MCP E2E Harness
 
+## Verification
+
+```powershell
+pnpm --filter @narada-core/mcp-e2e-harness test
+```
+
 The mcp-e2e-harness package contains generic mechanics for real MCP end-to-end
 tests. It does not create Site configuration, define surface policy, provide
 fake domain behavior, or make assertions about a surface.

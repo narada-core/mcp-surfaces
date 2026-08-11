@@ -279,6 +279,11 @@ strict coherence. Missing or invalid prerequisites are `not_run`; an admitted
 run that does not complete the contract is failed. The watchdog bounds the
 gate at 150 seconds.
 
+The production task-executability runbook and NARS host boundary are external
+Narada contracts. Use the [cross-repository contract
+register](../../docs/cross-repository-contracts.md#contract-register) for
+source ownership and revision evidence.
+
 ## Verification
 
 ```powershell

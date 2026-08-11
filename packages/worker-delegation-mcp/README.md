@@ -106,11 +106,15 @@ The package has two explicit real-boundary delegation proofs:
   `narada-agent-runtime-server` carrier, calls a bounded local HTTP provider
   fixture, and verifies provider requests, lifecycle events, durable run
   artifacts, and cleanup.
-- Narada's
-  `packages/agent-web-ui/test/live-delegated-task-launcher-e2e.mjs` is the
+- The external Narada proof at
+  `NARADA_REPO_ROOT/packages/agent-web-ui/test/live-delegated-task-launcher-e2e.mjs` is the
   controlled W1 proof with A0 provider authority. It starts the real launcher, carrier, Site-local MCP
   fabric, `nars-session-mcp`, delegated-task MCP, and worker carrier, then
   verifies durable task and worker evidence.
+
+This W1 path is owned by Narada proper rather than this repository; use the
+[cross-repository contract register](../../docs/cross-repository-contracts.md#contract-register)
+to resolve the external checkout and its current evidence.
 
 Run the B4 proof with:
 

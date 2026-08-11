@@ -1,11 +1,17 @@
 # NARS Session MCP
 
+## Verification
+
+```powershell
+pnpm --filter @narada-core/nars-session-mcp test
+```
+
 `@narada-core/nars-session-mcp` is a Narada-specific MCP adapter for governed
 input to an existing NARS session.
 
-The canonical semantic contract is maintained in Narada proper:
-
-`<src-root>/narada/docs/architecture/nars-session-input-contract.md`
+The canonical semantic contract is maintained in Narada proper. The
+[cross-repository contract register](../../docs/cross-repository-contracts.md#contract-register)
+records the external source path and revision-evidence requirement.
 
 The MCP-facing target and boundary notes are in:
 

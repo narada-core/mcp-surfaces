@@ -22,6 +22,10 @@ Lifecycle commands accept an optional `timeout_ms` from 100 through 120000. The 
 
 If the router state is malformed and its lock owner is not alive, Narada moves the corrupt `routes.json` and stale lock into a timestamped `recovery/corrupt-*` directory before retrying. A live or unreadable lock owner is never quarantined automatically.
 
-## Verify
+The host overlay implementation is external to this MCP adapter. Use the
+[cross-repository contract register](../../docs/cross-repository-contracts.md#contract-register)
+for the owning implementation and revision evidence.
+
+## Verification
 
     pnpm --filter @narada-core/operator-console-overlay-mcp test

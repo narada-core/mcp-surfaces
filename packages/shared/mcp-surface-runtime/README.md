@@ -1,5 +1,11 @@
 # @narada-core/mcp-surface-runtime
 
+## Verification
+
+```powershell
+pnpm --filter @narada-core/mcp-surface-runtime test
+```
+
 Policy-neutral execution substrate for authority-bound MCP surface instances.
 
 The package owns worker and stdio adapter lifecycle, instance tenancy,

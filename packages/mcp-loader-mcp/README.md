@@ -10,9 +10,48 @@ Every loader lifecycle projection uses the `narada.mcp_loader.runtime_lifecycle.
 
 When a proxied child guidance tool is called, its `structuredContent` is augmented with `loader_runtime_lifecycle` and `loader_runtime_freshness`, so the attached surface guidance itself advertises loader ownership and recovery.
 
+## Tools
+
+The loader's own public tools are:
+
+- `mcp_loader_guidance`, `mcp_loader_policy_inspect`, and
+  `mcp_loader_runtime_status`.
+- `mcp_loader_list_site_surfaces`, `mcp_loader_site_fabric_diagnostics`, and
+  `mcp_loader_site_tool_inventory_check`.
+- `mcp_loader_attach_surface`, `mcp_loader_open_surface`,
+  `mcp_loader_surface_status`, `mcp_loader_surface_restart`,
+  `mcp_loader_detach`, and `mcp_loader_connection_inventory`.
+- `mcp_loader_list_tools`, `mcp_loader_tool_discovery_manifest`,
+  `mcp_loader_call_tool`, and `mcp_loader_call_surface_tool`.
+- `mcp_loader_runtime_observation`, `mcp_loader_process`, and
+  `mcp_loader_process_ownership`, `mcp_loader_topology_diagnostics`.
+
+The exact child tool schemas remain owned by each attached surface and are
+discovered through the loader's tools/list projections.
+
 ## Runtime observation
 
 Call `mcp_loader_runtime_observation({ connection_id, carrier_kind })` after attach to obtain `RuntimeObservationV2`. The result includes stable logical identity, active generation state, heartbeat/lease freshness, descriptor and live tool-contract digests, lifecycle eligibility, and one bounded recovery actuator. A replayable child names `mcp_loader_surface_restart`; a session-pinned or restart-required projection names the carrier supervisor capability. The loader reports `runtime_state_root: null` because persistent observation records belong to the generic runtime-proxy observation store or another explicitly configured owner.
+
+## Process topology and consolidation
+
+`mcp_loader_topology_diagnostics` provides the operator-readable vocabulary
+and bounded evidence for one loader run:
+
+- a tool is an operation, a surface is the server boundary exposing tools, a
+  runtime proxy is the carrier-owned boundary, a loader attaches/proxies
+  children, and a session instance is one Site/session surface child;
+- counts are aggregated by surface, proxy, session, and loader owner, with
+  duplicate instance keys and known orphaned children called out;
+- the loader measures its own memory and explicitly marks child memory as
+  unavailable at this authority boundary. Host-wide proxy/conhost memory and
+  orphan reconciliation belong to `runtime-introspection` or the carrier
+  supervisor, so the loader never enumerates or terminates unrelated
+  processes;
+- per-session stdio isolation remains the default. Shared HTTP/daemon or
+  pooling mode is not implemented or selected; any future opt-in must prove
+  equivalent Site/session authority, lifecycle ownership, failure containment,
+  and conformance tests before it can be admitted.
 
 ## Tool Call Timeouts
 
@@ -66,3 +105,9 @@ The bounded loader benchmark is pnpm run benchmark:loader. It measures Node/Node
 ## Boundary
 
 MCP Loader owns child attachment, initialization, tool discovery, call proxying, and detachment. It does not own the attached surfaces, authorize their domain operations, or materialize the Site action-admission registry.
+
+## Verification
+
+```powershell
+pnpm --filter @narada-core/mcp-loader-mcp test
+```

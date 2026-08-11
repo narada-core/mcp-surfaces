@@ -2,6 +2,10 @@
 
 Guidance for agents working in this repository.
 
+The canonical package inventory is
+[docs/package-inventory.md](docs/package-inventory.md). It is checked against
+the package manifests; update it when packages are added or renamed.
+
 ## Repository Purpose
 
 `mcp-surfaces` contains MCP surface packages shared by Narada sites and carriers. Some surfaces are standalone and can be used outside Narada; package READMEs and wiring docs carry the setup details. See `docs/mcp-taxonomy.md` for the generic-versus-Narada-specific split.
@@ -14,6 +18,7 @@ Current packages:
 - `@narada-core/mcp-runtime-proxy`: shared carrier stdio proxy for MCP startup diagnostics.
 - `@narada-core/mcp-surface-runtime`: policy-neutral authority-bound surface execution engine with factory and stdio adapters.
 - `@narada-core/mcp-runtime-observation`: mandatory-but-best-effort sanitized runtime ownership and lifecycle observation producer.
+- `@narada-core/mcp-runtime-client`: bounded production client for invoking Site MCP fabric surfaces.
 - `@narada-core/mcp-e2e-harness`: shared bounded mechanics for real MCP end-to-end tests.
 - `@narada-core/mcp-fabric-contracts`: shared versioned MCP descriptor, manifest, carrier projection, observation, and reconciliation contracts.
 - `@narada-core/mcp-fabric-compiler`: pure manifest and Codex/Kimi/OpenCode carrier projection compiler with strict Moonshot schema validation.

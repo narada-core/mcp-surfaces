@@ -1,5 +1,11 @@
 # `@narada-core/execution-contract`
 
+## Verification
+
+```powershell
+pnpm --filter @narada-core/execution-contract test
+```
+
 This package defines the shared execution identity used when a task or delegated workflow crosses from intent into execution.
 
 `ExecutionBinding` records the authorized workspace, executor kind/profile/id, optional repository and Site roots, and a stable correlation key. Consumers normalize it before persistence and use `executionRequestFingerprint` to detect idempotency-key reuse with a different request.

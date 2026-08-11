@@ -141,6 +141,14 @@ Telemetry is optional and off by default. When a site enables `.ai/mcp-telemetry
 - `graph_mail_draft_discard`: deletes an ordinary draft, but refuses Work-linked tracked drafts; use `graph_mail_ticket_draft_discard` for those.
 - `graph_mail_draft_send`: sends an existing draft only when policy allows it.
 
+Reply and reply-all tools also accept the explicit `comment_html` mode. This
+mode performs a governed two-phase operation: Graph first creates the normal
+unsent reply (including its generated recipients and quoted history), then the
+surface reads that draft and patches an HTML body containing the authored
+`comment_html` followed by the preserved quote. This keeps paragraph
+boundaries, reply-all recipients, quote history, and the unsent state together;
+`comment_html` cannot be combined with `comment`, `body_text`, or `body_html`.
+
 ## Send Safety
 
 `graph_mail_draft_send` refuses by default.

@@ -29,8 +29,27 @@ Standalone MCP surface packages shared by Narada sites and carriers.
 - `@narada-core/speech-mcp`: host-level speech surface for TTS, bounded capture, and transcription. See `packages/speech-mcp/README.md`.
 - `@narada-core/nars-session-mcp`: governed input and bounded readback for existing NARS sessions. See `docs/nars-session-mcp-target.md`.
 - `@narada-core/quota-meter-mcp`: host-level quota-meter glide status and desktop overlay lifecycle management. See `packages/quota-meter-mcp/README.md`.
+- `@narada-core/operator-console-overlay-mcp`: host-level dedicated MCP surface for the Narada Operator Console Windows overlay. See `packages/operator-console-overlay-mcp/README.md`.
+- `@narada-core/artifacts-mcp`: NARS session artifact registration and renderable projections. See `packages/artifacts-mcp/README.md`.
+- `@narada-core/browser-control-mcp`: bounded host browser control for authenticated UX verification. See `packages/browser-control-mcp/README.md`.
+- `@narada-core/catalog-observation-mcp`: read-only provider catalog observation boundary. See `packages/catalog-observation-mcp/README.md`.
+- `@narada-core/cloudflare-carrier-mcp`: Cloudflare-carrier product, session, and continuity operations. See `packages/cloudflare-carrier-mcp/README.md`.
+- `@narada-core/launcher-mcp`: read-only launcher registry, option, plan, and coherence projections. See `packages/launcher-mcp/README.md`.
+- `@narada-core/mcp-affordances`: shared UI-neutral affordance schema and validation. See `packages/shared/mcp-affordances/README.md`.
+- `@narada-core/mcp-e2e-harness`: shared bounded mechanics for real MCP end-to-end tests. See `packages/shared/mcp-e2e-harness/README.md`.
+- `@narada-core/mcp-fabric-compiler`: shared manifest and carrier projection compiler. See `packages/shared/mcp-fabric-compiler/README.md`.
+- `@narada-core/mcp-fabric-contracts`: shared versioned descriptor and projection contracts. See `packages/shared/mcp-fabric-contracts/README.md`.
+- `@narada-core/mcp-loader-mcp`: policy-gated runtime attachment and proxying. See `packages/mcp-loader-mcp/README.md`.
+- `@narada-core/mcp-runtime-client`: bounded client for invoking Site MCP fabric surfaces. See `packages/shared/mcp-runtime-client/README.md`.
+- `@narada-core/mcp-runtime-observation`: sanitized runtime ownership and lifecycle observation. See `packages/shared/mcp-runtime-observation/README.md`.
+- `@narada-core/operator-routing-mcp`: transcript-to-target routing and inbox fallback packaging. See `packages/operator-routing-mcp/README.md`.
+- `@narada-core/project-state-mcp`: read-only virtual project-state projection. See `packages/project-state-mcp/README.md`.
+- `@narada-core/runtime-introspection-mcp`: runtime trace and authority-bound memory analysis. See `packages/runtime-introspection-mcp/README.md`.
+- `@narada-core/site-coherence-mcp`: local-versus-Cloudflare continuity coherence readback. See `packages/site-coherence-mcp/README.md`.
+- `@narada-core/work-lifecycle-mcp`: Site-scoped ticket and task lifecycle authority. See `packages/work-lifecycle-mcp/README.md`.
+- `@narada-core/execution-contract`: shared typed execution binding contract. See `packages/shared/execution-contract/README.md`.
+- `@narada-core/provider-registry`: shared provider/model capability registry. See `packages/shared/provider-registry/README.md`.
 
-- @narada-core/operator-console-overlay-mcp: host-level dedicated MCP surface for the Narada Operator Console Windows overlay. See packages/operator-console-overlay-mcp/README.md.
 
 ## Verify
 
@@ -76,3 +95,9 @@ surface decisions, evidence ledger, and implementation order.
 
 See `docs/agent-ergonomics-surfaces.md` for the boundary between mechanical MCP
 evidence, multi-repository Git summaries, and agent completion audits.
+
+See `docs/mcp-materialization-recovery.md` for the all-carrier recovery
+contract when a carrier reports stale artifacts or generation state.
+
+See `docs/cross-repository-contracts.md` for contracts owned by Narada proper
+or another repository.

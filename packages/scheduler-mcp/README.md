@@ -1,5 +1,11 @@
 # @narada-core/scheduler-mcp
 
+## Verification
+
+```powershell
+pnpm --filter @narada-core/scheduler-mcp test
+```
+
 Windows Task Scheduler MCP surface for governed task registration, inspection, and execution. It wraps `schtasks.exe` for Task Scheduler authority and stores every target behind Narada's native no-console actuator. The actuator is a GUI-subsystem executable and creates its managed target with Windows `CREATE_NO_WINDOW`; Task Scheduler's `Hidden` metadata is not treated as a window-suppression mechanism. Action replacement carries a task's disabled state into the same settings update, so refreshing an action cannot silently enable a paused task.
 
 ## Purpose

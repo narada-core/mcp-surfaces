@@ -172,6 +172,10 @@ when the operator intentionally authorizes work on the superseded lineage.
 
 Task Lifecycle is the authority for assessment requests, leases, attempts, admitted assessments, currency, and verdicts. Its cross-surface deterministic proof is run through Site Loop and covers lifecycle/recovery mechanics, including Windows SQLite ownership, no-NARS recovery, restart recovery, stale replacement, and strict dispatch enforcement. An `executable` verdict only says the task can be attempted in the declared environment; neither the verdict nor this proof establishes task correctness. The optional live provider check belongs to Worker Delegation. See Narada's `docs/operations/task-executability-e2e-and-recovery.md` runbook for commands and recovery boundaries.
 
+The task-executability recovery runbook is maintained by Narada proper. Use the
+[cross-repository contract register](../../docs/cross-repository-contracts.md#contract-register)
+before treating an external runbook or authority result as current.
+
 ## Verification
 
 ```powershell

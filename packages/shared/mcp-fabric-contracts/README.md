@@ -1,5 +1,11 @@
 # @narada-core/mcp-fabric-contracts
 
+## Verification
+
+```powershell
+pnpm --filter @narada-core/mcp-fabric-contracts test
+```
+
 Versioned, policy-neutral contracts for describing MCP surfaces, compiling Site
 fabric manifests, projecting carrier configuration, and reconciling observed
 runtime state.

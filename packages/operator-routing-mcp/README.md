@@ -1,5 +1,11 @@
 # @narada-core/operator-routing-mcp
 
+## Verification
+
+```powershell
+pnpm --filter @narada-core/operator-routing-mcp test
+```
+
 User Site operator routing MCP surface for transcript-to-target routing decisions, durable routing records, and site-inbox fallback draft packaging.
 
 ## Tools

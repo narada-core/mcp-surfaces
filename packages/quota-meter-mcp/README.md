@@ -1,5 +1,11 @@
 # @narada-core/quota-meter-mcp
 
+## Verification
+
+```powershell
+pnpm --filter @narada-core/quota-meter-mcp test
+```
+
 Host-level MCP surface for the local `quota-meter` CLI. It reads current
 Codex/Kimi glide status and manages the transparent desktop overlay without
 handling provider credentials itself.

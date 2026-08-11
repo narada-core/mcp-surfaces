@@ -16,3 +16,10 @@ both lifecycle Rust rows are admitted in the runtime matrix.
 Node and Bun remain explicit compatibility/reference profiles. The bounded
 parity, migration, lifecycle-refusal, cross-runtime, and benchmark suites run
 against the native adapters and the Node reference.
+
+## Verification
+
+```powershell
+pnpm --filter @narada-core/mcp-lifecycle-native test:parity
+pnpm --filter @narada-core/mcp-lifecycle-native test:cross-runtime
+```
