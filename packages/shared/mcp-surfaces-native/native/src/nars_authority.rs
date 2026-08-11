@@ -22,7 +22,8 @@ const DEFAULT_TIMEOUT_MS: u64 = 5_000;
 
 pub fn deliver(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     let session_id = required(args, "session_id")?;
-    let record = read_session_record(root, &session_id)?;
+    let requested_site = optional_text(args.get("site_id"));
+    let record = read_session_record(root, &session_id, requested_site.as_deref())?;
     assert_requested_site(args, &record)?;
     let authority = assert_writable_authority(args, &record)?;
     let delivery = delivery(args)?;
@@ -147,7 +148,8 @@ pub fn deliver(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
 
 pub fn status(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     let session_id = required(args, "session_id")?;
-    let record = read_session_record(root, &session_id)?;
+    let requested_site = optional_text(args.get("site_id"));
+    let record = read_session_record(root, &session_id, requested_site.as_deref())?;
     assert_requested_site(args, &record)?;
     let authority = authority_from_record(&record)?;
     let input_event_id = optional_text(args.get("input_event_id"));
@@ -253,13 +255,20 @@ fn authority_from_record(record: &Value) -> Result<Authority, Value> {
     Ok(Authority { event_endpoint: endpoint.to_string(), runtime_id, epoch, value: authority_summary(record) })
 }
 
-fn read_session_record(root: &Path, id: &str) -> Result<Value, Value> {
+fn read_session_record(root: &Path, id: &str, requested_site: Option<&str>) -> Result<Value, Value> {
     if id.is_empty() || id.len() > 128 || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
         return Err(error("session_id_invalid", "session_id_invalid"));
     }
     if user_site_scope() {
+        let authorities = user_site_authorities(root)?;
+        if let Some(requested_site) = requested_site {
+            if !authorities.iter().any(|(site_id, _)| site_id == requested_site) {
+                return Err(error("site_scope_refused", "site_scope_refused"));
+            }
+        }
         let mut matches = Vec::new();
-        for (site_id, site_root) in user_site_authorities(root)? {
+        for (site_id, site_root) in authorities {
+            if requested_site.is_some_and(|requested| requested != site_id) { continue; }
             for base in session_roots(&site_root) {
                 let path = base.join(id).join("session-index-record.json");
                 if !path.exists() { continue; }
@@ -582,5 +591,31 @@ mod tests {
         assert_eq!(summary.status, "admitted_to_turn");
         assert_eq!(summary.outcome, "completed");
         assert_eq!(summary.terminal_state.as_deref(), Some("completed"));
+    }
+
+    #[test]
+    fn requested_site_selects_admitted_authority_before_duplicate_check() {
+        let user_root = std::env::temp_dir().join(format!("narada-nars-authority-{}", Uuid::new_v4()));
+        let site_a = std::env::temp_dir().join(format!("narada-nars-site-a-{}", Uuid::new_v4()));
+        let site_b = std::env::temp_dir().join(format!("narada-nars-site-b-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&user_root).expect("user root");
+        std::fs::create_dir_all(site_a.join(".narada/crew/nars-sessions/duplicate")).expect("site a");
+        std::fs::create_dir_all(site_b.join(".narada/crew/nars-sessions/duplicate")).expect("site b");
+        let connection = Connection::open(user_root.join("registry.db")).expect("registry");
+        connection.execute_batch("CREATE TABLE site_registry (site_id TEXT NOT NULL, site_root TEXT NOT NULL, created_at TEXT NOT NULL);").expect("schema");
+        connection.execute("INSERT INTO site_registry (site_id, site_root, created_at) VALUES (?1, ?2, ?3)", rusqlite::params!["site-a", site_a.to_string_lossy(), "2026-01-01T00:00:00Z"]).expect("site a row");
+        connection.execute("INSERT INTO site_registry (site_id, site_root, created_at) VALUES (?1, ?2, ?3)", rusqlite::params!["site-b", site_b.to_string_lossy(), "2026-01-02T00:00:00Z"]).expect("site b row");
+        drop(connection);
+        std::fs::write(site_a.join(".narada/crew/nars-sessions/duplicate/session-index-record.json"), json!({"session_id":"duplicate","site_id":"site-a"}).to_string()).expect("site a record");
+        std::fs::write(site_b.join(".narada/crew/nars-sessions/duplicate/session-index-record.json"), json!({"session_id":"duplicate","site_id":"site-b"}).to_string()).expect("site b record");
+        std::env::set_var("NARADA_NARS_SESSION_SCOPE", "user_site");
+        std::env::set_var("NARADA_USER_SITE_ROOT", &user_root);
+        let selected = read_session_record(&user_root, "duplicate", Some("site-b")).expect("selected record");
+        assert_eq!(selected["site_id"], "site-b");
+        std::env::remove_var("NARADA_NARS_SESSION_SCOPE");
+        std::env::remove_var("NARADA_USER_SITE_ROOT");
+        let _ = std::fs::remove_dir_all(user_root);
+        let _ = std::fs::remove_dir_all(site_a);
+        let _ = std::fs::remove_dir_all(site_b);
     }
 }
