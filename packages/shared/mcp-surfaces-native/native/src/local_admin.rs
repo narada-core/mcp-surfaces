@@ -6,6 +6,8 @@ use std::process::Command;
 
 #[path = "nars_authority.rs"]
 mod nars_authority;
+#[path = "artifact_authority.rs"]
+mod artifact_authority;
 
 const MAX_BYTES: usize = 256_000;
 const MAX_SESSIONS: usize = 100;
@@ -74,9 +76,10 @@ fn artifacts_call(name: &str, args: &Map<String, Value>, root: &Path) -> Result<
         "artifacts_guidance" => Ok(guidance_result("artifacts", args)),
         "artifacts_doctor" => Ok(artifact_doctor(root)),
         "artifact_message_part_create" => { let id = required(args, "artifact_id")?; let part = artifact_message_part(&id, args.get("kind").cloned(), args.get("title").cloned(), args.get("render_hint").cloned()); let operator_title = part.get("title").and_then(Value::as_str).unwrap_or(&id); Ok(json!({"schema":"narada.artifacts.message_part.v1","status":"ok","verification_status":"unverified","message_part":part.clone(),"assistant_content_parts":[part],"operator_message":format!("Artifact ready: {operator_title}"),"recommended_verification":"Prefer artifact_read before emitting this part when a NARS endpoint is available.","native_read_only":true})) }
-        "artifact_list" => artifact_list(args, root),
-        "artifact_read" => artifact_read(args, root),
-        "artifact_register_file" | "artifact_present" => Err(authority_boundary("artifacts", name, "nars_artifact_write_authority_not_enabled_in_native_slice", "Use the owning NARS artifact authority for registration or presentation.")),
+        "artifact_list" => artifact_authority::list(args, root),
+        "artifact_read" => artifact_authority::read(args, root),
+        "artifact_register_file" => artifact_authority::register(args, root),
+        "artifact_present" => artifact_authority::present(args, root),
         _ => Err(error("unknown_tool", &format!("unknown_tool:{name}"))),
     }
 }
