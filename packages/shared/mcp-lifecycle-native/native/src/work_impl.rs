@@ -455,9 +455,12 @@ fn native_work_admit_source(
         .and_then(Value::as_array)
         .ok_or("correlation_keys_required")?;
     for candidate in values {
-        let kind = required_string(candidate, "correlation_kind_required")?;
-        let scope = required_string(candidate, "correlation_scope_required")?;
-        let value = required_string(candidate, "correlation_value_required")?;
+        let kind = required_string(candidate, "kind")
+            .map_err(|_| "correlation_kind_required".to_string())?;
+        let scope = required_string(candidate, "scope")
+            .map_err(|_| "correlation_scope_required".to_string())?;
+        let value = required_string(candidate, "value")
+            .map_err(|_| "correlation_value_required".to_string())?;
         if value.as_bytes().len() > 1_024 {
             return Err("correlation_value_too_large".to_string());
         }

@@ -152,7 +152,10 @@ function workInput(): string {
       policy_version: 'v1',
       summary: 'Parity ticket',
       source_ref: {},
-      correlation_keys: [],
+      correlation_keys: [
+        { kind: 'mailbox_conversation', scope: 'native', value: 'parity-conversation' },
+        { kind: 'internet_message_id', scope: 'rfc5322', value: '<parity@example.test>' },
+      ],
     }),
     toolCall(4, 'ticket_admit_proposal', {
       ticket_id: 'ticket-1',
