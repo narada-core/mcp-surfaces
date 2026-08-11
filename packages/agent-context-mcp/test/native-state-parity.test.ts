@@ -152,6 +152,7 @@ try {
       for (const [tool, argumentsValue] of [
         ['agent_context_whoami', { hint: 'parity.builder' }],
         ['agent_context_startup_sequence', {}],
+        ['agent_orientation_read', { step_id: 'read:site-law', offset: 0 }],
         ['agent_orientation_read', { selection: 'continuity' }],
         ['agent_orientation_read', { selection: 'work' }],
         ['agent_orientation_acknowledge', {}],

@@ -503,6 +503,48 @@ fn required_read(
         return Err(format!("agent_context_orientation_required_read_source_stale:{step_id}:expected={}:actual={content_hash}", step.pointer("/source/revision").and_then(Value::as_str).unwrap_or("")));
     }
     let db = context.open_db()?;
+    let receipt = evidence.delivery["receipt_id"].as_str().unwrap_or("");
+    let existing_completion: Option<String> = db.query_row(
+        "SELECT completion_json FROM orientation_required_read_completions WHERE delivery_receipt_ref=?1 AND step_id=?2 LIMIT 1",
+        params![receipt, step_id], |row| row.get(0),
+    ).optional().map_err(db_error)?;
+    if let Some(completion_text) = existing_completion {
+        let completion: Value = serde_json::from_str(&completion_text).map_err(|_| {
+            format!("agent_context_orientation_required_read_completion_invalid:{step_id}")
+        })?;
+        let existing_page: Option<String> = db.query_row(
+            "SELECT page_json FROM orientation_required_read_pages WHERE delivery_receipt_ref=?1 AND step_id=?2 AND byte_offset=?3 LIMIT 1",
+            params![receipt, step_id, offset], |row| row.get(0),
+        ).optional().map_err(db_error)?;
+        let page = existing_page
+            .map(|text| {
+                serde_json::from_str::<Value>(&text).map_err(|_| {
+                    format!("agent_context_orientation_required_read_page_invalid:{step_id}")
+                })
+            })
+            .transpose()?;
+        if let Some(value) = &page {
+            let start = value["byte_offset"].as_u64().unwrap_or(u64::MAX) as usize;
+            let end = value["next_byte_offset"].as_u64().unwrap_or(u64::MAX) as usize;
+            let expected = content
+                .as_bytes()
+                .get(start..end)
+                .and_then(|bytes| std::str::from_utf8(bytes).ok());
+            if value["content_sha256"] != content_hash || value["content"].as_str() != expected {
+                return Err(format!(
+                    "agent_context_orientation_required_read_page_source_conflict:{step_id}"
+                ));
+            }
+        }
+        let current = progress(&db, brief, &evidence.delivery)?;
+        let mut public_page = page.clone().unwrap_or(Value::Null);
+        if let Some(object) = public_page.as_object_mut() {
+            object.remove("content");
+        }
+        return Ok(
+            json!({"schema":"narada.agent_context.orientation_required_read.v1","status":"already_completed","source_mutation":false,"local_persistence":true,"ordinary_work_gate":"acknowledgement_required","step_id":step_id,"source":step["source"],"content":page.as_ref().and_then(|v|v["content"].as_str()).map(Value::from).unwrap_or(Value::Null),"page":public_page,"result_evidence":completion["result_evidence"],"completion_ref":format!("agent-context:orientation_required_read_completions:orientation-read:{receipt}:{step_id}"),"required_read_progress":{"total":current.total,"completed":current.completed.len(),"pending":current.pending.len(),"completed_step_ids":current.completed,"pending_step_ids":current.pending,"completion_refs":current.refs,"active_step_id":current.active,"next_byte_offset":current.offset},"next_call":current.next_call}),
+        );
+    }
     let before = progress(&db, brief, &evidence.delivery)?;
     if before.active.as_deref() != Some(step_id) {
         return Err(format!(
@@ -522,7 +564,6 @@ fn required_read(
     let page_content = std::str::from_utf8(page_bytes)
         .map_err(|_| "agent_context_orientation_required_read_page_boundary_invalid")?;
     let eof = end == bytes.len();
-    let receipt = evidence.delivery["receipt_id"].as_str().unwrap_or("");
     let page_id = format!("orientation-read-page:{receipt}:{step_id}:{offset}");
     let page_ref = format!("agent-context:orientation_required_read_pages:{page_id}");
     let page = json!({"schema":"narada.agent_context.orientation_required_read_page.v1","page_id":page_id,"delivery_receipt_ref":receipt,"manifest_id":brief.pointer("/manifest_ref/manifest_id").cloned().unwrap_or(Value::Null),"brief_id":brief["brief_id"],"step_id":step_id,"byte_offset":offset,"returned_bytes":page_bytes.len(),"next_byte_offset":end,"eof":eof,"content_sha256":content_hash,"page_sha256":format!("{:x}",Sha256::digest(page_bytes)),"page_ref":page_ref,"content":page_content});
