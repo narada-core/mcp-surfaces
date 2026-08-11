@@ -30,7 +30,7 @@
   "scripts": {
     "build": "tsc -b",
     "build:native:catalog": "node --import tsx scripts/emit-native-tool-catalog.ts",
-    "build:native": "pnpm run build:native:catalog && cargo build --release --locked --manifest-path native/Cargo.toml",
+    "build:native": "tsx scripts/build-native.ts",
     "test:native:contract": "pnpm --filter @narada-core/sqlite build && pnpm run build:native && pnpm build && node dist/test/native-tool-catalog-parity.test.js && node --disable-warning=ExperimentalWarning dist/test/native-state-parity.test.js",
     "typecheck": "tsc -b --pretty false",
     "test": "pnpm run test:bun",
@@ -53,6 +53,12 @@
     "@narada-core/mcp-e2e-harness": "workspace:*",
     "@narada-core/mcp-runtime-proxy": "workspace:*",
     "@types/node": "^22.15.3",
-    "typescript": "^5.8.3"
+    "typescript": "^5.8.3",
+    "tsx": "^4.21.0"
+  },
+  "naradaRuntimeArtifacts": {
+    "win32": ["./dist/native/current.json", "./dist/native/versions/*"],
+    "linux": ["./dist/native/current.json", "./dist/native/versions/*"],
+    "darwin": ["./dist/native/current.json", "./dist/native/versions/*"]
   }
 }

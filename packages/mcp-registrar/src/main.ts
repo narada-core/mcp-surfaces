@@ -203,14 +203,18 @@ const MCP_WORKSPACE_PARENT = resolve(configuredSourceRoot || resolve(MCP_WORKSPA
 const MCP_SURFACES_ROOT = portablePathLiteral(process.env.NARADA_MCP_SURFACES_ROOT ?? join(MCP_WORKSPACE_ROOT, 'packages'));
 const MCP_RUNTIME_PROXY_ENTRYPOINT = `${MCP_SURFACES_ROOT}/shared/mcp-runtime-proxy/dist/src/main.js`;
 const MCP_RUNTIME_PROXY_PACKAGE_ROOT = resolve(MCP_SURFACES_ROOT, 'shared', 'mcp-runtime-proxy');
-const MCP_NATIVE_RUNTIME_PROXY_LEGACY_ENTRYPOINT = `${MCP_SURFACES_ROOT}/shared/mcp-runtime-proxy/dist/native/narada-mcp-runtime${process.platform === 'win32' ? '.exe' : ''}`;
+function requiredNativeArtifact(packageRoot: string, artifactName: string): string {
+  const entrypoint = resolveNativeArtifact(packageRoot, artifactName);
+  if (!entrypoint) throw new Error(`native_artifact_pointer_unavailable:${packageRoot}:${artifactName}`);
+  return portablePathLiteral(entrypoint);
+}
 function nativeRuntimeProxyEntrypoint(): string {
-  return portablePath(resolveNativeArtifact(MCP_RUNTIME_PROXY_PACKAGE_ROOT, 'narada-mcp-runtime.exe') ?? MCP_NATIVE_RUNTIME_PROXY_LEGACY_ENTRYPOINT);
+  return requiredNativeArtifact(MCP_RUNTIME_PROXY_PACKAGE_ROOT, 'narada-mcp-runtime.exe');
 }
 const MCP_REGISTRAR_RUNTIME_ENTRYPOINT = `${MCP_SURFACES_ROOT}/mcp-registrar/dist/src/main.js`;
 const MCP_RUNTIME_IMPLEMENTATION_MATRIX_PATH = resolve(runtimeImplementationMatrixContractPath());
 const MCP_MCP_LOADER_PACKAGE_ROOT = resolve(MCP_SURFACES_ROOT, 'mcp-loader-mcp');
-const MCP_NATIVE_MCP_LOADER_ENTRYPOINT = portablePathLiteral(join(MCP_MCP_LOADER_PACKAGE_ROOT, 'dist', 'native', `narada-mcp-loader${process.platform === 'win32' ? '.exe' : ''}`));
+const MCP_NATIVE_MCP_LOADER_ARTIFACT_NAME = `narada-mcp-loader${process.platform === 'win32' ? '.exe' : ''}`;
 const MCP_LIFECYCLE_NATIVE_PACKAGE_ROOT = resolve(MCP_SURFACES_ROOT, 'shared', 'mcp-lifecycle-native');
 const MCP_NATIVE_TASK_LIFECYCLE_ARTIFACT_NAME = 'narada-task-lifecycle-mcp' + (process.platform === 'win32' ? '.exe' : '');
 const MCP_NATIVE_WORK_LIFECYCLE_ARTIFACT_NAME = 'narada-work-lifecycle-mcp' + (process.platform === 'win32' ? '.exe' : '');
@@ -218,14 +222,17 @@ function resolveNativeLifecycleEntrypoint(componentKind: string): string {
   const artifactName = componentKind === 'task-lifecycle-mcp'
     ? MCP_NATIVE_TASK_LIFECYCLE_ARTIFACT_NAME
     : MCP_NATIVE_WORK_LIFECYCLE_ARTIFACT_NAME;
-  const legacy = join(MCP_LIFECYCLE_NATIVE_PACKAGE_ROOT, 'dist', 'native', artifactName);
-  return portablePathLiteral(resolveNativeArtifact(MCP_LIFECYCLE_NATIVE_PACKAGE_ROOT, artifactName) ?? legacy);
+  return requiredNativeArtifact(MCP_LIFECYCLE_NATIVE_PACKAGE_ROOT, artifactName);
 }
 const MCP_SHARED_SURFACES_NATIVE_PACKAGE_ROOT = resolve(MCP_SURFACES_ROOT, 'shared', 'mcp-surfaces-native');
 const MCP_NATIVE_SHARED_SURFACES_ARTIFACT_NAME = 'narada-mcp-surfaces' + (process.platform === 'win32' ? '.exe' : '');
-const MCP_NATIVE_SHARED_SURFACES_LEGACY_ENTRYPOINT = portablePathLiteral(join(MCP_SHARED_SURFACES_NATIVE_PACKAGE_ROOT, 'dist', 'native', MCP_NATIVE_SHARED_SURFACES_ARTIFACT_NAME));
 function nativeSharedSurfacesEntrypoint(): string {
-  return portablePathLiteral(resolveNativeArtifact(MCP_SHARED_SURFACES_NATIVE_PACKAGE_ROOT, MCP_NATIVE_SHARED_SURFACES_ARTIFACT_NAME) ?? MCP_NATIVE_SHARED_SURFACES_LEGACY_ENTRYPOINT);
+  return requiredNativeArtifact(MCP_SHARED_SURFACES_NATIVE_PACKAGE_ROOT, MCP_NATIVE_SHARED_SURFACES_ARTIFACT_NAME);
+}
+const MCP_AGENT_CONTEXT_PACKAGE_ROOT = resolve(MCP_SURFACES_ROOT, 'agent-context-mcp');
+const MCP_NATIVE_AGENT_CONTEXT_ARTIFACT_NAME = 'narada-agent-context-mcp' + (process.platform === 'win32' ? '.exe' : '');
+function nativeAgentContextEntrypoint(): string {
+  return requiredNativeArtifact(MCP_AGENT_CONTEXT_PACKAGE_ROOT, MCP_NATIVE_AGENT_CONTEXT_ARTIFACT_NAME);
 }
 const PROCESS_REGISTRAR_ENTRYPOINT_FINGERPRINT = existsSync(MCP_REGISTRAR_RUNTIME_ENTRYPOINT)
   ? createHash('sha256').update(readFileSync(MCP_REGISTRAR_RUNTIME_ENTRYPOINT)).digest('hex')
@@ -2076,9 +2083,12 @@ function carrierLaunchCommand(
   const useNativeStructuredCommandApplet = selectedEngine === 'rust' && componentKind === 'structured-command-mcp';
   const useNativeGitApplet = selectedEngine === 'rust' && componentKind === 'git-mcp';
   const useNativeLifecycle = selectedEngine === 'rust' && (componentKind === 'task-lifecycle-mcp' || componentKind === 'work-lifecycle-mcp');
+  const useNativeAgentContext = selectedEngine === 'rust' && componentKind === 'agent-context-mcp'
+    && (server.projection?.id ?? 'default') === 'default';
   const useNativeSharedSurface = selectedEngine === 'rust' && (surfaceId === 'catalog-observation' || surfaceId === 'operator-routing' || surfaceId === 'site-inbox' || surfaceId === 'site-lifecycle' || surfaceId === 'site-registry' || surfaceId === 'project-state' || surfaceId === 'runtime-introspection' || surfaceId === 'site-coherence' || surfaceId === 'launcher' || surfaceId === 'mailbox' || surfaceId === 'graph-mail' || surfaceId === 'calendar' || surfaceId === 'site-loop' || surfaceId === 'worker-delegation' || surfaceId === 'delegated-task' || surfaceId === 'sop' || surfaceId === 'scheduler' || surfaceId === 'surface-feedback' || surfaceId === 'speech' || surfaceId === 'artifacts' || surfaceId === 'nars-session' || surfaceId === 'quota-meter' || surfaceId === 'operator-console-overlay' || surfaceId === 'browser-control' || surfaceId === 'cloudflare-carrier');
   const nativeApplet = useNativeFilesystemApplet ? 'filesystem' : useNativeStructuredCommandApplet ? 'structured-command' : useNativeGitApplet ? 'git' : null;
   const nativeSharedSurfaceEntrypoint = nativeSharedSurfacesEntrypoint();
+  const nativeAgentContext = useNativeAgentContext ? nativeAgentContextEntrypoint() : null;
   const nativeLifecycleEntrypoint = resolveNativeLifecycleEntrypoint(componentKind);
   if (useNativeLifecycle && !existsSync(nativeLifecycleEntrypoint)) {
     throw diagnosticError(
@@ -2094,29 +2104,35 @@ function carrierLaunchCommand(
       { entrypoint: nativeSharedSurfaceEntrypoint, surface_id: surfaceId, component_kind: componentKind },
     );
   }
-  if (useNativeLoader && !existsSync(MCP_NATIVE_MCP_LOADER_ENTRYPOINT)) {
+  if (useNativeAgentContext && (!nativeAgentContext || !existsSync(nativeAgentContext))) {
+    throw diagnosticError('registrar_native_agent_context_missing', 'Native Agent Context current pointer is unavailable.', { entrypoint: nativeAgentContext, surface_id: surfaceId, component_kind: componentKind });
+  }
+  const nativeLoaderEntrypoint = useNativeLoader
+    ? resolveNativeArtifact(MCP_MCP_LOADER_PACKAGE_ROOT, MCP_NATIVE_MCP_LOADER_ARTIFACT_NAME)
+    : null;
+  if (useNativeLoader && (!nativeLoaderEntrypoint || !existsSync(nativeLoaderEntrypoint))) {
     throw diagnosticError(
       'registrar_native_mcp_loader_missing',
-      `Native mcp-loader is unavailable: ${MCP_NATIVE_MCP_LOADER_ENTRYPOINT}`,
-      { entrypoint: MCP_NATIVE_MCP_LOADER_ENTRYPOINT, surface_id: surfaceId, component_kind: componentKind },
+      'Native mcp-loader current pointer is unavailable.',
+      { entrypoint: nativeLoaderEntrypoint, surface_id: surfaceId, component_kind: componentKind },
     );
   }
-  if ((nativeApplet || useNativeLoader || useNativeLifecycle || useNativeSharedSurface) && !nativeRuntimeProxyAvailable()) {
+  if ((nativeApplet || useNativeLoader || useNativeLifecycle || useNativeSharedSurface || useNativeAgentContext) && !nativeRuntimeProxyAvailable()) {
     throw diagnosticError(
       'registrar_native_runtime_proxy_missing',
       `Native runtime proxy is unavailable: ${nativeRuntimeProxyEntrypoint()}`,
       { entrypoint: nativeRuntimeProxyEntrypoint(), surface_id: surfaceId, component_kind: componentKind },
     );
   }
-  const effectiveChildCommand = useNativeLoader ? MCP_NATIVE_MCP_LOADER_ENTRYPOINT : nativeApplet ? nativeRuntimeProxyEntrypoint() : useNativeLifecycle ? nativeLifecycleEntrypoint : useNativeSharedSurface ? nativeSharedSurfaceEntrypoint : runtimeCommand;
-  const effectiveChildEntrypoint = useNativeLoader ? MCP_NATIVE_MCP_LOADER_ENTRYPOINT : nativeApplet ? nativeRuntimeProxyEntrypoint() : useNativeLifecycle ? nativeLifecycleEntrypoint : useNativeSharedSurface ? nativeSharedSurfaceEntrypoint : childEntrypoint;
+  const effectiveChildCommand = useNativeLoader ? nativeLoaderEntrypoint! : nativeApplet ? nativeRuntimeProxyEntrypoint() : useNativeLifecycle ? nativeLifecycleEntrypoint : useNativeSharedSurface ? nativeSharedSurfaceEntrypoint : useNativeAgentContext ? nativeAgentContext! : runtimeCommand;
+  const effectiveChildEntrypoint = useNativeLoader ? nativeLoaderEntrypoint! : nativeApplet ? nativeRuntimeProxyEntrypoint() : useNativeLifecycle ? nativeLifecycleEntrypoint : useNativeSharedSurface ? nativeSharedSurfaceEntrypoint : useNativeAgentContext ? nativeAgentContext! : childEntrypoint;
   const sidecarPath = configPath ? materializationSidecarPath(configPath) : null;
   const nativeAuthority = useNativeSharedSurface && (surfaceId === 'calendar' || surfaceId === 'graph-mail');
   const effectiveChildArgs = useNativeSharedSurface
     ? nativeSharedSurfaceArgs(server, surfaceId, nativeAuthority)
     : childArgs;
-  const childInvocationKind = useNativeLoader || useNativeLifecycle || useNativeSharedSurface ? 'native_entrypoint' : nativeApplet ? 'native_applet' : null;
-  if (server.kind === 'local' && !useNativeLoader && !nativeApplet && !useNativeLifecycle && !useNativeSharedSurface) {
+  const childInvocationKind = useNativeLoader || useNativeLifecycle || useNativeSharedSurface || useNativeAgentContext ? 'native_entrypoint' : nativeApplet ? 'native_applet' : null;
+  if (server.kind === 'local' && !useNativeLoader && !nativeApplet && !useNativeLifecycle && !useNativeSharedSurface && !useNativeAgentContext) {
     return {
       command: runtimeCommand,
       args: [childEntrypoint, ...childArgs],
