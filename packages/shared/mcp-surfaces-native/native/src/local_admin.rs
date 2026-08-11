@@ -1,8 +1,11 @@
 use serde_json::{json, Map, Value};
 use std::env;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 #[path = "nars_authority.rs"]
 mod nars_authority;
@@ -127,6 +130,10 @@ fn nars_call(name: &str, args: &Map<String, Value>, root: &Path) -> Result<Value
 fn nars_list(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(20).clamp(1, 100) as usize;
     let site_id = args.get("site_id").and_then(Value::as_str).map(str::to_string).or_else(|| env::var("NARADA_SITE_ID").ok().filter(|value| !value.trim().is_empty()));
+    if let (Some(requested), Ok(bound)) = (site_id.as_deref(), env::var("NARADA_SITE_ID")) {
+        if !bound.trim().is_empty() && requested != bound { return Err(error("site_scope_refused", "site_scope_refused")); }
+    }
+    let include_health = args.get("include_health").and_then(Value::as_bool).unwrap_or(false);
     let mut sessions = Vec::new();
     for base in session_roots(root).iter().take(4) {
         if let Ok(entries) = fs::read_dir(base) {
@@ -134,7 +141,8 @@ fn nars_list(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
                 if !entry.path().is_dir() { continue; }
                 let Some(id) = entry.file_name().to_str().map(str::to_string) else { continue; };
                 if let Ok(record) = read_session(root, &id, site_id.as_deref()) {
-                    sessions.push(public_session(&record, &id, root, json!({"status":"not_requested"})));
+                    let health = if include_health { probe_health(&record) } else { json!({"status":"not_requested"}) };
+                    sessions.push(public_session(&record, &id, root, health));
                 }
             }
         }
@@ -159,14 +167,16 @@ fn nars_list(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
 
 fn nars_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     let id = required(args, "session_id")?;
-    let record = read_session(root, &id, args.get("site_id").and_then(Value::as_str))?;
+    let site_id = args.get("site_id").and_then(Value::as_str).map(str::to_string).or_else(|| env::var("NARADA_SITE_ID").ok().filter(|value| !value.trim().is_empty()));
+    let record = read_session(root, &id, site_id.as_deref())?;
+    let health = if args.get("include_health").and_then(Value::as_bool) == Some(false) { json!({"status":"not_requested"}) } else { probe_health(&record) };
     Ok(json!({
         "schema":"narada.nars_session_mcp.session.v1",
         "status":"ok",
         "scope":"local_site",
         "authority_root":root.to_string_lossy(),
         "scope_root":root.to_string_lossy(),
-        "session":public_session(&record, &id, root, json!({"status":"not_requested"})),
+        "session":public_session(&record, &id, root, health),
         "authority":authority_summary(&record),
     }))
 }
@@ -176,16 +186,27 @@ fn input_status(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> 
     }
     let id=required(args,"session_id")?; let input=args.get("input_event_id").or_else(||args.get("request_id")).or_else(||args.get("directive_id")).and_then(Value::as_str); let base=session_roots(root).into_iter().find(|p|p.join(&id).is_dir()).unwrap_or_else(||root.to_path_buf()); let path=base.join(&id).join("input-status.json"); if !path.exists() { return Ok(json!({"schema":"narada.nars_session.input_status.v1","status":"not_materialized","session_id":id,"input_event_id":input,"outcome":null,"terminal_state":null,"native_read_only":true})); } let value=read_bounded_json(&path)?; Ok(json!({"schema":"narada.nars_session.input_status.v1","status":"ok","session_id":id,"input_event_id":input,"record":value,"native_read_only":true}))
 }
-fn read_session(root: &Path, id: &str, _site_id: Option<&str>) -> Result<Value, Value> { if id.is_empty()||id.len()>160||!id.chars().all(|c|c.is_ascii_alphanumeric()||c=='-'||c=='_') { return Err(error("session_id_invalid","session_id_invalid")); } for path in session_index_paths(root,id) { if path.exists() { return read_bounded_json(&path); } } Err(error("nars_session_not_found","nars_session_not_found")) }
+fn read_session(root: &Path, id: &str, site_id: Option<&str>) -> Result<Value, Value> { if id.is_empty()||id.len()>160||!id.chars().all(|c|c.is_ascii_alphanumeric()||c=='-'||c=='_') { return Err(error("session_id_invalid","session_id_invalid")); } for path in session_index_paths(root,id) { if path.exists() { let record = read_bounded_json(&path)?; if record.get("session_id").and_then(Value::as_str) != Some(id) { return Err(error("session_record_mismatch","session_record_mismatch")); } if let (Some(requested), Some(actual)) = (site_id, record.get("site_id").and_then(Value::as_str)) { if requested != actual { return Err(error("site_scope_refused","site_scope_refused")); } } return Ok(record); } } Err(error("nars_session_not_found","nars_session_not_found")) }
 fn public_session(record: &Value, id: &str, root: &Path, health: Value) -> Value {
     let heartbeat_path = record.get("heartbeat_path").and_then(Value::as_str).map(str::to_string).or_else(|| record.get("session_dir").and_then(Value::as_str).map(|directory| PathBuf::from(directory).join("heartbeat.json").to_string_lossy().to_string()));
     let heartbeat_value = heartbeat_path.as_deref().and_then(|path| read_bounded_json(Path::new(path)).ok()).and_then(|value| value.get("heartbeat_at").or_else(|| value.get("last_written_at")).or_else(|| value.get("timestamp")).cloned());
+    let heartbeat_age_ms = heartbeat_value.as_ref().and_then(timestamp_ms).map(|timestamp| (now_ms() - timestamp).max(0));
+    let heartbeat_fresh = heartbeat_age_ms.map(|age| age <= 30_000).unwrap_or(false);
+    let health_status = health.get("status").and_then(Value::as_str).map(|value| value.to_ascii_lowercase());
     let terminal_state = record.get("terminal_state").cloned().unwrap_or(Value::Null);
-    let (display_state, display_state_reason, liveness_source) = if terminal_state.as_str() == Some("closed") {
-        ("closed", "terminal_state_closed", "session_index_and_heartbeat")
-    } else {
-        ("historical", "historical_record_only", "session_index")
+    let (display_state, display_state_reason, liveness_source) = match health_status.as_deref() {
+        Some("healthy") => ("active", "health_probe_succeeded", "health_probe"),
+        Some("starting") => ("starting_or_degraded", "health_probe_starting", "health_probe"),
+        Some("degraded") => ("starting_or_degraded", "health_probe_degraded", "health_probe"),
+        Some("closing") => ("closing", "health_probe_closing", "health_probe"),
+        _ if terminal_state.as_str() == Some("closed") => ("closed", "terminal_state_closed", "session_index_and_heartbeat"),
+        Some("unhealthy") => ("unhealthy", "health_probe_unhealthy", "health_probe"),
+        Some("unavailable") => ("unavailable", "health_probe_unavailable", "health_probe"),
+        _ if heartbeat_fresh => ("starting_or_degraded", "fresh_heartbeat_without_health", "heartbeat"),
+        _ if heartbeat_age_ms.is_some() || record.get("status_hint").and_then(Value::as_str) == Some("alive") => ("stale", "stale_or_missing_liveness", "session_index_and_heartbeat"),
+        _ => ("historical", "historical_record_only", "session_index"),
     };
+    let health_observed_at = health.get("health_observed_at").cloned().unwrap_or(Value::Null);
     let authority = authority_summary(record);
     json!({
         "session_id":record.get("session_id").and_then(Value::as_str).unwrap_or(id),
@@ -204,10 +225,10 @@ fn public_session(record: &Value, id: &str, root: &Path, health: Value) -> Value
         "last_seen_at":record.get("last_seen_at").cloned().unwrap_or(Value::Null),
         "last_seen_source":"session_index_projection",
         "heartbeat_at":heartbeat_value.clone().unwrap_or(Value::Null),
-        "heartbeat_fresh":false,
-        "heartbeat_age_ms":Value::Null,
-        "health_observed_at":Value::Null,
-        "liveness":{"source":liveness_source,"observed_at":Value::Null,"heartbeat_path":heartbeat_path,"heartbeat_at":heartbeat_value.unwrap_or(Value::Null),"heartbeat_age_ms":Value::Null,"heartbeat_fresh":false},
+        "heartbeat_fresh":heartbeat_fresh,
+        "heartbeat_age_ms":heartbeat_age_ms,
+        "health_observed_at":health_observed_at.clone(),
+        "liveness":{"source":liveness_source,"observed_at":health_observed_at,"heartbeat_path":heartbeat_path,"heartbeat_at":heartbeat_value.unwrap_or(Value::Null),"heartbeat_age_ms":heartbeat_age_ms,"heartbeat_fresh":heartbeat_fresh},
         "terminal_state":terminal_state,
         "health":health,
         "event_endpoint_available":record.get("event_endpoint").and_then(Value::as_str).map(|value| !value.is_empty()).unwrap_or(false),
@@ -215,6 +236,50 @@ fn public_session(record: &Value, id: &str, root: &Path, health: Value) -> Value
         "authority":authority,
     })
 }
+
+fn probe_health(record: &Value) -> Value {
+    let Some(endpoint) = record.get("health_endpoint").and_then(Value::as_str).filter(|value| !value.trim().is_empty()) else {
+        return json!({"status":"unavailable","probe_status":"unavailable","reason":"session_health_endpoint_missing","health_observed_at":super::now_iso(),"health_source":"endpoint_missing"});
+    };
+    let timeout_ms = env::var("NARADA_NARS_SESSION_HEALTH_TIMEOUT_MS").ok().and_then(|value| value.parse::<u64>().ok()).unwrap_or(1500).clamp(250, 5000);
+    let agent = ureq::AgentBuilder::new().timeout(Duration::from_millis(timeout_ms)).build();
+    let response = match agent.get(endpoint).call() {
+        Ok(response) => response,
+        Err(ureq::Error::Status(_, response)) => response,
+        Err(error) => return json!({"status":"unavailable","probe_status":"unreachable","reason":error.to_string(),"health_observed_at":super::now_iso(),"health_source":"health_endpoint"}),
+    };
+    let status_code = response.status();
+    let http_ok = (200..400).contains(&status_code);
+    let body = bounded_response_json(response).unwrap_or_else(|_| json!({}));
+    let fallback = if http_ok { "healthy" } else { "unhealthy" };
+    let semantic = match body.get("status").and_then(Value::as_str).map(|value| value.to_ascii_lowercase()).as_deref() {
+        Some("starting") | Some("healthy") | Some("degraded") | Some("unhealthy") | Some("closing") | Some("unavailable") => body.get("status").and_then(Value::as_str).unwrap_or(fallback),
+        _ => fallback,
+    };
+    let mut result = body.as_object().cloned().unwrap_or_default();
+    result.insert("status".into(), json!(semantic));
+    result.insert("http_status".into(), json!(status_code));
+    result.insert("http_ok".into(), json!(http_ok));
+    result.insert("probe_status".into(), json!("reachable"));
+    result.insert("health_observed_at".into(), json!(super::now_iso()));
+    result.insert("health_source".into(), json!("health_endpoint"));
+    Value::Object(result)
+}
+
+fn bounded_response_json(response: ureq::Response) -> Result<Value, Value> {
+    let mut bytes = Vec::new();
+    response.into_reader().take(MAX_BYTES as u64 + 1).read_to_end(&mut bytes).map_err(|_| error("health_response_read_failed", "health_response_read_failed"))?;
+    if bytes.len() > MAX_BYTES { return Err(error("health_response_too_large", "health_response_too_large")); }
+    if bytes.is_empty() { return Ok(json!({})); }
+    serde_json::from_slice(&bytes).map_err(|_| error("health_response_not_json", "health_response_not_json"))
+}
+
+fn timestamp_ms(value: &Value) -> Option<i64> {
+    let text = value.as_str()?;
+    OffsetDateTime::parse(text, &Rfc3339).ok().map(|timestamp| (timestamp.unix_timestamp_nanos() / 1_000_000) as i64)
+}
+
+fn now_ms() -> i64 { (OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64 }
 
 fn authority_summary(record: &Value) -> Value {
     json!({
@@ -344,6 +409,26 @@ mod tests {
         assert_eq!(response["running"], false);
         assert_eq!(response["position"]["left"], 42);
         assert_eq!(response["position"]["updated_at"], "2026-08-09T00:00:00Z");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn nars_session_liveness_projects_fresh_heartbeat_without_health_probe() {
+        let root = std::env::temp_dir().join(format!("narada-nars-liveness-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("root");
+        let heartbeat = root.join("heartbeat.json");
+        fs::write(&heartbeat, format!(r#"{{"heartbeat_at":"{}"}}"#, super::super::now_iso())).expect("heartbeat");
+        let record = json!({
+            "session_id":"session-liveness",
+            "session_dir":root.to_string_lossy(),
+            "status_hint":"alive",
+            "terminal_state":null,
+            "site_root":root.to_string_lossy(),
+        });
+        let projected = public_session(&record, "session-liveness", &root, json!({"status":"not_requested"}));
+        assert_eq!(projected["display_state"], "starting_or_degraded");
+        assert_eq!(projected["display_state_reason"], "fresh_heartbeat_without_health");
+        assert_eq!(projected["heartbeat_fresh"], true);
         let _ = fs::remove_dir_all(root);
     }
 }
