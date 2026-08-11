@@ -18,6 +18,7 @@ try {
   try {
     for (const [tool, argumentsValue] of [
       ['agent_context_guidance', { workflow: 'checkpoint', tool: 'agent_context_checkpoint' }],
+      ['agent_context_doctor', {}],
       ['agent_context_whoami', {}],
       ['agent_context_hydrate_current', {}],
       ['agent_context_hydrate_current', { checkpoint_startup: true }],
@@ -28,6 +29,13 @@ try {
         `${tool} refusal/read-only projection`,
       );
     }
+    seedSessions(ts.db);
+    seedSessions(rust.db);
+    assert.deepEqual(
+      normalize(await rustClient.call('agent_context_list_sessions', { identity: 'parity.builder', limit: 10 }), rust),
+      normalize(await tsClient.call('agent_context_list_sessions', { identity: 'parity.builder', limit: 10 }), ts),
+      'agent_context_list_sessions parity',
+    );
     for (const [method, params] of [
       ['prompts/list', {}],
       ['prompts/get', { name: 'agent_context_startup' }],
@@ -158,4 +166,14 @@ function dbCounts(path: string) {
   const db = new DatabaseSync(path, { readOnly: true });
   try { return { current: db.prepare('SELECT COUNT(*) AS count FROM agent_checkpoints').get()?.count, history: db.prepare('SELECT COUNT(*) AS count FROM agent_checkpoint_history').get()?.count }; }
   finally { db.close(); }
+}
+
+function seedSessions(path: string) {
+  const db = new DatabaseSync(path);
+  try {
+    const insert = db.prepare('INSERT INTO agent_start_events (event_id, identity_id, runtime, created_at, status, resume_command, bootstrap_artifact_uri) VALUES (?, ?, ?, ?, ?, ?, ?)');
+    insert.run('evt-older', 'parity.builder', 'codex', '2026-01-01T00:00:00.000Z', 'materialized', 'resume older', null);
+    insert.run('evt-newer', 'parity.builder', 'codex', '2026-02-01T00:00:00.000Z', 'materialized', 'resume newer', 'file:///bootstrap');
+    insert.run('evt-other', 'other.builder', 'codex', '2026-03-01T00:00:00.000Z', 'materialized', null, null);
+  } finally { db.close(); }
 }

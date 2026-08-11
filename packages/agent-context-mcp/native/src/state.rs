@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 const MIGRATION_001: &str = include_str!("../../migrations/001-agent-context-materializations.sql");
 const MIGRATION_002: &str = include_str!("../../migrations/002-agent-events.sql");
+const MIGRATION_003: &str = include_str!("../migrations/003-agent-context-compatibility.sql");
 const NATIVE_CONTRACT: &str = include_str!("../tool-catalog.json");
 
 pub struct Context {
@@ -53,6 +54,7 @@ impl Context {
             .map_err(db_error)?;
         db.execute_batch(MIGRATION_001).map_err(db_error)?;
         db.execute_batch(MIGRATION_002).map_err(db_error)?;
+        db.execute_batch(MIGRATION_003).map_err(db_error)?;
         db.execute_batch("CREATE TABLE IF NOT EXISTS codex_session_admissions (admission_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, runtime TEXT NOT NULL DEFAULT 'codex', cwd TEXT NOT NULL, status TEXT NOT NULL CHECK (status IN ('creating','admitted','suspect','retired')), agent_start_event_id TEXT, codex_session_id TEXT, codex_session_file TEXT, evidence_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, verified_at TEXT); CREATE INDEX IF NOT EXISTS idx_codex_session_admissions_agent ON codex_session_admissions(agent_id,cwd,status,created_at DESC); CREATE INDEX IF NOT EXISTS idx_codex_session_admissions_session ON codex_session_admissions(codex_session_id);").map_err(db_error)?;
         ensure_checkpoint_tables(&db)?;
         Ok(db)
@@ -87,8 +89,81 @@ pub fn call_tool(
         "agent_context_rehydrate" => rehydrate(context, &args),
         "agent_context_continuation_export" => continuation_export(context, &args),
         "agent_context_continuation_read" => continuation_read(context, &args),
+        "agent_context_list_sessions" => list_sessions(context, &args),
         _ => Err(format!("agent_context_native_tool_not_implemented:{name}")),
     }
+}
+
+fn list_sessions(context: &Context, args: &Value) -> Result<Value, String> {
+    let db = context.open_db()?;
+    let identity = args.get("identity").and_then(Value::as_str);
+    let substrate = args.get("substrate").and_then(Value::as_str);
+    let date_from = parse_date_filter(args.get("date_from"), "date_from")?;
+    let date_to = parse_date_filter(args.get("date_to"), "date_to")?;
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_i64)
+        .unwrap_or(100)
+        .clamp(1, 500) as usize;
+    let mut stmt=db.prepare("SELECT event_id,identity_id,runtime,created_at,status,resume_command,bootstrap_artifact_uri FROM agent_start_events ORDER BY created_at DESC,event_id DESC").map_err(db_error)?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+            ))
+        })
+        .map_err(db_error)?;
+    let now = Utc::now();
+    let generated = now.to_rfc3339_opts(SecondsFormat::Millis, true);
+    let mut sessions = Vec::new();
+    for row in rows {
+        let (event_id, agent, runtime, created, status, resume, bootstrap) =
+            row.map_err(db_error)?;
+        if identity.is_some_and(|v| v != agent)
+            || substrate.is_some_and(|v| v != runtime)
+            || date_from
+                .as_ref()
+                .is_some_and(|v| created.as_str() < v.as_str())
+            || date_to
+                .as_ref()
+                .is_some_and(|v| created.as_str() > v.as_str())
+        {
+            continue;
+        }
+        let seconds = chrono::DateTime::parse_from_rfc3339(&created)
+            .ok()
+            .map(|start| (now.timestamp() - start.timestamp()).max(0));
+        sessions.push(json!({"event_id":event_id,"identity":agent,"substrate":runtime,"runtime":runtime,"status":status,"created_at":created,"resume_command":resume,"bootstrap_artifact_uri":bootstrap,"duration_estimate":{"seconds":seconds,"basis":"elapsed_since_start_no_end_event","as_of":generated}}));
+        if sessions.len() == limit {
+            break;
+        }
+    }
+    let mut latest = serde_json::Map::new();
+    for session in &sessions {
+        if let Some(agent) = session.get("identity").and_then(Value::as_str) {
+            if !latest.contains_key(agent) {
+                latest.insert(agent.into(), session.clone());
+            }
+        }
+    }
+    Ok(
+        json!({"status":"ok","schema":"narada.agent_context.sessions.v0","authority":"agent_context_sqlite","generated_at":generated,"filters":{"identity":args.get("identity").cloned().unwrap_or(Value::Null),"date_from":args.get("date_from").cloned().unwrap_or(Value::Null),"date_to":args.get("date_to").cloned().unwrap_or(Value::Null),"substrate":args.get("substrate").cloned().unwrap_or(Value::Null),"limit":limit},"session_count":sessions.len(),"sessions":sessions,"latest_session_per_identity":latest,"duration_estimate_note":"agent_start_events has no end timestamp; duration is elapsed time from created_at to generated_at."}),
+    )
+}
+fn parse_date_filter(value: Option<&Value>, field: &str) -> Result<Option<String>, String> {
+    let Some(value) = value.filter(|v| !v.is_null()) else {
+        return Ok(None);
+    };
+    let text = value.as_str().unwrap_or(&value.to_string()).to_string();
+    chrono::DateTime::parse_from_rfc3339(&text)
+        .map(|v| Some(v.to_utc().to_rfc3339_opts(SecondsFormat::Millis, true)))
+        .map_err(|_| format!("invalid_{field}: {text}"))
 }
 
 pub fn protocol_request(
