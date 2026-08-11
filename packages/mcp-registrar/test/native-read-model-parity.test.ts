@@ -15,6 +15,8 @@ try{
   }
   const sites=await ts.call('registrar_site_list',{}) as {items:Array<{site_id:string}>};
   if(sites.items[0]) assert.deepEqual(await rust.call('registrar_site_surfaces',{site_id:sites.items[0].site_id}),await ts.call('registrar_site_surfaces',{site_id:sites.items[0].site_id}),'registrar_site_surfaces native parity');
+  if(sites.items[0]) assert.deepEqual(await rust.call('registrar_site_mcp_fabric_validate',{site_id:sites.items[0].site_id}),await ts.call('registrar_site_mcp_fabric_validate',{site_id:sites.items[0].site_id}),'registrar_site_mcp_fabric_validate live parity');
+  if(sites.items[0]) assert.deepEqual(await rust.call('registrar_site_mcp_fabric_validate',{site_id:sites.items[0].site_id,include_ok:true}),await ts.call('registrar_site_mcp_fabric_validate',{site_id:sites.items[0].site_id,include_ok:true}),'registrar_site_mcp_fabric_validate include-ok parity');
   if(sites.items[0]){const rustRegistry=await rust.call('registrar_site_surface_registry_sync',{site_id:sites.items[0].site_id,dry_run:true}) as any;const tsRegistry=await ts.call('registrar_site_surface_registry_sync',{site_id:sites.items[0].site_id,dry_run:true}) as any;delete rustRegistry.registry.generated_at;delete tsRegistry.registry.generated_at;assert.deepEqual(rustRegistry,tsRegistry,'registrar_site_surface_registry_sync dry-run parity')}
   for(const surface_id of ['agent-context','fixture.local']) assert.deepEqual(await rust.call('registrar_surface_usage',{surface_id}),await ts.call('registrar_surface_usage',{surface_id}),`registrar_surface_usage ${surface_id} parity`);
   await dynamicRegistryParity();
@@ -43,6 +45,7 @@ async function dynamicRegistryParity(){
   const environment={NARADA_SITE_REGISTRY_DB:registry};const tsFixture=client(process.execPath,[tsEntrypoint],environment);const rustFixture=client(rustEntrypoint,[],environment);
   try{
     assert.deepEqual(await rustFixture.call('registrar_site_list',{}),await tsFixture.call('registrar_site_list',{}),'registrar_site_list dynamic SQLite parity');
+    assert.deepEqual(await rustFixture.call('registrar_site_mcp_fabric_validate',{site_id:'fixture-site'}),await tsFixture.call('registrar_site_mcp_fabric_validate',{site_id:'fixture-site'}),'registrar_site_mcp_fabric_validate invalid fixture parity');
     assert.deepEqual(await rustFixture.call('registrar_site_output_reader_closure_check',{site_root:siteRoot,include_ok:true}),await tsFixture.call('registrar_site_output_reader_closure_check',{site_root:siteRoot,include_ok:true}),'registrar_site_output_reader_closure_check parity');
     for(const surface_id of ['git','fixture.local']) assert.deepEqual(await rustFixture.call('registrar_surface_usage',{surface_id}),await tsFixture.call('registrar_surface_usage',{surface_id}),`registrar_surface_usage dynamic ${surface_id} parity`);
     const tsSync=await tsFixture.call('registrar_site_surface_registry_sync',{site_id:'fixture-site'});const tsRegistry=JSON.parse(readFileSync(join(siteRoot,'.narada','capabilities','mcp-surfaces.json'),'utf8'));

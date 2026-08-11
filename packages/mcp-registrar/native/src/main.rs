@@ -148,6 +148,17 @@ fn dispatch(request: &Value) -> Value {
                     }
                     Err(message) => error(id, message),
                 }
+            } else if name == "registrar_site_mcp_fabric_validate" {
+                let args = request
+                    .pointer("/params/arguments")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
+                match site_mcp_fabric_validate(&contract, &args) {
+                    Ok(value) => {
+                        json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":serde_json::to_string_pretty(&value).unwrap()}],"structuredContent":value}})
+                    }
+                    Err(message) => error(id, message),
+                }
             } else {
                 error(
                     id,
@@ -991,6 +1002,606 @@ fn parse_jsonc(text: &str) -> Option<Value> {
     }
     serde_json::from_str(&output).ok()
 }
+fn site_mcp_fabric_validate(contract: &Value, args: &Value) -> Result<Value, String> {
+    let requested = required_argument(args, "site_id", "registrar_requires_site_id")?;
+    let include_ok = args.get("include_ok").and_then(Value::as_bool) == Some(true);
+    let catalog = site_list(contract);
+    let sites = catalog["items"].as_array().cloned().unwrap_or_default();
+    let site = lookup_site_value(&sites, &requested)?;
+    let site_id = site["site_id"].as_str().unwrap_or(&requested);
+    let root = PathBuf::from(site["root"].as_str().unwrap_or(""));
+    let directory = site_mcp_control_root(&root).join(".ai").join("mcp");
+    let surface_catalog = contract
+        .pointer("/read_models/registrar_surface_list/items")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let servers = discover_fabric_servers(&directory, "site_fabric");
+    let carrier_servers =
+        discover_fabric_servers(&directory.join("carriers"), "carrier_projection");
+    let mut findings = vec![];
+    let mut add = |severity: &str, code: &str, message: String, detail: Value| {
+        let mut finding = json!({"severity":severity,"code":code,"message":message});
+        if let Some(values) = detail.as_object() {
+            finding.as_object_mut().unwrap().extend(values.clone())
+        }
+        findings.push(finding)
+    };
+    if servers.is_empty() {
+        add(
+            "warning",
+            "registrar_site_fabric_empty",
+            format!(
+                "No MCP servers found in {}",
+                path_text(&root.join(".ai").join("mcp"))
+            ),
+            json!({"site_id":site_id}),
+        );
+    }
+    let mut seen_keys = std::collections::HashSet::new();
+    let mut seen_surfaces = std::collections::HashMap::<String, (String, String)>::new();
+    let mut present = std::collections::HashSet::new();
+    for server in &servers {
+        let key = server["server_key"].as_str().unwrap_or("");
+        let surface_id = server["surface_id"].as_str().unwrap_or(key);
+        let file = server["source_file"].as_str().unwrap_or("");
+        present.insert(surface_id.to_string());
+        let detail = merge_value(
+            json!({"site_id":site_id,"server_key":key,"source_file":file,"surface_id":surface_id}),
+            server_scope_detail(&surface_catalog, server, surface_id, site_id, &root),
+        );
+        let known = surface_catalog
+            .iter()
+            .find(|surface| surface["id"] == surface_id);
+        if known.is_none() && server["surface_descriptor_path"].is_null() {
+            add(
+                "error",
+                "registrar_site_local_descriptor_missing",
+                format!("Site-local surface '{surface_id}' has no governed descriptor"),
+                merge_value(
+                    detail.clone(),
+                    json!({"remediation":"Declare a Site-relative surface_descriptor_path on the Site-local MCP server entry."}),
+                ),
+            );
+        }
+        if !seen_keys.insert(key.to_string()) {
+            add(
+                "error",
+                "registrar_site_fabric_duplicate_server_key",
+                format!("Duplicate server key '{key}' in site fabric"),
+                detail.clone(),
+            );
+        } else if include_ok {
+            add(
+                "info",
+                "registrar_site_fabric_server_key_ok",
+                format!("Server key '{key}' found"),
+                detail.clone(),
+            );
+        }
+        if known.is_some() {
+            if let Some((old_key, old_file)) = seen_surfaces.get(surface_id) {
+                add(
+                    "error",
+                    "registrar_site_fabric_duplicate_canonical_surface",
+                    format!("Multiple Site fabric entries claim canonical surface '{surface_id}'"),
+                    merge_value(
+                        detail.clone(),
+                        json!({"canonical_surface_id":surface_id,"conflicting_server_key":old_key,"conflicting_source_file":old_file,"remediation":format!("Remove the superseded projection from {} and rematerialize from authoritative Site registration.",path_text(&site_mcp_control_root(&root).join(".ai").join("mcp")))}),
+                    ),
+                );
+            } else {
+                seen_surfaces.insert(surface_id.to_string(), (key.to_string(), file.to_string()));
+            }
+        }
+        let child_args = server["args"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        let entrypoint = server["entrypoint"].as_str().unwrap_or("");
+        let unresolved = std::iter::once(entrypoint)
+            .chain(child_args.iter().copied())
+            .filter(|value| value.contains('{') && value.contains('}'))
+            .collect::<Vec<_>>();
+        if !unresolved.is_empty() {
+            add(
+                "error",
+                "registrar_site_fabric_unresolved_template",
+                format!("Surface {key} contains unresolved materialization tokens"),
+                merge_value(
+                    detail.clone(),
+                    json!({"unresolved_values":unresolved,"remediation":"Regenerate the Site fabric from registrar materialization; do not defer placeholder expansion to the loader."}),
+                ),
+            );
+        }
+        let resolved = canonical_root(PathBuf::from(entrypoint));
+        if !resolved.exists() {
+            add(
+                "error",
+                "registrar_site_fabric_missing_entrypoint",
+                format!(
+                    "Entrypoint for '{key}' does not exist: {}",
+                    path_text(&resolved)
+                ),
+                merge_value(detail.clone(), json!({"entrypoint":path_text(&resolved)})),
+            );
+        } else if include_ok {
+            add(
+                "info",
+                "registrar_site_fabric_entrypoint_exists",
+                format!("Entrypoint for '{key}' exists: {}", path_text(&resolved)),
+                merge_value(detail.clone(), json!({"entrypoint":path_text(&resolved)})),
+            );
+        }
+        add_runtime_preflight(
+            &mut add,
+            include_ok,
+            merge_value(detail.clone(), json!({"entrypoint":path_text(&resolved)})),
+            known,
+            server["uses_runtime_proxy"].as_bool() == Some(true),
+        );
+        if [
+            "local-filesystem",
+            "git",
+            "structured-command",
+            "delegated-task",
+            "worker-delegation",
+        ]
+        .contains(&surface_id)
+        {
+            let roots = flag_values(&child_args, "--allowed-root");
+            if roots.is_empty() {
+                add("error","registrar_site_fabric_missing_allowed_root",format!("Surface '{surface_id}' requires at least one --allowed-root but '{key}' has none"),detail.clone());
+            } else if include_ok {
+                add(
+                    "info",
+                    "registrar_site_fabric_allowed_root_ok",
+                    format!(
+                        "Surface '{surface_id}' on '{key}' has {} allowed root(s)",
+                        roots.len()
+                    ),
+                    merge_value(detail.clone(), json!({"allowed_roots":roots})),
+                );
+            }
+        }
+        if surface_id == "local-filesystem" || surface_id == "local-filesystem-mcp.local" {
+            if !child_args.contains(&"--output-root") {
+                add(
+                    "warning",
+                    "registrar_site_fabric_missing_output_root",
+                    format!("Filesystem surface '{key}' is missing --output-root"),
+                    detail.clone(),
+                );
+            } else if include_ok {
+                add(
+                    "info",
+                    "registrar_site_fabric_output_root_ok",
+                    format!("Filesystem surface '{key}' has --output-root"),
+                    detail.clone(),
+                );
+            }
+        }
+        if [
+            "agent-context",
+            "task-lifecycle",
+            "site-inbox",
+            "site-loop",
+            "mailbox",
+            "graph-mail",
+            "delegated-task",
+        ]
+        .contains(&surface_id)
+        {
+            if !child_args.contains(&"--site-root") {
+                add(
+                    "error",
+                    "registrar_site_fabric_missing_site_root",
+                    format!("Surface '{surface_id}' on '{key}' is missing --site-root"),
+                    detail.clone(),
+                );
+            } else if include_ok {
+                add(
+                    "info",
+                    "registrar_site_fabric_site_root_ok",
+                    format!("Surface '{surface_id}' on '{key}' has --site-root"),
+                    detail.clone(),
+                );
+            }
+        }
+    }
+    for server in &carrier_servers {
+        let surface_id = server["surface_id"].as_str().unwrap_or("");
+        let key = server["server_key"].as_str().unwrap_or("");
+        let detail = json!({"site_id":site_id,"server_key":key,"surface_id":surface_id,"source_file":server["source_file"],"projection_kind":"carrier_projection"});
+        let Some(authority) = surface_catalog
+            .iter()
+            .find(|surface| surface["id"] == surface_id)
+        else {
+            add(
+                "error",
+                "registrar_carrier_projection_unknown_surface",
+                format!("Carrier projection '{key}' has no authoritative surface definition"),
+                detail,
+            );
+            continue;
+        };
+        let actual = server["entrypoint"]
+            .as_str()
+            .unwrap_or("")
+            .replace('\\', "/");
+        let expected = authority["entrypoint"]
+            .as_str()
+            .unwrap_or("")
+            .replace(
+                "{mcp_surfaces_root}",
+                &workspace_repo_root()
+                    .map(|root| path_text(&root.join("packages")))
+                    .unwrap_or_default(),
+            )
+            .replace('\\', "/");
+        if actual != expected {
+            add("error","registrar_carrier_projection_entrypoint_drift",format!("Carrier projection '{key}' does not use the authoritative '{surface_id}' entrypoint"),merge_value(detail.clone(),json!({"entrypoint":actual,"expected_entrypoint":expected,"authoritative_package":authority["package"]})));
+        } else if include_ok {
+            add(
+                "info",
+                "registrar_carrier_projection_entrypoint_ok",
+                format!(
+                    "Carrier projection '{key}' uses the authoritative '{surface_id}' entrypoint"
+                ),
+                detail.clone(),
+            );
+        }
+        let values = server["args"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        if [
+            "agent-context",
+            "task-lifecycle",
+            "site-inbox",
+            "site-loop",
+            "mailbox",
+            "graph-mail",
+            "delegated-task",
+        ]
+        .contains(&surface_id)
+            && !values.contains(&"--site-root")
+        {
+            add(
+                "error",
+                "registrar_carrier_projection_missing_site_root",
+                format!("Carrier projection '{key}' is missing required --site-root"),
+                detail,
+            );
+        }
+    }
+    for surface in &surface_catalog {
+        let Some(id) = surface["id"].as_str() else {
+            continue;
+        };
+        if site
+            .pointer(&format!("/surface_overrides/{id}/enabled"))
+            .and_then(Value::as_bool)
+            == Some(false)
+        {
+            continue;
+        }
+        let required = surface["projections"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|projection| {
+                projection["injection_scope"] == "local_site"
+                    && projection["default_injection"] == "all_site_bound_sessions"
+            });
+        let Some(projection) = required else { continue };
+        if present.contains(id) || (id == "task-lifecycle" && present.contains("work-lifecycle")) {
+            continue;
+        }
+        add("error","registrar_site_fabric_missing_default_surface",format!("Default local Site surface '{id}' is missing from runtime-authoritative Site MCP fabric"),json!({"site_id":site_id,"surface_id":id,"projection_id":projection["id"],"default_injection":projection["default_injection"],"injection_scope":projection["injection_scope"],"expected_server_key":format!("{}-{id}",site_prefix(site_id)),"required_repair_locus":{"kind":"local_site","site_root":site["root"]},"remediation":format!("Materialize '{id}' with projection '{}' into {} before launching Site-bound sessions.",projection["id"].as_str().unwrap_or(""),path_text(&root.join(".ai").join("mcp")))}));
+    }
+    let errors = findings
+        .iter()
+        .filter(|finding| finding["severity"] == "error")
+        .count();
+    let warnings = findings
+        .iter()
+        .filter(|finding| finding["severity"] == "warning")
+        .count();
+    Ok(
+        json!({"status":if errors>0{"invalid"}else if warnings>0{"valid_with_warnings"}else{"valid"},"site_id":site_id,"server_count":servers.len(),"carrier_projection_count":carrier_servers.len(),"errors":errors,"warnings":warnings,"findings":findings}),
+    )
+}
+
+fn discover_fabric_servers(directory: &Path, projection_kind: &str) -> Vec<Value> {
+    let mut result = vec![];
+    let Ok(entries) = fs::read_dir(directory) else {
+        return result;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(file) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        let Some(config) = fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        else {
+            continue;
+        };
+        for (key, server) in config["mcpServers"].as_object().into_iter().flatten() {
+            let raw_command = server["command"].as_str().unwrap_or("node");
+            let raw_args = server["args"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            let launch = unwrap_launch(raw_command, &raw_args);
+            let args = if launch.proxied {
+                let separator = raw_args.iter().position(|value| value == "--");
+                separator
+                    .map(|index| raw_args[index + 1..].to_vec())
+                    .unwrap_or_default()
+            } else {
+                raw_args.iter().skip(1).cloned().collect()
+            };
+            let surface_id = server["surface_id"].as_str().unwrap_or(key);
+            result.push(json!({"server_key":key,"surface_id":surface_id,"entrypoint":launch.entrypoint,"args":args,"uses_runtime_proxy":launch.proxied,"surface_descriptor_path":server.get("surface_descriptor_path"),"narada_scope":server.get("narada_scope"),"surface_projection":server.get("surface_projection"),"source_file":if projection_kind=="carrier_projection"{format!("carriers/{file}")}else{file.to_string()},"projection_kind":projection_kind}));
+        }
+    }
+    result
+}
+fn server_scope_detail(
+    catalog: &[Value],
+    server: &Value,
+    surface_id: &str,
+    site_id: &str,
+    root: &Path,
+) -> Value {
+    let projection_id = server
+        .pointer("/surface_projection/projection_id")
+        .and_then(Value::as_str)
+        .unwrap_or("default");
+    let projection = catalog
+        .iter()
+        .find(|surface| surface["id"] == surface_id)
+        .and_then(|surface| surface["projections"].as_array())
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|projection| projection["id"] == projection_id)
+        });
+    let computed = projection.map(|value| scope_metadata(value, root)).unwrap_or_else(|| {
+        json!({"injection_scope":"local_site","authority_locus":{"kind":"local_site","site_root":path_text(root)},"mutation_locus":{"kind":"local_site","site_root":path_text(root)},"restart_owner":"local_site"})
+    });
+    let raw = server["narada_scope"].as_object();
+    let injection = raw
+        .and_then(|value| value.get("injection_scope"))
+        .cloned()
+        .unwrap_or_else(|| computed["injection_scope"].clone());
+    let authority = raw
+        .and_then(|value| value.get("authority_locus"))
+        .cloned()
+        .unwrap_or_else(|| computed["authority_locus"].clone());
+    let mutation = raw
+        .and_then(|value| value.get("mutation_locus"))
+        .cloned()
+        .unwrap_or_else(|| computed["mutation_locus"].clone());
+    let restart = raw
+        .and_then(|value| value.get("restart_owner"))
+        .cloned()
+        .unwrap_or_else(|| computed["restart_owner"].clone());
+    let bound = raw
+        .and_then(|value| value.get("bound_into_site"))
+        .cloned()
+        .unwrap_or_else(|| json!(site_id));
+    let source = if raw.is_some() {
+        json!("site_config_narada_scope")
+    } else {
+        json!("registrar_surface_catalog")
+    };
+    let narada = json!({"injection_scope":injection,"authority_locus":authority,"mutation_locus":mutation,"restart_owner":restart,"bound_into_site":bound,"scope_source":source});
+    json!({"injection_scope":injection,"authority_locus":authority,"mutation_locus":mutation,"restart_owner":restart,"bound_into_site":bound,"scope_source":source,"narada_scope":narada,"diagnostic_class":if injection=="host"{"host_injected_surface_missing_or_misconfigured_in_session"}else if injection=="user_site"{"user_site_injected_surface_missing_or_misconfigured_in_session"}else{"local_site_surface_missing_or_misconfigured"},"required_repair_locus":mutation})
+}
+fn add_runtime_preflight(
+    add: &mut impl FnMut(&str, &str, String, Value),
+    include_ok: bool,
+    detail: Value,
+    surface: Option<&Value>,
+    proxied: bool,
+) {
+    let Some(workspace) = workspace_repo_root() else {
+        return;
+    };
+    if proxied {
+        let manifest = workspace
+            .join(".ai")
+            .join("runtime")
+            .join("workspace-artifact-manifest.json");
+        let manifest_text = manifest.to_string_lossy().replace('\\', "/");
+        if manifest.exists() {
+            if include_ok {
+                add(
+                    "info",
+                    "registrar_workspace_artifact_manifest_exists",
+                    format!("Workspace artifact manifest exists: {manifest_text}"),
+                    merge_value(
+                        detail.clone(),
+                        json!({"artifact_manifest_path":manifest_text}),
+                    ),
+                );
+            }
+        } else {
+            add(
+                "error",
+                "registrar_workspace_artifact_manifest_missing",
+                format!("Workspace artifact manifest does not exist: {manifest_text}"),
+                merge_value(
+                    detail.clone(),
+                    json!({"artifact_manifest_path":manifest_text,"remediation":"Run pnpm build from mcp-surfaces before launching carrier MCPs."}),
+                ),
+            );
+        }
+        let proxy = native_proxy_entrypoint().unwrap_or_default();
+        if Path::new(&proxy).exists() {
+            if include_ok {
+                add(
+                    "info",
+                    "registrar_runtime_proxy_exists",
+                    format!("Runtime proxy exists: {proxy}"),
+                    merge_value(
+                        detail.clone(),
+                        json!({"runtime_proxy_entrypoint":proxy,"runtime_proxy_implementation":"native"}),
+                    ),
+                );
+            }
+        } else {
+            add(
+                "error",
+                "registrar_runtime_proxy_missing",
+                format!("Runtime proxy does not exist: {proxy}"),
+                merge_value(
+                    detail.clone(),
+                    json!({"runtime_proxy_entrypoint":proxy,"runtime_proxy_implementation":"native","remediation":"Run pnpm --filter @narada-core/mcp-runtime-proxy build before launching carrier MCPs."}),
+                ),
+            );
+        }
+    }
+    let Some(surface) = surface else { return };
+    for check in runtime_dependency_checks(&workspace, surface) {
+        let dependency = check["dependency"].as_str().unwrap_or("").to_string();
+        let export = check["export_path"].as_str().unwrap_or("").to_string();
+        let mut finding_detail = check.clone();
+        finding_detail.as_object_mut().unwrap().remove("exists");
+        if check["exists"].as_bool() == Some(true) {
+            if include_ok {
+                add(
+                    "info",
+                    "registrar_runtime_dependency_exists",
+                    format!("Runtime dependency export for '{dependency}' exists: {export}"),
+                    merge_value(detail.clone(), finding_detail),
+                );
+            }
+        } else {
+            add(
+                "error",
+                "registrar_runtime_dependency_missing",
+                format!("Runtime dependency export for '{dependency}' does not exist: {export}"),
+                merge_value(
+                    detail.clone(),
+                    merge_value(
+                        finding_detail,
+                        json!({"remediation":format!("Run pnpm --filter {dependency} build before launching carrier MCPs.")}),
+                    ),
+                ),
+            );
+        }
+    }
+}
+fn runtime_dependency_checks(workspace: &Path, surface: &Value) -> Vec<Value> {
+    let package = surface["package"].as_str().unwrap_or("");
+    let package_root = workspace.join("packages").join(package);
+    let Some(manifest) = fs::read_to_string(package_root.join("package.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+    else {
+        return vec![];
+    };
+    let mut result = vec![];
+    for dependency in manifest["dependencies"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(name, _)| name)
+        .filter(|name| name.starts_with("@narada-core/mcp-"))
+    {
+        let name = dependency.trim_start_matches("@narada-core/");
+        let shared = workspace.join("packages").join("shared").join(name);
+        let dependency_root = if shared.join("package.json").exists() {
+            shared
+        } else {
+            workspace.join("packages").join(name)
+        };
+        let package_path = dependency_root.join("package.json");
+        let Some(package_json) = fs::read_to_string(&package_path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        else {
+            result.push(json!({"dependency":dependency,"package_root":dependency_root.to_string_lossy().replace('\\',"/"),"export_path":package_path.to_string_lossy().replace('\\',"/"),"exists":false}));
+            continue;
+        };
+        for target in export_targets(&package_json) {
+            let export = dependency_root.join(target.trim_start_matches("./"));
+            let export_text = export.to_string_lossy().replace('\\', "/");
+            result.push(json!({"dependency":dependency,"package_root":dependency_root.to_string_lossy().replace('\\',"/"),"export_path":export_text,"exists":export_target_exists(&export)}));
+        }
+    }
+    result
+}
+fn export_targets(package: &Value) -> Vec<String> {
+    let mut result = vec![];
+    match &package["exports"] {
+        Value::String(value) => result.push(value.clone()),
+        Value::Object(values) => {
+            for value in values.values() {
+                if let Some(target) = value.as_str().or_else(|| value["default"].as_str()) {
+                    if !result.iter().any(|item| item == target) {
+                        result.push(target.into())
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    result
+}
+fn export_target_exists(path: &Path) -> bool {
+    let text = path.to_string_lossy();
+    let Some(index) = text.find(['*', '?']) else {
+        return path.exists();
+    };
+    let prefix = &text[..index];
+    let directory = if prefix.ends_with(['/', '\\']) {
+        PathBuf::from(&prefix[..prefix.len() - 1])
+    } else {
+        PathBuf::from(prefix)
+            .parent()
+            .unwrap_or(Path::new(""))
+            .to_path_buf()
+    };
+    fs::read_dir(directory)
+        .ok()
+        .is_some_and(|mut entries| entries.next().is_some())
+}
+fn flag_values<'a>(args: &[&'a str], flag: &str) -> Vec<&'a str> {
+    let mut result = vec![];
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == flag && index + 1 < args.len() {
+            result.push(args[index + 1]);
+            index += 2
+        } else {
+            index += 1
+        }
+    }
+    result
+}
+fn merge_value(mut left: Value, right: Value) -> Value {
+    if let (Some(target), Some(source)) = (left.as_object_mut(), right.as_object()) {
+        target.extend(source.clone())
+    }
+    left
+}
+
 fn site_bind(contract: &Value, args: &Value) -> Result<Value, String> {
     let site_id = required_argument(args, "site_id", "registrar_requires_site_id")?;
     let surface_id = required_argument(args, "surface_id", "registrar_requires_surface_id")?;
