@@ -3612,7 +3612,7 @@ fn runtime_engine(component: &str, implementation: Option<&str>) -> Result<Strin
         serde_json::from_str(&fs::read_to_string(path).map_err(|error| error.to_string())?)
             .map_err(|error| error.to_string())?;
     let component = if implementation == Some("js") {
-        "mcp-javascript-surface"
+        "mcp-javascript-fallback-runtime"
     } else {
         component
     };

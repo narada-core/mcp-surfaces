@@ -378,7 +378,7 @@ function componentKindForSurface(surfaceId: string): string {
   if (surfaceId === 'operator-console-overlay' || surfaceId === 'operator-console-overlay-mcp.local') return 'operator-console-overlay-mcp';
   if (surfaceId === 'browser-control' || surfaceId === 'browser-control-mcp.local') return 'browser-control-mcp';
   if (surfaceId === 'cloudflare-carrier' || surfaceId === 'cloudflare-carrier-mcp.local') return 'cloudflare-carrier-mcp';
-  return 'mcp-javascript-surface';
+  return 'mcp-javascript-fallback-runtime';
 }
 
 function selectedSurfaceRuntimeEngine(surfaceId: string, explicitImplementation?: 'js' | 'native', plan: RuntimeMaterializationPlan = runtimeMaterializationPlan): RuntimeEngineKind {
@@ -394,7 +394,7 @@ function selectedSurfaceRuntimeEngine(surfaceId: string, explicitImplementation?
     }
     return 'rust';
   }
-  if (explicitImplementation === 'js') return String(matrixPlanEntry('mcp-javascript-surface', plan).runtime_engine_kind) as RuntimeEngineKind;
+  if (explicitImplementation === 'js') return String(matrixPlanEntry('mcp-javascript-fallback-runtime', plan).runtime_engine_kind) as RuntimeEngineKind;
   return String(matrixPlanEntry(componentKind, plan).runtime_engine_kind) as RuntimeEngineKind;
 }
 

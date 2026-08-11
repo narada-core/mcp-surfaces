@@ -22,7 +22,7 @@ This does **not** mean the repositories contain no JavaScript:
   matrix admits them.
 - Build, test, benchmark, and publication workflows still use Node, pnpm, and
   PowerShell where appropriate. Those tools are not MCP runtime children.
-- The abstract `mcp-javascript-surface` matrix row still selects Bun for the
+- The `mcp-javascript-fallback-runtime` policy row still selects Bun for the
   native profile. It is a generic fallback category, not the selected runtime
   of any of the 30 currently materialized concrete Site surfaces.
 
@@ -127,7 +127,7 @@ authority boundaries remain explicit in Rust adapters.
 | Lifecycle surfaces | Native Rust authority/adapters; 69/80-tool catalog parity; smoke, refusal, migration, Node/Rust cross-runtime parity, review/dependency/resource checks, and 12-sample task/work benchmarks | None for the admitted native profile; retain TypeScript as the explicit rollback and keep compatibility tests running |
 | SOP | Native Rust template registry, run engine, handoff/action completion, child-run, cancellation, retry, and terminal-outbox authority; independent Node/Rust replay, conflict, and SQLite snapshot parity; full shared protocol suite | None for the admitted native profile; retain Node/Bun as explicit rollback and compatibility lanes |
 | Rust-default shared surfaces | Native protocol parity, matrix admission, boundary/refusal tests, and native artifact checks | Replace an explicit authority boundary with a Rust owner when the required domain/provider semantics are ported; retain Bun/Node rollback coverage |
-| JavaScript compatibility | Node/Bun package tests, cross-runtime parity, and explicit rollback profiles | The abstract generic JavaScript-surface row remains Bun-backed; no currently materialized concrete Site surface depends on it |
+| JavaScript compatibility | Node/Bun package tests, cross-runtime parity, and explicit rollback profiles | The `mcp-javascript-fallback-runtime` policy row remains Bun-backed; no currently materialized concrete Site surface depends on it |
 
 ## Work order
 
