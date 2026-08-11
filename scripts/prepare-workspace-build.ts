@@ -253,6 +253,16 @@ function resolveInstalledPackage(
   packageName: string,
 ): { manifest_path: string; package_root: string; realpath: string } | null {
   try {
+    const linkedManifest = join(dirname(consumerManifestPath), 'node_modules', ...packageName.split('/'), 'package.json');
+    if (existsSync(linkedManifest)) {
+      const packageRoot = realpathSync(dirname(linkedManifest));
+      const manifestPath = join(packageRoot, 'package.json');
+      const manifest = readPackageManifest(manifestPath);
+      if (manifest.name === packageName) {
+        const realpath = portablePath(packageRoot);
+        return { manifest_path: manifestPath, package_root: packageRoot, realpath };
+      }
+    }
     const require = createRequire(consumerManifestPath);
     let entrypoint: string;
     try {
