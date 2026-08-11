@@ -332,6 +332,11 @@ fn carrier_bind(contract: &Value, args: &Value) -> Result<Value, MutationFailure
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("andrey-user");
+    let sites = site_list(contract)["items"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    lookup_site_value(&sites,site_id).map_err(|message|mutation_failure("registrar_unknown_site",message,json!({"known":sites.iter().filter_map(|site|site["site_id"].as_str()).collect::<Vec<_>>() })))?;
     let binding = carrier["site_bindings"]
         .as_array()
         .into_iter()
