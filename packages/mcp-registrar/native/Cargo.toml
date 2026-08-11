@@ -9,6 +9,7 @@ name = "narada-mcp-registrar"
 path = "src/main.rs"
 
 [dependencies]
+flate2 = "1"
 serde_json = { version = "1", features = ["preserve_order"] }
 
 [profile.release]

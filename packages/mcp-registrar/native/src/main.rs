@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 
-const CONTRACT: &str = include_str!("../tool-catalog.json");
+const CONTRACT: &[u8] = include_bytes!("../tool-catalog.json.gz");
 
 fn main() {
     if let Err(error) = run() {
@@ -37,7 +37,12 @@ fn run() -> Result<(), String> {
 
 fn dispatch(request: &Value) -> Value {
     let id = request.get("id").cloned().unwrap_or(Value::Null);
-    let contract: Value = match serde_json::from_str(CONTRACT) {
+    let contract: Value = match flate2::read::GzDecoder::new(CONTRACT)
+        .bytes()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
+        .and_then(|bytes| serde_json::from_slice(&bytes).map_err(|e| e.to_string()))
+    {
         Ok(v) => v,
         Err(e) => return error(id, format!("mcp_registrar_native_contract_invalid:{e}")),
     };
