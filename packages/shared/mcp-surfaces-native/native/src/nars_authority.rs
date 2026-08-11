@@ -7,6 +7,7 @@
 //! second session or write the session journal behind the authority's back.
 
 use serde_json::{json, Map, Value};
+use rusqlite::{Connection, OpenFlags};
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
@@ -256,17 +257,50 @@ fn read_session_record(root: &Path, id: &str) -> Result<Value, Value> {
     if id.is_empty() || id.len() > 128 || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
         return Err(error("session_id_invalid", "session_id_invalid"));
     }
-    for base in session_roots(root) {
-        let path = base.join(id).join("session-index-record.json");
-        if path.exists() {
-            let record = read_bounded_json(&path)?;
-            if record.get("session_id").and_then(Value::as_str) != Some(id) {
-                return Err(error("session_record_mismatch", "session record does not match requested session"));
+    if user_site_scope() {
+        let mut matches = Vec::new();
+        for (site_id, site_root) in user_site_authorities(root)? {
+            for base in session_roots(&site_root) {
+                let path = base.join(id).join("session-index-record.json");
+                if !path.exists() { continue; }
+                let record = read_bounded_json(&path)?;
+                if record.get("session_id").and_then(Value::as_str) != Some(id) { return Err(error("session_record_mismatch", "session record does not match requested session")); }
+                if record.get("site_id").and_then(Value::as_str) != Some(site_id.as_str()) { return Err(error("session_site_id_mismatch", "session record belongs to a different admitted Site")); }
+                matches.push(record);
             }
-            return Ok(record);
+        }
+        if matches.len() > 1 { return Err(error("session_ambiguous", "session_ambiguous")); }
+        if let Some(record) = matches.into_iter().next() { return Ok(record); }
+    } else {
+        for base in session_roots(root) {
+            let path = base.join(id).join("session-index-record.json");
+            if path.exists() {
+                let record = read_bounded_json(&path)?;
+                if record.get("session_id").and_then(Value::as_str) != Some(id) {
+                    return Err(error("session_record_mismatch", "session record does not match requested session"));
+                }
+                return Ok(record);
+            }
         }
     }
     Err(error("session_not_found", "session_not_found"))
+}
+
+fn user_site_scope() -> bool {
+    matches!(std::env::var("NARADA_NARS_SESSION_SCOPE").ok().as_deref(), Some("user_site"))
+        || matches!(std::env::var("NARADA_NARS_SESSION_PROJECTION").ok().as_deref(), Some("user-site-operator"))
+}
+
+fn user_site_authorities(root: &Path) -> Result<Vec<(String, PathBuf)>, Value> {
+    let user_root = std::env::var("NARADA_USER_SITE_ROOT").ok().filter(|value| !value.trim().is_empty()).map(PathBuf::from).unwrap_or_else(|| root.to_path_buf());
+    let registry_path = std::env::var("NARADA_SITE_REGISTRY_DB").ok().filter(|value| !value.trim().is_empty()).map(PathBuf::from).unwrap_or_else(|| user_root.join("registry.db"));
+    let connection = Connection::open_with_flags(registry_path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|_| error("user_site_registry_unreadable", "user_site_registry_unreadable"))?;
+    let mut statement = connection.prepare("SELECT site_id, site_root FROM site_registry ORDER BY created_at ASC, site_id ASC").map_err(|_| error("user_site_registry_unreadable", "user_site_registry_unreadable"))?;
+    let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).map_err(|_| error("user_site_registry_unreadable", "user_site_registry_unreadable"))?;
+    let mut authorities = Vec::new();
+    for row in rows { let (site_id, site_root) = row.map_err(|_| error("user_site_registry_unreadable", "user_site_registry_unreadable"))?; if !site_id.trim().is_empty() && !site_root.trim().is_empty() { authorities.push((site_id, PathBuf::from(site_root))); } }
+    if authorities.is_empty() { return Err(error("user_site_registry_empty", "user_site_registry_empty")); }
+    Ok(authorities)
 }
 
 fn session_roots(root: &Path) -> Vec<PathBuf> {
