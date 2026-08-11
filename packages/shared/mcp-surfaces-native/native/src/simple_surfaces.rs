@@ -1,5 +1,5 @@
 use serde_json::{json, Map, Value};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const SITE_LIFECYCLE_COMMANDS: &[(&str, &str, bool, bool, bool)] = &[
     (
@@ -116,9 +116,9 @@ pub fn list_tools(surface_id: &str) -> Vec<Value> {
         "site-lifecycle" => {
             let mut tools = vec![
                 guidance_tool("site-lifecycle"),
-                tool(
+                lifecycle_tool(
                     "site_lifecycle_doctor",
-                    "Inspect native site lifecycle MCP posture and command coverage.",
+                    "Inspect one explicitly identified Site and report resolution evidence.",
                     true,
                 ),
                 tool(
@@ -131,7 +131,7 @@ pub fn list_tools(surface_id: &str) -> Vec<Value> {
                 SITE_LIFECYCLE_COMMANDS
                     .iter()
                     .map(|(name, _, read_only, _, _)| {
-                        tool(
+                        lifecycle_tool(
                             name,
                             "Execute or plan one Narada site lifecycle operation.",
                             *read_only,
@@ -212,11 +212,24 @@ fn call_site_lifecycle(name: &str, args: &Map<String, Value>, root: &Path) -> Re
         return Ok(guidance_result("site-lifecycle", args));
     }
     if name == "site_lifecycle_doctor" {
+        let evidence = site_resolution_evidence(args, root);
+        let status = evidence
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("attention");
         return Ok(json!({
-            "schema":"narada.site_lifecycle.doctor.v1","status":"ok","server_name":"site-lifecycle-mcp",
-            "implementation":"rust-native","site_root":root.to_string_lossy(),
-            "command_count":SITE_LIFECYCLE_COMMANDS.len(),"coverage":lifecycle_command_map(),
-            "cli_module_exists":false,"cli_module_path":null
+            "schema":"narada.site_lifecycle.doctor.v1",
+            "status":status,
+            "server_name":"site-lifecycle-mcp",
+            "implementation":"rust-native",
+            "site_root":root.to_string_lossy(),
+            "command_count":SITE_LIFECYCLE_COMMANDS.len(),
+            "coverage":lifecycle_command_map(),
+            "cli_module_exists":false,
+            "cli_module_path":null,
+            "inspected":evidence.get("inspected").and_then(Value::as_bool).unwrap_or(false),
+            "resolution_evidence":evidence,
+            "items":evidence.get("checks").cloned().unwrap_or_else(|| json!([]))
         }));
     }
     if name == "site_lifecycle_command_map" {
@@ -230,9 +243,11 @@ fn call_site_lifecycle(name: &str, args: &Map<String, Value>, root: &Path) -> Re
         .ok_or_else(|| diagnostic("unknown_tool", &format!("unknown_tool:{name}")))?;
     if matches!(name, "site_show" | "site_doctor") {
         require_string(args, "site_id")?;
+        require_string(args, "site_root")?;
     }
     if name == "site_init" {
         require_string(args, "site_id")?;
+        require_string(args, "site_root")?;
         require_string(args, "substrate")?;
         if !args.contains_key("authority_basis") {
             return Err(diagnostic(
@@ -245,25 +260,48 @@ fn call_site_lifecycle(name: &str, args: &Map<String, Value>, root: &Path) -> Re
         require_string(args, "kind")?;
     }
     let mutation = !spec.2;
-    let result = if name == "site_create_presets_list" {
-        json!({"presets":[]})
-    } else if name == "site_lifecycle_kinds" {
-        json!({"kinds":[]})
-    } else if name == "site_relation_list" {
-        json!({"relations":[]})
+    let (result, resolution_status) = if matches!(name, "site_show" | "site_doctor") {
+        let evidence = site_resolution_evidence(args, root);
+        let status = evidence
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("attention")
+            .to_string();
+        (
+            json!({
+                "items":evidence.get("checks").cloned().unwrap_or_else(|| json!([])),
+                "resolution_evidence":evidence
+            }),
+            status,
+        )
     } else {
-        json!({"items":[]})
+        let result = if name == "site_create_presets_list" {
+            json!({"presets":[]})
+        } else if name == "site_lifecycle_kinds" {
+            json!({"kinds":[]})
+        } else if name == "site_relation_list" {
+            json!({"relations":[]})
+        } else {
+            json!({"items":[]})
+        };
+        (
+            result,
+            if mutation {
+                "planned".to_string()
+            } else {
+                "ok".to_string()
+            },
+        )
     };
     Ok(json!({
         "schema":"narada.site_lifecycle.result.v1",
-        "status":if mutation {"planned"} else {"ok"},
+        "status":if mutation {resolution_status.clone()} else {resolution_status.clone()},
         "implementation":"rust-native","tool":name,"cli_command":spec.1,
         "read_only":spec.2,"requires_execute":spec.3,"requires_authority":spec.4,
         "mutation_performed":false,"dry_run":args.get("dry_run").and_then(Value::as_bool).unwrap_or(mutation),
         "options":args,"result":result
     }))
 }
-
 fn call_site_registry(name: &str, args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     if name == "site_registry_guidance" {
         return Ok(guidance_result("site-registry", args));
@@ -430,6 +468,135 @@ fn guidance_tool(surface_id: &str) -> Value {
         true,
     )
 }
+fn site_resolution_evidence(args: &Map<String, Value>, root: &Path) -> Value {
+    let requested_site_id = args
+        .get("site_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    let requested_site_root = args
+        .get("site_root")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    let bound_workspace = workspace_root_for(root);
+    let requested_path = requested_site_root.as_ref().map(PathBuf::from);
+    let requested_workspace = requested_path.as_deref().map(workspace_root_for);
+    let requested_control = requested_path.as_ref().map(|path| {
+        if is_site_authority_path(path) {
+            path.clone()
+        } else {
+            path.join(".narada")
+        }
+    });
+    let site_root_exists = requested_path
+        .as_ref()
+        .map(|path| path.exists())
+        .unwrap_or(false);
+    let control_root_exists = requested_control
+        .as_ref()
+        .map(|path| path.exists())
+        .unwrap_or(false);
+    let bound_root_match = requested_workspace
+        .as_ref()
+        .map(|path| path_key(path) == path_key(&bound_workspace))
+        .unwrap_or(false);
+    let site_id_resolved = requested_site_id.is_some();
+    let inspected = site_id_resolved
+        && requested_path.is_some()
+        && site_root_exists
+        && control_root_exists
+        && bound_root_match;
+    let status = if inspected { "ok" } else { "attention" };
+    json!({
+        "status":status,
+        "inspected":inspected,
+        "requested_site_id":requested_site_id,
+        "requested_site_root":requested_site_root,
+        "bound_site_root":bound_workspace.to_string_lossy(),
+        "bound_root_match":bound_root_match,
+        "site_root_exists":site_root_exists,
+        "control_root":requested_control.map(|path|path.to_string_lossy().to_string()),
+        "control_root_exists":control_root_exists,
+        "checks":[
+            {"check":"site_id_resolution","status":if site_id_resolved {"pass"} else {"attention"}},
+            {"check":"site_root_resolution","status":if requested_path.is_some() {"pass"} else {"attention"}},
+            {"check":"site_root_exists","status":if site_root_exists {"pass"} else {"attention"}},
+            {"check":"control_root_exists","status":if control_root_exists {"pass"} else {"attention"}},
+            {"check":"bound_root_match","status":if bound_root_match {"pass"} else {"attention"}}
+        ]
+    })
+}
+
+fn is_site_authority_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .map(|value| value.eq_ignore_ascii_case(".narada"))
+        .unwrap_or(false)
+}
+
+fn workspace_root_for(path: &Path) -> PathBuf {
+    if is_site_authority_path(path) {
+        path.parent().unwrap_or(path).to_path_buf()
+    } else {
+        path.to_path_buf()
+    }
+}
+
+fn path_key(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_ascii_lowercase()
+}
+
+fn lifecycle_tool(name: &str, description: &str, read_only: bool) -> Value {
+    tool_with_schema(name, description, read_only, lifecycle_input_schema(name))
+}
+
+fn lifecycle_input_schema(name: &str) -> Value {
+    let mut properties = Map::new();
+    properties.insert(
+        "site_id".to_string(),
+        json!({"type":"string","description":"Canonical Site identifier."}),
+    );
+    properties.insert("site_root".to_string(), json!({"type":"string","description":"Explicit workspace root or its .narada authority root."}));
+    properties.insert(
+        "kind".to_string(),
+        json!({"type":"string","description":"Lifecycle kind or preflight selector."}),
+    );
+    properties.insert(
+        "substrate".to_string(),
+        json!({"type":"string","description":"Requested Site substrate."}),
+    );
+    properties.insert(
+        "authority_basis".to_string(),
+        json!({"type":"object","description":"Explicit authority basis for a mutation."}),
+    );
+    properties.insert("execute".to_string(), json!({"type":"boolean","description":"Whether an owning authority may execute the planned mutation."}));
+    properties.insert(
+        "dry_run".to_string(),
+        json!({"type":"boolean","description":"Return a plan without mutation."}),
+    );
+    let required: Vec<&str> = match name {
+        "site_lifecycle_doctor" | "site_show" | "site_doctor" => vec!["site_id", "site_root"],
+        "site_init" => vec!["site_id", "site_root", "substrate", "authority_basis"],
+        _ => Vec::new(),
+    };
+    json!({"type":"object","properties":properties,"required":required,"additionalProperties":false})
+}
+
+fn tool_with_schema(name: &str, description: &str, read_only: bool, input_schema: Value) -> Value {
+    json!({
+        "name":name,"description":description,
+        "inputSchema":input_schema,
+        "annotations":{"title":name,"readOnlyHint":read_only,"destructiveHint":!read_only,"idempotentHint":true,"openWorldHint":false},
+        "outputSchema":{"type":"object","additionalProperties":true}
+    })
+}
+
 fn tool(name: &str, description: &str, read_only: bool) -> Value {
     json!({
         "name":name,"description":description,
@@ -461,16 +628,57 @@ mod tests {
 
     #[test]
     fn native_surface_tool_sets_match_domain_contracts() {
-        assert!(list_tools("site-lifecycle").iter().any(|tool| tool["name"] == "site_init"));
-        assert!(list_tools("site-registry").iter().any(|tool| tool["name"] == "site_registry_show"));
-        assert!(list_tools("project-state").iter().any(|tool| tool["name"] == "project_state_validate"));
+        assert!(list_tools("site-lifecycle")
+            .iter()
+            .any(|tool| tool["name"] == "site_init"));
+        assert!(list_tools("site-registry")
+            .iter()
+            .any(|tool| tool["name"] == "site_registry_show"));
+        assert!(list_tools("project-state")
+            .iter()
+            .any(|tool| tool["name"] == "project_state_validate"));
+    }
+
+    #[test]
+    #[test]
+    fn site_lifecycle_doctor_requires_coordinates_and_reports_resolution() {
+        let doctor = list_tools("site-lifecycle")
+            .into_iter()
+            .find(|tool| tool["name"] == "site_lifecycle_doctor")
+            .expect("doctor tool");
+        assert_eq!(
+            doctor["inputSchema"]["required"],
+            json!(["site_id", "site_root"])
+        );
+
+        let args = Map::new();
+        let result = call_tool(
+            "site-lifecycle",
+            "site_lifecycle_doctor",
+            &args,
+            Path::new("C:/definitely-missing-site"),
+        )
+        .unwrap();
+        assert_eq!(result["status"], "attention");
+        assert_eq!(result["inspected"], false);
+        assert!(result["items"]
+            .as_array()
+            .map(|items| !items.is_empty())
+            .unwrap_or(false));
+        assert_eq!(result["resolution_evidence"]["bound_root_match"], false);
     }
 
     #[test]
     fn project_state_remains_virtual_and_argument_bounded() {
         let mut args = Map::new();
         args.insert("program_id".to_string(), json!("demo"));
-        let result = call_tool("project-state", "project_state_program_show", &args, Path::new("C:/site")).unwrap();
+        let result = call_tool(
+            "project-state",
+            "project_state_program_show",
+            &args,
+            Path::new("C:/site"),
+        )
+        .unwrap();
         assert_eq!(result["status"], "ok");
         assert_eq!(result["virtual_only"], true);
         assert_eq!(result["result"]["args"][2], "demo");

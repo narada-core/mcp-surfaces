@@ -7,28 +7,28 @@ use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-mod launcher;
-mod calendar;
 mod authority;
+mod calendar;
+mod delegated_task;
 mod graph_authority;
 mod graph_mail_authority;
-mod delegated_task;
-mod worker_delegation;
+mod host_contracts;
+mod launcher;
 mod local_admin;
 mod mailbox;
 mod mailbox_sync;
-mod host_contracts;
 mod runtime_introspection;
+mod scheduler;
+mod scheduler_activation;
 mod simple_surfaces;
 mod site_coherence;
 mod site_inbox;
 mod site_loop;
-mod surface_feedback;
-mod scheduler;
-mod scheduler_activation;
 mod sop;
 mod sop_authority;
 mod sop_engine;
+mod surface_feedback;
+mod worker_delegation;
 
 const LEGACY_PROTOCOL_VERSION: &str = "2024-11-05";
 const MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
@@ -173,17 +173,13 @@ fn parse_options(args: Vec<String>) -> Result<Options, String> {
             "--projection-id" => {
                 let _ = value;
             }
-            "--canonical-feedback-root" => environment.push((
-                "NARADA_SURFACE_FEEDBACK_ROOT".to_string(),
-                value.clone(),
-            )),
-            "--task-lifecycle-root" => environment.push((
-                "NARADA_TASK_LIFECYCLE_ROOT".to_string(),
-                value.clone(),
-            )),
-            "--site-id" => {
-                environment.push(("NARADA_SITE_ID".to_string(), value.clone()))
+            "--canonical-feedback-root" => {
+                environment.push(("NARADA_SURFACE_FEEDBACK_ROOT".to_string(), value.clone()))
             }
+            "--task-lifecycle-root" => {
+                environment.push(("NARADA_TASK_LIFECYCLE_ROOT".to_string(), value.clone()))
+            }
+            "--site-id" => environment.push(("NARADA_SITE_ID".to_string(), value.clone())),
             "--owned-surface-id" => {
                 if let Some((_, owned)) = environment
                     .iter_mut()
@@ -207,27 +203,19 @@ fn parse_options(args: Vec<String>) -> Result<Options, String> {
                     }
                     roots.push_str(value);
                 } else {
-                    environment.push(("NARADA_FEEDBACK_DISCOVERY_ROOTS".to_string(), value.clone()));
+                    environment
+                        .push(("NARADA_FEEDBACK_DISCOVERY_ROOTS".to_string(), value.clone()));
                 }
             }
-            "--projection" => environment.push((
-                "NARADA_NARS_SESSION_PROJECTION".to_string(),
-                value.clone(),
-            )),
-            "--source-kind" => environment.push((
-                "NARADA_NARS_SESSION_SOURCE_KIND".to_string(),
-                value.clone(),
-            )),
-            "--operator-id" => {
-                environment.push(("NARADA_OPERATOR_ID".to_string(), value.clone()))
+            "--projection" => {
+                environment.push(("NARADA_NARS_SESSION_PROJECTION".to_string(), value.clone()))
             }
-            "--run-root" => environment.push((
-                "NARADA_WORKER_RUN_ROOT".to_string(),
-                value.clone(),
-            )),
-            "--sops-dir" => {
-                environment.push(("NARADA_SOPS_DIR".to_string(), value.clone()))
+            "--source-kind" => {
+                environment.push(("NARADA_NARS_SESSION_SOURCE_KIND".to_string(), value.clone()))
             }
+            "--operator-id" => environment.push(("NARADA_OPERATOR_ID".to_string(), value.clone())),
+            "--run-root" => environment.push(("NARADA_WORKER_RUN_ROOT".to_string(), value.clone())),
+            "--sops-dir" => environment.push(("NARADA_SOPS_DIR".to_string(), value.clone())),
             "--provider-registry-path" => environment.push((
                 "NARADA_SPEECH_PROVIDER_REGISTRY_PATH".to_string(),
                 value.clone(),
@@ -283,69 +271,115 @@ fn handle_request(request: &Value, options: &Options) -> Option<Value> {
                 .map(|value| modern_result(value, options)),
             method
                 if options.surface_id == "site-inbox"
-                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+                    && matches!(
+                        method,
+                        "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel"
+                    ) =>
             {
                 site_inbox::auxiliary(method, &params).map(|value| modern_result(value, options))
             }
             method
                 if options.surface_id == "calendar"
-                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+                    && matches!(
+                        method,
+                        "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel"
+                    ) =>
             {
                 calendar::auxiliary(method, &params).map(|value| modern_result(value, options))
             }
             method
                 if options.surface_id == "site-loop"
-                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+                    && matches!(
+                        method,
+                        "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel"
+                    ) =>
             {
                 site_loop::auxiliary(method, &params).map(|value| modern_result(value, options))
             }
             method
                 if options.surface_id == "surface-feedback"
-                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+                    && matches!(
+                        method,
+                        "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel"
+                    ) =>
             {
-                surface_feedback::auxiliary(method, &params).map(|value| modern_result(value, options))
+                surface_feedback::auxiliary(method, &params)
+                    .map(|value| modern_result(value, options))
             }
             method
                 if options.surface_id == "sop"
-                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+                    && matches!(
+                        method,
+                        "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel"
+                    ) =>
             {
                 sop::auxiliary(method, &params).map(|value| modern_result(value, options))
             }
             method
                 if options.surface_id == "delegated-task"
-                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+                    && matches!(
+                        method,
+                        "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel"
+                    ) =>
             {
-                delegated_task::auxiliary(method, &params).map(|value| modern_result(value, options))
+                delegated_task::auxiliary(method, &params)
+                    .map(|value| modern_result(value, options))
             }
             method
                 if options.surface_id == "worker-delegation"
-                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+                    && matches!(
+                        method,
+                        "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel"
+                    ) =>
             {
-                worker_delegation::auxiliary(method, &params).map(|value| modern_result(value, options))
+                worker_delegation::auxiliary(method, &params)
+                    .map(|value| modern_result(value, options))
             }
             method
-                if matches!(options.surface_id.as_str(), "artifacts" | "nars-session" | "quota-meter")
-                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+                if matches!(
+                    options.surface_id.as_str(),
+                    "artifacts" | "nars-session" | "quota-meter"
+                ) && matches!(
+                    method,
+                    "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel"
+                ) =>
             {
-                local_admin::auxiliary(&options.surface_id, method, &params).map(|value| modern_result(value, options))
+                local_admin::auxiliary(&options.surface_id, method, &params)
+                    .map(|value| modern_result(value, options))
             }
             method
                 if options.surface_id == "mailbox"
-                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+                    && matches!(
+                        method,
+                        "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel"
+                    ) =>
             {
                 mailbox::auxiliary(method, &params).map(|value| modern_result(value, options))
             }
             method
                 if options.surface_id == "scheduler"
-                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+                    && matches!(
+                        method,
+                        "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel"
+                    ) =>
             {
                 scheduler::auxiliary(method, &params).map(|value| modern_result(value, options))
             }
             method
-                if matches!(options.surface_id.as_str(), "browser-control" | "operator-console-overlay" | "cloudflare-carrier" | "speech" | "graph-mail")
-                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+                if matches!(
+                    options.surface_id.as_str(),
+                    "browser-control"
+                        | "operator-console-overlay"
+                        | "cloudflare-carrier"
+                        | "speech"
+                        | "graph-mail"
+                ) && matches!(
+                    method,
+                    "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel"
+                ) =>
             {
-                host_contracts::auxiliary(&options.surface_id, method, &params).map(|value| modern_result(value, options))
+                host_contracts::auxiliary(&options.surface_id, method, &params)
+                    .map(|value| modern_result(value, options))
             }
             "initialize" => Err(diagnostic(
                 "initialize_removed",
@@ -362,67 +396,108 @@ fn handle_request(request: &Value, options: &Options) -> Option<Value> {
         match method {
             method
                 if options.surface_id == "site-inbox"
-                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+                    && matches!(
+                        method,
+                        "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel"
+                    ) =>
             {
                 site_inbox::auxiliary(method, &params)
             }
             method
                 if options.surface_id == "calendar"
-                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+                    && matches!(
+                        method,
+                        "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel"
+                    ) =>
             {
                 calendar::auxiliary(method, &params)
             }
             method
                 if options.surface_id == "site-loop"
-                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+                    && matches!(
+                        method,
+                        "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel"
+                    ) =>
             {
                 site_loop::auxiliary(method, &params)
             }
             method
                 if options.surface_id == "surface-feedback"
-                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+                    && matches!(
+                        method,
+                        "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel"
+                    ) =>
             {
                 surface_feedback::auxiliary(method, &params)
             }
             method
                 if options.surface_id == "sop"
-                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+                    && matches!(
+                        method,
+                        "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel"
+                    ) =>
             {
                 sop::auxiliary(method, &params)
             }
             method
                 if options.surface_id == "delegated-task"
-                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+                    && matches!(
+                        method,
+                        "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel"
+                    ) =>
             {
                 delegated_task::auxiliary(method, &params)
             }
             method
                 if options.surface_id == "worker-delegation"
-                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+                    && matches!(
+                        method,
+                        "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel"
+                    ) =>
             {
                 worker_delegation::auxiliary(method, &params)
             }
             method
-                if matches!(options.surface_id.as_str(), "artifacts" | "nars-session" | "quota-meter")
-                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+                if matches!(
+                    options.surface_id.as_str(),
+                    "artifacts" | "nars-session" | "quota-meter"
+                ) && matches!(
+                    method,
+                    "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel"
+                ) =>
             {
                 local_admin::auxiliary(&options.surface_id, method, &params)
             }
             method
                 if options.surface_id == "mailbox"
-                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+                    && matches!(
+                        method,
+                        "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel"
+                    ) =>
             {
                 mailbox::auxiliary(method, &params)
             }
             method
                 if options.surface_id == "scheduler"
-                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+                    && matches!(
+                        method,
+                        "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel"
+                    ) =>
             {
                 scheduler::auxiliary(method, &params)
             }
             method
-                if matches!(options.surface_id.as_str(), "browser-control" | "operator-console-overlay" | "cloudflare-carrier" | "speech" | "graph-mail")
-                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+                if matches!(
+                    options.surface_id.as_str(),
+                    "browser-control"
+                        | "operator-console-overlay"
+                        | "cloudflare-carrier"
+                        | "speech"
+                        | "graph-mail"
+                ) && matches!(
+                    method,
+                    "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel"
+                ) =>
             {
                 host_contracts::auxiliary(&options.surface_id, method, &params)
             }
@@ -524,7 +599,26 @@ fn server_name(options: &Options) -> String {
 }
 
 fn capabilities(surface_id: &str) -> Value {
-    if matches!(surface_id, "site-inbox" | "calendar" | "site-loop" | "surface-feedback" | "sop" | "delegated-task" | "worker-delegation" | "artifacts" | "nars-session" | "quota-meter" | "mailbox" | "browser-control" | "operator-console-overlay" | "cloudflare-carrier" | "speech" | "scheduler" | "graph-mail") {
+    if matches!(
+        surface_id,
+        "site-inbox"
+            | "calendar"
+            | "site-loop"
+            | "surface-feedback"
+            | "sop"
+            | "delegated-task"
+            | "worker-delegation"
+            | "artifacts"
+            | "nars-session"
+            | "quota-meter"
+            | "mailbox"
+            | "browser-control"
+            | "operator-console-overlay"
+            | "cloudflare-carrier"
+            | "speech"
+            | "scheduler"
+            | "graph-mail"
+    ) {
         json!({"tools":{},"prompts":{},"completions":{},"logging":{}})
     } else {
         json!({"tools":{}})
@@ -673,12 +767,26 @@ fn call_tool(
         ("surface-feedback", name) => surface_feedback::call_tool(name, &args, &options.site_root),
         ("sop", name) => sop::call_tool(name, &args, &options.site_root),
         ("delegated-task", name) => delegated_task::call_tool(name, &args, &options.site_root),
-        ("worker-delegation", name) => worker_delegation::call_tool(name, &args, &options.site_root),
-        ("artifacts", name) | ("nars-session", name) | ("quota-meter", name) => local_admin::call_tool(surface_id, name, &args, &options.site_root),
+        ("worker-delegation", name) => {
+            worker_delegation::call_tool(name, &args, &options.site_root)
+        }
+        ("artifacts", name) | ("nars-session", name) | ("quota-meter", name) => {
+            local_admin::call_tool(surface_id, name, &args, &options.site_root)
+        }
         ("mailbox", name) => mailbox::call_tool(name, &args, &options.site_root),
-        ("graph-mail", name) if graph_mail_authority::enabled() && graph_mail_authority::supports(name) => graph_mail_authority::call_tool(name, &args, &options.site_root),
+        ("graph-mail", name)
+            if graph_mail_authority::enabled() && graph_mail_authority::supports(name) =>
+        {
+            graph_mail_authority::call_tool(name, &args, &options.site_root)
+        }
         ("scheduler", name) => scheduler::call_tool(name, &args, &options.site_root),
-        ("browser-control", name) | ("operator-console-overlay", name) | ("cloudflare-carrier", name) | ("speech", name) | ("graph-mail", name) => host_contracts::call_tool(surface_id, name, &args, &options.site_root),
+        ("browser-control", name)
+        | ("operator-console-overlay", name)
+        | ("cloudflare-carrier", name)
+        | ("speech", name)
+        | ("graph-mail", name) => {
+            host_contracts::call_tool(surface_id, name, &args, &options.site_root)
+        }
         ("site-lifecycle", name) | ("site-registry", name) | ("project-state", name) => {
             simple_surfaces::call_tool(surface_id, name, &args, &options.site_root)
         }
@@ -973,61 +1081,125 @@ mod tests {
     #[test]
     fn registrar_native_surface_argument_profiles_are_launchable() {
         let delegated = parsed_options(&[
-            "--surface-id", "delegated-task", "--site-root", "site", "--task-root",
-            "task", "--allowed-root", "site",
+            "--surface-id",
+            "delegated-task",
+            "--site-root",
+            "site",
+            "--task-root",
+            "task",
+            "--allowed-root",
+            "site",
         ]);
         assert_eq!(delegated.site_root, PathBuf::from("site"));
-        assert_eq!(environment_value(&delegated, "NARADA_DELEGATED_TASK_ROOT"), Some("task"));
+        assert_eq!(
+            environment_value(&delegated, "NARADA_DELEGATED_TASK_ROOT"),
+            Some("task")
+        );
 
         let nars = parsed_options(&[
-            "--surface-id", "nars-session", "--projection", "user-site-operator",
-            "--user-site-root", "user-site", "--source-kind", "operator",
-            "--operator-id", "andrey",
+            "--surface-id",
+            "nars-session",
+            "--projection",
+            "user-site-operator",
+            "--user-site-root",
+            "user-site",
+            "--source-kind",
+            "operator",
+            "--operator-id",
+            "andrey",
         ]);
         assert_eq!(nars.site_root, PathBuf::from("user-site"));
-        assert_eq!(environment_value(&nars, "NARADA_NARS_SESSION_PROJECTION"), Some("user-site-operator"));
-        assert_eq!(environment_value(&nars, "NARADA_USER_SITE_ROOT"), Some("user-site"));
+        assert_eq!(
+            environment_value(&nars, "NARADA_NARS_SESSION_PROJECTION"),
+            Some("user-site-operator")
+        );
+        assert_eq!(
+            environment_value(&nars, "NARADA_USER_SITE_ROOT"),
+            Some("user-site")
+        );
 
-        let scheduler = parsed_options(&[
-            "--surface-id", "scheduler", "--allowed-root", "site",
-        ]);
+        let scheduler = parsed_options(&["--surface-id", "scheduler", "--allowed-root", "site"]);
         assert_eq!(scheduler.site_root, PathBuf::from("site"));
 
-        let coherence = parsed_options(&[
-            "--surface-id", "site-coherence", "--repo-root", "repo",
-        ]);
+        let coherence = parsed_options(&["--surface-id", "site-coherence", "--repo-root", "repo"]);
         assert_eq!(coherence.site_root, PathBuf::from("repo"));
 
         let sop = parsed_options(&[
-            "--surface-id", "sop", "--sop-root", "site", "--server-name", "site-sop",
-            "--sops-dir", "site/.narada/sops",
+            "--surface-id",
+            "sop",
+            "--sop-root",
+            "site",
+            "--server-name",
+            "site-sop",
+            "--sops-dir",
+            "site/.narada/sops",
         ]);
         assert_eq!(sop.site_root, PathBuf::from("site"));
-        assert_eq!(environment_value(&sop, "NARADA_SOPS_DIR"), Some("site/.narada/sops"));
+        assert_eq!(
+            environment_value(&sop, "NARADA_SOPS_DIR"),
+            Some("site/.narada/sops")
+        );
 
         let speech = parsed_options(&[
-            "--surface-id", "speech", "--provider-registry-path", "providers.json",
+            "--surface-id",
+            "speech",
+            "--provider-registry-path",
+            "providers.json",
         ]);
-        assert_eq!(environment_value(&speech, "NARADA_SPEECH_PROVIDER_REGISTRY_PATH"), Some("providers.json"));
+        assert_eq!(
+            environment_value(&speech, "NARADA_SPEECH_PROVIDER_REGISTRY_PATH"),
+            Some("providers.json")
+        );
 
         let feedback = parsed_options(&[
-            "--surface-id", "surface-feedback", "--feedback-root", "feedback",
-            "--canonical-feedback-root", "canonical", "--task-lifecycle-root", "site",
-            "--site-id", "andrey-user", "--owned-surface-id", "calendar",
-            "--owned-surface-id", "site-loop",
+            "--surface-id",
+            "surface-feedback",
+            "--feedback-root",
+            "feedback",
+            "--canonical-feedback-root",
+            "canonical",
+            "--task-lifecycle-root",
+            "site",
+            "--site-id",
+            "andrey-user",
+            "--owned-surface-id",
+            "calendar",
+            "--owned-surface-id",
+            "site-loop",
         ]);
         assert_eq!(feedback.site_root, PathBuf::from("feedback"));
-        assert_eq!(environment_value(&feedback, "NARADA_SURFACE_FEEDBACK_ROOT"), Some("canonical"));
-        assert_eq!(environment_value(&feedback, "NARADA_TASK_LIFECYCLE_ROOT"), Some("site"));
-        assert_eq!(environment_value(&feedback, "NARADA_SITE_ID"), Some("andrey-user"));
-        assert_eq!(environment_value(&feedback, "NARADA_OWNED_SURFACE_IDS"), Some("calendar,site-loop"));
+        assert_eq!(
+            environment_value(&feedback, "NARADA_SURFACE_FEEDBACK_ROOT"),
+            Some("canonical")
+        );
+        assert_eq!(
+            environment_value(&feedback, "NARADA_TASK_LIFECYCLE_ROOT"),
+            Some("site")
+        );
+        assert_eq!(
+            environment_value(&feedback, "NARADA_SITE_ID"),
+            Some("andrey-user")
+        );
+        assert_eq!(
+            environment_value(&feedback, "NARADA_OWNED_SURFACE_IDS"),
+            Some("calendar,site-loop")
+        );
 
         let worker = parsed_options(&[
-            "--surface-id", "worker-delegation", "--site-root", "site", "--allowed-root",
-            "site", "--run-root", "site/.narada/runtime/worker-delegation",
+            "--surface-id",
+            "worker-delegation",
+            "--site-root",
+            "site",
+            "--allowed-root",
+            "site",
+            "--run-root",
+            "site/.narada/runtime/worker-delegation",
         ]);
         assert_eq!(worker.site_root, PathBuf::from("site"));
-        assert_eq!(environment_value(&worker, "NARADA_WORKER_RUN_ROOT"), Some("site/.narada/runtime/worker-delegation"));
+        assert_eq!(
+            environment_value(&worker, "NARADA_WORKER_RUN_ROOT"),
+            Some("site/.narada/runtime/worker-delegation")
+        );
     }
 
     #[test]
@@ -1039,7 +1211,10 @@ mod tests {
             "value".to_string(),
         ])
         .expect_err("unknown arguments must refuse");
-        assert_eq!(error, "native_surface_unknown_argument:--not-a-registrar-argument");
+        assert_eq!(
+            error,
+            "native_surface_unknown_argument:--not-a-registrar-argument"
+        );
     }
 
     #[test]
@@ -1118,17 +1293,41 @@ mod tests {
     #[test]
     fn named_native_surface_catalogs_are_present() {
         let surfaces = [
-            "site-inbox", "mailbox", "graph-mail", "calendar", "site-loop",
-            "site-lifecycle", "site-registry", "worker-delegation", "delegated-task",
-            "sop", "scheduler", "surface-feedback", "speech", "artifacts",
-            "nars-session", "quota-meter", "operator-console-overlay", "browser-control",
-            "cloudflare-carrier", "site-coherence", "catalog-observation", "runtime-introspection",
-            "project-state", "launcher", "operator-routing",
+            "site-inbox",
+            "mailbox",
+            "graph-mail",
+            "calendar",
+            "site-loop",
+            "site-lifecycle",
+            "site-registry",
+            "worker-delegation",
+            "delegated-task",
+            "sop",
+            "scheduler",
+            "surface-feedback",
+            "speech",
+            "artifacts",
+            "nars-session",
+            "quota-meter",
+            "operator-console-overlay",
+            "browser-control",
+            "cloudflare-carrier",
+            "site-coherence",
+            "catalog-observation",
+            "runtime-introspection",
+            "project-state",
+            "launcher",
+            "operator-routing",
         ];
         for surface in surfaces {
             let tools = list_tools(surface);
             assert!(!tools.is_empty(), "missing native catalog for {surface}");
-            assert!(tools.iter().all(|tool| tool.get("name").and_then(Value::as_str).is_some()), "unnamed native tool for {surface}");
+            assert!(
+                tools
+                    .iter()
+                    .all(|tool| tool.get("name").and_then(Value::as_str).is_some()),
+                "unnamed native tool for {surface}"
+            );
         }
     }
 
@@ -1176,5 +1375,4 @@ mod tests {
         assert_eq!(response["result"]["cacheScope"], "public");
         assert!(response["result"]["ttlMs"].as_u64().unwrap_or(0) > 0);
     }
-
 }

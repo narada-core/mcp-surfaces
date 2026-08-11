@@ -8,8 +8,15 @@ import { tmpdir } from 'node:os';
 import { runSopEngineParity } from './verify-sop-engine-parity.mjs';
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const executableName = process.platform === 'win32' ? 'narada-mcp-surfaces.exe' : 'narada-mcp-surfaces';
+const nativeOutputRoot = join(packageRoot, 'dist', 'native');
+const pointerPath = join(nativeOutputRoot, 'current.json');
+const pointerArtifact = existsSync(pointerPath)
+  ? JSON.parse(readFileSync(pointerPath, 'utf8'))?.artifacts?.[executableName]
+  : null;
 const executable = process.env.NARADA_NATIVE_SURFACE_EXECUTABLE
-  ?? join(packageRoot, 'dist', 'native', process.platform === 'win32' ? 'narada-mcp-surfaces.exe' : 'narada-mcp-surfaces');
+  ?? (typeof pointerArtifact === 'string' ? resolve(nativeOutputRoot, pointerArtifact) : null)
+  ?? join(nativeOutputRoot, executableName);
 const surfaces = [
   'catalog-observation',
   'operator-routing',

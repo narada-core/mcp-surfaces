@@ -1,6 +1,5 @@
 use serde_json::{json, Map, Value};
 use std::io::Write;
-use std::path::Path;
 use std::process::{Command, Stdio};
 
 pub const MAX_AUTHORITY_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
@@ -157,20 +156,6 @@ pub fn unavailable(surface_id: &str, reason: &str, detail: &str) -> Value {
     })
 }
 
-pub fn bounded_path(root: &Path, candidate: &str) -> Result<std::path::PathBuf, Value> {
-    let path = std::path::PathBuf::from(candidate);
-    let resolved = if path.is_absolute() { path } else { root.join(path) };
-    let root = root
-        .canonicalize()
-        .map_err(|error| unavailable("authority", "authority_root_unavailable", &error.to_string()))?;
-    let resolved = resolved
-        .canonicalize()
-        .map_err(|error| unavailable("authority", "authority_path_unavailable", &error.to_string()))?;
-    if !resolved.starts_with(&root) {
-        return Err(unavailable("authority", "authority_path_outside_root", &resolved.to_string_lossy()));
-    }
-    Ok(resolved)
-}
 
 #[cfg(test)]
 mod tests {
