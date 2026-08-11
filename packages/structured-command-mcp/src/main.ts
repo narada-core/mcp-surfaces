@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, relative, resolve } from 'node:path';
+import { homedir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildCommandMetadataTelemetryDeclaration, emitTelemetryEvent, telemetryErrorCodeFromUnknown, telemetryRefusalCodeFromResult, type TelemetryDeclaration, type TelemetryEventKind } from '@narada-core/mcp-telemetry';
 import { buildBoundedToolResult, outputShowAsync } from '@narada-core/mcp-transport';
@@ -164,7 +165,7 @@ export async function runStdioServer(options: Record<string, unknown>) {
 
 export function createServerState(options: Record<string, unknown> = {}, env: NodeJS.ProcessEnv = process.env): StructuredCommandState {
   const siteRoot = resolve(String(options.siteRoot ?? options.storageRoot ?? firstOption(options.allowedRoot) ?? firstOption(options.allowedRoots) ?? process.cwd()));
-  const stateEnv = { ...env };
+  const stateEnv = completeCommandEnvironment(env);
   loadSiteSecrets(siteRoot, stateEnv);
   const siteExtraRoots = loadSiteExtraAllowedRoots(siteRoot);
   const allowedRoots = buildAllowedRoots({
@@ -187,6 +188,55 @@ export function createServerState(options: Record<string, unknown> = {}, env: No
     env: stateEnv,
     clientRoots: { supported: false, roots: [], lastUpdatedAt: null },
   };
+}
+
+function completeCommandEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const result: NodeJS.ProcessEnv = { ...env };
+  const inherited = process.env;
+  const pick = (...keys: string[]): string | undefined => keys
+    .map((key) => result[key] ?? inherited[key])
+    .find((value): value is string => typeof value === 'string' && value.length > 0);
+  const setIfMissing = (key: string, ...sources: string[]): void => {
+    if (typeof result[key] === 'string' && result[key].length > 0) return;
+    const value = pick(...sources);
+    if (value) result[key] = value;
+  };
+  const explicitUserProfile = [result.USERPROFILE, result.userprofile]
+    .find((value): value is string => typeof value === 'string' && value.length > 0);
+  const explicitHome = [result.HOME, result.home]
+    .find((value): value is string => typeof value === 'string' && value.length > 0);
+  const home = explicitUserProfile
+    ?? explicitHome
+    ?? pick('USERPROFILE', 'userprofile', 'HOME', 'home')
+    ?? homedir();
+  if (home) {
+    if (!result.USERPROFILE) result.USERPROFILE = home;
+    if (!result.HOME) result.HOME = home;
+  }
+  setIfMissing('PATH', 'PATH', 'Path');
+  setIfMissing('Path', 'Path', 'PATH');
+  setIfMissing('SystemRoot', 'SystemRoot', 'SYSTEMROOT');
+  setIfMissing('ComSpec', 'ComSpec', 'COMSPEC');
+  setIfMissing('PATHEXT', 'PATHEXT');
+  setIfMissing('TEMP', 'TEMP', 'TMP');
+  setIfMissing('TMP', 'TMP', 'TEMP');
+  for (const key of [
+    'GIT_CONFIG_GLOBAL',
+    'GIT_CONFIG_SYSTEM',
+    'GIT_SSH_COMMAND',
+    'GIT_ASKPASS',
+    'GIT_TERMINAL_PROMPT',
+    'SSH_AUTH_SOCK',
+    'GCM_INTERACTIVE',
+    'VSCODE_GIT_ASKPASS_NODE',
+    'VSCODE_GIT_ASKPASS_MAIN',
+    'VSCODE_GIT_IPC_HANDLE',
+    'GIT_AUTHOR_NAME',
+    'GIT_AUTHOR_EMAIL',
+    'GIT_COMMITTER_NAME',
+    'GIT_COMMITTER_EMAIL',
+  ]) setIfMissing(key, key);
+  return result;
 }
 
 async function processStdioRequest(request: Record<string, unknown>, state: StructuredCommandState, activeRequests: Map<string, AbortController>, options: { framed: boolean }) {
@@ -665,9 +715,10 @@ function startDetachedBackgroundRunner(request: BackgroundExecutionRequest, stat
 
 export function buildStructuredCommandExecutionPayload({ decision, result, startedAt, timeoutMs, executionPosture, inputRef, executionMode, waitForCompletion }: any) {
   const finishedAt = new Date().toISOString();
+  const producerEvidence = buildProducerEvidence(decision, result);
   return {
     schema: 'narada.structured_command.execution_result.v0',
-    status: result.cancelled ? 'cancelled' : result.timed_out ? 'timed_out' : result.exit_code === 0 ? 'ok' : 'failed',
+    status: result.cancelled ? 'cancelled' : result.timed_out ? 'timed_out' : result.exit_code === 0 && producerEvidence.status === 'complete' ? 'ok' : result.exit_code === 0 ? 'verification_incomplete' : 'failed',
     executed: true,
     command: decision.command,
     args: decision.args,
@@ -689,9 +740,155 @@ export function buildStructuredCommandExecutionPayload({ decision, result, start
     timed_out: result.timed_out,
     cancelled: result.cancelled,
     command_resolution: result.command_resolution,
+    producer_evidence: producerEvidence,
     resolution_error_code: result.resolution_error_code,
     input_ref: inputRef,
   };
+}
+
+function buildProducerEvidence(decision: any, result: any): Record<string, unknown> {
+  const resolution = result.command_resolution;
+  const resolved = resolution?.status === 'resolved';
+  const processExitObserved = typeof result.exit_code === 'number'
+    || result.timed_out === true
+    || result.cancelled === true;
+  const packageScript = packageScriptEvidence(
+    String(decision.command ?? ''),
+    Array.isArray(decision.args) ? decision.args.map(String) : [],
+    String(decision.working_directory ?? process.cwd()),
+  );
+  return {
+    schema: 'narada.structured_command.producer_evidence.v1',
+    status: resolved && processExitObserved && packageScript.status !== 'not_declared'
+      ? 'complete'
+      : 'insufficient',
+    process_spawned: resolved,
+    process_exit_observed: typeof result.exit_code === 'number',
+    requested_command: decision.command,
+    requested_args: decision.args,
+    resolved_command: resolved ? resolution.spawn_command : null,
+    resolved_args: resolved ? resolution.spawn_args : null,
+    invocation_argv: resolved ? resolution.invocation_argv : null,
+    stdout_bytes: Buffer.byteLength(String(result.stdout ?? ''), 'utf8'),
+    stderr_bytes: Buffer.byteLength(String(result.stderr ?? ''), 'utf8'),
+    package_script: packageScript,
+  };
+}
+
+function packageScriptEvidence(command: string, args: string[], workingDirectory: string): Record<string, unknown> {
+  const executable = command.toLowerCase().replace(/\.(cmd|exe)$/, '');
+  if (!['pnpm', 'npm', 'yarn', 'bun'].includes(executable)) {
+    return {
+      kind: 'process',
+      status: 'complete',
+      verification: 'not_a_package_manager',
+    };
+  }
+
+  const lowerArgs = args.map((value) => value.toLowerCase());
+  if (lowerArgs.includes('exec') || lowerArgs.includes('dlx')) {
+    return {
+      kind: 'package_manager_exec',
+      status: 'complete',
+      verification: 'delegated_executable',
+    };
+  }
+  if (lowerArgs.includes('install') || lowerArgs.includes('add') || lowerArgs.includes('remove')) {
+    return {
+      kind: 'package_manager_mutation',
+      status: 'complete',
+      verification: 'delegated_package_manager_operation',
+    };
+  }
+
+  const filterIndex = lowerArgs.indexOf('--filter');
+  if (filterIndex >= 0) {
+    const script = firstPackageScriptToken(args, filterIndex + 2);
+    return {
+      kind: 'workspace_script',
+      status: 'complete',
+      verification: 'workspace_selector_delegated',
+      selector: args[filterIndex + 1] ?? null,
+      script_name: script,
+    };
+  }
+
+  const script = firstPackageScriptToken(args);
+  if (!script) {
+    return {
+      kind: 'package_manager_command',
+      status: 'complete',
+      verification: 'no_script_name',
+    };
+  }
+
+  const directory = packageManagerDirectory(args, workingDirectory);
+  let cursor = resolve(directory);
+  while (true) {
+    const manifestPath = join(cursor, 'package.json');
+    if (existsSync(manifestPath)) {
+      try {
+        const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { scripts?: Record<string, unknown> };
+        if (typeof manifest.scripts?.[script] === 'string') {
+          return {
+            kind: 'package_script',
+            status: 'complete',
+            verification: 'declared_script',
+            manifest_path: manifestPath,
+            script_name: script,
+          };
+        }
+        return {
+          kind: 'package_script',
+          status: 'not_declared',
+          verification: 'script_not_declared_in_manifest',
+          manifest_path: manifestPath,
+          script_name: script,
+        };
+      } catch {
+        return {
+          kind: 'package_script',
+          status: 'not_declared',
+          verification: 'manifest_unreadable',
+          manifest_path: manifestPath,
+          script_name: script,
+        };
+      }
+    }
+    const parent = dirname(cursor);
+    if (parent === cursor) break;
+    cursor = parent;
+  }
+  return {
+    kind: 'package_script',
+    status: 'not_declared',
+    verification: 'package_manifest_not_found',
+    script_name: script,
+  };
+}
+
+function firstPackageScriptToken(args: string[], startIndex = 0): string | null {
+  const optionValueFlags = new Set(['--dir', '-c', '--config', '--workspace-root']);
+  for (let index = startIndex; index < args.length; index += 1) {
+    const value = args[index];
+    if (value === 'run') return args[index + 1] ?? null;
+    if (value === '--') return args[index + 1] ?? null;
+    if (value.startsWith('-')) {
+      if (optionValueFlags.has(value)) index += 1;
+      continue;
+    }
+    return value;
+  }
+  return null;
+}
+
+function packageManagerDirectory(args: string[], workingDirectory: string): string {
+  for (let index = 0; index < args.length; index += 1) {
+    const value = args[index];
+    if (value === '--dir' || value === '-C') return args[index + 1] ?? workingDirectory;
+    if (value.startsWith('--dir=')) return value.slice('--dir='.length);
+  }
+  return workingDirectory;
 }
 
 export function createStructuredCommandInput(args: any, state: any) {
@@ -722,8 +919,9 @@ export function createStructuredCommandInput(args: any, state: any) {
 
 async function powershellParseCheck(args: Record<string, unknown>, state: StructuredCommandState, context: RequestContext = {}): Promise<unknown> {
   const scriptPath = resolve(String(args.path ?? ''));
-  if (!scriptPath || !scriptPath.toLowerCase().endsWith('.ps1')) {
-    throw diagnosticError('structured_command_powershell_parse_check_requires_ps1', 'structured_command_powershell_parse_check_requires_ps1', { path: String(args.path ?? '') });
+  const lowerScriptPath = scriptPath.toLowerCase();
+  if (!scriptPath || !(lowerScriptPath.endsWith('.ps1') || lowerScriptPath.endsWith('.psd1'))) {
+    throw diagnosticError('structured_command_powershell_parse_check_requires_ps1_or_psd1', 'structured_command_powershell_parse_check_requires_ps1_or_psd1', { path: String(args.path ?? '') });
   }
   if (!isInsideAnyRoot(scriptPath, state.policy.allowedRoots)) {
     throw diagnosticError('structured_command_powershell_parse_check_path_outside_allowed_roots', 'structured_command_powershell_parse_check_path_outside_allowed_roots', { path: scriptPath, allowed_roots: state.policy.allowedRoots });

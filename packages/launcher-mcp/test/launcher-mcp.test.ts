@@ -140,6 +140,16 @@ try {
   assert.equal((plan.wt_args as string[]).includes('codex-subscription'), false);
   assert.equal((plan.wt_args as string[]).includes('--wait'), false);
   assert.equal(plan.command_contract, 'narada.operator_surface.runtime_start.v1');
+  assert.equal(plan.planner_contract.schema, 'narada.launcher.planner_contract.v1');
+  assert.deepEqual(plan.planner_contract.required_fields, [
+    'operator_surface',
+    'runtime',
+    'target_site_id',
+    'authority',
+    'mcp_scope',
+    'wait_policy',
+    'execution_posture',
+  ]);
   assert.equal(plan.compatibility_diagnostics[0].code, 'intelligence_provider_not_projected');
   assert.deepEqual(plan.mcp_scope_plan.admitted_scopes, ['all', 'host', 'user-site', 'local-site', 'none']);
   assert.equal(plan.mcp_scope_plan.agents[0].requested, 'all');

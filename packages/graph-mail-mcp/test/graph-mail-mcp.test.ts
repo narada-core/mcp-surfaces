@@ -176,6 +176,7 @@ try {
   assert.equal(toolRows.find((tool: DynamicTestValue) => tool.name === 'graph_mail_ticket_draft_upsert')?.annotations.readOnlyHint, false);
   assert.equal(toolRows.find((tool: DynamicTestValue) => tool.name === 'graph_mail_ticket_draft_disposition_scan')?.annotations.idempotentHint, true);
   assert.equal(toolRows.find((tool: DynamicTestValue) => tool.name === 'graph_mail_ticket_draft_disposition_scan')?.annotations.readOnlyHint, false);
+  assert.equal(typeof toolRows.find((tool: DynamicTestValue) => tool.name === 'graph_mail_reply_all_draft_create')?.inputSchema.properties.comment_html, 'object');
   assert.equal(toolRows.find((tool: DynamicTestValue) => tool.name === 'graph_mail_ticket_draft_disposition_list')?.annotations.readOnlyHint, true);
   assert.equal(toolRows.find((tool: DynamicTestValue) => tool.name === 'graph_mail_folder_list')?.inputSchema.properties.limit.default, 50);
   assert.equal(toolRows.find((tool: DynamicTestValue) => tool.name === 'graph_mail_folder_create')?.inputSchema.properties.confirm_write.default, false);
@@ -1387,6 +1388,68 @@ try {
   assert.equal(replyDraftCalls.length, 3);
   assert.equal(replyDraftCalls[2].init.method, 'PATCH');
   assert.equal(JSON.parse(replyDraftCalls[2].init.body).body.content, 'new reply');
+
+  const htmlReplyCalls: CapturedRequest[] = [];
+  const htmlReplyState = createServerState({
+    siteRoot: root,
+    accessToken: 'test-token',
+    fetchImpl: mockFetch(htmlReplyCalls, [
+      {
+        body: {
+          id: 'draft-html-1',
+          isDraft: true,
+          toRecipients: [{ emailAddress: { address: 'sender@example.test' } }],
+          ccRecipients: [{ emailAddress: { address: 'peer@example.test' } }],
+        },
+      },
+      {
+        body: {
+          id: 'draft-html-1',
+          isDraft: true,
+          toRecipients: [{ emailAddress: { address: 'sender@example.test' } }],
+          ccRecipients: [{ emailAddress: { address: 'peer@example.test' } }],
+          body: { contentType: 'HTML', content: '<div class="graph-quote">Original quoted history</div>' },
+        },
+      },
+      {
+        body: {
+          id: 'draft-html-1',
+          isDraft: true,
+          toRecipients: [{ emailAddress: { address: 'sender@example.test' } }],
+          ccRecipients: [{ emailAddress: { address: 'peer@example.test' } }],
+          body: { contentType: 'HTML', content: '<p>First paragraph.</p><p>Second paragraph.</p><div data-narada-quoted-history="true"><div class="graph-quote">Original quoted history</div></div>' },
+        },
+      },
+    ]),
+  });
+  const htmlReply = await rpc({
+    jsonrpc: '2.0',
+    id: 143,
+    method: 'tools/call',
+    params: {
+      name: 'graph_mail_reply_all_draft_create',
+      arguments: {
+        mailbox_id: 'support@example.test',
+        message_id: 'message-original-1',
+        comment_html: '<p>First paragraph.</p><p>Second paragraph.</p>',
+      },
+    },
+  }, htmlReplyState);
+  assert.equal(htmlReply.error, undefined);
+  assert.equal(htmlReply.result.structuredContent.status, 'created');
+  assert.equal(htmlReply.result.structuredContent.reply_body_mode, 'comment_html');
+  assert.equal(htmlReply.result.structuredContent.quote_preserved, true);
+  assert.equal(htmlReply.result.structuredContent.unsent, true);
+  assert.equal(htmlReply.result.structuredContent.draft.isDraft, true);
+  assert.equal(htmlReplyCalls.length, 3);
+  assert.equal(htmlReplyCalls[0].init.method, 'POST');
+  assert.deepEqual(JSON.parse(htmlReplyCalls[0].init.body), {});
+  assert.equal(htmlReplyCalls[1].init.method, 'GET');
+  assert.equal(htmlReplyCalls[2].init.method, 'PATCH');
+  const htmlPatch = JSON.parse(htmlReplyCalls[2].init.body);
+  assert.equal(htmlPatch.body.contentType, 'HTML');
+  assert.match(htmlPatch.body.content, /<p>First paragraph\.<\/p><p>Second paragraph\.<\/p>/);
+  assert.match(htmlPatch.body.content, /Original quoted history/);
 
   const blockedMailbox = await rpc({
     jsonrpc: '2.0',

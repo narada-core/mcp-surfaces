@@ -21,10 +21,12 @@ const sourceRoot = process.env.NARADA_SRC_ROOT ?? join(homedir(), 'src');
 const naradaProperRoot = process.env.NARADA_PROPER_ROOT ?? process.env.NARADA_ROOT ?? join(sourceRoot, 'narada');
 const cliModulePath = process.env.NARADA_SITE_E2E_CLI_MODULE
   ?? join(naradaProperRoot, 'packages/layers/cli/dist/commands/sites.js');
+const operatorSurfaceModulePath = process.env.NARADA_SITE_E2E_OPERATOR_SURFACE_MODULE
+  ?? join(naradaProperRoot, 'packages/layers/cli/dist/commands/operator-surface.js');
 const resultPath = join(fileURLToPath(new URL('../..', import.meta.url)), '.tmp', 'e2e-results', 'site-lifecycle.site-fabric.real-cli.json');
 const evidence = installE2eArtifactRecorder(resultPath, { test_id: 'site-lifecycle.site-fabric.real-cli', authority: 'A0' });
 
-if (!existsSync(cliModulePath)) {
+if (!existsSync(cliModulePath) || !existsSync(operatorSurfaceModulePath)) {
   evidence.finalize({
     status: 'not_run',
     reason_code: 'narada_cli_module_missing',
@@ -50,6 +52,7 @@ const server = spawnJsonlMcpServer(process.execPath, [
   serverPath,
   '--narada-root', naradaRoot,
   '--cli-module-path', cliModulePath,
+  '--operator-surface-module-path', operatorSurfaceModulePath,
 ], {
   cwd: naradaRoot,
   env: siteFabricChildEnv(naradaRoot, { NARADA_ROOT: naradaRoot }),
@@ -120,8 +123,54 @@ try {
   assert.equal(inspected.mutation_performed, false, JSON.stringify(inspected));
   assert.equal((inspected.result as JsonRecord).siteId, 'fixture-site', JSON.stringify(inspected));
   assert.equal(existsSync(join(siteRoot, 'config.json')), true);
+  assert.equal((inspected.next_action as JsonRecord)?.tool, 'site_admit_role', JSON.stringify(inspected));
 
-  const listed = structured(await server.client.request(6, 'tools/call', {
+  const admitted = structured(await server.client.request(6, 'tools/call', {
+    name: 'site_admit_role',
+    arguments: {
+      site_id: 'fixture-site',
+      site_root: siteRoot,
+      role: 'architect',
+      agent_kind: 'codex_cli',
+      by: 'operator',
+      input_capabilities: 'type_text,submit',
+      submit_strategy: 'known_surface_submit',
+      authority_basis: { kind: 'controlled_test', summary: 'typed role admission proof' },
+      execute: true,
+    },
+  }));
+  assert.equal(admitted.status, 'ok', JSON.stringify(admitted));
+  assert.equal(admitted.mutation_performed, true, JSON.stringify(admitted));
+  assert.equal(existsSync(join(siteRoot, '.narada', 'operator-surfaces', 'identities.json')), true);
+
+  const roleCheck = structured(await server.client.request(7, 'tools/call', {
+    name: 'site_verify_role',
+    arguments: { site_id: 'fixture-site', site_root: siteRoot },
+  }));
+  assert.equal(roleCheck.status, 'failed', JSON.stringify(roleCheck));
+  assert.equal((roleCheck.result as JsonRecord).status, 'diagnostic', JSON.stringify(roleCheck));
+  assert.equal(roleCheck.mutation_performed, false, JSON.stringify(roleCheck));
+
+  const runtimeObservation = structured(await server.client.request(8, 'tools/call', {
+    name: 'site_observe_runtime',
+    arguments: { site_id: 'fixture-site', site_root: siteRoot },
+  }));
+  assert.equal(runtimeObservation.status, 'ok', JSON.stringify(runtimeObservation));
+  assert.equal(runtimeObservation.mutation_performed, false, JSON.stringify(runtimeObservation));
+
+  const doctorAfterAdmission = structured(await server.client.request(9, 'tools/call', {
+    name: 'site_doctor',
+    arguments: { site_id: 'fixture-site', root: siteRoot, kind: 'project', authority_locus: 'user_site' },
+  }));
+  assert.equal((doctorAfterAdmission.next_action as JsonRecord)?.tool, 'site_bind_runtime', JSON.stringify(doctorAfterAdmission));
+  const postAdmissionResult = doctorAfterAdmission.result as JsonRecord;
+  const postAdmissionReadiness = postAdmissionResult.readiness as JsonRecord;
+  const postAdmissionPosture = ((postAdmissionReadiness.coordinates as JsonRecord).operator_surface_posture as JsonRecord);
+  assert.equal(postAdmissionPosture.identity_admitted, true, JSON.stringify(doctorAfterAdmission));
+  assert.equal(postAdmissionPosture.submit_transport_declared, true, JSON.stringify(doctorAfterAdmission));
+  assert.equal(postAdmissionPosture.runtime_handle_bound, false, JSON.stringify(doctorAfterAdmission));
+
+  const listed = structured(await server.client.request(10, 'tools/call', {
     name: 'site_list',
     arguments: {},
   }));

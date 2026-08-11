@@ -2,13 +2,14 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { buildGuidanceResult } from '../src/guidance.js';
 import {
   createServerState,
   buildElevatedWindowBrokerCommand,
+  buildStructuredCommandExecutionPayload,
   executeStructuredCommand,
   handleRequest,
 } from '../src/main.js';
-import { buildGuidanceResult } from '../src/guidance.js';
 import { decideStructuredCommandExecution } from '../src/policy.js';
 type DynamicTestValue = string & DynamicTestValue[] & {
   [key: string]: DynamicTestValue;
@@ -162,6 +163,83 @@ assert.deepEqual(defaultPnpmFilteredTest.reasons, []);
 const defaultPnpmFilteredDeploy = decideStructuredCommandExecution({ command: 'pnpm', args: ['--filter', '@narada-core/structured-command-mcp', 'deploy'], workingDirectory: root }, stateWithDefaultCommands.policy);
 assert.equal(defaultPnpmFilteredDeploy.status, 'refused');
 assert.ok(defaultPnpmFilteredDeploy.reasons.some((reason) => String(reason).startsWith('command_not_allowed:')));
+
+const defaultCargoFmt = decideStructuredCommandExecution({ command: 'cargo', args: ['fmt', '--check'], workingDirectory: root }, stateWithDefaultCommands.policy);
+assert.equal(defaultCargoFmt.status, 'allowed');
+assert.deepEqual(defaultCargoFmt.reasons, []);
+const defaultCargoTest = decideStructuredCommandExecution({ command: 'cargo', args: ['test', '--manifest-path', join(root, 'Cargo.toml')], workingDirectory: root }, stateWithDefaultCommands.policy);
+assert.equal(defaultCargoTest.status, 'allowed');
+assert.deepEqual(defaultCargoTest.reasons, []);
+
+const defaultNaradaPlanner = decideStructuredCommandExecution({
+  command: 'narada',
+  args: ['launcher', 'workspace-plan', '--agent', 'example', '--format', 'json'],
+  workingDirectory: root,
+}, stateWithDefaultCommands.policy);
+assert.equal(defaultNaradaPlanner.status, 'allowed');
+assert.deepEqual(defaultNaradaPlanner.reasons, []);
+const mutatingNaradaDoctor = decideStructuredCommandExecution({
+  command: 'narada',
+  args: ['doctor', '--repair'],
+  workingDirectory: root,
+}, stateWithDefaultCommands.policy);
+assert.equal(mutatingNaradaDoctor.status, 'refused');
+assert.ok(mutatingNaradaDoctor.reasons.some((reason) => String(reason).startsWith('command_not_allowed:')));
+writeFileSync(join(root, 'package.json'), JSON.stringify({ scripts: { test: 'node -e "process.exit(0)"' } }), 'utf8');
+const completeExecution = buildStructuredCommandExecutionPayload({
+  decision: { command: 'pnpm', args: ['test'], working_directory: root },
+  result: {
+    exit_code: 0,
+    stdout: '',
+    stderr: '',
+    stdout_truncated: false,
+    stderr_truncated: false,
+    timed_out: false,
+    cancelled: false,
+    command_resolution: {
+      status: 'resolved',
+      spawn_command: 'pnpm',
+      spawn_args: ['test'],
+      invocation_argv: ['pnpm', 'test'],
+    },
+  },
+  startedAt: new Date(0).toISOString(),
+  timeoutMs: 30_000,
+  executionPosture: { test_scope: 'focused', expected_cost: 'low' },
+  inputRef: null,
+  executionMode: 'sync',
+  waitForCompletion: true,
+});
+assert.equal(completeExecution.status, 'ok');
+assert.equal(completeExecution.producer_evidence.status, 'complete');
+assert.deepEqual(completeExecution.producer_evidence.invocation_argv, ['pnpm', 'test']);
+
+const undeclaredExecution = buildStructuredCommandExecutionPayload({
+  decision: { command: 'pnpm', args: ['test:missing'], working_directory: root },
+  result: {
+    exit_code: 0,
+    stdout: '',
+    stderr: '',
+    stdout_truncated: false,
+    stderr_truncated: false,
+    timed_out: false,
+    cancelled: false,
+    command_resolution: {
+      status: 'resolved',
+      spawn_command: 'pnpm',
+      spawn_args: ['test:missing'],
+      invocation_argv: ['pnpm', 'test:missing'],
+    },
+  },
+  startedAt: new Date(0).toISOString(),
+  timeoutMs: 30_000,
+  executionPosture: { test_scope: 'focused', expected_cost: 'low' },
+  inputRef: null,
+  executionMode: 'sync',
+  waitForCompletion: true,
+});
+assert.equal(undeclaredExecution.status, 'verification_incomplete');
+assert.equal(undeclaredExecution.producer_evidence.status, 'insufficient');
 
 const focusedTestPosture = await exec({
   command: 'pnpm',
@@ -554,6 +632,33 @@ if (parsePayload.resolution_error_code === 'powershell_host_not_found') {
   assert.equal(parsePayload.arbitrary_command_execution_admitted, false);
 }
 
+const psd1Path = join(root, 'parse-ok.psd1');
+writeFileSync(psd1Path, '@{ Name = "ok" }\n', 'utf8');
+const dataParseCheck = await rpc({
+  jsonrpc: '2.0',
+  id: 35,
+  method: 'tools/call',
+  params: {
+    name: 'structured_command_powershell_parse_check',
+    arguments: { path: psd1Path, working_directory: root },
+  },
+}, state);
+const dataParsePayload = dataParseCheck.result.structuredContent;
+if (parsePayload.resolution_error_code === 'powershell_host_not_found') {
+  assert.equal(dataParsePayload.command_resolution.code, 'powershell_host_not_found');
+} else {
+  assert.equal(dataParsePayload.status, 'ok');
+}
+
+const environmentState = createServerState(
+  { allowedRoot: root, allowCommand: ['node'] },
+  { HOME: 'C:/fixture-home', GIT_AUTHOR_NAME: 'Fixture Author', PATH: 'C:/fixture-bin' },
+);
+assert.equal(environmentState.env.HOME, 'C:/fixture-home');
+assert.equal(environmentState.env.GIT_AUTHOR_NAME, 'Fixture Author');
+assert.equal(environmentState.env.USERPROFILE, 'C:/fixture-home');
+assert.equal(environmentState.env.PATH, 'C:/fixture-bin');
+
 const longInlineScript = `${' '.repeat(318)}process.stdout.write('long-inline-ok')`;
 const okLongInlineArg = await exec({
   command: 'node',
@@ -594,6 +699,11 @@ assert.deepEqual(policy.result.structuredContent.default_allowed_prefixes, [
   'pnpm build',
   'pnpm typecheck',
   'pnpm --filter',
+  'cargo fmt',
+  'cargo check',
+  'cargo test',
+  'narada launcher workspace-plan',
+  'narada doctor',
   'pwsh -file',
   'pwsh -noprofile -file',
   'pwsh -noprofile -executionpolicy bypass -file',

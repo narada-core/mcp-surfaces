@@ -405,6 +405,22 @@ function launcherPlan(args: JsonRecord, state: LauncherState): JsonRecord {
     registry_paths: selected.registryPaths,
     wt_args: wtArgs,
     command_contract: 'narada.operator_surface.runtime_start.v1',
+    planner_contract: {
+      schema: 'narada.launcher.planner_contract.v1',
+      version: 1,
+      canonical_contract: 'narada.operator_surface.runtime_start.v1',
+      projection: 'mcp_launcher_plan',
+      required_fields: [
+        'operator_surface',
+        'runtime',
+        'target_site_id',
+        'authority',
+        'mcp_scope',
+        'wait_policy',
+        'execution_posture',
+      ],
+      legacy_projection: 'not_emitted',
+    },
     compatibility_diagnostics: compatibilityDiagnostics,
     mcp_scope_plan: {
       admitted_scopes: ADMITTED_MCP_SCOPES,

@@ -25,6 +25,11 @@ const DEFAULT_ALLOWED_PREFIXES = [
   ['pnpm', 'build'],
   ['pnpm', 'typecheck'],
   ['pnpm', '--filter'],
+  ['cargo', 'fmt'],
+  ['cargo', 'check'],
+  ['cargo', 'test'],
+  ['narada', 'launcher', 'workspace-plan'],
+  ['narada', 'doctor'],
   ['pwsh', '-file'],
   ['pwsh', '-noprofile', '-file'],
   ['pwsh', '-noprofile', '-executionpolicy', 'bypass', '-file'],
@@ -383,6 +388,10 @@ function prefixAllowedByAdditionalGuards(prefix: any, argv: any) {
   if (prefix[0] === 'pnpm' && prefix[1] === '--filter') {
     const script = argv[3]?.toLowerCase();
     return script === 'test' || script === 'build' || script === 'typecheck' || String(script ?? '').startsWith('test:');
+  }
+  if (prefix[0] === 'narada' && prefix[1] === 'doctor') {
+    const mutatingFlags = new Set(['--repair', '--fix', '--write', 'repair', 'fix']);
+    return !argv.slice(2).some((arg: any) => mutatingFlags.has(String(arg).toLowerCase()));
   }
   return true;
 }

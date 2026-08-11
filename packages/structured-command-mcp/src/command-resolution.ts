@@ -2,16 +2,19 @@ import {
   accessSync,
   constants,
   existsSync,
+  readFileSync,
   statSync,
 } from 'node:fs';
 import {
   delimiter,
+  dirname,
   extname,
   isAbsolute,
+  join,
   resolve,
 } from 'node:path';
 
-export type CommandInvocationKind = 'direct' | 'powershell_script';
+export type CommandInvocationKind = 'direct' | 'powershell_script' | 'node_script_shim';
 
 export type CommandResolutionEvidence =
   | {
@@ -21,9 +24,15 @@ export type CommandResolutionEvidence =
       invocation_kind: CommandInvocationKind;
       resolved_path: string;
       spawn_command: string;
+      spawn_args: string[];
+      invocation_argv: string[];
       wrapper: {
         kind: 'powershell';
         path: string;
+      } | {
+        kind: 'node_script_shim';
+        path: string;
+        source_shim: string;
       } | null;
     }
   | {
@@ -90,7 +99,8 @@ function environmentValue(env: NodeJS.ProcessEnv, name: string): string | undefi
 function isRunnableFile(path: string, platform: NodeJS.Platform): boolean {
   if (!existsSync(path)) return false;
   try {
-    if (!statSync(path).isFile()) return false;
+    const stat = statSync(path);
+    if (!stat.isFile() || stat.size === 0) return false;
     if (platform !== 'win32') accessSync(path, constants.X_OK);
     return true;
   } catch {
@@ -132,12 +142,17 @@ function findCommandPath(
   cwd: string,
   env: NodeJS.ProcessEnv,
   platform: NodeJS.Platform,
+  candidateAllowed: (path: string) => boolean = () => true,
 ): { path: string | null; searchedCandidateCount: number } {
   const candidates = commandCandidates(command, cwd, env, platform);
   return {
-    path: candidates.find((candidate) => isRunnableFile(candidate, platform)) ?? null,
+    path: candidates.find((candidate) => candidateAllowed(candidate) && isRunnableFile(candidate, platform)) ?? null,
     searchedCandidateCount: candidates.length,
   };
+}
+
+function isWindowsAppExecutionAlias(path: string): boolean {
+  return path.replace(/\\/g, '/').toLowerCase().split('/').includes('windowsapps');
 }
 
 function resolvePowerShellHost(
@@ -149,7 +164,7 @@ function resolvePowerShellHost(
 ): { path: string; searchedCandidateCount: number } {
   let total = searchedCandidateCount;
   for (const candidate of ['pwsh.exe', 'powershell.exe']) {
-    const resolved = findCommandPath(candidate, cwd, env, platform);
+    const resolved = findCommandPath(candidate, cwd, env, platform, (path) => !isWindowsAppExecutionAlias(path));
     total += resolved.searchedCandidateCount;
     if (resolved.path !== null) return { path: resolved.path, searchedCandidateCount: total };
   }
@@ -160,6 +175,48 @@ function resolvePowerShellHost(
     total,
     'Install PowerShell 7 (pwsh.exe) or make powershell.exe available on PATH.',
   );
+}
+
+function nodeScriptShimInvocation(
+  requestedCommand: string,
+  scriptPath: string,
+  args: readonly string[],
+  platform: NodeJS.Platform,
+): ResolvedCommandInvocation | null {
+  if (platform !== 'win32') return null;
+  let source: string;
+  try {
+    source = readFileSync(scriptPath, 'utf8');
+  } catch {
+    return null;
+  }
+  const match = source.match(/&\s+"\$basedir\/node\$exe"\s+"\$basedir\/([^"]+)"\s+\$args/);
+  const relativeEntrypoint = match?.[1];
+  if (!relativeEntrypoint || relativeEntrypoint.split(/[\\/]/).includes('..')) return null;
+  const basedir = dirname(scriptPath);
+  const nodePath = join(basedir, 'node.exe');
+  const entrypoint = join(basedir, ...relativeEntrypoint.split('/'));
+  if (!isRunnableFile(nodePath, platform) || !isRunnableFile(entrypoint, platform)) return null;
+  const spawnArgs = [entrypoint, ...args];
+  return {
+    command: nodePath,
+    args: spawnArgs,
+    evidence: {
+      schema: 'narada.structured_command.command_resolution.v1',
+      status: 'resolved',
+      requested_command: requestedCommand,
+      invocation_kind: 'node_script_shim',
+      resolved_path: entrypoint,
+      spawn_command: nodePath,
+      spawn_args: spawnArgs,
+      invocation_argv: [nodePath, ...spawnArgs],
+      wrapper: {
+        kind: 'node_script_shim',
+        path: nodePath,
+        source_shim: scriptPath,
+      },
+    },
+  };
 }
 
 function powershellInvocation(
@@ -195,8 +252,29 @@ function powershellInvocation(
       status: 'resolved',
       requested_command: requestedCommand,
       invocation_kind: 'powershell_script',
-      resolved_path: scriptPath,
       spawn_command: host.path,
+      spawn_args: [
+        '-NoLogo',
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-File',
+        scriptPath,
+        ...args,
+      ],
+      invocation_argv: [
+        host.path,
+        '-NoLogo',
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-File',
+        scriptPath,
+        ...args,
+      ],
+      resolved_path: scriptPath,
       wrapper: {
         kind: 'powershell',
         path: host.path,
@@ -249,6 +327,8 @@ export function resolveCommandInvocation(
   if (platform === 'win32') {
     const extension = extname(resolved.path).toLowerCase();
     if (extension === '.ps1') {
+      const nodeShim = nodeScriptShimInvocation(requestedCommand, resolved.path, args, platform);
+      if (nodeShim) return nodeShim;
       return powershellInvocation(
         requestedCommand,
         resolved.path,
@@ -292,6 +372,8 @@ export function resolveCommandInvocation(
       invocation_kind: 'direct',
       resolved_path: resolved.path,
       spawn_command: resolved.path,
+      spawn_args: [...args],
+      invocation_argv: [resolved.path, ...args],
       wrapper: null,
     },
   };
