@@ -35,6 +35,15 @@ pub fn deliver(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     if idempotency_key.len() > 128 {
         return Err(error("idempotency_key_too_large", "idempotency_key exceeds 128 characters"));
     }
+    let health_response = health(&authority.event_endpoint)?;
+    if !health_is_healthy(&health_response) {
+        return Err(json!({
+            "schema": "narada.nars_session_mcp.error.v1",
+            "code": "session_health_unavailable",
+            "message": "session health did not confirm a live authority runtime",
+            "details": { "health": health_response }
+        }));
+    }
 
     let input_event_id = format!("input_{}", Uuid::new_v4().simple());
     let request_id = format!("nars_input_request_{}", Uuid::new_v4().simple());
@@ -334,6 +343,13 @@ fn assert_requested_site(args: &Map<String, Value>, record: &Value) -> Result<()
     Ok(())
 }
 
+fn health_is_healthy(value: &Value) -> bool {
+    match value.get("status").and_then(Value::as_str).map(|status| status.to_ascii_lowercase()).as_deref() {
+        Some("starting" | "degraded" | "unhealthy" | "closing" | "unavailable") => false,
+        _ => true,
+    }
+}
+
 fn directive_content(args: &Map<String, Value>) -> Result<String, Value> {
     let direct = optional_text(args.get("content"));
     let directive = args.get("directive").and_then(Value::as_object);
@@ -591,6 +607,14 @@ mod tests {
         assert_eq!(summary.status, "admitted_to_turn");
         assert_eq!(summary.outcome, "completed");
         assert_eq!(summary.terminal_state.as_deref(), Some("completed"));
+    }
+
+    #[test]
+    fn health_gate_rejects_non_live_statuses_and_accepts_omitted_status() {
+        assert!(health_is_healthy(&json!({"status":"healthy"})));
+        assert!(health_is_healthy(&json!({"status":"degraded"})) == false);
+        assert!(health_is_healthy(&json!({"status":"closing"})) == false);
+        assert!(health_is_healthy(&json!({"event":"session_health"})));
     }
 
     #[test]
