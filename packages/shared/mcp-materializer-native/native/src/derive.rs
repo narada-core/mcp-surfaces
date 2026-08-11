@@ -392,6 +392,33 @@ pub(crate) fn options_from_generation(path: &Path) -> Result<DeriveOptions, Fail
     })
 }
 
+pub(crate) fn options_from_installed_index(path: &Path) -> Result<DeriveOptions, Failure> {
+    require_absolute(path, "installed_index")?;
+    let bytes = read_required(path, "materializer_installed_index_read_failed")?;
+    let index: Value = serde_json::from_slice(&bytes)
+        .map_err(|error| Failure::new("materializer_installed_index_invalid", error.to_string()))?;
+    if index.get("schema").and_then(Value::as_str) != Some("narada.installed_carrier_index.v1") {
+        return Err(Failure::new(
+            "materializer_installed_index_schema_unsupported",
+            path_text(path),
+        ));
+    }
+    let generation = index
+        .get("carriers")
+        .and_then(Value::as_array)
+        .and_then(|carriers| carriers.first())
+        .and_then(|carrier| carrier.get("generation_sidecar_path"))
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            Failure::new(
+                "materializer_installed_index_generation_required",
+                path_text(path),
+            )
+        })?;
+    options_from_generation(&generation)
+}
+
 fn read_required(path: &Path, code: &'static str) -> Result<Vec<u8>, Failure> {
     fs::read(path).map_err(|error| {
         Failure::new(code, error.to_string()).with_details(json!({"path": path_text(path)}))

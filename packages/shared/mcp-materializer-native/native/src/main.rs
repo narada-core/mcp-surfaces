@@ -160,7 +160,7 @@ impl Failure {
 
 fn run() -> Result<(), Failure> {
     let mut args = env::args_os().skip(1);
-    let command = args
+    let mut command = args
         .next()
         .and_then(|value| value.into_string().ok())
         .ok_or_else(|| {
@@ -169,6 +169,40 @@ fn run() -> Result<(), Failure> {
                 "Expected `materialize-all --input <path>`.",
             )
         })?;
+    let current_executable = env::current_exe().ok();
+    if current_executable
+        .as_ref()
+        .is_some_and(|path| path_eq(path, Path::new(&command)))
+    {
+        command = args
+            .next()
+            .and_then(|value| value.into_string().ok())
+            .ok_or_else(|| {
+                Failure::new(
+                    "materializer_command_required",
+                    "Expected a command after the compatibility entrypoint.",
+                )
+            })?;
+    }
+    if command == "--materialize-all" {
+        if args.next().is_some() {
+            return Err(Failure::new(
+                "materializer_argument_unknown",
+                "Unexpected trailing argument.",
+            ));
+        }
+        let user_profile = env::var_os("USERPROFILE").ok_or_else(|| {
+            Failure::new(
+                "materializer_user_profile_required",
+                "USERPROFILE is required for installed-carrier recovery.",
+            )
+        })?;
+        let index = PathBuf::from(user_profile).join(".narada/carriers/installed-carriers.json");
+        let input = derive::derive_input(derive::options_from_installed_index(&index)?)?;
+        let result = materialize(input)?;
+        println!("{result}");
+        return Ok(());
+    }
     if command == "publish" {
         let flag = args.next().and_then(|value| value.into_string().ok());
         if flag.as_deref() != Some("--artifact-root") {

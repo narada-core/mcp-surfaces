@@ -294,4 +294,17 @@ fn derives_all_carriers_from_declared_site_capabilities_without_javascript() {
     assert!(fs::read_to_string(home.join(".codex/config.toml"))
         .unwrap()
         .contains("[mcp_servers.narada-site-andrey-user-local-filesystem]"));
+
+    let compatibility_recovery = Command::new(env!("CARGO_BIN_EXE_narada-mcp-materializer"))
+        .env_clear()
+        .env("USERPROFILE", &home)
+        .arg(env!("CARGO_BIN_EXE_narada-mcp-materializer"))
+        .arg("--materialize-all")
+        .output()
+        .unwrap();
+    assert!(
+        compatibility_recovery.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&compatibility_recovery.stderr)
+    );
 }
