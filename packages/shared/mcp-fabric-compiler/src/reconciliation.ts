@@ -111,12 +111,12 @@ function selectAction(
       action: 'rematerialize_all_carrier_configs',
       server_name: null,
       reason: 'Carrier materialization or runtime observation was produced from a different manifest.',
-      actuator: 'mcp-registrar',
+      actuator: 'narada-mcp-materializer',
       required_authority: 'fabric.config.apply',
       expected_descriptor_digest: null,
       outcome_tool: 'registrar_operation_outcome_show',
-      recovery_tool: 'registrar_materialize_all',
-      recovery_guidance: 'Call registrar_materialize_all after reviewing the diff; it rewrites every registered carrier config, then restart or reconnect only if the returned plan requires it.',
+      recovery_tool: null,
+      recovery_guidance: 'Run pnpm materialize:carrier from the mcp-surfaces workspace; the native materializer rewrites the declared carrier set transactionally, then restart affected carriers.',
     });
   }
 

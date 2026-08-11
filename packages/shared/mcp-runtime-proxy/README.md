@@ -58,9 +58,9 @@ manifest, registrar-build, and contract fingerprints. The proxy refuses to
 spawn the child when that sidecar is missing or stale, including after the
 carrier config or registrar build changes.
 
-Materialization requests run in a fresh built registrar subprocess rather than
-using a resident registrar's loaded module graph. A failed validation is a
-structured refusal; the registrar does not rebuild or retry automatically.
+Materialization requests run through the installed immutable Rust materializer.
+A failed validation is a structured refusal; the proxy does not rebuild or
+retry automatically.
 
 Workspace build and carrier materialization are intentionally separate
 lifecycles: `pnpm build` refreshes the workspace artifact manifest but does not
@@ -68,21 +68,19 @@ silently rewrite a user's Codex, Kimi, or OpenCode configuration. After a
 successful build, refresh a carrier explicitly with:
 
 ```powershell
-pnpm materialize:carrier -- --materialize-all
+pnpm materialize:carrier
 ```
 
-The command is owned by the built registrar and remains usable when the MCP
-registrar surface itself cannot start. It rewrites every registered carrier;
-use `--output-dir <directory>` only when an inspection copy is wanted. The
+The command is owned by the native materializer and remains usable when the MCP
+registrar surface itself cannot start. It rewrites every declared carrier. The
 generated sidecars are the proof that the carrier configs and current workspace
-generation were produced together. A targeted carrier escape hatch exists only
-behind the registrar's explicit `--allow-single-carrier` direct-CLI flag and is
-not used by runtime recovery.
+generation were produced together. There is no targeted compatibility escape
+hatch.
 
 When a proxy refuses a stale generation, its structured error includes a
 `narada.mcp_runtime_proxy.materialization_recovery.v1` record. Use its
 `recovery_group_id` to report one recovery action for all bootstrap surfaces
-with the same carrier failure, run the supplied registrar command once, then
+with the same carrier failure, run the supplied native materializer command once, then
 follow the `restart` instruction. Regeneration never restarts the carrier
 implicitly; Codex, Kimi, and OpenCode must reload their carrier configuration
 in a new or restarted session.
@@ -109,16 +107,13 @@ On supported Windows hosts, carrier materialization uses the native Rust proxy
 by default:
 
 ```powershell
-bun packages/mcp-registrar/dist/src/main.js --materialize-all
+pnpm materialize:carrier
 ```
 
-Pass `--runtime-proxy-implementation bun` for the JavaScript rollback path.
-Native mode is Windows-only; non-Windows hosts and Windows hosts without the
-built executable fall back to Bun. An explicit `native` selection still fails
-clearly when the artifact is unavailable. Both modes use runtime contract v6 and therefore carry explicit
+Native mode is Windows-only and fails clearly when its built executable is
+unavailable. Runtime contract v6 carries explicit
 `--child-command` and `--registrar-command` values; the proxy executable never
-guesses which JavaScript runtime should launch a domain surface or recovery
-registrar.
+guesses a recovery authority.
 
 When a native carrier is consumed by the Rust mcp-loader, the loader unwraps
 native child records and supervises the native child directly. The proxy's
