@@ -7,7 +7,8 @@ import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const executable = join(packageRoot, 'dist', 'native', process.platform === 'win32' ? 'narada-mcp-surfaces.exe' : 'narada-mcp-surfaces');
+const executable = process.env.NARADA_NATIVE_SURFACE_EXECUTABLE
+  ?? join(packageRoot, 'dist', 'native', process.platform === 'win32' ? 'narada-mcp-surfaces.exe' : 'narada-mcp-surfaces');
 const surfaces = [
   'catalog-observation',
   'operator-routing',

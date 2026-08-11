@@ -57,6 +57,9 @@ fn guidance_tool() -> Value { tool("delegated_task_guidance", "Show model-facing
 fn guidance(args: &Map<String, Value>) -> Value { json!({"schema":"narada.mcp_surface.guidance.v0","status":"ok","surface_id":"delegated-task","guidance_tool":"delegated_task_guidance","purpose":"Validate and inspect durable delegated task workflows without silently launching workers.","requested":{"workflow":args.get("workflow").cloned().unwrap_or(Value::Null),"tool":args.get("tool").cloned().unwrap_or(Value::Null)},"first_use":["Call delegated_task_policy_inspect first.","Validate an input before creating a task.","Use bounded list/status/result/events readback.","Keep worker execution, cancellation, and disposition with the owning authority."],"boundaries":["Native code reads task.json/events.jsonl under the bounded task root.","It never spawns a worker or changes task state.","Cross-site ownership remains server-bound authority."]}) }
 
 fn task_root(root: &Path) -> PathBuf {
+    if let Some(value) = std::env::var_os("NARADA_DELEGATED_TASK_ROOT") {
+        return PathBuf::from(value);
+    }
     if root.join("tasks").is_dir() {
         root.to_path_buf()
     } else if root.join(".ai/delegated-tasks/tasks").is_dir() {

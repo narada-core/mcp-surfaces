@@ -150,7 +150,12 @@ fn task_authority_adapter(root: &Path) -> Option<StdioAuthorityAdapter> {
         let candidate = shared_root.join("mcp-lifecycle-native").join("dist").join("native").join(if cfg!(windows) { "narada-task-lifecycle-mcp.exe" } else { "narada-task-lifecycle-mcp" });
         candidate.is_file().then_some(candidate)
     })?;
-    let site_root = std::env::var("NARADA_SITE_ROOT").ok().filter(|value| !value.trim().is_empty()).map(PathBuf::from).unwrap_or_else(|| root.to_path_buf());
+    let site_root = std::env::var("NARADA_TASK_LIFECYCLE_ROOT")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| std::env::var("NARADA_SITE_ROOT").ok().filter(|value| !value.trim().is_empty()))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.to_path_buf());
     let args = vec!["--site-root".to_string(), site_root.to_string_lossy().to_string()];
     Some(StdioAuthorityAdapter::new(executable.to_string_lossy().to_string(), args, "task-lifecycle"))
 }

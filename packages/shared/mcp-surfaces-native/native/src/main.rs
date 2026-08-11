@@ -7,9 +7,6 @@ use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-mod site_inbox;
-mod simple_surfaces;
-mod runtime_introspection;
 mod launcher;
 mod calendar;
 mod authority;
@@ -20,7 +17,10 @@ mod worker_delegation;
 mod local_admin;
 mod mailbox;
 mod host_contracts;
+mod runtime_introspection;
+mod simple_surfaces;
 mod site_coherence;
+mod site_inbox;
 mod site_loop;
 mod surface_feedback;
 mod scheduler;
@@ -34,9 +34,10 @@ const MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
 struct Options {
     surface_id: String,
     site_root: PathBuf,
-    registry_path: Option<PathBuf>,
     log_root: Option<PathBuf>,
+    registry_path: Option<PathBuf>,
     native_authority: bool,
+    environment: Vec<(String, String)>,
 }
 
 fn main() {
@@ -48,11 +49,14 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let options = parse_options(env::args().skip(1).collect())?;
-    if options.native_authority && options.surface_id == "graph-mail" {
-        env::set_var("NARADA_NATIVE_GRAPH_MAIL_AUTHORITY", "1");
+    for (key, value) in &options.environment {
+        env::set_var(key, value);
     }
     if options.native_authority && options.surface_id == "calendar" {
         env::set_var("NARADA_NATIVE_GRAPH_AUTHORITY", "1");
+    }
+    if options.native_authority && options.surface_id == "graph-mail" {
+        env::set_var("NARADA_NATIVE_GRAPH_MAIL_AUTHORITY", "1");
     }
     let stdin = io::stdin();
     let mut reader = BufReader::new(stdin.lock());
@@ -82,7 +86,11 @@ fn run() -> Result<(), String> {
             }
             let length = header
                 .lines()
-                .find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length:").map(|value| value.trim().to_string()))
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(|value| value.trim().to_string())
+                })
                 .ok_or("native_surface_content_length_missing")?
                 .parse::<usize>()
                 .map_err(|_| "native_surface_content_length_invalid".to_string())?;
@@ -100,8 +108,12 @@ fn run() -> Result<(), String> {
             let encoded = serde_json::to_string(&response)
                 .map_err(|error| format!("native_surface_response_encode_failed:{error}"))?;
             if framed {
-                write!(stdout, "Content-Length: {}\r\n\r\n{encoded}", encoded.as_bytes().len())
-                    .map_err(|error| format!("native_surface_stdout_write_failed:{error}"))?;
+                write!(
+                    stdout,
+                    "Content-Length: {}\r\n\r\n{encoded}",
+                    encoded.as_bytes().len()
+                )
+                .map_err(|error| format!("native_surface_stdout_write_failed:{error}"))?;
             } else {
                 writeln!(stdout, "{encoded}")
                     .map_err(|error| format!("native_surface_stdout_write_failed:{error}"))?;
@@ -116,9 +128,10 @@ fn run() -> Result<(), String> {
 fn parse_options(args: Vec<String>) -> Result<Options, String> {
     let mut surface_id = None;
     let mut site_root = None;
-    let mut registry_path = None;
     let mut log_root = None;
+    let mut registry_path = None;
     let mut native_authority = false;
+    let mut environment = Vec::new();
     let mut index = 0;
     while index < args.len() {
         let key = args[index].as_str();
@@ -127,53 +140,210 @@ fn parse_options(args: Vec<String>) -> Result<Options, String> {
             index += 1;
             continue;
         }
-        let value = args.get(index + 1).ok_or_else(|| format!("native_surface_argument_value_required:{key}"))?;
+        let value = args
+            .get(index + 1)
+            .ok_or_else(|| format!("native_surface_argument_value_required:{key}"))?;
         match key {
             "--surface-id" => surface_id = Some(value.clone()),
             "--site-root" => site_root = Some(PathBuf::from(value)),
             "--narada-root" => site_root = Some(PathBuf::from(value)),
+            "--feedback-root" | "--output-root" | "--repo-root" | "--sop-root" => {
+                site_root = Some(PathBuf::from(value));
+            }
+            "--user-site-root" => {
+                site_root = Some(PathBuf::from(value));
+                environment.push(("NARADA_USER_SITE_ROOT".to_string(), value.clone()));
+            }
+            "--task-root" => {
+                if site_root.is_none() {
+                    site_root = Some(PathBuf::from(value));
+                }
+                environment.push(("NARADA_DELEGATED_TASK_ROOT".to_string(), value.clone()));
+            }
+            "--allowed-root" => {
+                if site_root.is_none() {
+                    site_root = Some(PathBuf::from(value));
+                }
+            }
             "--log-root" => log_root = Some(PathBuf::from(value)),
             "--registry-path" => registry_path = Some(PathBuf::from(value)),
-            "--projection-id" => { let _ = value; }
+            "--projection-id" => {
+                let _ = value;
+            }
+            "--canonical-feedback-root" => environment.push((
+                "NARADA_SURFACE_FEEDBACK_ROOT".to_string(),
+                value.clone(),
+            )),
+            "--task-lifecycle-root" => environment.push((
+                "NARADA_TASK_LIFECYCLE_ROOT".to_string(),
+                value.clone(),
+            )),
+            "--site-id" => {
+                environment.push(("NARADA_SITE_ID".to_string(), value.clone()))
+            }
+            "--owned-surface-id" => {
+                if let Some((_, owned)) = environment
+                    .iter_mut()
+                    .find(|(candidate, _)| candidate == "NARADA_OWNED_SURFACE_IDS")
+                {
+                    if !owned.is_empty() {
+                        owned.push(',');
+                    }
+                    owned.push_str(value);
+                } else {
+                    environment.push(("NARADA_OWNED_SURFACE_IDS".to_string(), value.clone()));
+                }
+            }
+            "--feedback-discovery-root" => {
+                if let Some((_, roots)) = environment
+                    .iter_mut()
+                    .find(|(candidate, _)| candidate == "NARADA_FEEDBACK_DISCOVERY_ROOTS")
+                {
+                    if !roots.is_empty() {
+                        roots.push(';');
+                    }
+                    roots.push_str(value);
+                } else {
+                    environment.push(("NARADA_FEEDBACK_DISCOVERY_ROOTS".to_string(), value.clone()));
+                }
+            }
+            "--projection" => environment.push((
+                "NARADA_NARS_SESSION_PROJECTION".to_string(),
+                value.clone(),
+            )),
+            "--source-kind" => environment.push((
+                "NARADA_NARS_SESSION_SOURCE_KIND".to_string(),
+                value.clone(),
+            )),
+            "--operator-id" => {
+                environment.push(("NARADA_OPERATOR_ID".to_string(), value.clone()))
+            }
+            "--run-root" => environment.push((
+                "NARADA_WORKER_RUN_ROOT".to_string(),
+                value.clone(),
+            )),
+            "--sops-dir" => {
+                environment.push(("NARADA_SOPS_DIR".to_string(), value.clone()))
+            }
+            "--provider-registry-path" => environment.push((
+                "NARADA_SPEECH_PROVIDER_REGISTRY_PATH".to_string(),
+                value.clone(),
+            )),
+            "--server-name" => {
+                environment.push(("NARADA_MCP_SERVER_NAME".to_string(), value.clone()))
+            }
             _ => return Err(format!("native_surface_unknown_argument:{key}")),
         }
         index += 2;
     }
     let surface_id = surface_id.ok_or("native_surface_missing_surface_id")?;
-    let site_root = site_root.unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    Ok(Options { surface_id, site_root, registry_path, log_root, native_authority })
+    let site_root =
+        site_root.unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    Ok(Options {
+        surface_id,
+        site_root,
+        log_root,
+        registry_path,
+        native_authority,
+        environment,
+    })
 }
 
 fn handle_request(request: &Value, options: &Options) -> Option<Value> {
     let object = request.as_object()?;
-    let method = object.get("method").and_then(Value::as_str).unwrap_or_default();
+    let method = object
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     if method.starts_with("notifications/") {
         return None;
     }
     let id = object.get("id").cloned().unwrap_or(Value::Null);
-    let params = object.get("params").and_then(Value::as_object).cloned().unwrap_or_default();
+    let params = object
+        .get("params")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
     let modern = is_modern_request(&params);
     let result = if modern {
         validate_modern_request(&params).and_then(|_| match method {
             "server/discover" => Ok(server_discover_result(options)),
-            "tools/list" => Ok(modern_result(json!({
-                "tools": list_tools(&options.surface_id),
-                "ttlMs": 300_000,
-                "cacheScope": "public"
-            }), options)),
+            "tools/list" => Ok(modern_result(
+                json!({
+                    "tools": list_tools(&options.surface_id),
+                    "ttlMs": 300_000,
+                    "cacheScope": "public"
+                }),
+                options,
+            )),
             "tools/call" => call_tool(&options.surface_id, &params, options)
                 .map(|value| modern_result(value, options)),
-            method if options.surface_id == "site-inbox" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => site_inbox::auxiliary(method, &params).map(|value| modern_result(value, options)),
-            method if options.surface_id == "calendar" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => calendar::auxiliary(method, &params).map(|value| modern_result(value, options)),
-            method if options.surface_id == "site-loop" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => site_loop::auxiliary(method, &params).map(|value| modern_result(value, options)),
-            method if options.surface_id == "surface-feedback" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => surface_feedback::auxiliary(method, &params).map(|value| modern_result(value, options)),
-            method if options.surface_id == "delegated-task" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => delegated_task::auxiliary(method, &params).map(|value| modern_result(value, options)),
-            method if options.surface_id == "worker-delegation" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => worker_delegation::auxiliary(method, &params).map(|value| modern_result(value, options)),
-            method if matches!(options.surface_id.as_str(), "artifacts" | "nars-session" | "quota-meter") && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => local_admin::auxiliary(&options.surface_id, method, &params).map(|value| modern_result(value, options)),
-            method if options.surface_id == "mailbox" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => mailbox::auxiliary(method, &params).map(|value| modern_result(value, options)),
-            method if options.surface_id == "scheduler" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => scheduler::auxiliary(method, &params).map(|value| modern_result(value, options)),
-            method if matches!(options.surface_id.as_str(), "browser-control" | "operator-console-overlay" | "cloudflare-carrier" | "speech" | "graph-mail") && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => host_contracts::auxiliary(&options.surface_id, method, &params).map(|value| modern_result(value, options)),
-            method if options.surface_id == "sop" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => sop::auxiliary(method, &params).map(|value| modern_result(value, options)),
+            method
+                if options.surface_id == "site-inbox"
+                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+            {
+                site_inbox::auxiliary(method, &params).map(|value| modern_result(value, options))
+            }
+            method
+                if options.surface_id == "calendar"
+                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+            {
+                calendar::auxiliary(method, &params).map(|value| modern_result(value, options))
+            }
+            method
+                if options.surface_id == "site-loop"
+                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+            {
+                site_loop::auxiliary(method, &params).map(|value| modern_result(value, options))
+            }
+            method
+                if options.surface_id == "surface-feedback"
+                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+            {
+                surface_feedback::auxiliary(method, &params).map(|value| modern_result(value, options))
+            }
+            method
+                if options.surface_id == "sop"
+                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+            {
+                sop::auxiliary(method, &params).map(|value| modern_result(value, options))
+            }
+            method
+                if options.surface_id == "delegated-task"
+                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+            {
+                delegated_task::auxiliary(method, &params).map(|value| modern_result(value, options))
+            }
+            method
+                if options.surface_id == "worker-delegation"
+                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+            {
+                worker_delegation::auxiliary(method, &params).map(|value| modern_result(value, options))
+            }
+            method
+                if matches!(options.surface_id.as_str(), "artifacts" | "nars-session" | "quota-meter")
+                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+            {
+                local_admin::auxiliary(&options.surface_id, method, &params).map(|value| modern_result(value, options))
+            }
+            method
+                if options.surface_id == "mailbox"
+                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+            {
+                mailbox::auxiliary(method, &params).map(|value| modern_result(value, options))
+            }
+            method
+                if options.surface_id == "scheduler"
+                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+            {
+                scheduler::auxiliary(method, &params).map(|value| modern_result(value, options))
+            }
+            method
+                if matches!(options.surface_id.as_str(), "browser-control" | "operator-console-overlay" | "cloudflare-carrier" | "speech" | "graph-mail")
+                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+            {
+                host_contracts::auxiliary(&options.surface_id, method, &params).map(|value| modern_result(value, options))
+            }
             "initialize" => Err(diagnostic(
                 "initialize_removed",
                 "The 2026-07-28 protocol has no initialize handshake.",
@@ -187,17 +357,72 @@ fn handle_request(request: &Value, options: &Options) -> Option<Value> {
         })
     } else {
         match method {
-            method if options.surface_id == "site-inbox" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => site_inbox::auxiliary(method, &params),
-            method if options.surface_id == "calendar" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => calendar::auxiliary(method, &params),
-            method if options.surface_id == "site-loop" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => site_loop::auxiliary(method, &params),
-            method if options.surface_id == "delegated-task" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => delegated_task::auxiliary(method, &params),
-            method if options.surface_id == "worker-delegation" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => worker_delegation::auxiliary(method, &params),
-            method if matches!(options.surface_id.as_str(), "artifacts" | "nars-session" | "quota-meter") && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => local_admin::auxiliary(&options.surface_id, method, &params),
-            method if options.surface_id == "mailbox" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => mailbox::auxiliary(method, &params),
-            method if options.surface_id == "scheduler" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => scheduler::auxiliary(method, &params),
-            method if matches!(options.surface_id.as_str(), "browser-control" | "operator-console-overlay" | "cloudflare-carrier" | "speech" | "graph-mail") && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => host_contracts::auxiliary(&options.surface_id, method, &params),
-            method if options.surface_id == "surface-feedback" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => surface_feedback::auxiliary(method, &params),
-            method if options.surface_id == "sop" && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") => sop::auxiliary(method, &params),
+            method
+                if options.surface_id == "site-inbox"
+                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+            {
+                site_inbox::auxiliary(method, &params)
+            }
+            method
+                if options.surface_id == "calendar"
+                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+            {
+                calendar::auxiliary(method, &params)
+            }
+            method
+                if options.surface_id == "site-loop"
+                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+            {
+                site_loop::auxiliary(method, &params)
+            }
+            method
+                if options.surface_id == "surface-feedback"
+                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+            {
+                surface_feedback::auxiliary(method, &params)
+            }
+            method
+                if options.surface_id == "sop"
+                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+            {
+                sop::auxiliary(method, &params)
+            }
+            method
+                if options.surface_id == "delegated-task"
+                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+            {
+                delegated_task::auxiliary(method, &params)
+            }
+            method
+                if options.surface_id == "worker-delegation"
+                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+            {
+                worker_delegation::auxiliary(method, &params)
+            }
+            method
+                if matches!(options.surface_id.as_str(), "artifacts" | "nars-session" | "quota-meter")
+                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+            {
+                local_admin::auxiliary(&options.surface_id, method, &params)
+            }
+            method
+                if options.surface_id == "mailbox"
+                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+            {
+                mailbox::auxiliary(method, &params)
+            }
+            method
+                if options.surface_id == "scheduler"
+                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+            {
+                scheduler::auxiliary(method, &params)
+            }
+            method
+                if matches!(options.surface_id.as_str(), "browser-control" | "operator-console-overlay" | "cloudflare-carrier" | "speech" | "graph-mail")
+                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+            {
+                host_contracts::auxiliary(&options.surface_id, method, &params)
+            }
             "initialize" => Ok(initialize_result(options)),
             "tools/list" => Ok(json!({ "tools": list_tools(&options.surface_id) })),
             "tools/call" => call_tool(&options.surface_id, &params, options),
@@ -215,7 +440,9 @@ fn handle_request(request: &Value, options: &Options) -> Option<Value> {
     };
     Some(match result {
         Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
-        Err(error) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32000, "message": error["message"], "data": error } }),
+        Err(error) => {
+            json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32000, "message": error["message"], "data": error } })
+        }
     })
 }
 
@@ -232,15 +459,29 @@ fn validate_modern_request(params: &Map<String, Value>) -> Result<(), Value> {
     let meta = params
         .get("_meta")
         .and_then(Value::as_object)
-        .ok_or_else(|| diagnostic("modern_metadata_required", "Modern MCP requests require _meta.", Value::Null))?;
-    if meta.get("io.modelcontextprotocol/clientInfo").and_then(Value::as_object).is_none() {
+        .ok_or_else(|| {
+            diagnostic(
+                "modern_metadata_required",
+                "Modern MCP requests require _meta.",
+                Value::Null,
+            )
+        })?;
+    if meta
+        .get("io.modelcontextprotocol/clientInfo")
+        .and_then(Value::as_object)
+        .is_none()
+    {
         return Err(diagnostic(
             "modern_metadata_required",
             "Modern MCP requests require clientInfo metadata.",
             json!({ "key": "io.modelcontextprotocol/clientInfo" }),
         ));
     }
-    if meta.get("io.modelcontextprotocol/clientCapabilities").and_then(Value::as_object).is_none() {
+    if meta
+        .get("io.modelcontextprotocol/clientCapabilities")
+        .and_then(Value::as_object)
+        .is_none()
+    {
         return Err(diagnostic(
             "modern_metadata_required",
             "Modern MCP requests require clientCapabilities metadata.",
@@ -253,9 +494,15 @@ fn validate_modern_request(params: &Map<String, Value>) -> Result<(), Value> {
 fn server_name(options: &Options) -> String {
     match options.surface_id.as_str() {
         "site-inbox" => "narada-site-inbox-mcp".to_string(),
+        "calendar" => "narada-calendar-mcp".to_string(),
+        "site-loop" => "narada-site-loop-mcp".to_string(),
+        "surface-feedback" => "surface-feedback-mcp".to_string(),
+        "sop" => "sop-mcp".to_string(),
         "delegated-task" => "delegated-task-mcp".to_string(),
         "worker-delegation" => "worker-delegation-mcp".to_string(),
         "artifacts" => "artifacts-mcp".to_string(),
+        "nars-session" => "nars-session-mcp".to_string(),
+        "quota-meter" => "quota-meter-mcp".to_string(),
         "mailbox" => "mailbox-mcp".to_string(),
         "browser-control" => "browser-control-mcp".to_string(),
         "operator-console-overlay" => "operator-console-overlay-mcp".to_string(),
@@ -263,33 +510,22 @@ fn server_name(options: &Options) -> String {
         "speech" => "speech-mcp".to_string(),
         "scheduler" => "scheduler-mcp".to_string(),
         "graph-mail" => "graph-mail-mcp".to_string(),
-        "nars-session" => "nars-session-mcp".to_string(),
-        "quota-meter" => "quota-meter-mcp".to_string(),
-        "site-loop" => "narada-site-loop-mcp".to_string(),
-        "surface-feedback" => "surface-feedback-mcp".to_string(),
-        "sop" => "sop-mcp".to_string(),
         "site-lifecycle" => "site-lifecycle-mcp".to_string(),
-        "calendar" => "narada-calendar-mcp".to_string(),
         "site-registry" => "site-registry-mcp".to_string(),
         "project-state" => "project-state-mcp".to_string(),
-        "launcher" => "launcher-mcp".to_string(),
         "runtime-introspection" => "runtime-introspection-mcp".to_string(),
         "site-coherence" => "site-coherence-mcp".to_string(),
+        "launcher" => "launcher-mcp".to_string(),
         _ => format!("{}-mcp", options.surface_id),
     }
 }
 
 fn capabilities(surface_id: &str) -> Value {
-    if surface_id == "sop" { return json!({"tools":{},"prompts":{},"completions":{},"logging":{}}); }
-    if surface_id == "delegated-task" { return json!({"tools":{},"prompts":{},"completions":{},"logging":{}}); }
-    if surface_id == "worker-delegation" { return json!({"tools":{},"prompts":{},"completions":{},"logging":{}}); }
-    if matches!(surface_id, "artifacts" | "nars-session" | "quota-meter") { return json!({"tools":{},"prompts":{},"completions":{},"logging":{}}); }
-    if surface_id == "mailbox" { return json!({"tools":{},"prompts":{},"completions":{},"logging":{}}); }
-    if matches!(surface_id, "browser-control" | "operator-console-overlay" | "cloudflare-carrier" | "speech" | "scheduler" | "graph-mail") { return json!({"tools":{},"prompts":{},"completions":{},"logging":{}}); }
-    if surface_id == "site-loop" { return json!({"tools":{},"prompts":{},"completions":{},"logging":{}}); }
-    if surface_id == "surface-feedback" { return json!({"tools":{},"prompts":{},"completions":{},"logging":{}}); }
-    if surface_id == "calendar" { return json!({"tools":{},"prompts":{},"completions":{},"logging":{}}); }
-    if surface_id == "site-inbox" { json!({"tools":{},"prompts":{},"completions":{},"logging":{}}) } else { json!({"tools":{}}) }
+    if matches!(surface_id, "site-inbox" | "calendar" | "site-loop" | "surface-feedback" | "sop" | "delegated-task" | "worker-delegation" | "artifacts" | "nars-session" | "quota-meter" | "mailbox" | "browser-control" | "operator-console-overlay" | "cloudflare-carrier" | "speech" | "scheduler" | "graph-mail") {
+        json!({"tools":{},"prompts":{},"completions":{},"logging":{}})
+    } else {
+        json!({"tools":{}})
+    }
 }
 
 fn initialize_result(options: &Options) -> Value {
@@ -301,12 +537,15 @@ fn initialize_result(options: &Options) -> Value {
 }
 
 fn server_discover_result(options: &Options) -> Value {
-    modern_result(json!({
-        "supportedVersions": [MODERN_PROTOCOL_VERSION, LEGACY_PROTOCOL_VERSION],
-        "capabilities": capabilities(&options.surface_id),
-        "ttlMs": 3_600_000,
-        "cacheScope": "public"
-    }), options)
+    modern_result(
+        json!({
+            "supportedVersions": [MODERN_PROTOCOL_VERSION, LEGACY_PROTOCOL_VERSION],
+            "capabilities": capabilities(&options.surface_id),
+            "ttlMs": 3_600_000,
+            "cacheScope": "public"
+        }),
+        options,
+    )
 }
 
 fn modern_result(value: Value, options: &Options) -> Value {
@@ -325,17 +564,17 @@ fn modern_result(value: Value, options: &Options) -> Value {
 }
 fn list_tools(surface_id: &str) -> Vec<Value> {
     match surface_id {
+        "site-inbox" => site_inbox::list_tools(),
+        "calendar" => calendar::list_tools(),
+        "site-loop" => site_loop::list_tools(),
+        "surface-feedback" => surface_feedback::list_tools(),
+        "sop" => sop::list_tools(),
         "delegated-task" => delegated_task::list_tools(),
         "worker-delegation" => worker_delegation::list_tools(),
         "artifacts" | "nars-session" | "quota-meter" => local_admin::list_tools(surface_id),
         "mailbox" => mailbox::list_tools(),
         "scheduler" => scheduler::list_tools(),
         "browser-control" | "operator-console-overlay" | "cloudflare-carrier" | "speech" | "graph-mail" => host_contracts::list_tools(surface_id),
-        "site-inbox" => site_inbox::list_tools(),
-        "calendar" => calendar::list_tools(),
-        "site-loop" => site_loop::list_tools(),
-        "surface-feedback" => surface_feedback::list_tools(),
-        "sop" => sop::list_tools(),
         "catalog-observation" => vec![
             guidance_tool("catalog-observation"),
             tool("catalog_observation_observe", "Observe a provider model catalog through the Narada-owned observation port.", json!({
@@ -368,23 +607,28 @@ fn list_tools(surface_id: &str) -> Vec<Value> {
             }), false),
         ],
         "site-lifecycle" | "site-registry" | "project-state" => simple_surfaces::list_tools(surface_id),
-        "launcher" => launcher::list_tools(),
         "runtime-introspection" => runtime_introspection::list_tools(),
         "site-coherence" => site_coherence::list_tools(),
+        "launcher" => launcher::list_tools(),
         _ => Vec::new(),
     }
 }
 
 fn guidance_tool(surface_id: &str) -> Value {
     let tool_name = surface_id.replace("-", "_") + "_guidance";
-    tool(&tool_name, &format!("Show model-facing operating guidance for {surface_id} MCP workflows."), json!({
-        "type": "object",
-        "properties": {
-            "workflow": { "type": "string", "description": "Optional workflow name or area to focus guidance on." },
-            "tool": { "type": "string", "description": "Optional tool name for tool-specific guidance." }
-        },
-        "additionalProperties": false
-    }), true)
+    tool(
+        &tool_name,
+        &format!("Show model-facing operating guidance for {surface_id} MCP workflows."),
+        json!({
+            "type": "object",
+            "properties": {
+                "workflow": { "type": "string", "description": "Optional workflow name or area to focus guidance on." },
+                "tool": { "type": "string", "description": "Optional tool name for tool-specific guidance." }
+            },
+            "additionalProperties": false
+        }),
+        true,
+    )
 }
 
 fn tool(name: &str, description: &str, input_schema: Value, read_only: bool) -> Value {
@@ -397,14 +641,34 @@ fn tool(name: &str, description: &str, input_schema: Value, read_only: bool) -> 
     })
 }
 
-fn call_tool(surface_id: &str, params: &Map<String, Value>, options: &Options) -> Result<Value, Value> {
-    let name = params.get("name").and_then(Value::as_str).ok_or_else(|| diagnostic("invalid_request", "tools/call requires a tool name.", Value::Null))?;
-    let args = params.get("arguments").and_then(Value::as_object).cloned().unwrap_or_default();
+fn call_tool(
+    surface_id: &str,
+    params: &Map<String, Value>,
+    options: &Options,
+) -> Result<Value, Value> {
+    let name = params.get("name").and_then(Value::as_str).ok_or_else(|| {
+        diagnostic(
+            "invalid_request",
+            "tools/call requires a tool name.",
+            Value::Null,
+        )
+    })?;
+    let args = params
+        .get("arguments")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
     let result = match (surface_id, name) {
         ("catalog-observation", "catalog_observation_guidance") => catalog_guidance(&args),
         ("catalog-observation", "catalog_observation_observe") => catalog_observation(&args),
         ("operator-routing", "operator_routing_guidance") => operator_guidance(&args),
         ("operator-routing", "operator_route_doctor") => operator_route_doctor(options),
+        ("operator-routing", "operator_route_request") => operator_route_request(&args, options),
+        ("site-inbox", name) => site_inbox::call_tool(name, &args, &options.site_root),
+        ("calendar", name) => calendar::call_tool(name, &args, &options.site_root),
+        ("site-loop", name) => site_loop::call_tool(name, &args, &options.site_root),
+        ("surface-feedback", name) => surface_feedback::call_tool(name, &args, &options.site_root),
+        ("sop", name) => sop::call_tool(name, &args, &options.site_root),
         ("delegated-task", name) => delegated_task::call_tool(name, &args, &options.site_root),
         ("worker-delegation", name) => worker_delegation::call_tool(name, &args, &options.site_root),
         ("artifacts", name) | ("nars-session", name) | ("quota-meter", name) => local_admin::call_tool(surface_id, name, &args, &options.site_root),
@@ -412,19 +676,26 @@ fn call_tool(surface_id: &str, params: &Map<String, Value>, options: &Options) -
         ("graph-mail", name) if graph_mail_authority::enabled() && graph_mail_authority::supports(name) => graph_mail_authority::call_tool(name, &args, &options.site_root),
         ("scheduler", name) => scheduler::call_tool(name, &args, &options.site_root),
         ("browser-control", name) | ("operator-console-overlay", name) | ("cloudflare-carrier", name) | ("speech", name) | ("graph-mail", name) => host_contracts::call_tool(surface_id, name, &args, &options.site_root),
-        ("operator-routing", "operator_route_request") => operator_route_request(&args, options),
-        ("site-inbox", name) => site_inbox::call_tool(name, &args, &options.site_root),
-        ("calendar", name) => calendar::call_tool(name, &args, &options.site_root),
-        ("site-loop", name) => site_loop::call_tool(name, &args, &options.site_root),
-        ("surface-feedback", name) => surface_feedback::call_tool(name, &args, &options.site_root),
-        ("sop", name) => sop::call_tool(name, &args, &options.site_root),
         ("site-lifecycle", name) | ("site-registry", name) | ("project-state", name) => {
             simple_surfaces::call_tool(surface_id, name, &args, &options.site_root)
         }
-        ("runtime-introspection", name) => runtime_introspection::call_tool(name, &args, &options.site_root),
-        ("launcher", name) => launcher::call_tool(name, &args, &options.site_root, options.registry_path.as_deref()),
+        ("runtime-introspection", name) => {
+            runtime_introspection::call_tool(name, &args, &options.site_root)
+        }
         ("site-coherence", name) => site_coherence::call_tool(name, &args, &options.site_root),
-        (_, unknown) => return Err(diagnostic("unknown_tool", &format!("unknown_tool:{unknown}"), json!({ "tool_name": unknown }))),
+        ("launcher", name) => launcher::call_tool(
+            name,
+            &args,
+            &options.site_root,
+            options.registry_path.as_deref(),
+        ),
+        (_, unknown) => {
+            return Err(diagnostic(
+                "unknown_tool",
+                &format!("unknown_tool:{unknown}"),
+                json!({ "tool_name": unknown }),
+            ))
+        }
     }?;
     let is_error = result.get("status").and_then(Value::as_str) == Some("unavailable");
     let mut response = json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string()) }], "structuredContent": result });
@@ -447,12 +718,23 @@ fn catalog_guidance(_args: &Map<String, Value>) -> Result<Value, Value> {
 fn catalog_observation(args: &Map<String, Value>) -> Result<Value, Value> {
     let provider_id = required_string(args, "provider_id")?;
     let observed_at = required_string(args, "observed_at")?;
-    let access_mode = args.get("access_mode").and_then(Value::as_str).unwrap_or("public");
+    let access_mode = args
+        .get("access_mode")
+        .and_then(Value::as_str)
+        .unwrap_or("public");
     if !matches!(access_mode, "public" | "credentialed" | "operator_attested") {
-        return Err(diagnostic("invalid_request", "access_mode must be public, credentialed, or operator_attested.", Value::Null));
+        return Err(diagnostic(
+            "invalid_request",
+            "access_mode must be public, credentialed, or operator_attested.",
+            Value::Null,
+        ));
     }
     if OffsetDateTime::parse(&observed_at, &Rfc3339).is_err() {
-        return Err(diagnostic("invalid_request", "observed_at must be an explicit ISO instant.", Value::Null));
+        return Err(diagnostic(
+            "invalid_request",
+            "observed_at must be an explicit ISO instant.",
+            Value::Null,
+        ));
     }
     Ok(json!({
         "schema": "narada.invokable-intelligence.catalog-observation.v1",
@@ -470,8 +752,14 @@ fn catalog_observation(args: &Map<String, Value>) -> Result<Value, Value> {
 }
 
 fn operator_guidance(args: &Map<String, Value>) -> Result<Value, Value> {
-    let workflow = args.get("workflow").and_then(Value::as_str).filter(|v| !v.trim().is_empty());
-    let tool = args.get("tool").and_then(Value::as_str).filter(|v| !v.trim().is_empty());
+    let workflow = args
+        .get("workflow")
+        .and_then(Value::as_str)
+        .filter(|v| !v.trim().is_empty());
+    let tool = args
+        .get("tool")
+        .and_then(Value::as_str)
+        .filter(|v| !v.trim().is_empty());
     Ok(json!({
         "schema": "narada.mcp_surface.guidance.v0",
         "status": "ok",
@@ -502,21 +790,42 @@ fn operator_route_request(args: &Map<String, Value>, options: &Options) -> Resul
     let target_identity = optional_string(args, "target_identity");
     let intent_kind = optional_string(args, "intent_kind");
     let speaker_agent_id = optional_string(args, "speaker_agent_id");
-    let allow_inbox_fallback = args.get("allow_inbox_fallback").and_then(Value::as_bool).unwrap_or(true);
-    let request_id = optional_string(args, "request_id").unwrap_or_else(|| format!("route_{}_{}", compact_timestamp(), &Uuid::new_v4().to_string()[..8]));
+    let allow_inbox_fallback = args
+        .get("allow_inbox_fallback")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let request_id = optional_string(args, "request_id").unwrap_or_else(|| {
+        format!(
+            "route_{}_{}",
+            compact_timestamp(),
+            &Uuid::new_v4().to_string()[..8]
+        )
+    });
     let recorded_at = now_iso();
-    let spoken_text = if allow_inbox_fallback { "Request recorded. Direct delivery to that runtime is not available from this surface. I can route it through the admitted inbox path." } else { "Request recorded. Direct delivery to that runtime is not available from this surface, and no fallback path was enabled." };
-    let route_kind = if allow_inbox_fallback { "inbox_fallback_draft" } else { "unroutable" };
-    let inbox_envelope = if allow_inbox_fallback { Some(json!({
-        "kind": "command_request",
-        "title": target_identity.as_ref().map(|id| format!("Route request for {id}")).unwrap_or_else(|| format!("Route request for {target_runtime}")),
-        "summary": transcript.chars().take(240).collect::<String>(),
-        "principal": speaker_agent_id,
-        "target_role": Value::Null,
-        "severity": 35,
-        "authority_level": "operator_confirmed",
-        "payload": { "request_id": request_id, "recorded_at": recorded_at, "transcript": transcript, "target_runtime": target_runtime, "target_identity": target_identity, "intent_kind": intent_kind, "speaker_agent_id": speaker_agent_id, "spoken_acknowledgement": spoken_text, "suggested_delivery_channel": "site-inbox" }
-    })) } else { None };
+    let spoken_text = if allow_inbox_fallback {
+        "Request recorded. Direct delivery to that runtime is not available from this surface. I can route it through the admitted inbox path."
+    } else {
+        "Request recorded. Direct delivery to that runtime is not available from this surface, and no fallback path was enabled."
+    };
+    let route_kind = if allow_inbox_fallback {
+        "inbox_fallback_draft"
+    } else {
+        "unroutable"
+    };
+    let inbox_envelope = if allow_inbox_fallback {
+        Some(json!({
+            "kind": "command_request",
+            "title": target_identity.as_ref().map(|id| format!("Route request for {id}")).unwrap_or_else(|| format!("Route request for {target_runtime}")),
+            "summary": transcript.chars().take(240).collect::<String>(),
+            "principal": speaker_agent_id,
+            "target_role": Value::Null,
+            "severity": 35,
+            "authority_level": "operator_confirmed",
+            "payload": { "request_id": request_id, "recorded_at": recorded_at, "transcript": transcript, "target_runtime": target_runtime, "target_identity": target_identity, "intent_kind": intent_kind, "speaker_agent_id": speaker_agent_id, "spoken_acknowledgement": spoken_text, "suggested_delivery_channel": "site-inbox" }
+        }))
+    } else {
+        None
+    };
     let route_record = json!({
         "schema": "narada.operator_routing.route_request.v1",
         "status": if allow_inbox_fallback { "drafted_for_site_inbox" } else { "unroutable" },
@@ -536,42 +845,97 @@ fn operator_route_request(args: &Map<String, Value>, options: &Options) -> Resul
     });
     let log_path = append_route_record(&route_record, options)?;
     let mut result = route_record.as_object().cloned().unwrap_or_default();
-    result.insert("log_path".to_string(), Value::String(log_path.to_string_lossy().to_string()));
+    result.insert(
+        "log_path".to_string(),
+        Value::String(log_path.to_string_lossy().to_string()),
+    );
     Ok(Value::Object(result))
 }
 
 fn append_route_record(record: &Value, options: &Options) -> Result<PathBuf, Value> {
-    let root = options.log_root.clone().unwrap_or_else(|| options.site_root.join(".narada").join("runtime").join("operator-routing"));
-    create_dir_all(&root).map_err(|error| diagnostic("operator_route_log_create_failed", &error.to_string(), Value::Null))?;
+    let root = options.log_root.clone().unwrap_or_else(|| {
+        options
+            .site_root
+            .join(".narada")
+            .join("runtime")
+            .join("operator-routing")
+    });
+    create_dir_all(&root).map_err(|error| {
+        diagnostic(
+            "operator_route_log_create_failed",
+            &error.to_string(),
+            Value::Null,
+        )
+    })?;
     let path = root.join("operator-routing-log.jsonl");
-    let mut file = OpenOptions::new().create(true).append(true).open(&path).map_err(|error| diagnostic("operator_route_log_open_failed", &error.to_string(), Value::Null))?;
-    let line = serde_json::to_string(record).map_err(|error| diagnostic("operator_route_log_encode_failed", &error.to_string(), Value::Null))?;
-    writeln!(file, "{line}").map_err(|error| diagnostic("operator_route_log_write_failed", &error.to_string(), Value::Null))?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|error| {
+            diagnostic(
+                "operator_route_log_open_failed",
+                &error.to_string(),
+                Value::Null,
+            )
+        })?;
+    let line = serde_json::to_string(record).map_err(|error| {
+        diagnostic(
+            "operator_route_log_encode_failed",
+            &error.to_string(),
+            Value::Null,
+        )
+    })?;
+    writeln!(file, "{line}").map_err(|error| {
+        diagnostic(
+            "operator_route_log_write_failed",
+            &error.to_string(),
+            Value::Null,
+        )
+    })?;
     Ok(path)
 }
 
 fn required_string(args: &Map<String, Value>, key: &str) -> Result<String, Value> {
-    optional_string(args, key).ok_or_else(|| diagnostic("required_argument_missing", &format!("required_argument_missing:{key}"), json!({ "key": key })))
+    optional_string(args, key).ok_or_else(|| {
+        diagnostic(
+            "required_argument_missing",
+            &format!("required_argument_missing:{key}"),
+            json!({ "key": key }),
+        )
+    })
 }
 
 fn optional_string(args: &Map<String, Value>, key: &str) -> Option<String> {
-    args.get(key).and_then(Value::as_str).map(str::trim).filter(|value| !value.is_empty()).map(ToString::to_string)
+    args.get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
 }
 
 fn diagnostic(code: &str, message: &str, details: Value) -> Value {
     let mut object = Map::new();
     object.insert("code".to_string(), Value::String(code.to_string()));
     object.insert("message".to_string(), Value::String(message.to_string()));
-    if !details.is_null() { object.insert("details".to_string(), details); }
+    if !details.is_null() {
+        object.insert("details".to_string(), details);
+    }
     Value::Object(object)
 }
 
 fn now_iso() -> String {
-    OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339).unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
+    OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
 }
 
 fn compact_timestamp() -> String {
-    now_iso().replace(['-', ':', '.'], "").chars().take(15).collect()
+    now_iso()
+        .replace(['-', ':', '.'], "")
+        .chars()
+        .take(15)
+        .collect()
 }
 
 #[cfg(test)]
@@ -582,10 +946,97 @@ mod tests {
         Options {
             surface_id: "catalog-observation".to_string(),
             site_root: PathBuf::from("."),
-            registry_path: None,
             log_root: None,
+            registry_path: None,
             native_authority: false,
+            environment: Vec::new(),
         }
+    }
+
+    fn parsed_options(args: &[&str]) -> Options {
+        parse_options(args.iter().map(|value| (*value).to_string()).collect())
+            .expect("registrar arguments should parse")
+    }
+
+    fn environment_value<'a>(options: &'a Options, key: &str) -> Option<&'a str> {
+        options
+            .environment
+            .iter()
+            .rev()
+            .find(|(candidate, _)| candidate == key)
+            .map(|(_, value)| value.as_str())
+    }
+
+    #[test]
+    fn registrar_native_surface_argument_profiles_are_launchable() {
+        let delegated = parsed_options(&[
+            "--surface-id", "delegated-task", "--site-root", "site", "--task-root",
+            "task", "--allowed-root", "site",
+        ]);
+        assert_eq!(delegated.site_root, PathBuf::from("site"));
+        assert_eq!(environment_value(&delegated, "NARADA_DELEGATED_TASK_ROOT"), Some("task"));
+
+        let nars = parsed_options(&[
+            "--surface-id", "nars-session", "--projection", "user-site-operator",
+            "--user-site-root", "user-site", "--source-kind", "operator",
+            "--operator-id", "andrey",
+        ]);
+        assert_eq!(nars.site_root, PathBuf::from("user-site"));
+        assert_eq!(environment_value(&nars, "NARADA_NARS_SESSION_PROJECTION"), Some("user-site-operator"));
+        assert_eq!(environment_value(&nars, "NARADA_USER_SITE_ROOT"), Some("user-site"));
+
+        let scheduler = parsed_options(&[
+            "--surface-id", "scheduler", "--allowed-root", "site",
+        ]);
+        assert_eq!(scheduler.site_root, PathBuf::from("site"));
+
+        let coherence = parsed_options(&[
+            "--surface-id", "site-coherence", "--repo-root", "repo",
+        ]);
+        assert_eq!(coherence.site_root, PathBuf::from("repo"));
+
+        let sop = parsed_options(&[
+            "--surface-id", "sop", "--sop-root", "site", "--server-name", "site-sop",
+            "--sops-dir", "site/.narada/sops",
+        ]);
+        assert_eq!(sop.site_root, PathBuf::from("site"));
+        assert_eq!(environment_value(&sop, "NARADA_SOPS_DIR"), Some("site/.narada/sops"));
+
+        let speech = parsed_options(&[
+            "--surface-id", "speech", "--provider-registry-path", "providers.json",
+        ]);
+        assert_eq!(environment_value(&speech, "NARADA_SPEECH_PROVIDER_REGISTRY_PATH"), Some("providers.json"));
+
+        let feedback = parsed_options(&[
+            "--surface-id", "surface-feedback", "--feedback-root", "feedback",
+            "--canonical-feedback-root", "canonical", "--task-lifecycle-root", "site",
+            "--site-id", "andrey-user", "--owned-surface-id", "calendar",
+            "--owned-surface-id", "site-loop",
+        ]);
+        assert_eq!(feedback.site_root, PathBuf::from("feedback"));
+        assert_eq!(environment_value(&feedback, "NARADA_SURFACE_FEEDBACK_ROOT"), Some("canonical"));
+        assert_eq!(environment_value(&feedback, "NARADA_TASK_LIFECYCLE_ROOT"), Some("site"));
+        assert_eq!(environment_value(&feedback, "NARADA_SITE_ID"), Some("andrey-user"));
+        assert_eq!(environment_value(&feedback, "NARADA_OWNED_SURFACE_IDS"), Some("calendar,site-loop"));
+
+        let worker = parsed_options(&[
+            "--surface-id", "worker-delegation", "--site-root", "site", "--allowed-root",
+            "site", "--run-root", "site/.narada/runtime/worker-delegation",
+        ]);
+        assert_eq!(worker.site_root, PathBuf::from("site"));
+        assert_eq!(environment_value(&worker, "NARADA_WORKER_RUN_ROOT"), Some("site/.narada/runtime/worker-delegation"));
+    }
+
+    #[test]
+    fn unrecognized_native_surface_arguments_still_refuse() {
+        let error = parse_options(vec![
+            "--surface-id".to_string(),
+            "scheduler".to_string(),
+            "--not-a-registrar-argument".to_string(),
+            "value".to_string(),
+        ])
+        .expect_err("unknown arguments must refuse");
+        assert_eq!(error, "native_surface_unknown_argument:--not-a-registrar-argument");
     }
 
     #[test]
@@ -594,7 +1045,10 @@ mod tests {
             &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}),
             &test_options(),
         ).expect("response");
-        assert_eq!(response["result"]["protocolVersion"], LEGACY_PROTOCOL_VERSION);
+        assert_eq!(
+            response["result"]["protocolVersion"],
+            LEGACY_PROTOCOL_VERSION
+        );
         assert!(response["result"]["resultType"].is_null());
     }
 
@@ -606,7 +1060,10 @@ mod tests {
         ).expect("response");
         assert_eq!(response["result"]["resultType"], "complete");
         assert_eq!(response["result"]["cacheScope"], "public");
-        assert_eq!(response["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"], "catalog-observation-mcp");
+        assert_eq!(
+            response["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+            "catalog-observation-mcp"
+        );
     }
 
     #[test]
@@ -616,13 +1073,26 @@ mod tests {
             .iter()
             .filter_map(|tool| tool.get("name").and_then(Value::as_str))
             .collect::<Vec<_>>();
-        assert_eq!(catalog_names, vec!["catalog_observation_guidance", "catalog_observation_observe"]);
+        assert_eq!(
+            catalog_names,
+            vec![
+                "catalog_observation_guidance",
+                "catalog_observation_observe"
+            ]
+        );
         let routing_tools = list_tools("operator-routing");
         let routing_names = routing_tools
             .iter()
             .filter_map(|tool| tool.get("name").and_then(Value::as_str))
             .collect::<Vec<_>>();
-        assert_eq!(routing_names, vec!["operator_routing_guidance", "operator_route_doctor", "operator_route_request"]);
+        assert_eq!(
+            routing_names,
+            vec![
+                "operator_routing_guidance",
+                "operator_route_doctor",
+                "operator_route_request"
+            ]
+        );
         let launcher_tools = list_tools("launcher");
         let launcher_names = launcher_tools
             .iter()
@@ -674,12 +1144,18 @@ mod tests {
         let options = Options {
             surface_id: "operator-routing".to_string(),
             site_root: root.clone(),
-            registry_path: None,
             log_root: Some(root.join("log")),
+            registry_path: None,
             native_authority: false,
+            environment: Vec::new(),
         };
         let params = json!({"name":"operator_route_request","arguments":{"transcript":"route this","target_runtime":"codex","request_id":"route-test"}});
-        let result = call_tool("operator-routing", params.as_object().expect("params"), &options).expect("route");
+        let result = call_tool(
+            "operator-routing",
+            params.as_object().expect("params"),
+            &options,
+        )
+        .expect("route");
         assert_eq!(result["structuredContent"]["request_id"], "route-test");
         let log = root.join("log").join("operator-routing-log.jsonl");
         assert!(log.exists());
@@ -689,11 +1165,13 @@ mod tests {
     }
     #[test]
     fn modern_tools_list_requires_metadata_and_has_cache_metadata() {
-        let response = handle_request(            &json!({"jsonrpc":"2.0","id":3,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":MODERN_PROTOCOL_VERSION,"io.modelcontextprotocol/clientInfo":{"name":"test","version":"1"},"io.modelcontextprotocol/clientCapabilities":{}}}}),
+        let response = handle_request(
+            &json!({"jsonrpc":"2.0","id":3,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":MODERN_PROTOCOL_VERSION,"io.modelcontextprotocol/clientInfo":{"name":"test","version":"1"},"io.modelcontextprotocol/clientCapabilities":{}}}}),
             &test_options(),
         ).expect("response");
         assert_eq!(response["result"]["resultType"], "complete");
         assert_eq!(response["result"]["cacheScope"], "public");
         assert!(response["result"]["ttlMs"].as_u64().unwrap_or(0) > 0);
     }
-}
+
+}

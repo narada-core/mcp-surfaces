@@ -5,8 +5,9 @@ import { createHash } from 'node:crypto';
 import { DatabaseSync } from '@narada-core/sqlite';
 import { spawn } from 'node:child_process';
 import { payloadShow } from '@narada-core/mcp-transport';
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { defineNativeSurface, surfaceDescriptorDigest, surfaceExecutionDeclaration, surfaceToolContractDigest, type DefinedSurface, type McpToolDefinition, type SurfaceDescriptorV2, type SurfaceExecutionDeclaration } from '@narada-core/mcp-fabric-contracts';
 import {
@@ -45,6 +46,7 @@ export type McpSurfaceProjection = {
   id: string;
   injection_scope: McpInjectionScope;
   execution: SurfaceExecutionDeclaration;
+  exposed_tools?: string[];
   command?: string;
   default_injection?: McpDefaultInjection;
   restart_owner?: McpRestartOwner;
@@ -345,10 +347,83 @@ function selectedSurfaceRuntimeEngine(surfaceId: string, explicitImplementation?
 }
 
 
+function executableEngine(path: string): 'bun' | 'node' | null {
+  const name = basename(path).toLowerCase();
+  if (name === 'bun' || name === 'bun.exe') return 'bun';
+  if (name === 'node' || name === 'node.exe') return 'node';
+  return null;
+}
+
+function runtimeExecutableCandidate(candidate: string, engine: 'bun' | 'node'): string | null {
+  const normalized = resolve(candidate);
+  const name = basename(normalized).toLowerCase();
+  const expected = engine === 'bun' ? ['bun', 'bun.exe'] : ['node', 'node.exe'];
+  if (!isAbsolute(normalized) || !expected.includes(name) || !existsSync(normalized)) return null;
+  return portablePathLiteral(normalized);
+}
+
+function executablePathCandidates(engine: 'bun' | 'node'): string[] {
+  const overrideName = engine === 'bun' ? 'NARADA_BUN_EXECUTABLE' : 'NARADA_NODE_EXECUTABLE';
+  const override = process.env[overrideName]?.trim();
+  if (override) {
+    const candidate = runtimeExecutableCandidate(override, engine);
+    if (!candidate) {
+      throw diagnosticError(
+        'registrar_runtime_executable_unresolved',
+        `registrar_runtime_executable_unresolved:${engine}`,
+        {
+          runtime_engine_kind: engine,
+          override_environment_variable: overrideName,
+          invalid_override: override,
+          remediation: `Set ${overrideName} to an existing absolute ${engine} executable. Wrapper scripts (.cmd/.bat) are not valid for shell-free spawning.`,
+        },
+      );
+    }
+    return [candidate];
+  }
+
+  const candidates: string[] = [];
+  if (executableEngine(process.execPath) === engine) candidates.push(process.execPath);
+  const executableNames = process.platform === 'win32' ? [`${engine}.exe`, engine] : [engine];
+  for (const rawDirectory of (process.env.PATH ?? '').split(delimiter)) {
+    const directory = rawDirectory.trim().replace(/^"|"$/g, '');
+    if (!directory) continue;
+    for (const name of executableNames) candidates.push(join(directory, name));
+  }
+  if (engine === 'bun') {
+    candidates.push(join(homedir(), '.bun', 'bin', process.platform === 'win32' ? 'bun.exe' : 'bun'));
+  } else if (process.platform === 'win32') {
+    const programFiles = process.env.ProgramFiles ?? 'C:\\Program Files';
+    const programFilesX86 = process.env['PROGRAMFILES(X86)'] ?? 'C:\\Program Files (x86)';
+    candidates.push(join(programFiles, 'nodejs', 'node.exe'));
+    candidates.push(join(programFilesX86, 'nodejs', 'node.exe'));
+  }
+  return [...new Set(candidates.map((candidate) => runtimeExecutableCandidate(candidate, engine)).filter((candidate): candidate is string => candidate !== null))];
+}
+
 function javascriptRuntimeCommand(engine: RuntimeEngineKind): string {
-  if (engine === 'bun') return 'bun';
-  if (engine === 'node') return 'node';
-  throw diagnosticError('registrar_native_surface_command_required', `registrar_native_surface_command_required:${engine}`);
+  if (engine !== 'bun' && engine !== 'node') {
+    throw diagnosticError('registrar_native_surface_command_required', `registrar_native_surface_command_required:${engine}`);
+  }
+  const executable = executablePathCandidates(engine)[0];
+  if (executable) return executable;
+  const overrideName = engine === 'bun' ? 'NARADA_BUN_EXECUTABLE' : 'NARADA_NODE_EXECUTABLE';
+  throw diagnosticError(
+    'registrar_runtime_executable_unresolved',
+    `registrar_runtime_executable_unresolved:${engine}`,
+    {
+      runtime_engine_kind: engine,
+      override_environment_variable: overrideName,
+      remediation: `Install ${engine} or set ${overrideName} to an existing absolute executable. Generated carrier and Site launches never depend on PATH.`,
+    },
+  );
+}
+
+function materializedExecutableCommand(command: string): string {
+  if (isAbsolute(command)) return portablePathLiteral(command);
+  const engine = executableEngine(command);
+  if (engine) return javascriptRuntimeCommand(engine);
+  return command;
 }
 
 function runtimeProxyImplementationForResolvedPlan(plan: RuntimeMaterializationPlan): RuntimeProxyImplementation {
@@ -413,6 +488,7 @@ function nativeProjectionToRegistrarProjection(
     id: projection.id,
     injection_scope: projection.injection_scope,
     execution: surfaceExecutionDeclaration(projection.execution),
+    exposed_tools: projection.exposed_tools,
     default_injection: projection.default_injection === 'enabled'
       ? projection.injection_scope === 'host' ? 'all_carrier_sessions' : 'all_site_bound_sessions'
       : projection.runtime_requirements.length > 0 ? 'runtime_selected_sessions' : undefined,
@@ -436,7 +512,7 @@ const SURFACE_OUTPUT_READER_CLOSURES: Readonly<Record<string, Record<string, str
   'graph-mail': { graph_mail_query: 'graph_mail_output_show', graph_mail_message_show: 'graph_mail_output_show' },
   calendar: { calendar_list: 'calendar_output_show', calendar_event_query: 'calendar_output_show', calendar_event_show: 'calendar_output_show' },
   'site-loop': { site_loop_guidance: 'site_loop_output_show' },
-  'agent-context': { agent_context_hydrate_current: 'mcp_output_show', agent_context_startup_sequence: 'mcp_output_show' },
+  'agent-context': { agent_orientation_read: 'mcp_output_show' },
 };
 
 function nativeSurfaceToRegistrarRecord(native: DefinedSurface): RegistrarSurfaceRecord {
@@ -454,7 +530,7 @@ function nativeSurfaceToRegistrarRecord(native: DefinedSurface): RegistrarSurfac
     entrypoint: first.entrypoint,
     kind: 'mcp_surface',
     args: (first.args ?? []).map(nativeEntrypoint),
-    tools: descriptor.tools.map((tool) => tool.name),
+    tools: descriptor.projections[0]?.exposed_tools ?? descriptor.tools.map((tool) => tool.name),
     output_reader_closure: SURFACE_OUTPUT_READER_CLOSURES[descriptor.surface_id],
     projections,
     ...(singleProjection
@@ -1252,14 +1328,31 @@ function lookupSurface(surfaceId: string): RegistrarSurfaceRecord {
   return surface;
 }
 
+export function canonicalSiteIdForRoot(siteRoot: string, fallbackSiteId: string): string {
+  for (const manifestPath of [join(siteRoot, '.narada', 'site.json'), join(siteRoot, 'site.json')]) {
+    const manifest = readJsonFile(manifestPath);
+    const manifestSiteId = optionalString(manifest?.site_id);
+    if (manifestSiteId) return manifestSiteId;
+  }
+  return fallbackSiteId;
+}
+
 function lookupSite(siteId: string): SiteDef {
   assertCanonicalSiteId(siteId);
   const catalog = readSiteRegistryCatalog();
   const candidates = catalog.status === 'ready' ? catalog.items : KNOWN_SITES;
-  const direct = candidates.find((site) => site.site_id === siteId);
-  if (direct) return direct;
+  for (const candidate of candidates) {
+    const canonicalSiteId = canonicalSiteIdForRoot(candidate.root, candidate.site_id);
+    if (
+      candidate.site_id === siteId
+      || canonicalSiteId === siteId
+      || `narada-${canonicalSiteId}` === siteId
+    ) {
+      return { ...candidate, site_id: canonicalSiteId };
+    }
+  }
   throw diagnosticError('registrar_unknown_site', `registrar_unknown_site:${siteId}`, {
-    known: candidates.map((site) => site.site_id),
+    known: candidates.map((site) => canonicalSiteIdForRoot(site.root, site.site_id)),
   });
 }
 
@@ -1401,6 +1494,7 @@ function surfaceProjections(surface: RegistrarSurfaceRecord): McpSurfaceProjecti
     id: projection.id,
     injection_scope: projection.injection_scope,
     execution: surfaceExecutionDeclaration(projection.execution),
+    exposed_tools: projection.exposed_tools,
     default_injection: projection.default_injection === 'enabled'
       ? projection.injection_scope === 'host' ? 'all_carrier_sessions' : 'all_site_bound_sessions'
       : projection.runtime_requirements.length > 0 ? 'runtime_selected_sessions' : undefined,
@@ -1500,6 +1594,7 @@ function projectionMetadata(surfaceId: string, projectionId?: string, runtimeKin
     injection_scope: projection.injection_scope,
     ...(projection.default_injection ? { default_injection: projection.default_injection } : {}),
     runtime_requirements: projection.runtime_requirements ?? [],
+    exposed_tools: projection.exposed_tools ?? nativeToolNames(surfaceId),
     execution: projection.execution,
     ...(runtimeKind ? { runtime_kind: runtimeKind } : {}),
     descriptor_digest: surfaceDescriptorDigest(descriptor),
@@ -1507,6 +1602,15 @@ function projectionMetadata(surfaceId: string, projectionId?: string, runtimeKin
     surface_descriptor: descriptor,
     lifecycle: descriptor.projections.find((candidate) => candidate.id === projection.id)?.lifecycle,
   };
+}
+
+function nativeProjectionToolNames(
+  surfaceId: string,
+  projectionId?: string,
+  runtimeKind?: McpRuntimeKind,
+): string[] {
+  const { projection } = selectSurfaceProjection(surfaceId, projectionId, runtimeKind);
+  return projection.exposed_tools ?? nativeToolNames(surfaceId);
 }
 
 function injectionScopeForSurface(surfaceId: string, projectionId?: string): McpInjectionScope {
@@ -1649,7 +1753,19 @@ function writeSiteSurfaceRegistriesForCarrier(carrier: CarrierDef): JsonRecord[]
   for (const binding of carrier.site_bindings) {
     if (seen.has(binding.site_id)) continue;
     seen.add(binding.site_id);
-    results.push(writeSiteSurfaceRegistry(lookupSite(binding.site_id)));
+    const site = lookupSite(binding.site_id);
+    const siteFabricRefresh = refreshRegistrarOwnedSiteFabric(site);
+    if (siteFabricRefresh.status === 'error') {
+      throw diagnosticError(
+        'registrar_site_fabric_refresh_failed',
+        `registrar_site_fabric_refresh_failed:${binding.site_id}`,
+        { site_id: binding.site_id, site_fabric_refresh: siteFabricRefresh },
+      );
+    }
+    results.push({
+      ...writeSiteSurfaceRegistry(site),
+      site_fabric_refresh: siteFabricRefresh,
+    });
   }
   return results;
 }
@@ -1884,6 +2000,47 @@ type CarrierLaunchCommand = {
   child_args: string[];
 };
 
+function nativeSharedSurfaceArgs(
+  server: MaterializedServer,
+  surfaceId: string,
+  nativeAuthority: boolean,
+): string[] {
+  const result = ['--surface-id', surfaceId, ...(nativeAuthority ? ['--native-authority'] : [])];
+  const rootArguments = new Set([
+    '--site-root', '--narada-root', '--feedback-root', '--output-root', '--user-site-root',
+    '--repo-root', '--sop-root', '--task-root', '--allowed-root',
+  ]);
+  const forwardedArguments = new Set([
+    '--log-root', '--registry-path', '--projection-id', '--canonical-feedback-root',
+    '--task-lifecycle-root', '--feedback-discovery-root', '--site-id', '--owned-surface-id',
+    '--projection', '--source-kind', '--operator-id', '--run-root', '--sops-dir',
+    '--provider-registry-path', '--server-name',
+  ]);
+  let hasSiteRoot = false;
+  for (let index = 0; index < server.args.length; index += 1) {
+    const key = server.args[index];
+    if (!key.startsWith('--')) continue;
+    const value = server.args[index + 1];
+    if (value === undefined || value.startsWith('--')) continue;
+    index += 1;
+    if (rootArguments.has(key)) {
+      result.push(key, value);
+      hasSiteRoot = true;
+      continue;
+    }
+    if (forwardedArguments.has(key)) {
+      result.push(key, value);
+    }
+  }
+  if (!hasSiteRoot) {
+    const locus = server.mutation_locus;
+    if ((locus.kind === 'local_site' || locus.kind === 'user_site') && locus.site_root) {
+      result.push('--site-root', locus.site_root);
+    }
+  }
+  return result;
+}
+
 function carrierLaunchCommand(
   server: MaterializedServer,
   surfaceId: string,
@@ -1944,7 +2101,9 @@ function carrierLaunchCommand(
   const effectiveChildEntrypoint = useNativeLoader ? MCP_NATIVE_MCP_LOADER_ENTRYPOINT : nativeApplet ? nativeRuntimeProxyEntrypoint() : useNativeLifecycle ? nativeLifecycleEntrypoint : useNativeSharedSurface ? nativeSharedSurfaceEntrypoint : childEntrypoint;
   const sidecarPath = configPath ? materializationSidecarPath(configPath) : null;
   const nativeAuthority = useNativeSharedSurface && (surfaceId === 'calendar' || surfaceId === 'graph-mail');
-  const effectiveChildArgs = useNativeSharedSurface ? ['--surface-id', surfaceId, ...(nativeAuthority ? ['--native-authority'] : []), ...childArgs] : childArgs;
+  const effectiveChildArgs = useNativeSharedSurface
+    ? nativeSharedSurfaceArgs(server, surfaceId, nativeAuthority)
+    : childArgs;
   const childInvocationKind = useNativeLoader || useNativeLifecycle || useNativeSharedSurface ? 'native_entrypoint' : nativeApplet ? 'native_applet' : null;
   if (server.kind === 'local' && !useNativeLoader && !nativeApplet && !useNativeLifecycle && !useNativeSharedSurface) {
     return {
@@ -1955,7 +2114,7 @@ function carrierLaunchCommand(
       runtime_engine_kind: selectedEngine,
       component_kind: componentKind,
       child_entrypoint: childEntrypoint,
-      child_args: childArgs,
+      child_args: effectiveChildArgs,
     };
   }
   const proxyImplementation = proxyImplementationOverride ?? runtimeProxyImplementationForResolvedPlan(plan);
@@ -2392,6 +2551,65 @@ function writeFileAtomic(path: string, content: string): void {
   }
 }
 
+type TransactionalFile = {
+  path: string;
+  content: string;
+};
+
+type FileSnapshot = {
+  path: string;
+  kind: 'missing' | 'file' | 'other';
+  content?: string;
+};
+
+function captureFileSnapshots(paths: string[]): FileSnapshot[] {
+  const uniquePaths = [...new Set(paths.map((path) => resolve(path)))];
+  return uniquePaths.map((path) => {
+    if (!existsSync(path)) return { path, kind: 'missing' };
+    try {
+      if (!statSync(path).isFile()) return { path, kind: 'other' };
+      return { path, kind: 'file', content: readFileSync(path, 'utf8') };
+    } catch {
+      return { path, kind: 'other' };
+    }
+  });
+}
+
+function restoreFileSnapshots(snapshots: FileSnapshot[]): string[] {
+  const errors: string[] = [];
+  for (const snapshot of snapshots) {
+    try {
+      if (snapshot.kind === 'file') {
+        writeFileAtomic(snapshot.path, snapshot.content ?? '');
+      } else if (snapshot.kind === 'missing' && existsSync(snapshot.path)) {
+        if (statSync(snapshot.path).isFile()) unlinkSync(snapshot.path);
+      }
+    } catch (error) {
+      errors.push(`${snapshot.path}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return errors;
+}
+
+export function transactionalWriteFiles(files: TransactionalFile[]): void {
+  const snapshots = captureFileSnapshots(files.map((file) => file.path));
+  try {
+    for (const file of files) writeFileAtomic(file.path, file.content);
+  } catch (error) {
+    const rollbackErrors = restoreFileSnapshots(snapshots);
+    throw diagnosticError(
+      'registrar_materialization_transaction_rolled_back',
+      'Registrar materialization failed; all previously written files were rolled back.',
+      {
+        failed_path: files.find((file) => !existsSync(file.path))?.path ?? null,
+        rollback_status: rollbackErrors.length === 0 ? 'complete' : 'incomplete',
+        ...(rollbackErrors.length > 0 ? { rollback_errors: rollbackErrors.slice(0, 20) } : {}),
+        cause: error instanceof Error ? error.message : String(error),
+      },
+    );
+  }
+}
+
 function readWorkspaceManifestFingerprint(): string | null {
   if (!existsSync(MCP_WORKSPACE_ARTIFACT_MANIFEST)) return null;
   try {
@@ -2555,7 +2773,22 @@ function runFreshRegistrarRequest(method: string, args: JsonRecord): Promise<Jso
   });
 }
 
-function materializeCarrierAtPath(carrier: CarrierDef, outputPath: string, persistSiteState: boolean, proxyImplementationOverride?: RuntimeProxyImplementation, recoveryEscapeHatch = false): JsonRecord {
+type PreparedCarrierMaterialization = {
+  carrier: CarrierDef;
+  outputPath: string;
+  injectionSummary: ReturnType<typeof carrierInjectionSummary>;
+  compilation: ReturnType<typeof compileCarrierRuntimeMaterializationPlan>;
+  result: { content: string; structured: JsonRecord };
+  validation: ReturnType<typeof validateMaterializedConfiguration>;
+  generation: NonNullable<ReturnType<typeof buildMaterializationGeneration>>;
+};
+
+function prepareCarrierMaterialization(
+  carrier: CarrierDef,
+  outputPath: string,
+  proxyImplementationOverride?: RuntimeProxyImplementation,
+  recoveryEscapeHatch = false,
+): PreparedCarrierMaterialization {
   const injectionSummary = carrierInjectionSummary(carrier);
   const compilation = compileCarrierRuntimeMaterializationPlan(carrier, outputPath, proxyImplementationOverride, recoveryEscapeHatch);
   let result: { content: string; structured: JsonRecord };
@@ -2566,16 +2799,24 @@ function materializeCarrierAtPath(carrier: CarrierDef, outputPath: string, persi
     default: throw diagnosticError('registrar_unknown_carrier_kind', `registrar_unknown_carrier_kind:${carrier.kind}`);
   }
   const { validation, generation } = validateCarrierMaterialization(carrier, result, outputPath, runtimeMaterializationPlan, compilation.plan, compilation.runtimeProxyImplementation);
-  writeFileAtomic(outputPath, result.content);
-  writeRuntimeMaterializationPlan(runtimeMaterializationPlanPath(outputPath), compilation.plan);
-  writeMaterializationGeneration(materializationSidecarPath(outputPath), generation!);
+  if (!generation) {
+    throw diagnosticError('registrar_materialization_generation_missing', 'A carrier materialization did not produce a generation sidecar.', { carrier_id: carrier.carrier_id, output_path: outputPath });
+  }
+  return { carrier, outputPath, injectionSummary, compilation, result, validation, generation };
+}
+
+function carrierMaterializationFiles(prepared: PreparedCarrierMaterialization): TransactionalFile[] {
+  return [
+    { path: prepared.outputPath, content: prepared.result.content },
+    { path: runtimeMaterializationPlanPath(prepared.outputPath), content: JSON.stringify(prepared.compilation.plan, null, 2) + '\n' },
+    { path: materializationSidecarPath(prepared.outputPath), content: JSON.stringify(prepared.generation, null, 2) + '\n' },
+  ];
+}
+
+function materializedCarrierResult(prepared: PreparedCarrierMaterialization, siteSurfaceRegistries: JsonRecord[] | null): JsonRecord {
+  const { carrier, outputPath, result, validation, generation, compilation, injectionSummary } = prepared;
   const carrierRuntimePlan = compilation.plan;
   const runtimeMaterializationPlanOutputPath = runtimeMaterializationPlanPath(outputPath);
-  let siteSurfaceRegistries: JsonRecord[] | null = null;
-  if (persistSiteState) {
-    writeSiteAllowedRootsConfig(carrier);
-    siteSurfaceRegistries = writeSiteSurfaceRegistriesForCarrier(carrier);
-  }
   return {
     status: 'materialized',
     carrier_id: carrier.carrier_id,
@@ -2595,11 +2836,41 @@ function materializeCarrierAtPath(carrier: CarrierDef, outputPath: string, persi
   };
 }
 
+function materializeCarrierAtPath(carrier: CarrierDef, outputPath: string, persistSiteState: boolean, proxyImplementationOverride?: RuntimeProxyImplementation, recoveryEscapeHatch = false): JsonRecord {
+  const prepared = prepareCarrierMaterialization(carrier, outputPath, proxyImplementationOverride, recoveryEscapeHatch);
+  for (const file of carrierMaterializationFiles(prepared)) writeFileAtomic(file.path, file.content);
+  const siteSurfaceRegistries = persistSiteState
+    ? (() => {
+      writeSiteAllowedRootsConfig(carrier);
+      return writeSiteSurfaceRegistriesForCarrier(carrier);
+    })()
+    : null;
+  return materializedCarrierResult(prepared, siteSurfaceRegistries);
+}
+
 async function registrarMaterializeAll(args: JsonRecord): Promise<JsonRecord> {
   if (process.env[FRESH_REGISTRAR_ENV] !== '1') {
     return runFreshRegistrarRequest('registrar_materialize_all', args);
   }
   return withRuntimeMaterializationProfile(optionalString(args.runtime_profile), () => registrarMaterializeAllFresh(args));
+}
+
+function carrierMaterializationRollbackPaths(carriers: CarrierDef[]): string[] {
+  const paths = new Set<string>();
+  for (const carrier of carriers) {
+    for (const binding of carrier.site_bindings) {
+      const site = lookupSite(binding.site_id);
+      const siteControlRoot = sitePathInterpolation(site.root).siteControlRoot;
+      paths.add(join(siteControlRoot, 'allowed-roots.json'));
+      paths.add(join(siteCapabilityRoot(site), 'capabilities', 'mcp-surfaces.json'));
+      const configDir = join(siteMcpControlRoot(site), '.ai', 'mcp');
+      if (!existsSync(configDir)) continue;
+      for (const fileName of readdirSync(configDir).filter((name) => name.endsWith('-mcp.json'))) {
+        paths.add(join(configDir, fileName));
+      }
+    }
+  }
+  return [...paths];
 }
 
 
@@ -2622,7 +2893,38 @@ async function registrarMaterializeAllFresh(args: JsonRecord): Promise<JsonRecor
     }
     pathOwners.set(normalizedPath, CARRIERS[index]!.carrier_id);
   });
-  const carriers = CARRIERS.map((carrier, index) => materializeCarrierAtPath(carrier, outputPaths[index]!, outputDir === null));
+  const prepared = CARRIERS.map((carrier, index) => prepareCarrierMaterialization(carrier, outputPaths[index]!, undefined, false));
+  const artifactFiles = prepared.flatMap(carrierMaterializationFiles);
+  const rollbackPaths = outputDir === null
+    ? [
+      ...artifactFiles.map((file) => file.path),
+      ...carrierMaterializationRollbackPaths(CARRIERS),
+    ]
+    : artifactFiles.map((file) => file.path);
+  const snapshots = captureFileSnapshots(rollbackPaths);
+  const siteSurfaceRegistries = new Map<string, JsonRecord[]>();
+  try {
+    for (const file of artifactFiles) writeFileAtomic(file.path, file.content);
+    if (outputDir === null) {
+      for (const carrier of CARRIERS) {
+        writeSiteAllowedRootsConfig(carrier);
+        siteSurfaceRegistries.set(carrier.carrier_id, writeSiteSurfaceRegistriesForCarrier(carrier));
+      }
+    }
+  } catch (error) {
+    const rollbackErrors = restoreFileSnapshots(snapshots);
+    throw diagnosticError(
+      'registrar_materialization_transaction_rolled_back',
+      'All-carrier materialization failed; previously materialized carrier files were rolled back.',
+      {
+        carrier_ids: CARRIERS.map((carrier) => carrier.carrier_id),
+        rollback_status: rollbackErrors.length === 0 ? 'complete' : 'incomplete',
+        ...(rollbackErrors.length > 0 ? { rollback_errors: rollbackErrors.slice(0, 20) } : {}),
+        cause: error instanceof Error ? error.message : String(error),
+      },
+    );
+  }
+  const carriers = prepared.map((carrier) => materializedCarrierResult(carrier, siteSurfaceRegistries.get(carrier.carrier.carrier_id) ?? null));
   return {
     status: 'materialized_all',
     carrier_count: carriers.length,
@@ -2922,7 +3224,7 @@ function registrarSurfaceList(_args: JsonRecord): JsonRecord {
         : {};
       return {
         ...surface,
-        tools: nativeToolNames(surface.id),
+        tools: surface.tools,
         projections,
         descriptor_source: descriptor.source,
         descriptor_digest: surfaceDescriptorDigest(descriptor),
@@ -2940,7 +3242,7 @@ function registrarSurfaceToolInventoryCheck(args: JsonRecord): JsonRecord {
   const includeOk = args.include_ok === true;
   const surfaces = SURFACES.filter((surface) => Object.hasOwn(observedInput, surface.id));
   const findings = surfaces.flatMap((surface) => {
-    const registered = nativeToolNames(surface.id);
+    const registered = surface.tools;
     const observed = uniqueStrings(Array.isArray(observedInput[surface.id]) ? (observedInput[surface.id] as unknown[]).map(String) : []);
     const missing_from_registrar = observed.filter((tool) => !registered.includes(tool));
     const extra_in_registrar = registered.filter((tool) => !observed.includes(tool));
@@ -3566,6 +3868,7 @@ export function buildSiteBindConfig(site: SiteDef, surface: RegistrarSurfaceReco
     ...projectionLaunchArgs(projection),
   ];
   const resolvedEntrypoint = resolveEntrypoint(surface, siteId, siteRoot, projection);
+  const projectedTools = projection.exposed_tools ?? surface.tools;
   const scopeMetadata = surfaceScopeMetadata(surfaceId, siteRoot, projection.id);
   const naradaScope = naradaScopeMetadata(surfaceId, siteRoot, siteId, projection.id);
   if (surfaceId === 'sop') appendSopsDirs(resolvedArgs);
@@ -3593,7 +3896,7 @@ export function buildSiteBindConfig(site: SiteDef, surface: RegistrarSurfaceReco
           transport: 'stdio',
           command: launch.command,
           args: launch.args,
-          tools: surface.tools,
+          tools: projectedTools,
           env_vars: projectionEnvVars(surface, projection),
           surface_id: surfaceId,
           projection_id: projection.id,
@@ -3605,6 +3908,108 @@ export function buildSiteBindConfig(site: SiteDef, surface: RegistrarSurfaceReco
         },
       },
     },
+  };
+}
+
+function isJsonRecord(value: unknown): value is JsonRecord {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function mergeGeneratedRecord(current: JsonRecord, generated: JsonRecord): JsonRecord {
+  const merged: JsonRecord = { ...current, ...generated };
+  for (const [key, value] of Object.entries(generated)) {
+    if (isJsonRecord(value) && isJsonRecord(current[key])) {
+      merged[key] = mergeGeneratedRecord(current[key] as JsonRecord, value);
+    }
+  }
+  return merged;
+}
+
+export function refreshRegistrarOwnedSiteFabric(site: SiteDef): JsonRecord {
+  const configDir = join(siteMcpControlRoot(site), '.ai', 'mcp');
+  if (!existsSync(configDir)) {
+    return { status: 'not_present', site_id: site.site_id, config_dir: configDir, refreshed_count: 0, unchanged_count: 0, skipped_count: 0, error_count: 0 };
+  }
+  let refreshedCount = 0;
+  let unchangedCount = 0;
+  let skippedCount = 0;
+  const skippedFiles: string[] = [];
+  const errors: Array<JsonRecord> = [];
+  const pendingWrites: Array<{ filePath: string; content: string }> = [];
+  for (const fileName of readdirSync(configDir).filter((name) => name.endsWith('-mcp.json')).sort()) {
+    const filePath = join(configDir, fileName);
+    let currentContent: string;
+    let current: JsonRecord;
+    try {
+      currentContent = readFileSync(filePath, 'utf8');
+      current = asRecord(JSON.parse(currentContent));
+    } catch (error) {
+      const raw = (() => { try { return readFileSync(filePath, 'utf8'); } catch { return ''; } })();
+      if (raw.includes('narada.mcp.client_config.v0') && raw.includes('MCP surface bound by registrar.')) {
+        errors.push({ file: fileName, code: 'registrar_site_fabric_generated_config_invalid', message: String(error) });
+      } else {
+        skippedCount += 1;
+        skippedFiles.push(fileName);
+      }
+      continue;
+    }
+    const registrarOwned = current.schema === 'narada.mcp.client_config.v0'
+      && String(current.description ?? '').endsWith(' MCP surface bound by registrar.');
+    if (!registrarOwned || current.site_id !== site.site_id) {
+      skippedCount += 1;
+      skippedFiles.push(fileName);
+      continue;
+    }
+    const entries = Object.entries(asRecord(current.mcpServers));
+    if (entries.length !== 1) {
+      skippedCount += 1;
+      skippedFiles.push(fileName);
+      continue;
+    }
+    const [serverKey, rawServer] = entries[0]!;
+    const server = asRecord(rawServer);
+    const surfaceId = optionalString(server.surface_id) ?? fabricSurfaceId(serverKey, site);
+    let surface: RegistrarSurfaceRecord;
+    try {
+      surface = lookupSurface(surfaceId);
+    } catch (error) {
+      errors.push({ file: fileName, code: 'registrar_site_fabric_surface_unknown', surface_id: surfaceId, message: String(error) });
+      continue;
+    }
+    const projection = asRecord(server.surface_projection);
+    const projectionId = optionalString(server.projection_id) ?? optionalString(projection.projection_id);
+    const runtimeKind = projection.runtime_kind === 'nars' ? 'nars' : undefined;
+    let refreshed: ReturnType<typeof buildSiteBindConfig>;
+    try {
+      refreshed = buildSiteBindConfig(site, surface, projectionId, runtimeKind);
+    } catch (error) {
+      errors.push({ file: fileName, code: 'registrar_site_fabric_refresh_failed', surface_id: surfaceId, message: String(error) });
+      continue;
+    }
+    if (refreshed.fileName !== fileName || refreshed.serverKey !== serverKey) {
+      errors.push({ file: fileName, code: 'registrar_site_fabric_identity_mismatch', expected_file: refreshed.fileName, expected_server_key: refreshed.serverKey });
+      continue;
+    }
+    const merged = mergeGeneratedRecord(current, refreshed.config);
+    const nextContent = JSON.stringify(merged, null, 2) + '\n';
+    if (nextContent === currentContent) {
+      unchangedCount += 1;
+      continue;
+    }
+    pendingWrites.push({ filePath, content: nextContent });
+  }
+  if (errors.length > 0) {
+    return {
+      status: 'error', site_id: site.site_id, config_dir: configDir, refreshed_count: 0, unchanged_count: unchangedCount, skipped_count: skippedCount, error_count: errors.length,
+      ...(skippedFiles.length > 0 ? { skipped_files: skippedFiles.slice(0, 50) } : {}), errors: errors.slice(0, 50),
+    };
+  }
+  for (const pending of pendingWrites) writeFileAtomic(pending.filePath, pending.content);
+  refreshedCount = pendingWrites.length;
+  return {
+    status: skippedCount > 0 ? 'partial' : 'refreshed',
+    site_id: site.site_id, config_dir: configDir, refreshed_count: refreshedCount, unchanged_count: unchangedCount, skipped_count: skippedCount, error_count: 0,
+    ...(skippedFiles.length > 0 ? { skipped_files: skippedFiles.slice(0, 50) } : {}),
   };
 }
 
@@ -3744,22 +4149,33 @@ type SiteMcpFabricServer = {
   projection_kind: 'site_fabric' | 'carrier_projection';
 };
 
-function unwrapRuntimeProxyLaunch(entrypoint: string, args: string[]): { entrypoint: string; args: string[]; usesRuntimeProxy: boolean; launchEntrypoint: string; childInvocationKind?: 'entrypoint' | 'native_applet' | 'native_entrypoint'; childApplet?: string } {
-  const launchEntrypoint = entrypoint;
-  if (portablePath(entrypoint) !== portablePath(MCP_RUNTIME_PROXY_ENTRYPOINT)
-    && !isNativeArtifactEntrypoint(MCP_RUNTIME_PROXY_PACKAGE_ROOT, 'narada-mcp-runtime.exe', entrypoint)) {
-    return { entrypoint, args, usesRuntimeProxy: false, launchEntrypoint };
+function unwrapRuntimeProxyLaunch(launchCommand: string, entrypoint: string, args: string[]): { entrypoint: string; args: string[]; usesRuntimeProxy: boolean; launchEntrypoint: string; childCommand?: string; childInvocationKind?: 'entrypoint' | 'native_applet' | 'native_entrypoint'; childApplet?: string } {
+  const javascriptProxy = portablePath(entrypoint) === portablePath(MCP_RUNTIME_PROXY_ENTRYPOINT);
+  const nativeProxy = entrypoint === 'proxy'
+    && isNativeArtifactEntrypoint(MCP_RUNTIME_PROXY_PACKAGE_ROOT, 'narada-mcp-runtime.exe', launchCommand);
+  if (!javascriptProxy && !nativeProxy) {
+    return { entrypoint, args, usesRuntimeProxy: false, launchEntrypoint: entrypoint };
   }
   const entrypointIndex = args.indexOf('--entrypoint');
+  const childCommandIndex = args.indexOf('--child-command');
   const separatorIndex = args.indexOf('--');
   const childEntrypoint = entrypointIndex >= 0 ? args[entrypointIndex + 1] : '';
+  const childCommand = childCommandIndex >= 0 ? args[childCommandIndex + 1] : '';
   const childArgs = separatorIndex >= 0 ? args.slice(separatorIndex + 1) : [];
   const invocationIndex = args.indexOf('--child-invocation-kind');
   const appletIndex = args.indexOf('--child-applet');
   const childInvocationValue = invocationIndex >= 0 ? args[invocationIndex + 1] : undefined;
   const childInvocationKind = childInvocationValue === 'native_applet' || childInvocationValue === 'native_entrypoint' ? childInvocationValue : 'entrypoint';
   const childApplet = appletIndex >= 0 ? args[appletIndex + 1] : undefined;
-  return { entrypoint: childEntrypoint, args: childArgs, usesRuntimeProxy: true, launchEntrypoint, childInvocationKind, ...(childApplet ? { childApplet } : {}) };
+  return {
+    entrypoint: childEntrypoint,
+    args: childArgs,
+    usesRuntimeProxy: true,
+    launchEntrypoint: nativeProxy ? launchCommand : entrypoint,
+    ...(childCommand ? { childCommand } : {}),
+    childInvocationKind,
+    ...(childApplet ? { childApplet } : {}),
+  };
 }
 
 function portablePath(path: string): string {
@@ -3827,11 +4243,14 @@ function discoverMcpConfigDirectory(
       const surfaceId = fabricSurfaceId(serverKey, site);
       const surfaceProjection = asRecord(server.surface_projection);
       let command = server.command ?? 'node';
+      let launchCommand = 'node';
       let args: string[] = [];
       if (Array.isArray(command)) {
         args = command.slice(2).map(String);
+        launchCommand = String(command[0] ?? 'node');
         command = command.slice(0, 2);
       } else {
+        launchCommand = String(command);
         args = Array.isArray(server.args) ? server.args.map(String) : [];
       }
       let entrypoint = '';
@@ -3851,10 +4270,10 @@ function discoverMcpConfigDirectory(
         entrypoint = args.shift() ?? '';
       }
       // Materialized fabric is executable data, never a template. Validation reports any token verbatim.
-      const unwrapped = unwrapRuntimeProxyLaunch(entrypoint, args);
+      const unwrapped = unwrapRuntimeProxyLaunch(launchCommand, entrypoint, args);
       servers.push({
         server_key: serverKey,
-        command: Array.isArray(command) ? String(command[0] ?? 'node') : String(command),
+        command: materializedExecutableCommand(unwrapped.childCommand ?? launchCommand),
         args: unwrapped.args,
         entrypoint: unwrapped.entrypoint,
         launch_entrypoint: unwrapped.launchEntrypoint,
@@ -3997,7 +4416,9 @@ function registrySurfaceForFabricServer(site: SiteDef, server: SiteMcpFabricServ
       runtime_requirements: server.runtime_requirements ?? [],
       ...(server.runtime_kind ? { runtime_kind: server.runtime_kind } : {}),
     };
-  const registeredTools = uniqueStrings(catalog ? nativeToolNames(catalog.id) : readConfiguredServerTools(site, server));
+  const registeredTools = uniqueStrings(catalog
+    ? nativeProjectionToolNames(catalog.id, server.projection_id, server.runtime_kind)
+    : readConfiguredServerTools(site, server));
   const toolContract = surfaceToolContract(catalog?.id ?? surfaceId, registeredTools);
   return {
     surface_id: `${server.server_key}.local`,

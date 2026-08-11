@@ -76,6 +76,9 @@ fn guidance_tool() -> Value { tool("worker_guidance", "Show model-facing operati
 fn guidance(args: &Map<String, Value>) -> Value { json!({"schema":"narada.worker.guidance.v1","status":"ok","server_name":SERVER_NAME,"requested":{"workflow":args.get("workflow").cloned().unwrap_or(Value::Null),"tool":args.get("tool").cloned().unwrap_or(Value::Null)},"first_use":["Inspect worker_policy_inspect.","Resolve worker inputs without launching with worker_config_resolve.","Read durable runs with worker_run_status or worker_runs_list.","Use worker_output_show for bounded artifact readback."],"boundaries":["Native mode never spawns, resumes, cancels, or reaps a worker.","Credentials and provider secrets never cross this surface.","Run records are read from the bounded site worker-delegation root."]}) }
 
 fn run_root(root: &Path) -> PathBuf {
+    if let Some(value) = std::env::var_os("NARADA_WORKER_RUN_ROOT") {
+        return PathBuf::from(value);
+    }
     if root.file_name().and_then(|v| v.to_str()).map(|v| v.eq_ignore_ascii_case(".narada")).unwrap_or(false) { root.join("runtime/worker-delegation") } else { root.join(".narada/runtime/worker-delegation") }
 }
 fn is_within(path: &Path, root: &Path) -> bool { let p=path.canonicalize().unwrap_or_else(|_|path.to_path_buf()); let r=root.canonicalize().unwrap_or_else(|_|root.to_path_buf()); p==r || p.starts_with(&r) }
