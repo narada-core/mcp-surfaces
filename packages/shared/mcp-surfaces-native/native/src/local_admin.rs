@@ -4,6 +4,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "nars_authority.rs"]
+mod nars_authority;
+
 const MAX_BYTES: usize = 256_000;
 const MAX_SESSIONS: usize = 100;
 
@@ -54,7 +57,13 @@ fn artifact_tools() -> Vec<Value> {
     vec![guidance("artifacts_guidance"), tool("artifacts_doctor", "Report local NARS artifact endpoint and session-index readiness.", json!({"type":"object","additionalProperties":false}), true), tool("artifact_register_file", "Register a local file with the owning NARS artifact authority.", json!({"type":"object","properties":{"path":{"type":"string"},"kind":{"type":"string"},"title":{"type":"string"},"render_hint":{"type":"string"}},"required":["path","kind"],"additionalProperties":false}), false), tool("artifact_list", "Read artifacts registered in the current NARS session when a local index is available.", json!({"type":"object","additionalProperties":false}), true), tool("artifact_read", "Read one artifact metadata record from the local NARS session index.", json!({"type":"object","properties":{"artifact_id":{"type":"string"}},"required":["artifact_id"],"additionalProperties":false}), true), tool("artifact_present", "Ask the owning NARS authority to present an artifact.", json!({"type":"object","properties":{"artifact_id":{"type":"string"},"text":{"type":"string"},"title":{"type":"string"},"render_hint":{"type":"string"}},"required":["artifact_id"],"additionalProperties":false}), false), tool("artifact_message_part_create", "Create a pure renderable artifact_ref message part from known metadata.", json!({"type":"object","properties":{"artifact_id":{"type":"string"},"kind":{"type":"string"},"title":{"type":"string"},"render_hint":{"type":"string"}},"required":["artifact_id"],"additionalProperties":false}), true)]
 }
 fn nars_tools() -> Vec<Value> {
-    vec![guidance("nars_session_guidance"), tool("nars_session_list", "List bounded local NARS session index records.", json!({"type":"object","properties":{"site_id":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":100}},"additionalProperties":false}), true), tool("nars_session_show", "Show one bounded local NARS session index record.", json!({"type":"object","properties":{"site_id":{"type":"string"},"session_id":{"type":"string"}},"required":["session_id"],"additionalProperties":false}), true), tool("nars_session_input_deliver", "Deliver input to an existing NARS session through the owning runtime authority.", json!({"type":"object","additionalProperties":true}), false), tool("nars_session_input_status", "Read bounded local input status evidence when materialized.", json!({"type":"object","properties":{"site_id":{"type":"string"},"session_id":{"type":"string"},"input_event_id":{"type":"string"},"request_id":{"type":"string"},"directive_id":{"type":"string"}},"required":["session_id"],"additionalProperties":false}), true)]
+    vec![
+        guidance("nars_session_guidance"),
+        tool("nars_session_list", "List bounded local NARS session index records.", json!({"type":"object","properties":{"site_id":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":100}},"additionalProperties":false}), true),
+        tool("nars_session_show", "Show one bounded local NARS session index record.", json!({"type":"object","properties":{"site_id":{"type":"string"},"session_id":{"type":"string"}},"required":["session_id"],"additionalProperties":false}), true),
+        tool("nars_session_input_deliver", "Deliver one explicit send, enqueue, or steer request to a concrete existing NARS session.", json!({"type":"object","properties":{"site_id":{"type":"string"},"session_id":{"type":"string"},"content":{"type":"string","maxLength":20000},"directive":{"type":"object","additionalProperties":true},"delivery":{"type":"string","enum":["send","enqueue","steer"]},"idempotency_key":{"type":"string","minLength":1,"maxLength":128},"expected_authority_epoch":{"type":"integer","minimum":1},"payload_ref":{"type":"string"}},"required":["session_id","delivery","idempotency_key"],"additionalProperties":false}), false),
+        tool("nars_session_input_status", "Read authoritative NARS admission, request-state, terminal-state, and outcome evidence for a submitted input.", json!({"type":"object","properties":{"site_id":{"type":"string"},"session_id":{"type":"string"},"input_event_id":{"type":"string"},"request_id":{"type":"string"},"directive_id":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":200},"payload_ref":{"type":"string"}},"required":["session_id"],"additionalProperties":false}), true),
+    ]
 }
 fn quota_tools() -> Vec<Value> {
     vec![guidance("quota_meter_guidance"), tool("quota_meter_glide_status", "Inspect quota provider posture without launching provider login.", json!({"type":"object","properties":{"providers":{"type":"string"}},"additionalProperties":false}), true), tool("quota_meter_overlay_status", "Inspect local quota overlay pid and position state.", json!({"type":"object","additionalProperties":false}), true), tool("quota_meter_overlay_start", "Start the quota overlay through its owning runtime authority.", json!({"type":"object","additionalProperties":true}), false), tool("quota_meter_overlay_stop", "Stop the quota overlay through its owning runtime authority.", json!({"type":"object","additionalProperties":true}), false)]
@@ -108,7 +117,7 @@ fn nars_call(name: &str, args: &Map<String, Value>, root: &Path) -> Result<Value
         "nars_session_list" => nars_list(args, root),
         "nars_session_show" => nars_show(args, root),
         "nars_session_input_status" => input_status(args, root),
-        "nars_session_input_deliver" => Err(authority_boundary("nars-session", name, "nars_input_authority_not_enabled_in_native_slice", "Use the owning NARS runtime for delivery.")),
+        "nars_session_input_deliver" => nars_authority::deliver(args, root),
         _ => Err(error("unknown_tool", &format!("unknown_tool:{name}"))),
     }
 }
@@ -158,7 +167,12 @@ fn nars_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
         "authority":authority_summary(&record),
     }))
 }
-fn input_status(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> { let id=required(args,"session_id")?; let input=args.get("input_event_id").or_else(||args.get("request_id")).or_else(||args.get("directive_id")).and_then(Value::as_str); let base=session_roots(root).into_iter().find(|p|p.join(&id).is_dir()).unwrap_or_else(||root.to_path_buf()); let path=base.join(&id).join("input-status.json"); if !path.exists() { return Ok(json!({"schema":"narada.nars_session.input_status.v1","status":"not_materialized","session_id":id,"input_event_id":input,"outcome":null,"terminal_state":null,"native_read_only":true})); } let value=read_bounded_json(&path)?; Ok(json!({"schema":"narada.nars_session.input_status.v1","status":"ok","session_id":id,"input_event_id":input,"record":value,"native_read_only":true})) }
+fn input_status(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    if args.get("input_event_id").is_some() || args.get("request_id").is_some() || args.get("directive_id").is_some() {
+        return nars_authority::status(args, root);
+    }
+    let id=required(args,"session_id")?; let input=args.get("input_event_id").or_else(||args.get("request_id")).or_else(||args.get("directive_id")).and_then(Value::as_str); let base=session_roots(root).into_iter().find(|p|p.join(&id).is_dir()).unwrap_or_else(||root.to_path_buf()); let path=base.join(&id).join("input-status.json"); if !path.exists() { return Ok(json!({"schema":"narada.nars_session.input_status.v1","status":"not_materialized","session_id":id,"input_event_id":input,"outcome":null,"terminal_state":null,"native_read_only":true})); } let value=read_bounded_json(&path)?; Ok(json!({"schema":"narada.nars_session.input_status.v1","status":"ok","session_id":id,"input_event_id":input,"record":value,"native_read_only":true}))
+}
 fn read_session(root: &Path, id: &str, _site_id: Option<&str>) -> Result<Value, Value> { if id.is_empty()||id.len()>160||!id.chars().all(|c|c.is_ascii_alphanumeric()||c=='-'||c=='_') { return Err(error("session_id_invalid","session_id_invalid")); } for path in session_index_paths(root,id) { if path.exists() { return read_bounded_json(&path); } } Err(error("nars_session_not_found","nars_session_not_found")) }
 fn public_session(record: &Value, id: &str, root: &Path, health: Value) -> Value {
     let heartbeat_path = record.get("heartbeat_path").and_then(Value::as_str).map(str::to_string).or_else(|| record.get("session_dir").and_then(Value::as_str).map(|directory| PathBuf::from(directory).join("heartbeat.json").to_string_lossy().to_string()));
