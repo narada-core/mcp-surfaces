@@ -2057,7 +2057,7 @@ fn preflight_materialization(
 fn canonical_config(kind: &str, content: &str) -> String {
     let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
     if kind != "codex" {
-        return normalized;
+        return normalized.trim_end_matches('\n').to_string();
     }
     let mut canonical = Vec::new();
     let mut in_mcp = false;
@@ -2106,6 +2106,7 @@ fn preflight_refusal(options: &Options, mut refusal: Refusal) -> Result<(), Stri
                 "surface_id": options.surface_id,
                 "entrypoint": options.entrypoint,
                 "artifact_manifest_path": options.artifact_manifest,
+                "reason": refusal.reason,
                 "details": refusal.details
             }
         }});
