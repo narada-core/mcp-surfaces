@@ -202,6 +202,15 @@ pub fn status(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     }))
 }
 
+pub fn health(endpoint: &str) -> Result<Value, Value> {
+    let request_id = format!("nars_health_{}", Uuid::new_v4().simple());
+    ws_call(
+        endpoint,
+        json!({"id":request_id,"method":"session.health","params":{}}),
+        WaitFor::Health,
+    )
+}
+
 #[derive(Clone)]
 struct Authority {
     event_endpoint: String,
@@ -381,7 +390,7 @@ fn event_name(value: &Value) -> Option<&str> {
     value.get("event").and_then(Value::as_str).or_else(|| value.get("type").and_then(Value::as_str))
 }
 
-enum WaitFor { Delivery, EventsRead }
+enum WaitFor { Delivery, EventsRead, Health }
 
 fn ws_call(endpoint: &str, request: Value, wait_for: WaitFor) -> Result<Value, Value> {
     let parsed = WsEndpoint::parse(endpoint)?;
@@ -417,7 +426,7 @@ fn ws_call(endpoint: &str, request: Value, wait_for: WaitFor) -> Result<Value, V
                     continue;
                 }
                 if !sent_request { continue; }
-                let matches = match wait_for { WaitFor::Delivery => matches!(name, "input_event_queued" | "input_event_started" | "input_admitted_to_turn" | "session_control_accepted" | "input_completed" | "user_message" | "turn_started" | "error" | "websocket_error"), WaitFor::EventsRead => name == "session_events_read" };
+                let matches = match wait_for { WaitFor::Delivery => matches!(name, "input_event_queued" | "input_event_started" | "input_admitted_to_turn" | "session_control_accepted" | "input_completed" | "user_message" | "turn_started" | "error" | "websocket_error"), WaitFor::EventsRead => name == "session_events_read", WaitFor::Health => name == "session_health" };
                 let same_request = message.get("request_id") == request.get("id") || message.get("id") == request.get("id");
                 if matches && (same_request || matches!(wait_for, WaitFor::EventsRead)) {
                     let _ = stream.shutdown(Shutdown::Both);

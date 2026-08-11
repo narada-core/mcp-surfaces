@@ -1,4 +1,5 @@
 use serde_json::{json, Map, Value};
+use rusqlite::{Connection, OpenFlags};
 use std::env;
 use std::fs;
 use std::io::Read;
@@ -134,6 +135,9 @@ fn nars_list(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
         if !bound.trim().is_empty() && requested != bound { return Err(error("site_scope_refused", "site_scope_refused")); }
     }
     let include_health = args.get("include_health").and_then(Value::as_bool).unwrap_or(false);
+    if user_site_scope() {
+        return nars_user_site_list(args, root, site_id.as_deref(), limit, include_health);
+    }
     let mut sessions = Vec::new();
     for base in session_roots(root).iter().take(4) {
         if let Ok(entries) = fs::read_dir(base) {
@@ -168,6 +172,9 @@ fn nars_list(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
 fn nars_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     let id = required(args, "session_id")?;
     let site_id = args.get("site_id").and_then(Value::as_str).map(str::to_string).or_else(|| env::var("NARADA_SITE_ID").ok().filter(|value| !value.trim().is_empty()));
+    if user_site_scope() {
+        return nars_user_site_show(args, root, &id, site_id.as_deref());
+    }
     let record = read_session(root, &id, site_id.as_deref())?;
     let health = if args.get("include_health").and_then(Value::as_bool) == Some(false) { json!({"status":"not_requested"}) } else { probe_health(&record) };
     Ok(json!({
@@ -187,6 +194,102 @@ fn input_status(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> 
     let id=required(args,"session_id")?; let input=args.get("input_event_id").or_else(||args.get("request_id")).or_else(||args.get("directive_id")).and_then(Value::as_str); let base=session_roots(root).into_iter().find(|p|p.join(&id).is_dir()).unwrap_or_else(||root.to_path_buf()); let path=base.join(&id).join("input-status.json"); if !path.exists() { return Ok(json!({"schema":"narada.nars_session.input_status.v1","status":"not_materialized","session_id":id,"input_event_id":input,"outcome":null,"terminal_state":null,"native_read_only":true})); } let value=read_bounded_json(&path)?; Ok(json!({"schema":"narada.nars_session.input_status.v1","status":"ok","session_id":id,"input_event_id":input,"record":value,"native_read_only":true}))
 }
 fn read_session(root: &Path, id: &str, site_id: Option<&str>) -> Result<Value, Value> { if id.is_empty()||id.len()>160||!id.chars().all(|c|c.is_ascii_alphanumeric()||c=='-'||c=='_') { return Err(error("session_id_invalid","session_id_invalid")); } for path in session_index_paths(root,id) { if path.exists() { let record = read_bounded_json(&path)?; if record.get("session_id").and_then(Value::as_str) != Some(id) { return Err(error("session_record_mismatch","session_record_mismatch")); } if let (Some(requested), Some(actual)) = (site_id, record.get("site_id").and_then(Value::as_str)) { if requested != actual { return Err(error("site_scope_refused","site_scope_refused")); } } return Ok(record); } } Err(error("nars_session_not_found","nars_session_not_found")) }
+
+fn user_site_scope() -> bool {
+    matches!(env::var("NARADA_NARS_SESSION_SCOPE").ok().as_deref(), Some("user_site"))
+        || matches!(env::var("NARADA_NARS_SESSION_PROJECTION").ok().as_deref(), Some("user-site-operator"))
+}
+
+fn nars_user_site_list(_args: &Map<String, Value>, root: &Path, requested_site: Option<&str>, limit: usize, include_health: bool) -> Result<Value, Value> {
+    let (authority_root, authorities) = user_site_authorities(root)?;
+    let selected = select_user_site_authorities(&authorities, requested_site)?;
+    let mut sessions = Vec::new();
+    for (site_id, site_root) in &selected {
+        for base in session_roots(site_root).iter().take(4) {
+            let Ok(entries) = fs::read_dir(base) else { continue };
+            for entry in entries.filter_map(Result::ok).take(MAX_SESSIONS) {
+                if !entry.path().is_dir() { continue; }
+                let Some(id) = entry.file_name().to_str().map(str::to_string) else { continue; };
+                let Ok(record) = read_session_from_roots(&session_roots(site_root), &id, Some(site_id)) else { continue };
+                let health = if include_health { probe_health(&record) } else { json!({"status":"not_requested"}) };
+                sessions.push(public_session(&record, &id, site_root, health));
+                if sessions.len() >= limit { break; }
+            }
+            if sessions.len() >= limit { break; }
+        }
+        if sessions.len() >= limit { break; }
+    }
+    Ok(json!({
+        "schema":"narada.nars_session_mcp.sessions.v1",
+        "status":"ok",
+        "site_id":requested_site,
+        "authority_root":authority_root.to_string_lossy(),
+        "scope_root":authority_root.to_string_lossy(),
+        "site_root":authority_root.to_string_lossy(),
+        "scope":"user_site",
+        "scope_semantics":"The envelope roots identify the bound discovery authority; each session.site_root identifies that session's admitted Site root.",
+        "authority_count":authorities.len(),
+        "selected_site_ids":selected.iter().map(|(site_id, _)| json!(site_id)).collect::<Vec<_>>(),
+        "count":sessions.len(),
+        "sessions":sessions,
+    }))
+}
+
+fn nars_user_site_show(args: &Map<String, Value>, root: &Path, id: &str, requested_site: Option<&str>) -> Result<Value, Value> {
+    let (authority_root, authorities) = user_site_authorities(root)?;
+    let selected = select_user_site_authorities(&authorities, requested_site)?;
+    let mut matches = Vec::new();
+    for (site_id, site_root) in selected {
+        if let Ok(record) = read_session_from_roots(&session_roots(&site_root), id, Some(&site_id)) {
+            matches.push((record, site_root));
+        }
+    }
+    if matches.is_empty() { return Err(error("nars_session_not_found", "nars_session_not_found")); }
+    if matches.len() > 1 { return Err(error("session_ambiguous", "session_ambiguous")); }
+    let (record, site_root) = matches.remove(0);
+    let health = if args.get("include_health").and_then(Value::as_bool) == Some(false) { json!({"status":"not_requested"}) } else { probe_health(&record) };
+    Ok(json!({
+        "schema":"narada.nars_session_mcp.session.v1",
+        "status":"ok",
+        "scope":"user_site",
+        "authority_root":authority_root.to_string_lossy(),
+        "scope_root":authority_root.to_string_lossy(),
+        "session":public_session(&record, id, &site_root, health),
+        "authority":authority_summary(&record),
+    }))
+}
+
+fn user_site_authorities(root: &Path) -> Result<(PathBuf, Vec<(String, PathBuf)>), Value> {
+    let authority_root = env::var("NARADA_USER_SITE_ROOT").ok().filter(|value| !value.trim().is_empty()).map(PathBuf::from).unwrap_or_else(|| root.to_path_buf());
+    let registry_path = env::var("NARADA_SITE_REGISTRY_DB").ok().filter(|value| !value.trim().is_empty()).map(PathBuf::from).unwrap_or_else(|| authority_root.join("registry.db"));
+    let size = fs::metadata(&registry_path).map_err(|_| error("user_site_registry_required", "user_site_registry_required"))?.len();
+    if size > MAX_BYTES as u64 { return Err(error("user_site_registry_too_large", "user_site_registry_too_large")); }
+    let connection = Connection::open_with_flags(&registry_path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|_| error("user_site_registry_unreadable", "user_site_registry_unreadable"))?;
+    let mut statement = connection.prepare("SELECT site_id, site_root FROM site_registry ORDER BY created_at ASC, site_id ASC").map_err(|_| error("user_site_registry_unreadable", "user_site_registry_unreadable"))?;
+    let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).map_err(|_| error("user_site_registry_unreadable", "user_site_registry_unreadable"))?;
+    let mut authorities = Vec::new();
+    for row in rows { let (site_id, site_root) = row.map_err(|_| error("user_site_registry_unreadable", "user_site_registry_unreadable"))?; if !site_id.trim().is_empty() && !site_root.trim().is_empty() { authorities.push((site_id, PathBuf::from(site_root))); } }
+    if authorities.is_empty() { return Err(error("user_site_registry_empty", "user_site_registry_empty")); }
+    Ok((authority_root, authorities))
+}
+
+fn select_user_site_authorities(authorities: &[(String, PathBuf)], requested: Option<&str>) -> Result<Vec<(String, PathBuf)>, Value> {
+    if let Some(site_id) = requested { let selected = authorities.iter().filter(|(candidate, _)| candidate == site_id).cloned().collect::<Vec<_>>(); if selected.is_empty() { return Err(error("site_scope_refused", "site_scope_refused")); } return Ok(selected); }
+    Ok(authorities.to_vec())
+}
+
+fn read_session_from_roots(roots: &[PathBuf], id: &str, site_id: Option<&str>) -> Result<Value, Value> {
+    if id.is_empty() || id.len() > 160 || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') { return Err(error("session_id_invalid", "session_id_invalid")); }
+    for base in roots {
+        let path = base.join(id).join("session-index-record.json");
+        if !path.exists() { continue; }
+        let record = read_bounded_json(&path)?;
+        if record.get("session_id").and_then(Value::as_str) != Some(id) { return Err(error("session_record_mismatch", "session_record_mismatch")); }
+        if let (Some(requested), Some(actual)) = (site_id, record.get("site_id").and_then(Value::as_str)) { if requested != actual { return Err(error("site_scope_refused", "site_scope_refused")); } }
+        return Ok(record);
+    }
+    Err(error("nars_session_not_found", "nars_session_not_found"))
+}
 fn public_session(record: &Value, id: &str, root: &Path, health: Value) -> Value {
     let heartbeat_path = record.get("heartbeat_path").and_then(Value::as_str).map(str::to_string).or_else(|| record.get("session_dir").and_then(Value::as_str).map(|directory| PathBuf::from(directory).join("heartbeat.json").to_string_lossy().to_string()));
     let heartbeat_value = heartbeat_path.as_deref().and_then(|path| read_bounded_json(Path::new(path)).ok()).and_then(|value| value.get("heartbeat_at").or_else(|| value.get("last_written_at")).or_else(|| value.get("timestamp")).cloned());
@@ -239,6 +342,9 @@ fn public_session(record: &Value, id: &str, root: &Path, health: Value) -> Value
 
 fn probe_health(record: &Value) -> Value {
     let Some(endpoint) = record.get("health_endpoint").and_then(Value::as_str).filter(|value| !value.trim().is_empty()) else {
+        if let Some(endpoint) = record.get("event_endpoint").and_then(Value::as_str).filter(|value| !value.trim().is_empty()) {
+            return probe_event_health(endpoint);
+        }
         return json!({"status":"unavailable","probe_status":"unavailable","reason":"session_health_endpoint_missing","health_observed_at":super::now_iso(),"health_source":"endpoint_missing"});
     };
     let timeout_ms = env::var("NARADA_NARS_SESSION_HEALTH_TIMEOUT_MS").ok().and_then(|value| value.parse::<u64>().ok()).unwrap_or(1500).clamp(250, 5000);
@@ -263,6 +369,26 @@ fn probe_health(record: &Value) -> Value {
     result.insert("probe_status".into(), json!("reachable"));
     result.insert("health_observed_at".into(), json!(super::now_iso()));
     result.insert("health_source".into(), json!("health_endpoint"));
+    Value::Object(result)
+}
+
+fn probe_event_health(endpoint: &str) -> Value {
+    let response = match nars_authority::health(endpoint) {
+        Ok(value) => value,
+        Err(error) => {
+            let reason = error.get("message").cloned().unwrap_or_else(|| json!("event health probe failed"));
+            return json!({"status":"unavailable","probe_status":"unreachable","reason":reason,"health_observed_at":super::now_iso(),"health_source":"event_endpoint"});
+        }
+    };
+    let mut result = response.as_object().cloned().unwrap_or_default();
+    let status = match result.get("status").and_then(Value::as_str).map(|value| value.to_ascii_lowercase()).as_deref() {
+        Some("starting") | Some("healthy") | Some("degraded") | Some("unhealthy") | Some("closing") | Some("unavailable") => result.get("status").and_then(Value::as_str).unwrap_or("healthy"),
+        _ => "healthy",
+    };
+    result.insert("status".into(), json!(status));
+    result.insert("probe_status".into(), json!("reachable"));
+    result.insert("health_observed_at".into(), json!(super::now_iso()));
+    result.insert("health_source".into(), json!("event_endpoint"));
     Value::Object(result)
 }
 
@@ -430,5 +556,30 @@ mod tests {
         assert_eq!(projected["display_state_reason"], "fresh_heartbeat_without_health");
         assert_eq!(projected["heartbeat_fresh"], true);
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn nars_user_site_scope_reads_only_registry_admitted_sites() {
+        let user_root = std::env::temp_dir().join(format!("narada-user-site-{}", uuid::Uuid::new_v4()));
+        let site_root = std::env::temp_dir().join(format!("narada-user-child-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&user_root).expect("user root");
+        fs::create_dir_all(site_root.join(".narada/crew/nars-sessions/session-user")).expect("session root");
+        let connection = Connection::open(user_root.join("registry.db")).expect("registry");
+        connection.execute_batch("CREATE TABLE site_registry (site_id TEXT NOT NULL, site_root TEXT NOT NULL, created_at TEXT NOT NULL);").expect("schema");
+        connection.execute("INSERT INTO site_registry (site_id, site_root, created_at) VALUES (?1, ?2, ?3)", rusqlite::params!["fixture-site", site_root.to_string_lossy(), "2026-01-01T00:00:00Z"]).expect("row");
+        drop(connection);
+        fs::write(site_root.join(".narada/crew/nars-sessions/session-user/session-index-record.json"), json!({"session_id":"session-user","site_id":"fixture-site","site_root":site_root.to_string_lossy()}).to_string()).expect("record");
+        env::set_var("NARADA_NARS_SESSION_SCOPE", "user_site");
+        env::set_var("NARADA_USER_SITE_ROOT", &user_root);
+        let listed = nars_list(&Map::from_iter([(String::from("limit"), json!(10))]), &user_root).expect("list");
+        assert_eq!(listed["scope"], "user_site");
+        assert_eq!(listed["authority_root"], user_root.to_string_lossy().to_string());
+        assert_eq!(listed["sessions"][0]["site_id"], "fixture-site");
+        let shown = nars_show(&Map::from_iter([(String::from("session_id"), json!("session-user")), (String::from("site_id"), json!("fixture-site"))]), &user_root).expect("show");
+        assert_eq!(shown["session"]["site_root"], site_root.to_string_lossy().to_string());
+        env::remove_var("NARADA_NARS_SESSION_SCOPE");
+        env::remove_var("NARADA_USER_SITE_ROOT");
+        let _ = fs::remove_dir_all(user_root);
+        let _ = fs::remove_dir_all(site_root);
     }
 }
