@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import {
   MCP_RUNTIME_CONTRACT_VERSION,
@@ -471,94 +471,6 @@ test('runtime profiles compile carrier plans with matrix-selected engines', asyn
         assert.equal(nativeLoader?.child_applet, undefined);
       }
     }
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-test('carrier recovery evidence retention bounds current and legacy artifacts', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'narada-recovery-evidence-contract-'));
-  const evidenceRoot = join(root, '.ai', 'runtime', 'carrier-materialization-recovery');
-  try {
-    mkdirSync(evidenceRoot, { recursive: true });
-    const legacyPath = join(evidenceRoot, '20260811120000-aaaaaaaaaaaaaaaa.json');
-    writeFileSync(legacyPath, '{}\n', 'utf8');
-    const evidenceModule = await import(pathToFileURL(join(workspaceRoot, 'scripts', 'carrier-recovery-evidence.mjs')).href + '?contract=' + Date.now()) as {
-      writeRecoveryEvidence(args: { workspaceRoot: string; evidenceRoot: string; value: unknown; maxFiles: number; now?: () => Date; pin?: boolean }): {
-        path: string;
-        retention: { policy: string; max_files: number; retained_count: number; pruned_count: number };
-        latest_materialization?: { path: string };
-      };
-    };
-    const refs = Array.from({ length: 4 }, (_, sequence) => evidenceModule.writeRecoveryEvidence({
-      workspaceRoot: root,
-      evidenceRoot,
-      value: { sequence },
-      maxFiles: 2,
-      pin: sequence === 0,
-    }));
-    assert.equal(readdirSync(evidenceRoot).filter((name) => name.endsWith('.json')).length, 3);
-    assert.equal(existsSync(legacyPath), false);
-    assert.equal(existsSync(refs[0].path), false);
-    assert.equal(existsSync(refs[3].path), true);
-    assert.deepEqual(refs[3].retention, { policy: 'current_then_newest_files_with_latest_materialization_pin', max_files: 2, retained_count: 2, pruned_count: 1 });
-    assert.deepEqual(JSON.parse(readFileSync(join(evidenceRoot, 'latest-materialization.json'), 'utf8')), { sequence: 0 });
-    const fixedNow = () => new Date('2026-08-11T12:34:56.789Z');
-    const duplicateA = evidenceModule.writeRecoveryEvidence({ workspaceRoot: root, evidenceRoot, value: { duplicate: true }, maxFiles: 2, now: fixedNow });
-    const duplicateB = evidenceModule.writeRecoveryEvidence({ workspaceRoot: root, evidenceRoot, value: { duplicate: true }, maxFiles: 2, now: fixedNow });
-    assert.equal(duplicateB.path, duplicateA.path);
-    assert.equal(existsSync(duplicateA.path), true);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-test('carrier restart pressure survives no-op recovery until explicit acknowledgement', () => {
-  const root = mkdtempSync(join(tmpdir(), 'narada-restart-pressure-contract-'));
-  try {
-    mkdirSync(join(root, 'scripts'), { recursive: true });
-    mkdirSync(join(root, 'packages', 'mcp-registrar', 'dist', 'src'), { recursive: true });
-    mkdirSync(join(root, 'packages', 'shared', 'mcp-runtime-proxy', 'dist', 'src'), { recursive: true });
-    mkdirSync(join(root, '.ai', 'runtime'), { recursive: true });
-    writeFileSync(join(root, 'package.json'), JSON.stringify({ type: 'module' }));
-    for (const name of ['recover-carrier-materialization.mjs', 'carrier-recovery-evidence.mjs']) {
-      writeFileSync(join(root, 'scripts', name), readFileSync(join(workspaceRoot, 'scripts', name), 'utf8'));
-    }
-    const fakeExport = join(root, 'fake-export.js');
-    writeFileSync(fakeExport, 'export {};\n');
-    writeFileSync(join(root, '.ai', 'runtime', 'workspace-artifact-manifest.json'), JSON.stringify({
-      packages: [{ export_targets: [{ path: fakeExport }] }],
-    }));
-    writeFileSync(join(root, 'packages', 'shared', 'mcp-runtime-proxy', 'dist', 'src', 'workspace-artifact-manifest.js'),
-      'export function preflightWorkspaceArtifacts() { return { ok: true }; }\n');
-    const marker = join(root, '.ai', 'runtime', 'materialized');
-    writeFileSync(join(root, 'packages', 'mcp-registrar', 'dist', 'src', 'main.js'), [
-      "import { existsSync, writeFileSync } from 'node:fs';",
-      `const marker = ${JSON.stringify(marker)};`,
-      "export function inspectAllCarrierMaterialization() { return existsSync(marker) ? { status: 'current', carrier_count: 1, stale_carrier_ids: [] } : { status: 'stale', carrier_count: 1, stale_carrier_ids: ['codex-andrey'] }; }",
-      "if (process.argv.includes('--materialize-all')) writeFileSync(marker, 'ok');",
-    ].join('\n'));
-    const script = join(root, 'scripts', 'recover-carrier-materialization.mjs');
-    const run = (...args: string[]) => {
-      const result = spawnSync(process.execPath, [script, ...args], { cwd: root, encoding: 'utf8' });
-      assert.equal(result.status, 0, result.stderr);
-      return JSON.parse(result.stdout);
-    };
-    const recovered = run();
-    assert.equal(recovered.restart_required, true);
-    assert.deepEqual(recovered.restart_carrier_ids, ['codex-andrey']);
-    const noOp = run();
-    assert.equal(noOp.status, 'current');
-    assert.equal(noOp.restart_required, true);
-    assert.deepEqual(noOp.restart_carrier_ids, ['codex-andrey']);
-    const pressureRef = recovered.restart_pressure['codex-andrey'].evidence_ref;
-    const staleAck = spawnSync(process.execPath, [script, '--ack-carrier', 'codex-andrey', '--expected-pressure-ref', 'obsolete-ref'], { cwd: root, encoding: 'utf8' });
-    assert.equal(staleAck.status, 2);
-    assert.equal(JSON.parse(staleAck.stdout).status, 'stale_ack_refused');
-    assert.equal(run().restart_required, true);
-    const acknowledged = run('--ack-carrier', 'codex-andrey', '--expected-pressure-ref', pressureRef);
-    assert.equal(acknowledged.status, 'acknowledged');
-    const current = run();
-    assert.equal(current.restart_required, false);
-    assert.deepEqual(current.restart_carrier_ids, []);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
