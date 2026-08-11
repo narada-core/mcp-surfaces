@@ -255,16 +255,77 @@ fn run() -> Result<(), Failure> {
         let options = derive::options_from_generation(&generation)?;
         let input = derive::derive_input(options)?;
         let installed_index = input.installed_carrier_index_path.clone();
+        let workspace_root = input.workspace_root.clone();
+        let carrier_ids = input
+            .carriers
+            .iter()
+            .map(|carrier| carrier.carrier_id.clone())
+            .collect::<Vec<_>>();
         let materialization = materialize(input)?;
         let verification = verify_all(&installed_index)?;
+        let recovered_at = OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .map_err(|error| Failure::new("materializer_clock_failed", error.to_string()))?;
+        let evidence_unsigned = json!({
+            "schema": "narada.mcp_materializer.recovery_evidence.v1",
+            "status": "recovered",
+            "recovered_at": recovered_at,
+            "trigger_generation_path": path_text(&generation),
+            "materialization": materialization,
+            "verification": verification,
+        });
+        let evidence_fingerprint =
+            sha256(&serde_json::to_vec(&evidence_unsigned).map_err(json_failure)?);
+        let evidence_ref = format!("sha256:{evidence_fingerprint}");
+        let mut evidence = evidence_unsigned;
+        evidence
+            .as_object_mut()
+            .expect("recovery evidence is an object")
+            .insert("ref".to_string(), Value::String(evidence_ref.clone()));
+        let recovery_root = workspace_root.join(".ai/runtime/carrier-materialization-recovery");
+        let evidence_path = recovery_root.join("latest-materialization.json");
+        let pressure_path = workspace_root.join(".ai/runtime/carrier-restart-pressure.json");
+        let pressure_carriers = carrier_ids
+            .iter()
+            .map(|carrier_id| {
+                (
+                    carrier_id.clone(),
+                    json!({
+                        "carrier_id": carrier_id,
+                        "materialized_at": recovered_at,
+                        "evidence_ref": evidence_ref,
+                    }),
+                )
+            })
+            .collect::<Map<String, Value>>();
+        let pressure = json!({
+            "schema": "narada.carrier_restart_pressure.v1",
+            "updated_at": recovered_at,
+            "carriers": pressure_carriers,
+        });
+        transactional_publish(&[
+            Publication {
+                path: evidence_path.clone(),
+                content: pretty_json(&evidence)?,
+            },
+            Publication {
+                path: pressure_path.clone(),
+                content: pretty_json(&pressure)?,
+            },
+        ])?;
         println!(
             "{}",
             json!({
-                "schema": "narada.mcp_materializer.recovery_evidence.v1",
-                "status": "recovered",
+                "schema": evidence.get("schema"),
+                "status": evidence.get("status"),
+                "ref": evidence_ref,
+                "recovered_at": recovered_at,
                 "trigger_generation_path": path_text(&generation),
-                "materialization": materialization,
-                "verification": verification,
+                "materialization": evidence.get("materialization"),
+                "verification": evidence.get("verification"),
+                "evidence_path": path_text(&evidence_path),
+                "restart_pressure_path": path_text(&pressure_path),
+                "restart_pressure": pressure.get("carriers"),
             })
         );
         return Ok(());

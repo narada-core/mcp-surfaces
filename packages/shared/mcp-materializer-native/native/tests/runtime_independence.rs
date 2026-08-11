@@ -291,6 +291,19 @@ fn derives_all_carriers_from_declared_site_capabilities_without_javascript() {
     );
     assert_eq!(recovery_result["status"], "recovered");
     assert_eq!(recovery_result["verification"]["status"], "current");
+    assert!(recovery_result["ref"]
+        .as_str()
+        .unwrap()
+        .starts_with("sha256:"));
+    assert!(
+        recovery_result["restart_pressure"]["codex-andrey"]["evidence_ref"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
+    assert!(workspace
+        .join(".ai/runtime/carrier-materialization-recovery/latest-materialization.json")
+        .exists());
     assert!(fs::read_to_string(home.join(".codex/config.toml"))
         .unwrap()
         .contains("[mcp_servers.narada-site-andrey-user-local-filesystem]"));
