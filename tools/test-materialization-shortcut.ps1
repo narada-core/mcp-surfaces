@@ -102,15 +102,22 @@ function Invoke-Materialization {
   $backup = Save-Environment -Names $environmentNames
   try {
     $env:Path = 'C:\Windows\System32;C:\Windows'
-    if ($Mode -eq 'failure') {
+    if ($Mode -in @('failure', 'version-mismatch')) {
       $env:PNPM_HOME = Join-Path $IsolationRoot 'pnpm-home'
       $env:LOCALAPPDATA = Join-Path $IsolationRoot 'local-appdata'
       $env:APPDATA = Join-Path $IsolationRoot 'appdata'
       $env:USERPROFILE = Join-Path $IsolationRoot 'user-profile'
       $env:ProgramFiles = Join-Path $IsolationRoot 'program-files'
       foreach ($directory in @($env:PNPM_HOME, $env:LOCALAPPDATA, $env:APPDATA, $env:USERPROFILE, $env:ProgramFiles)) {
-        New-Item -ItemType Directory -Path $directory -Force | Out-Null
+      New-Item -ItemType Directory -Path $directory -Force | Out-Null
       }
+    }
+    if ($Mode -eq 'version-mismatch') {
+      [System.IO.File]::WriteAllText(
+        (Join-Path $env:PNPM_HOME 'pnpm.cmd'),
+        "@echo off`r`nif `"%1`"==`"--version`" echo 10.33.0`r`nexit /b 0`r`n",
+        (New-Object System.Text.UTF8Encoding($false))
+      )
     }
 
     return Invoke-ChildPowerShell -Arguments @(
@@ -161,6 +168,14 @@ function Test-ShortcutContract {
   Assert-Condition ($contract.schema -eq 'narada.materialization_shortcut_contract.v1') 'contract schema must be versioned'
   Assert-Condition (-not ([string]$contract.script_relative_path -match '^[A-Za-z]:')) 'contract script path must be portable'
   Assert-Condition (([string]$contract.arguments_template -match '-NoProfile') -and ([string]$contract.arguments_template -match '-File')) 'contract must enforce no-profile file execution'
+  Assert-Condition ([string]$contract.arguments_template -match '-PauseOnError') 'shortcut must keep failures visible for operator diagnosis'
+  Assert-Condition ([string]$contract.arguments_template -match '-File\s+"\{script_path\}"\s+-PauseOnError(?:\s|$)') 'script parameters must follow the -File script path so PowerShell passes them to the script'
+  Assert-Condition (-not ([string]$contract.arguments_template -match '-WindowStyle\\s+Hidden')) 'desktop launcher must remain visibly informative'
+  Assert-Condition ([int]$contract.window_style -eq 1) 'desktop launcher must use a normal visible window style'
+  $materializeScriptText = Get-Content -LiteralPath $materializePath -Raw
+  Assert-Condition ($materializeScriptText -match 'Restart Codex, Kimi Code, and OpenCode') 'success notification must name every materialized carrier'
+  Assert-Condition ($materializeScriptText -match 'Write-ConsoleStatus') 'launcher must print visible status messages'
+  Assert-Condition ($materializeScriptText -match '\$spinner') 'launcher must print a live progress spinner'
 
   $first = Invoke-Installer -Arguments @('-RepoRoot', $repoRoot, '-DesktopPath', $TestRoot)
   Assert-Condition ($first.ExitCode -eq 0) "initial installer failed: $($first.Text)"
@@ -227,11 +242,34 @@ function Test-FailureReporting {
   }
 }
 
+function Test-PnpmVersionEnforcement {
+  param([Parameter(Mandatory)][string]$TestRoot)
+
+  $logPath = Join-Path $TestRoot 'materialization-version-mismatch.log'
+  $result = Invoke-Materialization -LogPath $logPath -Mode 'version-mismatch' -IsolationRoot (Join-Path $TestRoot 'isolated-version-runtime')
+  Assert-Condition ($result.ExitCode -ne 0) 'isolated mismatched-pnpm run must fail'
+  Assert-Condition (Test-Path -LiteralPath $logPath -PathType Leaf) 'version-mismatch run must produce a log'
+  $log = Get-Content -LiteralPath $logPath -Raw
+  Assert-Condition ($log -match 'requires pnpm@10\.9\.0') 'version-mismatch log must identify the pinned pnpm version'
+  Assert-Condition ($log -match '10\.33\.0') 'version-mismatch log must identify the discovered pnpm version'
+
+  [pscustomobject]@{
+    mode = 'version_mismatch'
+    exit_code = $result.ExitCode
+    log_path = $logPath
+    error_marker = $true
+  }
+}
+
 function Test-FullE2E {
   param([Parameter(Mandatory)][string]$TestRoot)
 
   $manifestPath = Join-Path $repoRoot '.ai\runtime\workspace-artifact-manifest.json'
-  $generationPath = Join-Path $env:USERPROFILE '.codex\config.toml.narada-generation.json'
+  $generationPaths = @(
+    [pscustomobject]@{ Carrier = 'codex-andrey'; Path = (Join-Path $env:USERPROFILE '.codex\config.toml.narada-generation.json') },
+    [pscustomobject]@{ Carrier = 'kimi-andrey'; Path = (Join-Path $env:USERPROFILE '.kimi-code\mcp.json.narada-generation.json') },
+    [pscustomobject]@{ Carrier = 'opencode-andrey'; Path = (Join-Path $env:USERPROFILE '.config\opencode\opencode.jsonc.narada-generation.json') }
+  )
   $e2eDesktop = Join-Path $TestRoot 'e2e-desktop'
   $installation = Invoke-Installer -Arguments @('-RepoRoot', $repoRoot, '-DesktopPath', $e2eDesktop)
   Assert-Condition ($installation.ExitCode -eq 0) "E2E shortcut installation failed: $($installation.Text)"
@@ -250,11 +288,23 @@ function Test-FullE2E {
   $manifestMtime = (Get-Item -LiteralPath $manifestPath).LastWriteTimeUtc
   Assert-Condition ($manifestMtime -ge $startedAt.UtcDateTime.AddSeconds(-5)) 'manifest must be refreshed by this E2E run'
 
-  Assert-Condition (Test-Path -LiteralPath $generationPath -PathType Leaf) 'Codex materialization generation sidecar must exist'
-  $generation = Get-Content -LiteralPath $generationPath -Raw | ConvertFrom-Json
-  Assert-Condition ([string]$generation.artifact_manifest_fingerprint -eq [string]$manifest.manifest_fingerprint) 'generation must reference the current manifest fingerprint'
-  $generatedAt = [DateTimeOffset]::Parse([string]$generation.generated_at)
-  Assert-Condition ($generatedAt -ge $startedAt.AddSeconds(-5)) 'generation timestamp must be fresh for this E2E run'
+  $generations = @()
+  foreach ($carrierGeneration in $generationPaths) {
+    Assert-Condition (Test-Path -LiteralPath $carrierGeneration.Path -PathType Leaf) "$($carrierGeneration.Carrier) materialization generation sidecar must exist"
+    $generation = Get-Content -LiteralPath $carrierGeneration.Path -Raw | ConvertFrom-Json
+    Assert-Condition ([string]$generation.carrier_id -eq [string]$carrierGeneration.Carrier) "$($carrierGeneration.Carrier) sidecar must identify its carrier"
+    Assert-Condition ([string]$generation.artifact_manifest_fingerprint -eq [string]$manifest.manifest_fingerprint) "$($carrierGeneration.Carrier) generation must reference the current manifest fingerprint"
+    Assert-Condition (Test-Path -LiteralPath ([string]$generation.runtime_materialization_plan_path) -PathType Leaf) "$($carrierGeneration.Carrier) runtime materialization plan must exist"
+    $generatedAt = [DateTimeOffset]::Parse([string]$generation.generated_at)
+    Assert-Condition ($generatedAt -ge $startedAt.AddSeconds(-5)) "$($carrierGeneration.Carrier) generation timestamp must be fresh for this E2E run"
+    $generations += [pscustomobject]@{
+      carrier = $generation.carrier_id
+      generation_fingerprint = $generation.generation_fingerprint
+      generated_at = $generation.generated_at
+      artifact_manifest_fingerprint = $generation.artifact_manifest_fingerprint
+      proxy_implementation = $generation.proxy_implementation
+    }
+  }
 
   [pscustomobject]@{
     mode = 'full_e2e'
@@ -262,8 +312,7 @@ function Test-FullE2E {
     log_path = $logPath
     manifest_fingerprint = $manifest.manifest_fingerprint
     artifact_count = @($manifest.artifacts).Count
-    generation_fingerprint = $generation.generation_fingerprint
-    generated_at = $generation.generated_at
+    carrier_generations = $generations
   }
 }
 
@@ -273,7 +322,8 @@ New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
 try {
   Test-ShortcutContract -TestRoot (Join-Path $testRoot 'desktop')
   $failure = Test-FailureReporting -TestRoot $testRoot
-  $results = @($failure)
+  $versionMismatch = Test-PnpmVersionEnforcement -TestRoot $testRoot
+  $results = @($failure, $versionMismatch)
 
   if ($FullE2E) {
     $results += Test-FullE2E -TestRoot $testRoot

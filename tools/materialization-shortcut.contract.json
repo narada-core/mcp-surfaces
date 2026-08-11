@@ -6,7 +6,7 @@
     "preferred_relative_path": "{system_root}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
     "fallback_command": "pwsh.exe"
   },
-  "arguments_template": "-NoLogo -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"{script_path}\"",
+  "arguments_template": "-NoLogo -NoProfile -ExecutionPolicy Bypass -File \"{script_path}\" -PauseOnError",
   "working_directory": "{repo_root}",
   "window_style": 1,
   "description": "Build mcp-surfaces and materialize all Narada carriers.",
