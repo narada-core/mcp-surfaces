@@ -425,6 +425,10 @@ function runMailboxReconciliationParity() {
       { jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'mailbox_admission_show', arguments: { fact_id: 'fact-1', scope_id: 'support' } } },
       { jsonrpc: '2.0', id: 8, method: 'tools/call', params: { name: 'mailbox_outbox_consumer_register', arguments: { consumer_id: 'decision-consumer', scope_id: 'support', topics: ['mailbox.message.admitted', 'mailbox.message.rejected'], start_at: '2026-01-01T00:00:00.000Z' } } },
       { jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'mailbox_outbox_list', arguments: { consumer_id: 'decision-consumer', limit: 10 } } },
+      { jsonrpc: '2.0', id: 10, method: 'tools/call', params: { name: 'mailbox_message_fact_find', arguments: { scope_id: 'support', message_id: 'message-1' } } },
+      { jsonrpc: '2.0', id: 11, method: 'tools/call', params: { name: 'mailbox_fact_show', arguments: { scope_id: 'support', fact_id: 'fact-1', include_content: false } } },
+      { jsonrpc: '2.0', id: 12, method: 'tools/call', params: { name: 'mailbox_fact_show', arguments: { scope_id: 'support', fact_id: 'fact-1', include_content: true } } },
+      { jsonrpc: '2.0', id: 13, method: 'tools/call', params: { name: 'mailbox_generation_show', arguments: { generation_id: 'generation-1' } } },
     ];
     const bun = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', [bunEntrypoint, '--site-root', bunRoot, '--control-plane-root', naradaRoot], requests, workspaceRoot);
     const rust = runMailbox(executable, ['--surface-id', 'mailbox', '--site-root', rustRoot], requests, workspaceRoot);
@@ -446,7 +450,16 @@ function runMailboxReconciliationParity() {
       assertSame('mailbox.admission.outbox.' + field, bunDecisionPage.items?.[0]?.[field], rustDecisionPage.items?.[0]?.[field]);
     }
     if (JSON.stringify(rustDecisionPage).includes('secret body')) throw new Error('mailbox_admission_body_leaked');
-    return { status: 'passed', fixture: 'immutable_fact_reconciliation_and_admission', compared: ['first_observation', 'reconciliation_replay', 'first_observation_event', 'admission', 'canonical_admission_replay', 'admission_show', 'admission_event'] };
+    const bunFactFind = mailboxStructured(bun, 10, 'bun');
+    const rustFactFind = mailboxStructured(rust, 10, 'rust');
+    for (const field of ['schema', 'status', 'scope_id', 'message_id']) assertSame('mailbox.fact_find.' + field, bunFactFind[field], rustFactFind[field]);
+    for (const field of ['observation_id', 'mailbox_id', 'message_id', 'first_generation_id', 'first_fact_id', 'event_id']) {
+      assertSame('mailbox.fact_find.observation.' + field, bunFactFind.observation?.[field], rustFactFind.observation?.[field]);
+    }
+    assertSame('mailbox.fact_show.safe', mailboxStructured(bun, 11, 'bun'), mailboxStructured(rust, 11, 'rust'));
+    assertSame('mailbox.fact_show.full', mailboxStructured(bun, 12, 'bun'), mailboxStructured(rust, 12, 'rust'));
+    assertSame('mailbox.generation_show', mailboxStructured(bun, 13, 'bun'), mailboxStructured(rust, 13, 'rust'));
+    return { status: 'passed', fixture: 'immutable_fact_reconciliation_and_admission', compared: ['first_observation', 'reconciliation_replay', 'first_observation_event', 'admission', 'canonical_admission_replay', 'admission_show', 'admission_event', 'fact_find', 'fact_show_safe', 'fact_show_full', 'generation_show'] };
   } finally {
     rmSync(bunRoot, { recursive: true, force: true });
     rmSync(rustRoot, { recursive: true, force: true });

@@ -39,6 +39,8 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<V
         "mailbox_search" => { required(args, "query")?; messages(args, root) },
         "mailbox_thread_show" => thread_show(args, root),
         "mailbox_output_show" => output_show(args, root),
+        "mailbox_fact_show" => fact_show(args, root),
+        "mailbox_message_fact_find" => message_fact_find(args, root),
         "mailbox_generation_show" => generation_show(args, root),
         "mailbox_admission_show" => admission_show(args, root),
         "mailbox_outbox_consumer_show" => outbox_consumer_show(args, root),
@@ -360,7 +362,229 @@ fn init_outbox_schema(db: &Connection) -> Result<(), Value> {
     Ok(())
 }
 
-fn generation_show(args:&Map<String,Value>,root:&Path)->Result<Value,Value>{let id=required(args,"generation_id")?;let Some(db)=open_domain_db(root)? else{return Ok(json!({"schema":"narada.mailbox.sync_generation.v1","status":"not_found","generation_id":id}));};let row:Option<Value>=db.query_row("SELECT generation_id,idempotency_key,scope_id,config_fingerprint,status,parent_cursor,next_cursor,batch_sha256,batch_record_count,staged_at,error_message,created_at,updated_at,completed_at FROM mailbox_sync_generations WHERE generation_id=? LIMIT 1",params![id],|row|Ok(json!({"generation_id":row.get::<_,String>(0)?,"idempotency_key":row.get::<_,String>(1)?,"scope_id":row.get::<_,String>(2)?,"config_fingerprint":row.get::<_,String>(3)?,"status":row.get::<_,String>(4)?,"parent_cursor_sha256":row.get::<_,Option<String>>(5)?.map(|v|v.len()),"next_cursor_sha256":row.get::<_,Option<String>>(6)?.map(|v|v.len()),"batch_sha256":row.get::<_,Option<String>>(7)?,"batch_record_count":row.get::<_,i64>(8)?,"staged_at":row.get::<_,Option<String>>(9)?,"error_present":row.get::<_,Option<String>>(10)?.is_some(),"created_at":row.get::<_,String>(11)?,"updated_at":row.get::<_,String>(12)?,"completed_at":row.get::<_,Option<String>>(13)?}))).optional().map_err(|e|error("mailbox_generation_query_failed",&e.to_string()))?;Ok(json!({"schema":"narada.mailbox.sync_generation.v1","status":if row.is_some(){"ok"}else{"not_found"},"generation":row,"metadata_only":true}))}
+fn generation_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let generation_id = required_bounded(args, "generation_id", "mailbox_generation_id_required", 128)?;
+    let Some(db) = open_domain_db(root)? else {
+        let code = format!("mailbox_sync_generation_not_found:{generation_id}");
+        return Err(error(&code, &code));
+    };
+    let row: Option<(
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        i64,
+        Option<String>,
+        Option<String>,
+        String,
+        String,
+        Option<String>,
+    )> = db
+        .query_row(
+            "SELECT scope_id,config_fingerprint,status,parent_cursor,next_cursor,batch_sha256,batch_record_count,receipt_json,error_message,created_at,updated_at,completed_at FROM mailbox_sync_generations WHERE generation_id=?",
+            params![generation_id],
+            |row| {
+                Ok((
+                    row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?,
+                    row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?, row.get(10)?, row.get(11)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| error("mailbox_generation_query_failed", &e.to_string()))?;
+    let Some((
+        scope_id,
+        config_fingerprint,
+        status,
+        parent_cursor,
+        next_cursor,
+        batch_sha256,
+        batch_record_count,
+        receipt_json,
+        error_message,
+        created_at,
+        updated_at,
+        completed_at,
+    )) = row
+    else {
+        let code = format!("mailbox_sync_generation_not_found:{generation_id}");
+        return Err(error(&code, &code));
+    };
+    let receipt = receipt_json
+        .map(|value| serde_json::from_str::<Value>(&value))
+        .transpose()
+        .map_err(|e| error("mailbox_generation_receipt_invalid", &e.to_string()))?
+        .unwrap_or(Value::Null);
+    let mut statement = db
+        .prepare("SELECT record_id,fact_id,event_kind,message_id,mailbox_id,conversation_id,source_version,application_status FROM mailbox_sync_generation_records WHERE generation_id=? ORDER BY rowid LIMIT 100")
+        .map_err(|e| error("mailbox_generation_record_query_failed", &e.to_string()))?;
+    let rows = statement
+        .query_map(params![generation_id], |row| {
+            Ok(json!({
+                "record_id":row.get::<_,String>(0)?,
+                "fact_id":row.get::<_,String>(1)?,
+                "event_kind":row.get::<_,String>(2)?,
+                "message_id":row.get::<_,Option<String>>(3)?,
+                "mailbox_id":row.get::<_,Option<String>>(4)?,
+                "conversation_id":row.get::<_,Option<String>>(5)?,
+                "source_version":row.get::<_,Option<String>>(6)?,
+                "application_status":row.get::<_,String>(7)?
+            }))
+        })
+        .map_err(|e| error("mailbox_generation_record_query_failed", &e.to_string()))?;
+    let mut records = Vec::new();
+    for row in rows {
+        records.push(row.map_err(|e| error("mailbox_generation_record_row_failed", &e.to_string()))?);
+    }
+    Ok(json!({
+        "schema":"narada.mailbox.sync_generation.v1",
+        "generation":{
+            "generation_id":generation_id,
+            "scope_id":scope_id,
+            "config_fingerprint":config_fingerprint,
+            "status":status,
+            "parent_cursor_sha256":parent_cursor.map(|value| sha256_hex(value.as_bytes())),
+            "next_cursor_sha256":next_cursor.map(|value| sha256_hex(value.as_bytes())),
+            "batch_sha256":batch_sha256,
+            "batch_record_count":batch_record_count,
+            "receipt":receipt,
+            "error_message":error_message,
+            "created_at":created_at,
+            "updated_at":updated_at,
+            "completed_at":completed_at
+        },
+        "records":records,
+        "records_truncated":batch_record_count > 100
+    }))
+}
+
+fn message_fact_find(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let scope_id = required_bounded(args, "scope_id", "mailbox_fact_find_scope_id_required", 256)?;
+    let message_id = required_bounded(args, "message_id", "mailbox_fact_find_message_id_required", 1024)?;
+    let Some(db) = open_domain_db(root)? else {
+        return Ok(json!({
+            "schema":"narada.mailbox.message_fact_lookup.v1",
+            "status":"not_found",
+            "scope_id":scope_id,
+            "message_id":message_id
+        }));
+    };
+    let observation: Option<Value> = db
+        .query_row(
+            "SELECT observation.observation_id,observation.mailbox_id,observation.message_id,observation.first_generation_id,observation.first_fact_id,observation.observed_at,event.event_id FROM mailbox_message_observations observation JOIN mailbox_sync_generations generation ON generation.generation_id=observation.first_generation_id LEFT JOIN mailbox_outbox event ON event.aggregate_id=observation.observation_id AND event.topic='mailbox.message.first_observed' WHERE generation.scope_id=? AND observation.message_id=?",
+            params![scope_id, message_id],
+            |row| {
+                Ok(json!({
+                    "observation_id":row.get::<_,String>(0)?,
+                    "mailbox_id":row.get::<_,String>(1)?,
+                    "message_id":row.get::<_,String>(2)?,
+                    "first_generation_id":row.get::<_,String>(3)?,
+                    "first_fact_id":row.get::<_,String>(4)?,
+                    "observed_at":row.get::<_,String>(5)?,
+                    "event_id":row.get::<_,Option<String>>(6)?
+                }))
+            },
+        )
+        .optional()
+        .map_err(|e| error("mailbox_fact_find_query_failed", &e.to_string()))?;
+    if let Some(observation) = observation {
+        Ok(json!({
+            "schema":"narada.mailbox.message_fact_lookup.v1",
+            "status":"ok",
+            "scope_id":scope_id,
+            "message_id":message_id,
+            "observation":observation
+        }))
+    } else {
+        Ok(json!({
+            "schema":"narada.mailbox.message_fact_lookup.v1",
+            "status":"not_found",
+            "scope_id":scope_id,
+            "message_id":message_id
+        }))
+    }
+}
+
+fn safe_fact_payload(value: &Value) -> Value {
+    match value {
+        Value::Array(values) => Value::Array(values.iter().map(safe_fact_payload).collect()),
+        Value::Object(object) => Value::Object(
+            object
+                .iter()
+                .map(|(key, value)| {
+                    if key.eq_ignore_ascii_case("attachments") {
+                        (key.clone(), metadata_only_attachment(value))
+                    } else {
+                        (key.clone(), safe_fact_payload(value))
+                    }
+                })
+                .collect(),
+        ),
+        _ => value.clone(),
+    }
+}
+
+fn fact_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let fact_id = required_bounded(args, "fact_id", "mailbox_fact_id_required", 256)?;
+    let scope = load_mailbox_scope(args, root)?;
+    let path = scope.root_dir.join(".narada/facts.db");
+    if !path.is_file() {
+        return Ok(json!({
+            "schema":"narada.mailbox.immutable_fact.v1",
+            "status":"not_found",
+            "fact_id":fact_id,
+            "scope_id":scope.scope_id
+        }));
+    }
+    let fact = match load_mail_fact(&scope, &fact_id) {
+        Ok(fact) => fact,
+        Err(value)
+            if value
+                .get("code")
+                .and_then(Value::as_str)
+                .is_some_and(|code| code.contains("fact_not_found")) =>
+        {
+            return Ok(json!({
+                "schema":"narada.mailbox.immutable_fact.v1",
+                "status":"not_found",
+                "fact_id":fact_id,
+                "scope_id":scope.scope_id
+            }));
+        }
+        Err(value) => return Err(value),
+    };
+    if fact.fact_type != "mail.message.discovered" {
+        let code = format!("mailbox_fact_type_invalid:{}", fact.fact_type);
+        return Err(error(&code, &code));
+    }
+    let metadata = mail_metadata(&fact)?;
+    if metadata.mailbox_id != scope.scope_id {
+        let code = format!("mailbox_fact_scope_mismatch:{}:{}", metadata.mailbox_id, scope.scope_id);
+        return Err(error(&code, &code));
+    }
+    let include_content = args.get("include_content").and_then(Value::as_bool) == Some(true);
+    if include_content && fact.payload_json.as_bytes().len() > 750 * 1024 {
+        let code = format!("mailbox_fact_content_too_large:{}", fact.payload_json.as_bytes().len());
+        return Err(error(&code, &code));
+    }
+    Ok(json!({
+        "schema":"narada.mailbox.immutable_fact.v1",
+        "status":"ok",
+        "scope_id":scope.scope_id,
+        "projection":if include_content { "full" } else { "safe" },
+        "fact":{
+            "fact_id":fact.fact_id,
+            "fact_type":fact.fact_type,
+            "provenance":fact.provenance,
+            "payload_sha256":sha256_hex(fact.payload_json.as_bytes()),
+            "payload":if include_content { fact.payload } else { safe_fact_payload(&fact.payload) },
+            "payload_content_included":include_content,
+            "created_at":fact.created_at
+        }
+    }))
+}
 fn outbox_consumer_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     let consumer_id = required_bounded(args, "consumer_id", "mailbox_outbox_consumer_id_required", 256)?;
     let Some(db) = open_domain_db(root)? else {
@@ -652,6 +876,7 @@ struct MailFact {
     fact_id: String,
     fact_type: String,
     provenance: Value,
+    payload_json: String,
     payload: Value,
     created_at: String,
 }
@@ -822,6 +1047,7 @@ fn load_mail_fact(scope: &MailboxScope, fact_id: &str) -> Result<MailFact, Value
         fact_id: fact_id.to_string(),
         fact_type,
         provenance,
+        payload_json,
         payload,
         created_at,
     })
@@ -1902,6 +2128,11 @@ fn schema(name: &str) -> Value {
             "limit":{"type":"integer","minimum":1,"maximum":100},"include_body":{"type":"boolean"}
         },"required":["thread_id"],"additionalProperties":false}),
         "mailbox_generation_show" => json!({"type":"object","properties":{"generation_id":{"type":"string"}},"required":["generation_id"],"additionalProperties":false}),
+        "mailbox_admission_show" => json!({"type":"object","properties":{"scope_id":{"type":"string"},"fact_id":{"type":"string"}},"required":["scope_id","fact_id"],"additionalProperties":false}),
+        "mailbox_fact_show" => json!({"type":"object","properties":{
+            "fact_id":{"type":"string"},"scope_id":{"type":"string"},"config_path":{"type":"string"},"include_content":{"type":"boolean","default":false}
+        },"required":["fact_id"],"additionalProperties":false}),
+        "mailbox_message_fact_find" => json!({"type":"object","properties":{"scope_id":{"type":"string"},"message_id":{"type":"string"}},"required":["scope_id","message_id"],"additionalProperties":false}),
         "mailbox_outbox_consumer_show" => json!({"type":"object","properties":{"consumer_id":{"type":"string"}},"required":["consumer_id"],"additionalProperties":false}),
         "mailbox_outbox_list" => json!({"type":"object","properties":{"consumer_id":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":100}},"required":["consumer_id"],"additionalProperties":false}),
         "mailbox_outbox_consumer_register" => json!({"type":"object","properties":{
@@ -1991,7 +2222,7 @@ mod tests {
         )
         .expect_err("registration conflict");
         assert_eq!(conflict["code"], "mailbox_outbox_consumer_conflict:c1");
-        assert_eq!(generation_show(&json!({"generation_id":"g1"}).as_object().unwrap(), &root).expect("generation")["status"], "ok");
+        assert_eq!(generation_show(&json!({"generation_id":"g1"}).as_object().unwrap(), &root).expect("generation")["generation"]["status"], "completed");
         assert_eq!(outbox_consumer_show(&json!({"consumer_id":"c1"}).as_object().unwrap(), &root).expect("consumer")["status"], "ok");
         let page = outbox_list(&json!({"consumer_id":"c1","limit":1}).as_object().unwrap(), &root).expect("outbox");
         assert_eq!(page["count"], 1);
