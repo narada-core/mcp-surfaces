@@ -222,6 +222,19 @@ fn read_run(root: &Path, id: &str) -> Result<Value, Value> {
 fn policy(root: &Path, allowed_roots: &[PathBuf]) -> Value {
     json!({"schema":"narada.worker.policy.v1","status":"ok","server_name":SERVER_NAME,"run_root":run_root(root).to_string_lossy(),"site_root":root.to_string_lossy(),"allowed_roots":allowed_roots.iter().map(|allowed|allowed.to_string_lossy()).collect::<Vec<_>>(),"allowed_runtimes":["narada-agent-runtime-server"],"allowed_authorities":["read","write","command"],"native_execution":"rust_authority","secret_projection":"environment_only"})
 }
+fn capability_snapshot(authority: &str, cwd: &Path, allowed_roots: &[PathBuf]) -> Value {
+    let writable = authority != "read";
+    json!({
+        "schema":"narada.worker.capability_snapshot.v1",
+        "authority":authority,
+        "cwd":cwd.to_string_lossy(),
+        "allowed_roots":allowed_roots.iter().map(|root|root.to_string_lossy()).collect::<Vec<_>>(),
+        "filesystem":{"read":true,"write":writable,"patch":writable},
+        "commands":{"execute":true,"working_directory_scoped":true,"tests_may_write_build_artifacts":writable},
+        "approval":{"mode":if writable{"automatic_review"}else{"not_applicable"},"sandbox":if writable{"workspace-write"}else{"read-only"}},
+        "tool_bridge":{"kind":"codex_builtin_repo_tools","mcp_projection":"none","reason":"delegated runs use an isolated config to avoid duplicating the carrier MCP fleet"}
+    })
+}
 fn defaults_path(root: &Path) -> PathBuf {
     run_root(root).join("cognition-defaults.json")
 }
@@ -238,6 +251,7 @@ fn cognition_defaults(root: &Path) -> Value {
     json!({"schema":"narada.worker.cognition_defaults.v1","status":"ok","defaults":cognition_defaults_for(root),"source":"native_contract","canonical_runtime":"narada-agent-runtime-server uses an immutable invocation plan","native_read_only":false})
 }
 fn config_resolve(args: &Map<String, Value>, root: &Path, allowed_roots: &[PathBuf]) -> Result<Value, Value> {
+    let resolved_authority = authority(args)?;
     let cwd = args
         .get("constraints")
         .and_then(Value::as_object)
@@ -252,7 +266,7 @@ fn config_resolve(args: &Map<String, Value>, root: &Path, allowed_roots: &[PathB
         ));
     }
     Ok(
-        json!({"schema":"narada.worker.config_resolve.v1","status":"ok","resolved":{"cwd":cwd.to_string_lossy(),"site_root":root.to_string_lossy(),"runtime":"narada-agent-runtime-server","authority":"read","launch":false},"diagnostics":[{"name":"native_execution","status":"boundary","message":"worker launch is delegated to the owning worker authority"}],"native_read_only":true}),
+        json!({"schema":"narada.worker.config_resolve.v1","status":"ok","resolved":{"cwd":cwd.to_string_lossy(),"site_root":root.to_string_lossy(),"runtime":"narada-agent-runtime-server","authority":resolved_authority,"launch":false},"capability_snapshot":capability_snapshot(resolved_authority,&cwd,allowed_roots),"diagnostics":[{"name":"native_execution","status":"boundary","message":"worker launch is delegated to the owning worker authority"}],"native_read_only":true}),
     )
 }
 fn run_status(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
@@ -522,7 +536,7 @@ fn affordances() -> Value {
 }
 fn compact_run(run: &Value) -> Value {
     let o = run.as_object().cloned().unwrap_or_default();
-    json!({"run_id":o.get("run_id"),"status":o.get("status"),"completion_state":o.get("completion_state"),"authority":o.get("authority"),"worker_session_id":o.get("worker_session_id"),"started_at":o.get("timing").and_then(|v|v.get("started_at")),"finished_at":o.get("timing").and_then(|v|v.get("finished_at")),"summary_preview":o.get("summary").or_else(||o.get("last_message")),"error_preview":o.get("error"),"updated_at":o.get("updated_at").or_else(||o.get("timing").and_then(|v|v.get("finished_at")))})
+    json!({"run_id":o.get("run_id"),"status":o.get("status"),"completion_state":o.get("completion_state"),"authority":o.get("authority"),"capability_snapshot":o.get("capability_snapshot"),"worker_session_id":o.get("worker_session_id"),"started_at":o.get("timing").and_then(|v|v.get("started_at")),"finished_at":o.get("timing").and_then(|v|v.get("finished_at")),"summary_preview":o.get("summary").or_else(||o.get("last_message")),"error_preview":o.get("error"),"updated_at":o.get("updated_at").or_else(||o.get("timing").and_then(|v|v.get("finished_at")))})
 }
 
 fn now() -> String {
@@ -779,17 +793,18 @@ fn worker_run(
         ));
     }
     let runtime = runtime_command(root)?;
+    let capabilities = capability_snapshot(&auth, &cwd, allowed_roots);
     let id = format!("run-{}", uuid::Uuid::new_v4().simple());
     let session = resume.clone().unwrap_or_else(|| id.clone());
     let dir = run_root(root).join(&id);
     fs::create_dir_all(&dir)
         .map_err(|_| error("worker_run_create_failed", "worker_run_create_failed"))?;
     let started = now();
-    let request = json!({"schema":"narada.worker.request.v1","run_id":id,"origin_tool":tool_name,"intent":args.get("intent"),"constraints":args.get("constraints"),"resume_worker_session_id":resume});
+    let request = json!({"schema":"narada.worker.request.v1","run_id":id,"origin_tool":tool_name,"intent":args.get("intent"),"constraints":args.get("constraints"),"resume_worker_session_id":resume,"capability_snapshot":capabilities.clone()});
     write_json_atomic(&dir.join("request.json"), &request)?;
     fs::write(dir.join("worker_prompt.txt"), &prompt)
         .map_err(|_| error("worker_write_failed", "worker_write_failed"))?;
-    let running = json!({"schema":"narada.worker.run.v1","run_id":id,"status":"running","completion_state":"pending","runtime":"narada-agent-runtime-server","authority":auth,"worker_session_id":session,"origin_tool":tool_name,"pid":null,"summary":null,"error":null,"timing":{"started_at":started,"finished_at":null,"duration_ms":null},"artifacts":{"request":dir.join("request.json").to_string_lossy(),"events":dir.join("events.jsonl").to_string_lossy(),"diagnostic":dir.join("diagnostic.log").to_string_lossy(),"last_message":dir.join("last_message.json").to_string_lossy()}});
+    let running = json!({"schema":"narada.worker.run.v1","run_id":id,"status":"running","completion_state":"pending","runtime":"narada-agent-runtime-server","authority":auth,"capability_snapshot":capabilities.clone(),"worker_session_id":session,"origin_tool":tool_name,"pid":null,"summary":null,"error":null,"timing":{"started_at":started,"finished_at":null,"duration_ms":null},"artifacts":{"request":dir.join("request.json").to_string_lossy(),"events":dir.join("events.jsonl").to_string_lossy(),"diagnostic":dir.join("diagnostic.log").to_string_lossy(),"last_message":dir.join("last_message.json").to_string_lossy()}});
     write_json_atomic(&dir.join("result.json"), &running)?;
     let root_owned = root.to_path_buf();
     let dir_owned = dir.clone();
@@ -813,7 +828,7 @@ fn worker_run(
                 plan_ref,
                 provider_mode,
                 provider_model,
-                prompt,
+                format!("Effective capability snapshot (authoritative for this run):\n{}\n\nUse built-in contained repository tools for bounded file inspection, patching, and focused tests. No carrier MCP tools are projected into this delegated run. If an operation is refused, report the exact tool, requested operation, effective root, and raw refusal.\n\nTask:\n{prompt}", serde_json::to_string_pretty(&capabilities).unwrap_or_else(|_| "{}".to_string())),
             )
         })
         .map_err(|_| error("worker_launch_failed", "worker_launch_failed"))?;
@@ -1112,7 +1127,8 @@ fn complete_native_run(
                 &json!({"summary":message,"deliverables":[],"open_questions":[],"next_actions":[]}),
             );
         }
-        let payload = json!({"schema":"narada.worker.run.v1","run_id":id,"status":if successful{"completed"}else{"failed"},"completion_state":if assistant.is_some(){"complete"}else{"absent"},"runtime":"narada-agent-runtime-server","authority":authority,"worker_session_id":provider_session.unwrap_or(session),"pid":child.id(),"summary":assistant,"error":runtime_error.or_else(||if successful{None}else{Some(format!("worker_runtime_exit:{:?}",status.and_then(|v|v.code())))}),"timing":{"started_at":Value::Null,"finished_at":finished,"duration_ms":started.elapsed().as_millis() as u64},"artifacts":{"request":dir.join("request.json").to_string_lossy(),"events":events_path.to_string_lossy(),"diagnostic":diagnostic_path.to_string_lossy(),"last_message":dir.join("last_message.json").to_string_lossy()}});
+        let snapshot = read_json(&dir.join("request.json")).ok().and_then(|request| request.get("capability_snapshot").cloned()).unwrap_or(Value::Null);
+        let payload = json!({"schema":"narada.worker.run.v1","run_id":id,"status":if successful{"completed"}else{"failed"},"completion_state":if assistant.is_some(){"complete"}else{"absent"},"runtime":"narada-agent-runtime-server","authority":authority,"capability_snapshot":snapshot,"worker_session_id":provider_session.unwrap_or(session),"pid":child.id(),"summary":assistant,"error":runtime_error.or_else(||if successful{None}else{Some(format!("worker_runtime_exit:{:?}",status.and_then(|v|v.code())))}),"timing":{"started_at":Value::Null,"finished_at":finished,"duration_ms":started.elapsed().as_millis() as u64},"artifacts":{"request":dir.join("request.json").to_string_lossy(),"events":events_path.to_string_lossy(),"diagnostic":diagnostic_path.to_string_lossy(),"last_message":dir.join("last_message.json").to_string_lossy()}});
         let _ = write_json_atomic(&result_path, &payload);
     }
 }
@@ -1140,6 +1156,15 @@ fn tool(name: &str, description: &str, schema: Value, read_only: bool) -> Value 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capability_snapshot_reports_effective_write_posture() {
+        let cwd = PathBuf::from("C:/workspace/repo");
+        let snapshot = capability_snapshot("write", &cwd, std::slice::from_ref(&cwd));
+        assert_eq!(snapshot["filesystem"]["write"], true);
+        assert_eq!(snapshot["approval"]["mode"], "automatic_review");
+        assert_eq!(snapshot["tool_bridge"]["kind"], "codex_builtin_repo_tools");
+    }
 
     #[test]
     fn native_worker_reads_bounded_run_records() {

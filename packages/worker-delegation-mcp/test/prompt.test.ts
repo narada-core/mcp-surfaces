@@ -12,6 +12,8 @@ const basePrompt = buildWorkerPrompt({
   ],
   outputContract: { schema: 'test.contract' },
   exitInterview: false,
+  authority: 'read',
+  allowedRoots: ['C:/workspace/example'],
 });
 
 assert.match(basePrompt, /Inspect the target module\./);
@@ -19,6 +21,8 @@ assert.match(basePrompt, /Audit only: inspect and report/);
 assert.match(basePrompt, /Do not call any worker_\* MCP tools\./);
 assert.match(basePrompt, /Structured output contract\n\{"schema":"test\.contract"\}/);
 assert.doesNotMatch(basePrompt, /Exit interview/);
+assert.match(basePrompt, /narada\.worker\.capability_snapshot\.v1/);
+assert.match(basePrompt, /codex_builtin_repo_tools/);
 
 const narsPrompt = buildWorkerPrompt({
   intent: { instruction: 'Make the requested edit.', mode: 'implement' },
@@ -29,6 +33,8 @@ const narsPrompt = buildWorkerPrompt({
   outputContract: { schema: 'test.contract' },
   exitInterview: true,
   requiredMcpTools: ['local-filesystem.fs_read_file'],
+  authority: 'write',
+  allowedRoots: ['C:/workspace/example'],
 });
 
 assert.match(narsPrompt, /NARS worker completion guard/);

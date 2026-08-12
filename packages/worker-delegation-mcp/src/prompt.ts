@@ -9,10 +9,23 @@ export type WorkerPromptOptions = {
   outputContract: Record<string, unknown>;
   exitInterview: boolean;
   requiredMcpTools?: string[];
+  authority: string;
+  allowedRoots: string[];
 };
 
 export function buildWorkerPrompt(options: WorkerPromptOptions): string {
   const requiredMcpTools = options.requiredMcpTools ?? [];
+  const writable = options.authority !== 'read';
+  const capabilitySnapshot = {
+    schema: 'narada.worker.capability_snapshot.v1',
+    authority: options.authority,
+    cwd: options.cwd,
+    allowed_roots: options.allowedRoots,
+    filesystem: { read: true, write: writable, patch: writable },
+    commands: { execute: true, working_directory_scoped: true, tests_may_write_build_artifacts: writable },
+    approval: { mode: writable ? 'automatic_review' : 'not_applicable', sandbox: writable ? 'workspace-write' : 'read-only' },
+    tool_bridge: { kind: 'codex_builtin_repo_tools', mcp_projection: requiredMcpTools.length > 0 ? 'explicit_allowlist' : 'none' },
+  };
   return [
     'Intent',
     options.intent.instruction,
@@ -22,6 +35,10 @@ export function buildWorkerPrompt(options: WorkerPromptOptions): string {
     '',
     'Working directory',
     options.cwd,
+    '',
+    'Effective capability snapshot (authoritative for this run)',
+    JSON.stringify(capabilitySnapshot),
+    'If an operation is refused, report the exact tool, requested operation, effective root, and raw refusal.',
     '',
     'Preflight evidence',
     ...options.preflight.map((check) => `- ${check.status} ${check.name}: ${check.message}`),
@@ -33,7 +50,12 @@ export function buildWorkerPrompt(options: WorkerPromptOptions): string {
     'Do not call any worker_* MCP tools.',
     '',
     'Tool use discipline',
-    'Prefer available MCP filesystem, git, and structured-command tools for inspection and verification.',
+    ...(requiredMcpTools.length > 0 ? [
+      'Prefer the explicitly projected MCP filesystem, git, and structured-command tools for inspection and verification.',
+    ] : [
+      'Use built-in contained repository tools for bounded file inspection, patching, and focused tests.',
+      'These built-in tools are the governed repo-work bridge for this isolated delegated run.',
+    ]),
     'Do not use direct shell commands for file discovery or file reads when MCP tools can do the work.',
     'Use direct shell execution only when the delegated intent explicitly requires command execution and no narrower MCP surface fits.',
     'When required_mcp_tools are listed in preflight, verify availability or use in the verification array; if falling back to shell, include a concise fallback reason in verification.summary.',

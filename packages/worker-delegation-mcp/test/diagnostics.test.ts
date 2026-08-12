@@ -7,6 +7,9 @@ import { classifyRuntimeError, partialFailurePosture, readRunProgress, runtimeFa
 assert.equal(classifyRuntimeError('API error 429: rate_limit_exceeded'), 'provider_rate_limited');
 assert.equal(classifyRuntimeError('Missing API key for provider'), 'provider_auth');
 assert.equal(classifyRuntimeError('not inside a trusted directory; pass --skip-git-repo-check'), 'codex_untrusted_directory');
+assert.equal(classifyRuntimeError('windows sandbox: orchestrator_helper_launch_failed: filename or extension is too long. (os error 206)'), 'windows_sandbox_setup_payload_too_long');
+assert.equal(classifyRuntimeError('writing is blocked by read-only sandbox'), 'write_admission_mismatch');
+assert.equal(classifyRuntimeError('worker_cwd_outside_allowed_roots'), 'cwd_outside_allowed_roots');
 
 assert.equal(
   runtimeFailurePhase(

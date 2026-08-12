@@ -130,7 +130,7 @@ function workerConfigResolve(args: Record<string, unknown>, state: WorkerMcpStat
   const runtimeAvailability = checkRuntimeAvailability(runtime, state.policy, environment);
   const implementationGate = workerImplementationGate();
   const launchability = mcpToolLaunchability(request.constraints.required_mcp_tools ?? [], runtime);
-  const prompt = buildWorkerPrompt({ intent: request.intent, cwd, mode: requestedMode, runtime, preflight, outputContract, exitInterview: request.constraints.exit_interview === true, requiredMcpTools: request.constraints.required_mcp_tools ?? [] });
+  const prompt = buildWorkerPrompt({ intent: request.intent, cwd, mode: requestedMode, runtime, preflight, outputContract, exitInterview: request.constraints.exit_interview !== false && requestedMode.startsWith('implement'), requiredMcpTools: request.constraints.required_mcp_tools ?? [], authority, allowedRoots: state.policy.allowedRoots });
   const promptBytes = Buffer.byteLength(prompt, 'utf8');
   if (promptBytes > state.policy.maxPromptBytes) throw diagnosticError('worker_prompt_too_large', 'worker_prompt_too_large', { prompt_byte_length: promptBytes, max_prompt_bytes: state.policy.maxPromptBytes });
   const skipGitRepoCheck = optionalBoolean(overrides.skip_git_repo_check, 'skip_git_repo_check');
@@ -586,7 +586,7 @@ async function workerRunInner(args: Record<string, unknown>, state: WorkerMcpSta
   ensureRequiredMcpToolsProjectable(request.constraints.required_mcp_tools ?? [], runtime);
   assertWorkerImplementationFresh();
 
-  const prompt = buildWorkerPrompt({ intent: request.intent, cwd, mode: requestedMode, runtime, preflight, outputContract, exitInterview: request.constraints.exit_interview === true, requiredMcpTools: request.constraints.required_mcp_tools ?? [] });
+  const prompt = buildWorkerPrompt({ intent: request.intent, cwd, mode: requestedMode, runtime, preflight, outputContract, exitInterview: request.constraints.exit_interview !== false && requestedMode.startsWith('implement'), requiredMcpTools: request.constraints.required_mcp_tools ?? [], authority, allowedRoots: state.policy.allowedRoots });
   const resumable = resumeSessionId !== null || request.constraints.resumable === true;
   const ephemeral = !resumable;
   const promptBytes = Buffer.byteLength(prompt, 'utf8');

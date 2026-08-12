@@ -410,6 +410,10 @@ function classifyDiagnosticTail(text: string): string {
 
 export function classifyRuntimeError(text: string): string | null {
   const lower = text.toLowerCase();
+  if (lower.includes('orchestrator_helper_launch_failed') && (lower.includes('os error 206') || lower.includes('filename or extension is too long'))) return 'windows_sandbox_setup_payload_too_long';
+  if (lower.includes('writing is blocked by read-only sandbox') || lower.includes('read-only filesystem sandbox')) return 'write_admission_mismatch';
+  if (lower.includes('outside allowed roots') || lower.includes('outside_allowed_roots')) return 'cwd_outside_allowed_roots';
+  if (lower.includes('rejected by policy') || lower.includes('command syntax not admitted')) return 'command_shape_not_admitted';
   if (lower.includes('mcp runtime fault') || lower.includes('mcp_runtime_fault') || lower.includes('surface_registry_tool_not_declared') || lower.includes('admission_required') || lower.includes('tool_not_declared')) return 'mcp_tool_failure';
   if (lower.includes('rate_limit') || lower.includes('rate limit') || lower.includes('429')) return 'provider_rate_limited';
   if (lower.includes('unauthorized') || lower.includes('authentication') || lower.includes('api key') || lower.includes('401') || lower.includes('403')) return 'provider_auth';

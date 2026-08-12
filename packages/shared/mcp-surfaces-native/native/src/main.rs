@@ -1064,6 +1064,7 @@ mod tests {
         Options {
             surface_id: "catalog-observation".to_string(),
             site_root: PathBuf::from("."),
+            allowed_roots: vec![PathBuf::from(".")],
             log_root: None,
             registry_path: None,
             native_authority: false,
@@ -1369,6 +1370,7 @@ mod tests {
         let options = Options {
             surface_id: "operator-routing".to_string(),
             site_root: root.clone(),
+            allowed_roots: vec![root.clone()],
             log_root: Some(root.join("log")),
             registry_path: None,
             native_authority: false,
