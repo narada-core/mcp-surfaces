@@ -1170,12 +1170,19 @@ try {
       );
       const sharedServer: any = Object.values(sharedBindConfig.config.mcpServers as Record<string, any>).find((candidate: any) => candidate.surface_id === surfaceId);
       assert.ok(sharedServer);
-      assert.equal(sharedServer.args[sharedServer.args.indexOf('--child-invocation-kind') + 1], 'native_entrypoint');
+      const childInvocationKinds = sharedServer.args
+        .flatMap((argument: string, index: number) => argument === '--child-invocation-kind' ? [sharedServer.args[index + 1]] : []);
+      if (surfaceId === 'worker-delegation' || surfaceId === 'delegated-task') {
+        assert.equal(childInvocationKinds.includes('native_entrypoint'), false, surfaceId);
+        assert.match(sharedServer.args[sharedServer.args.indexOf('--child-command') + 1], /node\.exe$/i);
+      } else {
+        assert.ok(childInvocationKinds.includes('native_entrypoint'), surfaceId);
+        assert.match(sharedServer.args[sharedServer.args.indexOf('--child-command') + 1], /narada-mcp-surfaces\.exe$/i);
+        const separator = sharedServer.args.indexOf('--');
+        assert.equal(sharedServer.args[separator + 1], '--surface-id');
+        assert.equal(sharedServer.args[separator + 2], surfaceId);
+      }
       assert.match(sharedServer.command, /narada-mcp-runtime\.exe$/i);
-      assert.match(sharedServer.args[sharedServer.args.indexOf('--child-command') + 1], /narada-mcp-surfaces\.exe$/i);
-      const separator = sharedServer.args.indexOf('--');
-      assert.equal(sharedServer.args[separator + 1], '--surface-id');
-      assert.equal(sharedServer.args[separator + 2], surfaceId);
       assert.equal(sharedServer.args.includes('--native-authority'), surfaceId === 'calendar' || surfaceId === 'graph-mail');
     }
   }
@@ -1258,9 +1265,8 @@ try {
   );
   const workerServer: any = (workerBindConfig.config.mcpServers as Record<string, any>)['narada-sonar-worker-delegation'];
   assert.equal(workerServer.surface_id, 'worker-delegation');
-  assertRuntimeProxy(workerServer, nativeSharedSurfaceEntrypoint, 'narada-mcp-surfaces');
+  assertRuntimeProxy(workerServer, workspacePath('packages', 'worker-delegation-mcp', 'dist', 'src', 'main.js'), 'node');
   const workerChildArgs = workerServer.args.slice(workerServer.args.indexOf('--') + 1);
-  assert.deepEqual(workerChildArgs.slice(0, 2), ['--surface-id', 'worker-delegation']);
   assert.equal(workerChildArgs[workerChildArgs.indexOf('--site-root') + 1], root);
   assert.equal(workerChildArgs[workerChildArgs.indexOf('--allowed-root') + 1], root);
   assert.equal(String(workerChildArgs[workerChildArgs.indexOf('--run-root') + 1]).replace(/\\/g, '/'), join(root, '.narada', 'runtime', 'worker-delegation').replace(/\\/g, '/'));
@@ -1285,7 +1291,6 @@ try {
   );
   const controlRootWorkerServer: any = (controlRootWorkerBindConfig.config.mcpServers as Record<string, any>)['narada-smart-scheduling-worker-delegation'];
   const controlRootWorkerChildArgs: any[] = controlRootWorkerServer.args.slice(controlRootWorkerServer.args.indexOf('--') + 1);
-  assert.deepEqual(controlRootWorkerChildArgs.slice(0, 2), ['--surface-id', 'worker-delegation']);
   assert.equal(controlRootWorkerChildArgs[controlRootWorkerChildArgs.indexOf('--site-root') + 1], controlRootWorkspace);
   assert.equal(controlRootWorkerChildArgs[controlRootWorkerChildArgs.indexOf('--allowed-root') + 1], controlRootWorkspace);
   const controlRootRunRoot = String(controlRootWorkerChildArgs[controlRootWorkerChildArgs.indexOf('--run-root') + 1]);
