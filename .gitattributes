@@ -1,2 +1,19 @@
-# Generated dependency lock must remain byte-stable across Windows and Unix.
-pnpm-lock.yaml text eol=lf
+# Text is byte-stable across Windows and Unix. Runtime configuration writers
+# enforce this independently; Git normalization is not a freshness boundary.
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.gz binary
+*.zip binary
+*.7z binary
+*.exe binary
+*.dll binary
+*.db binary
+*.sqlite binary
+*.sqlite3 binary

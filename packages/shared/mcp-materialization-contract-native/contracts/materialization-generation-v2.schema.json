@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "narada.mcp_materialization_generation.v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "contract_version", "carrier_id", "carrier_kind", "config_path",
+    "config_artifact", "managed_projection", "materialization_contract_entrypoint",
+    "materialization_contract_fingerprint", "artifact_manifest_path",
+    "artifact_manifest_fingerprint", "runtime_profile_kind",
+    "runtime_materialization_plan_path", "runtime_materialization_plan_fingerprint",
+    "runtime_implementation_matrix_path", "runtime_implementation_matrix_fingerprint",
+    "registrar_entrypoint", "registrar_fingerprint", "proxy_implementation",
+    "proxy_entrypoint", "proxy_fingerprint", "server_count", "proxy_count",
+    "generated_at", "generation_fingerprint"
+  ],
+  "properties": {
+    "schema": { "const": "narada.mcp_materialization_generation.v2" },
+    "contract_version": { "const": 7 },
+    "carrier_id": { "type": "string", "minLength": 1 },
+    "carrier_kind": { "enum": ["codex", "kimi", "opencode"] },
+    "config_path": { "type": "string", "minLength": 1 },
+    "config_artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bytes_sha256", "encoding", "bom", "line_endings", "final_newline"],
+      "properties": {
+        "bytes_sha256": { "$ref": "#/$defs/sha256" },
+        "encoding": { "const": "utf-8" },
+        "bom": { "type": "boolean" },
+        "line_endings": { "enum": ["lf", "crlf", "cr", "mixed", "none"] },
+        "final_newline": { "type": "boolean" }
+      }
+    },
+    "managed_projection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha256", "scope", "canonicalization", "selectors"],
+      "properties": {
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "scope": { "enum": ["codex_managed_selectors", "whole_document"] },
+        "canonicalization": { "enum": ["narada.codex_managed_projection.v1", "narada.whole_document_bytes.v1"] },
+        "selectors": { "type": "array", "items": { "type": "string", "pattern": "^/" }, "uniqueItems": true }
+      }
+    },
+    "materialization_contract_entrypoint": { "type": "string", "minLength": 1 },
+    "materialization_contract_fingerprint": { "$ref": "#/$defs/nullableSha256" },
+    "artifact_manifest_path": { "type": "string", "minLength": 1 },
+    "artifact_manifest_fingerprint": { "$ref": "#/$defs/nullableSha256" },
+    "runtime_profile_kind": { "enum": ["native", "bun", "node-compat"] },
+    "runtime_materialization_plan_path": { "type": "string", "minLength": 1 },
+    "runtime_materialization_plan_fingerprint": { "$ref": "#/$defs/sha256" },
+    "runtime_implementation_matrix_path": { "type": "string", "minLength": 1 },
+    "runtime_implementation_matrix_fingerprint": { "$ref": "#/$defs/sha256" },
+    "registrar_entrypoint": { "type": "string", "minLength": 1 },
+    "registrar_fingerprint": { "$ref": "#/$defs/nullableSha256" },
+    "proxy_implementation": { "enum": ["bun", "node", "native"] },
+    "proxy_entrypoint": { "type": "string", "minLength": 1 },
+    "proxy_fingerprint": { "$ref": "#/$defs/nullableSha256" },
+    "server_count": { "type": "integer", "minimum": 0 },
+    "proxy_count": { "type": "integer", "minimum": 0 },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "generation_fingerprint": { "$ref": "#/$defs/sha256" }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "nullableSha256": { "anyOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] }
+  }
+}

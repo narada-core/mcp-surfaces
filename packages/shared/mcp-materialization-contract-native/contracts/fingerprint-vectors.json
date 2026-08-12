@@ -1,0 +1,45 @@
+{
+  "schema": "narada.mcp_materialization_fingerprint_vectors.v1",
+  "vectors": [
+    {
+      "id": "codex-lf",
+      "carrier_kind": "codex",
+      "content": "model = \"a\"\n[mcp_servers.fixture]\ncommand = \"x\"\n",
+      "selectors": ["/mcp_servers"],
+      "expected_bytes_sha256": "e61805ff40591153c099d1064abbcd7a4b98fd76905f8c65824b174c1da61338",
+      "expected_managed_sha256": "64f8314f9ce3cba7a0715248186be6ecbcc52788f27a182d704cd9cde4d1c033"
+    },
+    {
+      "id": "codex-crlf-unmanaged-drift",
+      "carrier_kind": "codex",
+      "content": "model = \"b\"\r\n\r\n[mcp_servers.fixture]\r\ncommand=\"x\"\r\n",
+      "selectors": ["/mcp_servers"],
+      "expected_bytes_sha256": "cab4b1565fd917f770d10cfd98fbbc48057d64604704c752a395fd5299215866",
+      "expected_managed_sha256": "64f8314f9ce3cba7a0715248186be6ecbcc52788f27a182d704cd9cde4d1c033"
+    },
+    {
+      "id": "codex-managed-drift",
+      "carrier_kind": "codex",
+      "content": "model = \"a\"\n[mcp_servers.fixture]\ncommand = \"y\"\n",
+      "selectors": ["/mcp_servers"],
+      "expected_bytes_sha256": "8829ef67c0f93c9b124b3a833f93230307006df7cde91907e2ec3c524f454e5a",
+      "expected_managed_sha256": "edfc9a5ea629d099958641b4064b11e47572171f2d8d1112f3c311191ea7b0e9"
+    },
+    {
+      "id": "kimi-lf",
+      "carrier_kind": "kimi",
+      "content": "{\"mcpServers\":{}}\n",
+      "selectors": [],
+      "expected_bytes_sha256": "e93fc8db2b1bd77107fe6c758bca9545fa864cf7cce8ab93a7b2b93a1d566a7b",
+      "expected_managed_sha256": "e93fc8db2b1bd77107fe6c758bca9545fa864cf7cce8ab93a7b2b93a1d566a7b"
+    },
+    {
+      "id": "kimi-crlf",
+      "carrier_kind": "kimi",
+      "content": "{\"mcpServers\":{}}\r\n",
+      "selectors": [],
+      "expected_bytes_sha256": "099e43a43f1a6e62d9217999ae5f8dd0b072dcd4ddacf97d0b8085613cd974ff",
+      "expected_managed_sha256": "099e43a43f1a6e62d9217999ae5f8dd0b072dcd4ddacf97d0b8085613cd974ff"
+    }
+  ]
+}

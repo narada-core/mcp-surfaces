@@ -1,4 +1,4 @@
-use crate::filesystem::{read_message, write_message};
+use crate::filesystem::{parse_site_extra_allowed_roots, read_message, write_message};
 use crate::protocol;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -215,14 +215,20 @@ fn parse_state(args: &[String]) -> Result<State, String> {
     if roots.is_empty() {
         return Err("git_mcp_requires_at_least_one_allowed_root".to_string());
     }
-    let allowed_roots = roots
-        .into_iter()
-        .map(|root| absolute(PathBuf::from(root)))
-        .collect::<Vec<_>>();
-    let output_root =
-        absolute(PathBuf::from(output_root.unwrap_or_else(|| {
-            allowed_roots[0].to_string_lossy().to_string()
-        })));
+    let output_root = absolute(PathBuf::from(
+        output_root.unwrap_or_else(|| roots[0].clone()),
+    ));
+    roots.extend(parse_site_extra_allowed_roots(&output_root));
+    let mut allowed_roots = Vec::new();
+    for root in roots {
+        let path = absolute(PathBuf::from(root));
+        if !allowed_roots
+            .iter()
+            .any(|candidate: &PathBuf| path_key(candidate) == path_key(&path))
+        {
+            allowed_roots.push(path);
+        }
+    }
     Ok(State {
         mode,
         allowed_roots,
@@ -564,9 +570,17 @@ fn git_begin_work_scope(
     state
         .work_scopes
         .lock()
-        .map_err(|_| GitError::new("git_work_scope_store_unavailable", "git_work_scope_store_unavailable", json!({})))?
+        .map_err(|_| {
+            GitError::new(
+                "git_work_scope_store_unavailable",
+                "git_work_scope_store_unavailable",
+                json!({}),
+            )
+        })?
         .insert(reference.clone(), scope.clone());
-    Ok(json!({"schema": "narada.git.work_scope.v1", "status": "ok", "working_directory": cwd.to_string_lossy(), "repository_root": repository_root, "work_scope_ref": reference, "allowed_paths": allowed_paths, "base_state": base_state, "created_at": scope.created_at, "expires_at": expires.format(&Rfc3339).unwrap_or_default(), "mutation_started": false, "summary": format!("work scope issued for {} path{}", scope.allowed_paths.len(), if scope.allowed_paths.len() == 1 { "" } else { "s" })}))
+    Ok(
+        json!({"schema": "narada.git.work_scope.v1", "status": "ok", "working_directory": cwd.to_string_lossy(), "repository_root": repository_root, "work_scope_ref": reference, "allowed_paths": allowed_paths, "base_state": base_state, "created_at": scope.created_at, "expires_at": expires.format(&Rfc3339).unwrap_or_default(), "mutation_started": false, "summary": format!("work scope issued for {} path{}", scope.allowed_paths.len(), if scope.allowed_paths.len() == 1 { "" } else { "s" })}),
+    )
 }
 
 fn apply_status_query(
@@ -582,11 +596,21 @@ fn apply_status_query(
     };
     let filters = pathspecs(args)?;
     let allowed_paths = scope.as_ref().map(|value| value.allowed_paths.clone());
-    let staged_only = args.get("staged_only").and_then(Value::as_bool).unwrap_or(false);
-    let include_untracked = args.get("include_untracked").and_then(Value::as_bool).unwrap_or(true);
+    let staged_only = args
+        .get("staged_only")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let include_untracked = args
+        .get("include_untracked")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
     let format = args.get("format").and_then(Value::as_str).unwrap_or("full");
     if !matches!(format, "full" | "paths" | "summary") {
-        return Err(GitError::new("git_invalid_status_format", "git_invalid_status_format", json!({"format": format})));
+        return Err(GitError::new(
+            "git_invalid_status_format",
+            "git_invalid_status_format",
+            json!({"format": format}),
+        ));
     }
     let entries = parsed
         .get("status_entries")
@@ -596,43 +620,144 @@ fn apply_status_query(
     let selected = entries
         .into_iter()
         .filter(|entry| {
-            let path = entry.get("path").or_else(|| entry.get("display_path")).and_then(Value::as_str).unwrap_or_default();
-            let in_scope = allowed_paths.as_ref().is_none_or(|paths| paths.iter().any(|allowed| path_matches(path, allowed)));
-            let in_pathspec = filters.is_empty() || filters.iter().any(|pattern| path_matches(path, pattern));
-            let staged = !staged_only || entry.get("staged").and_then(Value::as_bool).unwrap_or(false);
-            let untracked = include_untracked || !entry.get("untracked").and_then(Value::as_bool).unwrap_or(false);
+            let path = entry
+                .get("path")
+                .or_else(|| entry.get("display_path"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let in_scope = allowed_paths
+                .as_ref()
+                .is_none_or(|paths| paths.iter().any(|allowed| path_matches(path, allowed)));
+            let in_pathspec =
+                filters.is_empty() || filters.iter().any(|pattern| path_matches(path, pattern));
+            let staged = !staged_only
+                || entry
+                    .get("staged")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+            let untracked = include_untracked
+                || !entry
+                    .get("untracked")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
             in_scope && in_pathspec && staged && untracked
         })
         .collect::<Vec<_>>();
-    let staged = selected.iter().filter(|entry| entry.get("staged").and_then(Value::as_bool).unwrap_or(false)).filter_map(|entry| entry.get("display_path").cloned()).collect::<Vec<_>>();
-    let unstaged = selected.iter().filter(|entry| entry.get("unstaged").and_then(Value::as_bool).unwrap_or(false)).filter_map(|entry| entry.get("display_path").cloned()).collect::<Vec<_>>();
-    let untracked = selected.iter().filter(|entry| entry.get("untracked").and_then(Value::as_bool).unwrap_or(false)).filter_map(|entry| entry.get("display_path").cloned()).collect::<Vec<_>>();
-    let conflicts = selected.iter().filter(|entry| entry.get("conflict").and_then(Value::as_bool).unwrap_or(false)).filter_map(|entry| entry.get("display_path").cloned()).collect::<Vec<_>>();
-    let clean = staged.is_empty() && unstaged.is_empty() && untracked.is_empty() && conflicts.is_empty();
-    parsed["status_entries"] = if format == "full" { json!(selected) } else { json!([]) };
-    parsed["staged"] = if format == "full" { json!(staged) } else { json!([]) };
-    parsed["unstaged"] = if format == "full" { json!(unstaged) } else { json!([]) };
-    parsed["untracked"] = if format == "full" { json!(untracked) } else { json!([]) };
-    parsed["conflicts"] = if format == "full" { json!(conflicts) } else { json!([]) };
+    let staged = selected
+        .iter()
+        .filter(|entry| {
+            entry
+                .get("staged")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+        .filter_map(|entry| entry.get("display_path").cloned())
+        .collect::<Vec<_>>();
+    let unstaged = selected
+        .iter()
+        .filter(|entry| {
+            entry
+                .get("unstaged")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+        .filter_map(|entry| entry.get("display_path").cloned())
+        .collect::<Vec<_>>();
+    let untracked = selected
+        .iter()
+        .filter(|entry| {
+            entry
+                .get("untracked")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+        .filter_map(|entry| entry.get("display_path").cloned())
+        .collect::<Vec<_>>();
+    let conflicts = selected
+        .iter()
+        .filter(|entry| {
+            entry
+                .get("conflict")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+        .filter_map(|entry| entry.get("display_path").cloned())
+        .collect::<Vec<_>>();
+    let clean =
+        staged.is_empty() && unstaged.is_empty() && untracked.is_empty() && conflicts.is_empty();
+    parsed["status_entries"] = if format == "full" {
+        json!(selected)
+    } else {
+        json!([])
+    };
+    parsed["staged"] = if format == "full" {
+        json!(staged)
+    } else {
+        json!([])
+    };
+    parsed["unstaged"] = if format == "full" {
+        json!(unstaged)
+    } else {
+        json!([])
+    };
+    parsed["untracked"] = if format == "full" {
+        json!(untracked)
+    } else {
+        json!([])
+    };
+    parsed["conflicts"] = if format == "full" {
+        json!(conflicts)
+    } else {
+        json!([])
+    };
     parsed["clean"] = json!(clean);
     parsed["summary"] = json!({"staged_count": staged.len(), "unstaged_count": unstaged.len(), "untracked_count": untracked.len(), "conflict_count": conflicts.len(), "matching_path_count": selected.len(), "clean": clean});
     if format != "full" {
-        parsed["paths"] = Value::Array(selected.iter().filter_map(|entry| entry.get("display_path").cloned()).collect());
+        parsed["paths"] = Value::Array(
+            selected
+                .iter()
+                .filter_map(|entry| entry.get("display_path").cloned())
+                .collect(),
+        );
     }
-    Ok(json!({"work_scope_ref": scope.as_ref().map(|value| value.reference.clone()), "pathspecs": filters, "staged_only": staged_only, "include_untracked": include_untracked, "format": format}))
+    Ok(
+        json!({"work_scope_ref": scope.as_ref().map(|value| value.reference.clone()), "pathspecs": filters, "staged_only": staged_only, "include_untracked": include_untracked, "format": format}),
+    )
 }
 
-fn resolve_work_scope(state: &State, reference: &str, repository_root: &str) -> Result<WorkScope, GitError> {
-    let mut scopes = state.work_scopes.lock().map_err(|_| GitError::new("git_work_scope_store_unavailable", "git_work_scope_store_unavailable", json!({})))?;
+fn resolve_work_scope(
+    state: &State,
+    reference: &str,
+    repository_root: &str,
+) -> Result<WorkScope, GitError> {
+    let mut scopes = state.work_scopes.lock().map_err(|_| {
+        GitError::new(
+            "git_work_scope_store_unavailable",
+            "git_work_scope_store_unavailable",
+            json!({}),
+        )
+    })?;
     let Some(scope) = scopes.get(reference).cloned() else {
-        return Err(GitError::new("git_work_scope_ref_not_found", "git_work_scope_ref_not_found", json!({"work_scope_ref": reference, "mutation_started": false, "atomic": true})));
+        return Err(GitError::new(
+            "git_work_scope_ref_not_found",
+            "git_work_scope_ref_not_found",
+            json!({"work_scope_ref": reference, "mutation_started": false, "atomic": true}),
+        ));
     };
     if scope.expires_at <= OffsetDateTime::now_utc() {
         scopes.remove(reference);
-        return Err(GitError::new("git_work_scope_ref_expired", "git_work_scope_ref_expired", json!({"work_scope_ref": reference, "mutation_started": false, "atomic": true})));
+        return Err(GitError::new(
+            "git_work_scope_ref_expired",
+            "git_work_scope_ref_expired",
+            json!({"work_scope_ref": reference, "mutation_started": false, "atomic": true}),
+        ));
     }
     if scope.repository_root != repository_root {
-        return Err(GitError::new("git_work_scope_repository_mismatch", "git_work_scope_repository_mismatch", json!({"work_scope_ref": reference, "repository_root": repository_root, "expected_repository_root": scope.repository_root, "mutation_started": false, "atomic": true})));
+        return Err(GitError::new(
+            "git_work_scope_repository_mismatch",
+            "git_work_scope_repository_mismatch",
+            json!({"work_scope_ref": reference, "repository_root": repository_root, "expected_repository_root": scope.repository_root, "mutation_started": false, "atomic": true}),
+        ));
     }
     Ok(scope)
 }
@@ -654,27 +779,60 @@ fn git_workflow_record(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| GitError::new("git_workflow_record_requires_scope_label", "git_workflow_record_requires_scope_label", json!({})))?;
+        .ok_or_else(|| {
+            GitError::new(
+                "git_workflow_record_requires_scope_label",
+                "git_workflow_record_requires_scope_label",
+                json!({}),
+            )
+        })?;
     let repositories = args
         .get("repositories")
         .and_then(Value::as_array)
-        .ok_or_else(|| GitError::new("git_workflow_record_requires_repositories", "git_workflow_record_requires_repositories", json!({})))?;
+        .ok_or_else(|| {
+            GitError::new(
+                "git_workflow_record_requires_repositories",
+                "git_workflow_record_requires_repositories",
+                json!({}),
+            )
+        })?;
     if repositories.is_empty() {
-        return Err(GitError::new("git_workflow_record_requires_repositories", "git_workflow_record_requires_repositories", json!({})));
+        return Err(GitError::new(
+            "git_workflow_record_requires_repositories",
+            "git_workflow_record_requires_repositories",
+            json!({}),
+        ));
     }
     let mut records = Vec::new();
     for repository in repositories {
         let working_directory = repository
             .get("working_directory")
             .and_then(Value::as_str)
-            .ok_or_else(|| GitError::new("git_workflow_record_requires_working_directory", "git_workflow_record_requires_working_directory", json!({})))?;
-        let status = git_status(state, &json!({"working_directory": working_directory}), cancellation.clone())?;
+            .ok_or_else(|| {
+                GitError::new(
+                    "git_workflow_record_requires_working_directory",
+                    "git_workflow_record_requires_working_directory",
+                    json!({}),
+                )
+            })?;
+        let status = git_status(
+            state,
+            &json!({"working_directory": working_directory}),
+            cancellation.clone(),
+        )?;
         let push_status = repository
             .get("push_status")
             .and_then(Value::as_str)
             .unwrap_or("not_attempted");
-        if !matches!(push_status, "pushed" | "not_attempted" | "failed" | "not_pushable") {
-            return Err(GitError::new("git_workflow_record_invalid_push_status", "git_workflow_record_invalid_push_status", json!({"push_status": push_status})));
+        if !matches!(
+            push_status,
+            "pushed" | "not_attempted" | "failed" | "not_pushable"
+        ) {
+            return Err(GitError::new(
+                "git_workflow_record_invalid_push_status",
+                "git_workflow_record_invalid_push_status",
+                json!({"push_status": push_status}),
+            ));
         }
         records.push(json!({
             "working_directory": status.get("working_directory"),
@@ -700,19 +858,46 @@ fn git_workflow_record(
         "summary": args.get("summary").cloned().unwrap_or(Value::Null),
         "repositories": records,
     });
-    let ledger_path = state.output_root.join(".ai").join("state").join("git-mcp-audit").join("git-workflows.jsonl");
+    let ledger_path = state
+        .output_root
+        .join(".ai")
+        .join("state")
+        .join("git-mcp-audit")
+        .join("git-workflows.jsonl");
     if let Some(parent) = ledger_path.parent() {
-        fs::create_dir_all(parent).map_err(|error| GitError::new("git_workflow_record_persist_failed", error.to_string(), json!({"path": parent})))?;
+        fs::create_dir_all(parent).map_err(|error| {
+            GitError::new(
+                "git_workflow_record_persist_failed",
+                error.to_string(),
+                json!({"path": parent}),
+            )
+        })?;
     }
-    let line = format!("{}\n", serde_json::to_string(&record).unwrap_or_else(|_| "{}".to_string()));
+    let line = format!(
+        "{}\n",
+        serde_json::to_string(&record).unwrap_or_else(|_| "{}".to_string())
+    );
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&ledger_path)
-        .map_err(|error| GitError::new("git_workflow_record_persist_failed", error.to_string(), json!({"path": ledger_path})))?;
-    file.write_all(line.as_bytes())
-        .map_err(|error| GitError::new("git_workflow_record_persist_failed", error.to_string(), json!({"path": ledger_path})))?;
-    Ok(json!({"schema": "narada.git.workflow_record.v1", "status": "recorded", "workflow_id": record.get("workflow_id"), "scope_label": scope_label, "recorded_at": recorded_at, "summary": record.get("summary"), "repositories": record.get("repositories"), "ledger_path": ledger_path.to_string_lossy()}))
+        .map_err(|error| {
+            GitError::new(
+                "git_workflow_record_persist_failed",
+                error.to_string(),
+                json!({"path": ledger_path}),
+            )
+        })?;
+    file.write_all(line.as_bytes()).map_err(|error| {
+        GitError::new(
+            "git_workflow_record_persist_failed",
+            error.to_string(),
+            json!({"path": ledger_path}),
+        )
+    })?;
+    Ok(
+        json!({"schema": "narada.git.workflow_record.v1", "status": "recorded", "workflow_id": record.get("workflow_id"), "scope_label": scope_label, "recorded_at": recorded_at, "summary": record.get("summary"), "repositories": record.get("repositories"), "ledger_path": ledger_path.to_string_lossy()}),
+    )
 }
 
 fn now_rfc3339() -> String {
@@ -750,59 +935,134 @@ fn git_index_change(
             json!({"tool_name": if stage { "git_add" } else { "git_unstage" }, "mode": state.mode, "mutation_started": false, "atomic": true}),
         ));
     }
-    let _write_guard = state
-        .git_write_lock
-        .lock()
-        .map_err(|_| GitError::new("git_write_lock_unavailable", "git_write_lock_unavailable", json!({"mutation_started": false, "atomic": true})))?;
+    let _write_guard = state.git_write_lock.lock().map_err(|_| {
+        GitError::new(
+            "git_write_lock_unavailable",
+            "git_write_lock_unavailable",
+            json!({"mutation_started": false, "atomic": true}),
+        )
+    })?;
     let cwd = resolve_cwd(state, args)?;
-    let values = args
-        .get("paths")
-        .and_then(Value::as_array)
-        .ok_or_else(|| GitError::new("git_index_change_requires_paths", "git_index_change_requires_paths", json!({})))?;
+    let values = args.get("paths").and_then(Value::as_array).ok_or_else(|| {
+        GitError::new(
+            "git_index_change_requires_paths",
+            "git_index_change_requires_paths",
+            json!({}),
+        )
+    })?;
     if values.is_empty() {
-        return Err(GitError::new("git_index_change_requires_paths", "git_index_change_requires_paths", json!({})));
+        return Err(GitError::new(
+            "git_index_change_requires_paths",
+            "git_index_change_requires_paths",
+            json!({}),
+        ));
     }
     let paths = values
         .iter()
         .map(|value| {
-            let path = value.as_str().ok_or_else(|| GitError::new("git_invalid_pathspec", "git_invalid_pathspec", json!({})))?;
+            let path = value.as_str().ok_or_else(|| {
+                GitError::new("git_invalid_pathspec", "git_invalid_pathspec", json!({}))
+            })?;
             validate_path(path)?;
             if path == "." || path.contains(['*', '?', '[']) {
-                return Err(GitError::new("git_index_change_requires_explicit_paths", "git_index_change_requires_explicit_paths", json!({"pathspec": path})));
+                return Err(GitError::new(
+                    "git_index_change_requires_explicit_paths",
+                    "git_index_change_requires_explicit_paths",
+                    json!({"pathspec": path}),
+                ));
             }
             Ok(path.replace('\\', "/"))
         })
         .collect::<Result<Vec<_>, GitError>>()?;
-    let repository_root = git_text(state, &cwd, &["rev-parse", "--show-toplevel"], cancellation.clone(), "git_index_change_failed")?.trim().to_string();
+    let repository_root = git_text(
+        state,
+        &cwd,
+        &["rev-parse", "--show-toplevel"],
+        cancellation.clone(),
+        "git_index_change_failed",
+    )?
+    .trim()
+    .to_string();
     let scope = if let Some(reference) = args.get("work_scope_ref").and_then(Value::as_str) {
         let scope = resolve_work_scope(state, reference, &repository_root)?;
         let base = read_git_base_state(state, &cwd, cancellation.clone());
         for field in ["head", "index_digest"] {
             if scope.base_state.get(field) != base.get(field) {
-                return Err(GitError::new("git_work_scope_base_state_mismatch", "git_work_scope_base_state_mismatch", json!({"field": field, "supplied": scope.base_state.get(field), "actual": base.get(field), "mutation_started": false, "atomic": true})));
+                return Err(GitError::new(
+                    "git_work_scope_base_state_mismatch",
+                    "git_work_scope_base_state_mismatch",
+                    json!({"field": field, "supplied": scope.base_state.get(field), "actual": base.get(field), "mutation_started": false, "atomic": true}),
+                ));
             }
         }
-        if paths.iter().any(|path| !scope.allowed_paths.iter().any(|allowed| path_matches(path, allowed))) {
-            return Err(GitError::new("git_index_change_path_outside_work_scope", "git_index_change_path_outside_work_scope", json!({"work_scope_ref": scope.reference, "allowed_paths": scope.allowed_paths, "paths": paths, "mutation_started": false, "atomic": true})));
+        if paths.iter().any(|path| {
+            !scope
+                .allowed_paths
+                .iter()
+                .any(|allowed| path_matches(path, allowed))
+        }) {
+            return Err(GitError::new(
+                "git_index_change_path_outside_work_scope",
+                "git_index_change_path_outside_work_scope",
+                json!({"work_scope_ref": scope.reference, "allowed_paths": scope.allowed_paths, "paths": paths, "mutation_started": false, "atomic": true}),
+            ));
         }
         Some(scope)
     } else {
         None
     };
     let path_refs = paths.iter().map(String::as_str).collect::<Vec<_>>();
-    let mut command = if stage { vec!["add", "--"] } else { vec!["reset", "--"] };
+    let mut command = if stage {
+        vec!["add", "--"]
+    } else {
+        vec!["reset", "--"]
+    };
     command.extend(path_refs);
     let result = run_git(state, &cwd, &command, cancellation);
     if result.exit_code != Some(0) || result.timed_out || result.cancelled {
-        return Err(GitError::new(if stage { "git_add_failed" } else { "git_unstage_failed" }, if stage { "git_add_failed" } else { "git_unstage_failed" }, json!({"exit_code": result.exit_code, "timed_out": result.timed_out, "cancelled": result.cancelled, "diagnostic_text": result.diagnostic_text, "output_preview": result.output_text.chars().take(PREVIEW_CHAR_LIMIT).collect::<String>()})));
+        return Err(GitError::new(
+            if stage {
+                "git_add_failed"
+            } else {
+                "git_unstage_failed"
+            },
+            if stage {
+                "git_add_failed"
+            } else {
+                "git_unstage_failed"
+            },
+            json!({"exit_code": result.exit_code, "timed_out": result.timed_out, "cancelled": result.cancelled, "diagnostic_text": result.diagnostic_text, "output_preview": result.output_text.chars().take(PREVIEW_CHAR_LIMIT).collect::<String>()}),
+        ));
     }
-    let post_status = git_status(state, &json!({"working_directory": cwd.to_string_lossy()}), None)?;
-    Ok(json!({"schema": if stage { "narada.git.add.v1" } else { "narada.git.unstage.v1" }, "status": "ok", "operation": if stage { "add" } else { "unstage" }, "working_directory": cwd.to_string_lossy(), "repository_root": repository_root, "paths": paths, "work_scope_ref": scope.as_ref().map(|value| value.reference.clone()), "output": result.output_text, "post_status": post_status, "summary": if stage { "staged explicit paths" } else { "unstaged explicit paths" }}))
+    let post_status = git_status(
+        state,
+        &json!({"working_directory": cwd.to_string_lossy()}),
+        None,
+    )?;
+    Ok(
+        json!({"schema": if stage { "narada.git.add.v1" } else { "narada.git.unstage.v1" }, "status": "ok", "operation": if stage { "add" } else { "unstage" }, "working_directory": cwd.to_string_lossy(), "repository_root": repository_root, "paths": paths, "work_scope_ref": scope.as_ref().map(|value| value.reference.clone()), "output": result.output_text, "post_status": post_status, "summary": if stage { "staged explicit paths" } else { "unstaged explicit paths" }}),
+    )
 }
 
 fn read_git_base_state(state: &State, cwd: &Path, cancellation: Option<Arc<AtomicBool>>) -> Value {
-    let head = git_text(state, cwd, &["rev-parse", "HEAD"], cancellation.clone(), "git_base_state_failed").ok().map(|value| value.trim().to_string());
-    let index_digest = git_text(state, cwd, &["write-tree"], cancellation, "git_base_state_failed").ok().map(|value| value.trim().to_string());
+    let head = git_text(
+        state,
+        cwd,
+        &["rev-parse", "HEAD"],
+        cancellation.clone(),
+        "git_base_state_failed",
+    )
+    .ok()
+    .map(|value| value.trim().to_string());
+    let index_digest = git_text(
+        state,
+        cwd,
+        &["write-tree"],
+        cancellation,
+        "git_base_state_failed",
+    )
+    .ok()
+    .map(|value| value.trim().to_string());
     json!({"head": head, "index_digest": index_digest})
 }
 

@@ -10,9 +10,10 @@ path = "src/main.rs"
 
 [dependencies]
 hex = "0.4"
+narada-mcp-fabric-contracts = { path = "../../shared/mcp-fabric-contracts/native" }
 sha2 = "0.10"
 serde_json = { version = "1", features = ["preserve_order"] }
-time = { version = "0.3", features = ["formatting", "macros"] }
+time = { version = "0.3", features = ["formatting", "macros", "parsing"] }
 
 [profile.release]
 codegen-units = 1

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { access } from 'node:fs/promises';
+import { access, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
@@ -20,8 +20,53 @@ import {
   defineNativeSurface,
   surfaceExecutionDeclaration,
   type SurfaceDescriptorV2,
+  bindingAdmissionEnvelopeDigest,
+  bindingAdmissionEntryDigest,
+  canonicalJson,
+  parseMcpBindingAdmissionEnvelopeV1,
 } from '../src/index.js';
 import { startHttpFixture } from '../src/http-fixture.js';
+
+test('binding identity golden vectors fix canonical bytes and digest', async () => {
+  const vectors = JSON.parse(await readFile(
+    new URL('../../contracts/binding-identity-v1.vectors.json', import.meta.url),
+    'utf8',
+  ));
+  assert.equal(vectors.schema, 'narada.mcp.binding_identity_vectors.v1');
+  for (const vector of vectors.vectors) {
+    assert.equal(canonicalJson(vector.unsigned), vector.canonical_json, vector.name);
+    assert.equal(bindingAdmissionEntryDigest(vector.unsigned), vector.sha256, vector.name);
+  }
+});
+
+test('binding admission envelope is exact, order-stable, and digest-fenced', () => {
+  const unsigned: any = {
+    schema: 'narada.mcp.binding_admission_envelope.v1', envelope_id: 'envelope-1', decision: 'admitted',
+    issued_at: '2026-08-12T00:00:00.000Z', valid_until: null, principal_key: 'local:site:agent',
+    site_id: 'site-1', carrier_session_id: 'session-1', carrier_kind: 'codex', runtime_kind: 'narada-runtime',
+    authority_epoch: 1, carrier_session_admission_receipt_ref: 'receipt:1', authority_readback_ref: 'authority:1',
+    fabric_digest: 'a'.repeat(64),
+    bindings: [
+      { binding_id: 'binding-b', surface_id: 'surface-b', projection_id: 'default', authority_locus: { kind: 'local_site' }, injection_scope: 'local_site', operations: ['restart', 'attach', 'discover'], binding_identity: { schema: 'narada.mcp.binding_identity.v1', binding_id: 'binding-b', surface_id: 'surface-b', projection_id: 'default', injection_scope: 'local_site', authority_locus: { kind: 'local_site' }, transport: 'stdio', command: 'b', args: [], env: {}, env_vars: [], target_site_root: null, surface_projection: null }, binding_digest: 'b'.repeat(64) },
+      { binding_id: 'binding-a', surface_id: 'surface-a', projection_id: 'default', authority_locus: { kind: 'local_site' }, injection_scope: 'local_site', operations: ['discover', 'attach'], binding_identity: { schema: 'narada.mcp.binding_identity.v1', binding_id: 'binding-a', surface_id: 'surface-a', projection_id: 'default', injection_scope: 'local_site', authority_locus: { kind: 'local_site' }, transport: 'stdio', command: 'a', args: [], env: {}, env_vars: [], target_site_root: null, surface_projection: null }, binding_digest: 'c'.repeat(64) },
+    ],
+  };
+  const envelope = { ...unsigned, envelope_digest: bindingAdmissionEnvelopeDigest(unsigned) };
+  assert.deepEqual(parseMcpBindingAdmissionEnvelopeV1(envelope).bindings.map((binding) => binding.binding_id), ['binding-a', 'binding-b']);
+  assert.throws(() => parseMcpBindingAdmissionEnvelopeV1({ ...envelope, authority_epoch: 2 }), /digest_mismatch/);
+  assert.throws(() => parseMcpBindingAdmissionEnvelopeV1({ ...envelope, bindings: [envelope.bindings[0], envelope.bindings[0]], envelope_digest: bindingAdmissionEnvelopeDigest({ ...unsigned, bindings: [envelope.bindings[0], envelope.bindings[0]] }) }));
+  const competing = {
+    ...envelope.bindings[0],
+    binding_id: 'binding-c',
+    binding_identity: { ...envelope.bindings[0].binding_identity, binding_id: 'binding-c' },
+  };
+  competing.binding_digest = bindingAdmissionEntryDigest(competing);
+  const competingUnsigned = { ...unsigned, bindings: [envelope.bindings[0], competing] };
+  assert.throws(
+    () => parseMcpBindingAdmissionEnvelopeV1({ ...competingUnsigned, envelope_digest: bindingAdmissionEnvelopeDigest(competingUnsigned) }),
+    /admitted surface/,
+  );
+});
 
 test('runtime memory observation contracts are strict, versioned, and sanitized', () => {
   const now = new Date().toISOString();

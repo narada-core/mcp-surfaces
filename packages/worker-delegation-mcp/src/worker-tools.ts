@@ -151,7 +151,9 @@ function workerConfigResolve(args: Record<string, unknown>, state: WorkerMcpStat
     const siteBinding = naradaAgentRuntimeSiteBinding(cwd, resolvedSiteBinding);
     intelligenceContext = canonicalPlanLaunch?.context ?? readWorkerIntelligenceContext(state, siteRoot);
     if (intelligenceContext.status === 'ready') Object.assign(environment, projectIntelligenceLaunchContext(intelligenceContext));
-    const canonicalProviderProjection = projectCanonicalProviderCredential(state, environment, canonicalPlanLaunch!.plan);
+    const canonicalProviderProjection = canonicalPlanLaunch!.plan
+      ? projectCanonicalProviderCredential(state, environment, canonicalPlanLaunch!.plan)
+      : null;
     environment.NARADA_SITE_ROOT = siteRoot;
     environment.NARADA_WORKSPACE_ROOT = resolvedSiteBinding.workspaceRoot;
     environment.NARADA_AGENT_ID ??= 'narada.architect';
@@ -322,7 +324,7 @@ function requireCanonicalInvocationPlan(
   state: WorkerMcpState,
   sessionSiteRoot: string,
   request: WorkerRunToolInput,
-): { context: IntelligenceLaunchContext; planRef: string; plan: CanonicalInvocationPlanBinding } {
+): { context: IntelligenceLaunchContext; planRef: string | null; plan: CanonicalInvocationPlanBinding | null } {
   const legacyFields = [
     request.constraints.provider !== undefined ? 'constraints.provider' : null,
     request.constraints.cognition !== undefined ? 'constraints.cognition' : null,
@@ -359,18 +361,14 @@ function requireCanonicalInvocationPlan(
     });
   }
   const planRef = explicitPlanRef ?? contextPlanRef;
-  if (!planRef) {
-    throw diagnosticError(
-      'worker_canonical_invocation_plan_required',
-      'narada-agent-runtime-server requires an immutable canonical invocation plan reference.',
-      { remediation: 'Resolve a plan in Narada and set invocation_plan_ref or NARADA_INTELLIGENCE_PLAN_REF.' },
-    );
-  }
   if (context.status !== 'ready' || !context.target_site) {
-    throw diagnosticError('worker_intelligence_context_required', 'The canonical invocation plan requires a complete intelligence launch context.', {
+    throw diagnosticError('worker_intelligence_context_required', 'The agent runtime requires a complete intelligence launch context.', {
       context_path: context.context_path,
       missing: context.missing,
     });
+  }
+  if (!planRef) {
+    return { context, planRef: null, plan: null };
   }
   let plan: CanonicalInvocationPlanBinding;
   try {
@@ -425,7 +423,17 @@ type CanonicalProviderProjection = {
   credential_env_names: string[];
 };
 
-function canonicalPlanRuntimeBinding(context: IntelligenceLaunchContext, plan: CanonicalInvocationPlanBinding, projection: CanonicalProviderProjection): Record<string, unknown> {
+function canonicalPlanRuntimeBinding(context: IntelligenceLaunchContext, plan: CanonicalInvocationPlanBinding | null, projection: CanonicalProviderProjection | null): Record<string, unknown> {
+  if (!plan || !projection) {
+    return {
+      schema: 'narada.worker.runtime-preflight-plan-binding.v1',
+      source: 'agent_runtime_canonical_preflight',
+      plan_ref: null,
+      registry_db_path: context.registry_db_path,
+      target_site: context.target_site,
+      selector_crosses_worker_boundary: false,
+    };
+  }
   return {
     schema: 'narada.worker.canonical-plan-binding.v1',
     source: 'narada-canonical-invocation-plan',
@@ -625,7 +633,9 @@ async function workerRunInner(args: Record<string, unknown>, state: WorkerMcpSta
     const siteBinding = naradaAgentRuntimeSiteBinding(cwd, resolvedSiteBinding);
     intelligenceContext = canonicalPlanLaunch?.context ?? requireWorkerIntelligenceContext(state, siteRoot, environment);
     Object.assign(environment, projectIntelligenceLaunchContext(intelligenceContext));
-    const canonicalProviderProjection = projectCanonicalProviderCredential(state, environment, canonicalPlanLaunch!.plan);
+    const canonicalProviderProjection = canonicalPlanLaunch!.plan
+      ? projectCanonicalProviderCredential(state, environment, canonicalPlanLaunch!.plan)
+      : null;
     const workerSessionId = resumeSessionId ?? runRecord.runId;
     environment.NARADA_SITE_ROOT = siteRoot;
     environment.NARADA_WORKSPACE_ROOT = resolvedSiteBinding.workspaceRoot;
@@ -1447,8 +1457,10 @@ function cognitionDefaultsForLaunch(cognition: ResolvedWorkerConfig['cognition']
 function assertExplicitCognitionTuple(config: ResolvedWorkerConfig, state?: WorkerMcpState): void {
   if (config.runtime === 'narada-agent-runtime-server') {
     const planRef = asRecord(config.intelligence_context).invocation_plan_ref;
-    if (typeof planRef !== 'string' || !planRef.startsWith('plan:')) {
-      throw diagnosticError('worker_canonical_invocation_plan_required', 'narada-agent-runtime-server requires an immutable canonical invocation plan reference.');
+    const runtimeBinding = asRecord(config.provider_runtime_binding);
+    const runtimeOwnsPreflight = runtimeBinding.source === 'agent_runtime_canonical_preflight';
+    if (!runtimeOwnsPreflight && (typeof planRef !== 'string' || !planRef.startsWith('plan:'))) {
+      throw diagnosticError('worker_canonical_invocation_plan_required', 'No canonical invocation-plan authority is available.');
     }
     return;
   }

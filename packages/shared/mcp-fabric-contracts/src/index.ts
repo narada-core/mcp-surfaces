@@ -221,6 +221,63 @@ export const FabricManifestV2Schema = z.object({
     ['bindings'],
     context,
   );
+  addDuplicateIssues(
+    manifest.bindings.filter((binding) => binding.enabled).map((binding) => binding.surface_id),
+    'enabled surface',
+    ['bindings'],
+    context,
+  );
+});
+
+const Sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
+
+export const McpBindingIdentityV1Schema = z.object({
+  schema: z.literal('narada.mcp.binding_identity.v1'),
+  binding_id: IdentifierSchema,
+  surface_id: IdentifierSchema,
+  projection_id: IdentifierSchema,
+  injection_scope: z.enum(['host', 'user_site', 'local_site']),
+  authority_locus: JsonObjectSchema,
+  transport: z.literal('stdio'),
+  command: z.string().trim().min(1),
+  args: z.array(z.string()),
+  env: z.record(z.string(), z.string()),
+  env_vars: z.array(z.string()),
+  target_site_root: z.string().nullable(),
+  surface_projection: JsonObjectSchema.nullable(),
+}).strict();
+
+export const McpBindingAdmissionEntryV1Schema = z.object({
+  binding_id: IdentifierSchema,
+  surface_id: IdentifierSchema,
+  projection_id: IdentifierSchema,
+  authority_locus: JsonObjectSchema,
+  injection_scope: z.enum(['host', 'user_site', 'local_site']),
+  operations: z.array(z.enum(['discover', 'attach', 'restart'])).min(1),
+  binding_identity: McpBindingIdentityV1Schema,
+  binding_digest: Sha256Schema,
+}).strict();
+
+export const McpBindingAdmissionEnvelopeV1Schema = z.object({
+  schema: z.literal('narada.mcp.binding_admission_envelope.v1'),
+  envelope_id: IdentifierSchema,
+  decision: z.literal('admitted'),
+  issued_at: z.string().datetime(),
+  valid_until: z.string().datetime().nullable(),
+  principal_key: z.string().trim().min(1),
+  site_id: IdentifierSchema,
+  carrier_session_id: IdentifierSchema,
+  carrier_kind: IdentifierSchema,
+  runtime_kind: IdentifierSchema,
+  authority_epoch: z.number().int().nonnegative(),
+  carrier_session_admission_receipt_ref: z.string().trim().min(1),
+  authority_readback_ref: z.string().trim().min(1),
+  fabric_digest: Sha256Schema,
+  bindings: z.array(McpBindingAdmissionEntryV1Schema),
+  envelope_digest: Sha256Schema,
+}).strict().superRefine((envelope, context) => {
+  addDuplicateIssues(envelope.bindings.map((binding) => binding.binding_id), 'binding', ['bindings'], context);
+  addDuplicateIssues(envelope.bindings.map((binding) => binding.surface_id), 'admitted surface', ['bindings'], context);
 });
 
 export const CarrierProjectionV2Schema = z.object({
@@ -244,6 +301,21 @@ export const CarrierProjectionV2Schema = z.object({
     ['servers'],
     context,
   );
+  addDuplicateIssues(
+    projection.servers.map((server) => server.surface_id),
+    'surface',
+    ['servers'],
+    context,
+  );
+  projection.servers.forEach((server, index) => {
+    if (server.server_name !== server.surface_id) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `carrier server name must equal surface_id '${server.surface_id}'`,
+        path: ['servers', index, 'server_name'],
+      });
+    }
+  });
 });
 
 export const RuntimeGenerationV2Schema = z.object({
@@ -507,6 +579,9 @@ export type SurfaceProjectionV2 = z.infer<typeof SurfaceProjectionV2Schema>;
 export type SurfaceDescriptorV2 = z.infer<typeof SurfaceDescriptorV2Schema>;
 export type FabricBindingV2 = z.infer<typeof FabricBindingV2Schema>;
 export type FabricManifestV2 = z.infer<typeof FabricManifestV2Schema>;
+export type McpBindingAdmissionEntryV1 = z.infer<typeof McpBindingAdmissionEntryV1Schema>;
+export type McpBindingIdentityV1 = z.infer<typeof McpBindingIdentityV1Schema>;
+export type McpBindingAdmissionEnvelopeV1 = z.infer<typeof McpBindingAdmissionEnvelopeV1Schema>;
 export type CarrierProjectionV2 = z.infer<typeof CarrierProjectionV2Schema>;
 export type RuntimeGenerationV2 = z.infer<typeof RuntimeGenerationV2Schema>;
 export type RuntimeRecoveryActionV2 = z.infer<typeof RuntimeRecoveryActionV2Schema>;
@@ -964,9 +1039,129 @@ export function fabricManifestDigest(value: unknown): string {
   return stableDigest(normalizeFabricManifestV2(value));
 }
 
+export function bindingAdmissionEntryDigest(value: Record<string, unknown>): string {
+  return stableDigest(value);
+}
+
+type BindingIdentitySource = Record<string, unknown>;
+
+export function normalizeMcpBindingLaunchIdentityV1(
+  identity: Pick<McpBindingAdmissionEntryV1, 'binding_id' | 'surface_id' | 'projection_id'>,
+  source: BindingIdentitySource,
+): Record<string, unknown> {
+  const naradaScope = (source.narada_scope ?? {}) as BindingIdentitySource;
+  const injectionScope = String(naradaScope.injection_scope ?? source.injection_scope ?? 'local_site') as 'host' | 'user_site' | 'local_site';
+  const authorityLocus = canonicalizeJson(naradaScope.authority_locus ?? source.authority_locus ?? {
+    kind: injectionScope,
+    ...(source.target_site_root ? { site_root: source.target_site_root } : {}),
+  }) as Record<string, unknown>;
+  return canonicalizeJson({
+    schema: 'narada.mcp.binding_identity.v1',
+    binding_id: identity.binding_id,
+    surface_id: identity.surface_id,
+    projection_id: identity.projection_id,
+    injection_scope: injectionScope,
+    authority_locus: authorityLocus,
+    transport: source.transport ?? 'stdio',
+    command: source.command ?? null,
+    args: source.args ?? [],
+    env: source.env ?? {},
+    env_vars: source.env_vars ?? [],
+    target_site_root: source.target_site_root ?? null,
+    surface_projection: source.surface_projection ?? null,
+  }) as Record<string, unknown>;
+}
+
+export function mcpBindingAdmissionEntryDigestV1(entry: McpBindingAdmissionEntryV1): string {
+  const { binding_digest: _digest, binding_identity, ...unsigned } = entry;
+  return bindingAdmissionEntryDigest({ ...unsigned, launch_identity: binding_identity });
+}
+
+export function compileMcpBindingAdmissionSetV1(fabric: BindingIdentitySource): {
+  fabric_digest: string;
+  bindings: McpBindingAdmissionEntryV1[];
+} {
+  const servers = (fabric.servers ?? {}) as Record<string, BindingIdentitySource>;
+  const bindings = Object.entries(servers).map(([serverName, source]) => {
+    const bindingId = String(source.binding_id ?? '').trim();
+    if (!bindingId) throw new Error(`mcp_binding_admission_binding_id_required:${serverName}`);
+    const surfaceId = String(source.canonical_surface_id ?? source.surface_id ?? '').trim();
+    if (!surfaceId) throw new Error(`mcp_binding_admission_surface_id_required:${bindingId}`);
+    const projection = (source.surface_projection ?? {}) as BindingIdentitySource;
+    const projectionId = String(source.projection_id ?? projection.projection_id ?? 'default').trim();
+    const naradaScope = (source.narada_scope ?? {}) as BindingIdentitySource;
+    const injectionScope = String(naradaScope.injection_scope ?? source.injection_scope ?? 'local_site') as 'host' | 'user_site' | 'local_site';
+    const authorityLocus = canonicalizeJson(naradaScope.authority_locus ?? source.authority_locus ?? {
+      kind: injectionScope,
+      ...(source.target_site_root ? { site_root: source.target_site_root } : {}),
+    }) as Record<string, unknown>;
+    const unsigned = {
+      binding_id: bindingId,
+      surface_id: surfaceId,
+      projection_id: projectionId,
+      authority_locus: authorityLocus,
+      injection_scope: injectionScope,
+      operations: ['attach', 'discover', 'restart'] as const,
+    };
+    const binding_identity = normalizeMcpBindingLaunchIdentityV1(unsigned, source);
+    const binding_digest = bindingAdmissionEntryDigest({
+      ...unsigned,
+      operations: [...unsigned.operations],
+      launch_identity: binding_identity,
+    });
+    return McpBindingAdmissionEntryV1Schema.parse({
+      ...unsigned,
+      operations: [...unsigned.operations],
+      binding_identity,
+      binding_digest,
+    });
+  }).sort((left, right) => left.binding_id.localeCompare(right.binding_id));
+  const duplicate = bindings.find((binding, index) => index > 0 && bindings[index - 1].binding_id === binding.binding_id);
+  if (duplicate) throw new Error(`mcp_binding_admission_duplicate_binding_id:${duplicate.binding_id}`);
+  return { fabric_digest: stableDigest(bindings), bindings };
+}
+
+export function normalizeMcpBindingAdmissionEnvelopeV1(value: unknown): McpBindingAdmissionEnvelopeV1 {
+  const envelope = McpBindingAdmissionEnvelopeV1Schema.parse(value);
+  return {
+    ...envelope,
+    bindings: envelope.bindings
+      .map((binding) => ({
+        ...binding,
+        authority_locus: canonicalizeJson(binding.authority_locus) as Record<string, unknown>,
+        operations: sortUnique(binding.operations) as Array<'discover' | 'attach' | 'restart'>,
+      }))
+      .sort((left, right) => left.binding_id.localeCompare(right.binding_id)),
+  };
+}
+
+export function bindingAdmissionEnvelopeDigest(value: Omit<McpBindingAdmissionEnvelopeV1, 'envelope_digest'> & Record<string, unknown>): string {
+  const normalized = {
+    ...value,
+    bindings: [...value.bindings]
+      .map((binding) => ({
+        ...binding,
+        authority_locus: canonicalizeJson(binding.authority_locus) as Record<string, unknown>,
+        operations: sortUnique(binding.operations),
+      }))
+      .sort((left, right) => left.binding_id.localeCompare(right.binding_id)),
+  };
+  return stableDigest(normalized);
+}
+
+export function parseMcpBindingAdmissionEnvelopeV1(value: unknown): McpBindingAdmissionEnvelopeV1 {
+  const envelope = normalizeMcpBindingAdmissionEnvelopeV1(value);
+  const { envelope_digest: _digest, ...unsigned } = envelope;
+  if (bindingAdmissionEnvelopeDigest(unsigned) !== envelope.envelope_digest) {
+    throw new Error('mcp_binding_admission_envelope_digest_mismatch');
+  }
+  return envelope;
+}
+
 export const McpFabricJsonSchemas = {
   surface_descriptor: z.toJSONSchema(SurfaceDescriptorV2Schema),
   fabric_manifest: z.toJSONSchema(FabricManifestV2Schema),
+  mcp_binding_admission_envelope: z.toJSONSchema(McpBindingAdmissionEnvelopeV1Schema),
   carrier_projection: z.toJSONSchema(CarrierProjectionV2Schema),
   runtime_observation: z.toJSONSchema(RuntimeObservationV2Schema),
   runtime_resource_owner: z.toJSONSchema(RuntimeResourceOwnerV1Schema),

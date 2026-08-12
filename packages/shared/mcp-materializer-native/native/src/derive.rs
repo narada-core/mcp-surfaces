@@ -1,6 +1,6 @@
 use super::{
-    path_text, sha256, suffix_path, CarrierInput, CarrierKind, Failure, MaterializationInput,
-    ServerInput, ToolInput,
+    canonical_json_sha256, path_text, sha256, suffix_path, CarrierInput, CarrierKind, Failure,
+    MaterializationInput, ServerInput, ToolInput,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -34,6 +34,8 @@ struct ContractSite {
     site_id: String,
     registry_path: PathBuf,
     surface_ids: Vec<String>,
+    #[serde(default)]
+    admit_local_bindings: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -118,11 +120,14 @@ pub(crate) fn derive_input(options: DeriveOptions) -> Result<MaterializationInpu
         ));
     }
     let mut servers = Vec::new();
+    let mut ambient_bindings = Vec::new();
+    let mut ambient_fabric_digests = Vec::new();
+    let mut admitted_site_roots = BTreeSet::new();
     let mut proxy_commands = BTreeSet::new();
-    let mut server_names = BTreeSet::new();
+    let mut binding_by_surface = BTreeMap::<String, (String, String)>::new();
     let mut site_ids = BTreeSet::new();
     for site in &contract.sites {
-        if site.site_id.is_empty() || site.surface_ids.is_empty() {
+        if site.site_id.is_empty() {
             return Err(Failure::new(
                 "materializer_carrier_contract_site_empty",
                 site.site_id.clone(),
@@ -135,10 +140,14 @@ pub(crate) fn derive_input(options: DeriveOptions) -> Result<MaterializationInpu
             ));
         }
         require_absolute(&site.registry_path, "registry_path")?;
+        if site.admit_local_bindings {
+            admitted_site_roots.insert(registry_site_root(&site.registry_path)?);
+        }
         let registry_bytes =
             read_required(&site.registry_path, "materializer_registry_read_failed")?;
         let registry: Value = serde_json::from_slice(&registry_bytes)
             .map_err(|error| Failure::new("materializer_registry_invalid", error.to_string()))?;
+        ambient_fabric_digests.push(sha256(&registry_bytes));
         if registry.get("schema").and_then(Value::as_str) != Some(REGISTRY_SCHEMA) {
             return Err(Failure::new(
                 "materializer_registry_schema_unsupported",
@@ -175,6 +184,13 @@ pub(crate) fn derive_input(options: DeriveOptions) -> Result<MaterializationInpu
                 return Err(Failure::new("materializer_registry_surface_duplicate", id));
             }
         }
+        for surface in surfaces {
+            if let Some(entry) =
+                ambient_binding_entry(&site.site_id, surface, site.admit_local_bindings)?
+            {
+                ambient_bindings.push(entry);
+            }
+        }
         for surface_id in &site.surface_ids {
             let surface = by_id.get(surface_id).ok_or_else(|| {
                 Failure::new(
@@ -182,13 +198,31 @@ pub(crate) fn derive_input(options: DeriveOptions) -> Result<MaterializationInpu
                     format!("{}:{surface_id}", site.site_id),
                 )
             })?;
-            let server_name = required_string(surface, "server_name")?;
-            if !server_names.insert(server_name.clone()) {
+            let source_server_key = required_string(surface, "server_name")?;
+            let server_name = surface_id.clone();
+            let binding_id = surface
+                .get("binding_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("{}-{}", site.site_id, surface_id));
+            if let Some((predecessor_binding_id, predecessor_server_key)) =
+                binding_by_surface.get(&server_name)
+            {
                 return Err(Failure::new(
-                    "materializer_server_name_duplicate",
-                    server_name,
-                ));
+                    "materializer_surface_binding_conflict",
+                    format!("More than one binding was selected for surface '{server_name}'."),
+                ).with_details(json!({
+                    "surface_id": server_name,
+                    "bindings": [
+                        {"binding_id": predecessor_binding_id, "server_key": predecessor_server_key},
+                        {"binding_id": binding_id, "server_key": source_server_key},
+                    ]
+                })));
             }
+            binding_by_surface.insert(
+                server_name.clone(),
+                (binding_id.clone(), source_server_key.clone()),
+            );
             let binding = surface.get("runtime_binding").ok_or_else(|| {
                 Failure::new("materializer_runtime_binding_required", surface_id.clone())
             })?;
@@ -237,6 +271,8 @@ pub(crate) fn derive_input(options: DeriveOptions) -> Result<MaterializationInpu
                 .and_then(|value| value.get("codex_startup_timeout_sec"))
                 .and_then(Value::as_u64);
             servers.push(ServerInput {
+                binding_id: Some(binding_id),
+                source_server_key: Some(source_server_key),
                 name: server_name,
                 command,
                 args,
@@ -285,6 +321,26 @@ pub(crate) fn derive_input(options: DeriveOptions) -> Result<MaterializationInpu
                 path_text(&artifact_manifest_path),
             )
         })?;
+    let artifact_build_set_path = options
+        .workspace_root
+        .join(".ai/runtime/artifact-build-set.json");
+    let artifact_build_set_bytes = read_required(
+        &artifact_build_set_path,
+        "materializer_artifact_build_set_read_failed",
+    )?;
+    let artifact_build_set: Value =
+        serde_json::from_slice(&artifact_build_set_bytes).map_err(|error| {
+            Failure::new("materializer_artifact_build_set_invalid", error.to_string())
+        })?;
+    if artifact_build_set.get("schema").and_then(Value::as_str)
+        != Some("narada.artifact_build_set.v1")
+    {
+        return Err(Failure::new(
+            "materializer_artifact_build_set_schema_unsupported",
+            path_text(&artifact_build_set_path),
+        ));
+    }
+    let artifact_build_set_fingerprint = required_string(&artifact_build_set, "build_set_digest")?;
     let matrix_fingerprint = sha256(&read_required(
         &options.matrix,
         "materializer_matrix_read_failed",
@@ -301,17 +357,55 @@ pub(crate) fn derive_input(options: DeriveOptions) -> Result<MaterializationInpu
         .unwrap_or(&options.workspace_root)
         .to_string_lossy()
         .to_string();
+    ambient_bindings.sort_by(|left, right| {
+        left.get("binding_id")
+            .and_then(Value::as_str)
+            .cmp(&right.get("binding_id").and_then(Value::as_str))
+    });
+    // Ambient carrier authority is durable installation state, not a session
+    // lease. Keep its signed content reproducible; session envelopes carry
+    // actual issuance/expiry timestamps in the Narada launch path.
+    let ambient_issued_at = "1970-01-01T00:00:00Z".to_string();
+    let ambient_fabric_digest = stable_digest(&json!(ambient_fabric_digests));
+    let ambient_site_id = site_ids
+        .iter()
+        .next()
+        .cloned()
+        .unwrap_or_else(|| "ambient".to_string());
     let carriers = contract
         .carriers
         .into_iter()
         .map(|carrier| {
             let config_path = options.home.join(carrier.config_relative_path);
             let sidecar_path = suffix_path(&config_path, ".narada-generation.json");
+            let admission_path = suffix_path(&config_path, ".narada-binding-admission.json");
             let carrier_kind = match carrier.carrier_kind {
                 CarrierKind::Codex => "codex",
                 CarrierKind::Kimi => "kimi",
                 CarrierKind::Opencode => "opencode",
             };
+            let mut admission_envelope = json!({
+                "schema": "narada.mcp.binding_admission_envelope.v1",
+                "envelope_id": format!("ambient-{}", carrier.carrier_id),
+                "decision": "admitted",
+                "issued_at": ambient_issued_at.clone(),
+                "valid_until": Value::Null,
+                "principal_key": format!("ambient:{}", carrier.carrier_id),
+                "site_id": ambient_site_id.clone(),
+                "carrier_session_id": format!("ambient-{}", carrier.carrier_id),
+                "carrier_kind": carrier_kind,
+                "runtime_kind": "native",
+                "authority_epoch": 0,
+                "carrier_session_admission_receipt_ref": format!("materialized:{}", carrier.carrier_id),
+                "authority_readback_ref": format!("materialized:{}", carrier.carrier_id),
+                "fabric_digest": ambient_fabric_digest.clone(),
+                "bindings": ambient_bindings.clone(),
+                "envelope_digest": "",
+            });
+            let mut unsigned_envelope = admission_envelope.clone();
+            unsigned_envelope.as_object_mut().expect("envelope is an object").remove("envelope_digest");
+            let admission_digest = stable_digest(&unsigned_envelope);
+            admission_envelope["envelope_digest"] = Value::String(admission_digest.clone());
             let derived_servers = servers
                 .iter()
                 .cloned()
@@ -336,6 +430,20 @@ pub(crate) fn derive_input(options: DeriveOptions) -> Result<MaterializationInpu
                             path_text(&sidecar_path),
                         ],
                     );
+                    if server.name == "mcp-loader" {
+                        server.args.extend([
+                            "--binding-admission-path".to_string(),
+                            path_text(&admission_path),
+                            "--binding-admission-digest".to_string(),
+                            admission_digest.clone(),
+                        ]);
+                        for site_root in &admitted_site_roots {
+                            server.args.extend([
+                                "--allowed-site-root".to_string(),
+                                path_text(site_root),
+                            ]);
+                        }
+                    }
                     server
                 })
                 .collect();
@@ -345,6 +453,8 @@ pub(crate) fn derive_input(options: DeriveOptions) -> Result<MaterializationInpu
                 config_path,
                 codex_plugin_overrides: carrier.codex_plugin_overrides,
                 trust_projects: vec![trust_project.clone()],
+                binding_admission_path: Some(admission_path),
+                binding_admission_envelope: Some(admission_envelope),
                 servers: derived_servers,
             }
         })
@@ -357,6 +467,8 @@ pub(crate) fn derive_input(options: DeriveOptions) -> Result<MaterializationInpu
         carrier_contract_fingerprint: contract_fingerprint,
         artifact_manifest_path,
         artifact_manifest_fingerprint: Some(artifact_manifest_fingerprint),
+        artifact_build_set_path,
+        artifact_build_set_fingerprint,
         runtime_profile_kind: "native".to_string(),
         runtime_implementation_matrix_path: options.matrix,
         runtime_implementation_matrix_fingerprint: matrix_fingerprint,
@@ -370,14 +482,194 @@ pub(crate) fn derive_input(options: DeriveOptions) -> Result<MaterializationInpu
     })
 }
 
+fn stable_digest(value: &Value) -> String {
+    canonical_json_sha256(value).expect("JSON values must canonicalize")
+}
+
+fn registry_site_root(registry_path: &Path) -> Result<PathBuf, Failure> {
+    let capabilities = registry_path.parent().ok_or_else(|| {
+        Failure::new(
+            "materializer_registry_site_root_unresolved",
+            path_text(registry_path),
+        )
+    })?;
+    let narada = capabilities.parent().ok_or_else(|| {
+        Failure::new(
+            "materializer_registry_site_root_unresolved",
+            path_text(registry_path),
+        )
+    })?;
+    let site_root = narada.parent().ok_or_else(|| {
+        Failure::new(
+            "materializer_registry_site_root_unresolved",
+            path_text(registry_path),
+        )
+    })?;
+    if capabilities.file_name().and_then(|value| value.to_str()) != Some("capabilities")
+        || narada.file_name().and_then(|value| value.to_str()) != Some(".narada")
+    {
+        return Err(Failure::new(
+            "materializer_registry_site_root_unresolved",
+            path_text(registry_path),
+        ));
+    }
+    Ok(site_root.to_path_buf())
+}
+
+fn binding_admission_entry_digest_v1(entry: &Value) -> String {
+    let mut unsigned = entry.clone();
+    let object = unsigned
+        .as_object_mut()
+        .expect("binding admission entry must be an object");
+    object.remove("binding_digest");
+    let identity = object
+        .remove("binding_identity")
+        .expect("binding admission entry must carry binding_identity");
+    object.insert("launch_identity".to_string(), identity);
+    stable_digest(&unsigned)
+}
+fn ambient_binding_entry(
+    site_id: &str,
+    surface: &Value,
+    admit_local: bool,
+) -> Result<Option<Value>, Failure> {
+    let injection_scope = surface
+        .get("injection_scope")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            surface
+                .get("narada_scope")
+                .and_then(|value| value.get("injection_scope"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            surface
+                .get("surface_projection")
+                .and_then(|value| value.get("injection_scope"))
+                .and_then(Value::as_str)
+        })
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| Failure::new("materializer_registry_field_required", "injection_scope"))?;
+    if injection_scope == "local_site" && !admit_local {
+        return Ok(None);
+    }
+    if injection_scope != "host"
+        && injection_scope != "user_site"
+        && injection_scope != "local_site"
+    {
+        return Err(Failure::new(
+            "materializer_injection_scope_unsupported",
+            injection_scope,
+        ));
+    }
+    let surface_id = required_string(surface, "catalog_surface_id")?;
+    let binding_id = surface
+        .get("binding_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("{site_id}-{surface_id}"));
+    let projection = surface
+        .get("surface_projection")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let projection_id = projection
+        .get("projection_id")
+        .and_then(Value::as_str)
+        .unwrap_or("default")
+        .to_string();
+    let authority_locus = surface
+        .get("authority_locus")
+        .or_else(|| {
+            surface
+                .get("narada_scope")
+                .and_then(|value| value.get("authority_locus"))
+        })
+        .cloned()
+        .unwrap_or_else(|| match injection_scope.as_str() {
+            "host" => json!({"kind": "host"}),
+            "user_site" => json!({"kind": "user_site", "site_id": site_id}),
+            "local_site" => json!({"kind": "local_site", "site_id": site_id}),
+            _ => Value::Null,
+        });
+    if authority_locus.is_null() {
+        return Err(Failure::new(
+            "materializer_authority_locus_required",
+            surface_id,
+        ));
+    }
+    let runtime_binding = surface
+        .get("runtime_binding")
+        .ok_or_else(|| Failure::new("materializer_runtime_binding_required", surface_id.clone()))?;
+    let transport = runtime_binding
+        .get("transport")
+        .ok_or_else(|| Failure::new("materializer_transport_required", surface_id.clone()))?;
+    if transport.get("type").and_then(Value::as_str) != Some("stdio") {
+        return Err(Failure::new(
+            "materializer_transport_unsupported",
+            surface_id,
+        ));
+    }
+    let command = required_string(transport, "command")?;
+    let args = string_array(transport, "args")?;
+    let descriptor = projection.get("surface_descriptor").unwrap_or(&Value::Null);
+    let env_vars = descriptor
+        .get("projections")
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| item.get("id").and_then(Value::as_str) == Some(projection_id.as_str()))
+        })
+        .and_then(|item| item.get("transport"))
+        .map(|transport| string_array(transport, "env"))
+        .transpose()?
+        .unwrap_or_default();
+    let target_site_root = authority_locus
+        .get("site_root")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let binding_identity = json!({
+        "schema": "narada.mcp.binding_identity.v1",
+        "binding_id": binding_id.clone(),
+        "surface_id": surface_id.clone(),
+        "projection_id": projection_id.clone(),
+        "injection_scope": injection_scope.clone(),
+        "authority_locus": authority_locus,
+        "transport": "stdio",
+        "command": command,
+        "args": args,
+        "env": {},
+        "env_vars": env_vars,
+        "target_site_root": target_site_root,
+        "surface_projection": projection,
+    });
+    let mut entry = json!({
+        "binding_id": binding_id,
+        "surface_id": surface_id,
+        "projection_id": projection_id,
+        "authority_locus": binding_identity["authority_locus"].clone(),
+        "injection_scope": injection_scope,
+        "operations": ["discover", "attach", "restart"],
+        "binding_identity": binding_identity,
+        "binding_digest": "",
+    });
+    let digest = binding_admission_entry_digest_v1(&entry);
+    entry["binding_digest"] = Value::String(digest);
+    Ok(Some(entry))
+}
+
 pub(crate) fn options_from_generation(path: &Path) -> Result<DeriveOptions, Failure> {
     require_absolute(path, "generation")?;
     let bytes = read_required(path, "materializer_generation_read_failed")?;
     let generation: Value = serde_json::from_slice(&bytes)
         .map_err(|error| Failure::new("materializer_generation_invalid", error.to_string()))?;
-    if generation.get("schema").and_then(Value::as_str)
-        != Some("narada.mcp_materialization_generation.v1")
-    {
+    if !matches!(
+        generation.get("schema").and_then(Value::as_str),
+        Some("narada.mcp_materialization_generation.v1")
+            | Some("narada.mcp_materialization_generation.v2")
+            | Some("narada.mcp_materialization_generation.v3")
+    ) {
         return Err(Failure::new(
             "materializer_generation_schema_unsupported",
             path_text(path),
@@ -528,4 +820,57 @@ fn string_array(value: &Value, field: &'static str) -> Result<Vec<String>, Failu
                 .ok_or_else(|| Failure::new("materializer_registry_string_required", field))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn surface(scope: &str) -> Value {
+        json!({
+            "catalog_surface_id": "fixture",
+            "binding_id": "fixture-binding",
+            "injection_scope": scope,
+            "authority_locus": {"kind": scope},
+            "runtime_binding": {
+                "transport": {
+                    "type": "stdio",
+                    "command": "fixture.exe",
+                    "args": ["serve"]
+                }
+            },
+            "surface_projection": {
+                "projection_id": "default",
+                "surface_descriptor": {
+                    "projections": [{
+                        "id": "default",
+                        "transport": {"env": ["PATH"]}
+                    }]
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn ambient_admission_excludes_local_site_bindings() {
+        assert!(ambient_binding_entry("site", &surface("local_site"), false)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn ambient_admission_carries_exact_host_and_user_bindings() {
+        for scope in ["host", "user_site"] {
+            let entry = ambient_binding_entry("site", &surface(scope), false)
+                .unwrap()
+                .expect("ambient binding");
+            assert_eq!(entry["injection_scope"], scope);
+            assert_eq!(entry["binding_id"], "fixture-binding");
+            assert_eq!(
+                entry["binding_digest"],
+                binding_admission_entry_digest_v1(&entry)
+            );
+            assert_eq!(entry["binding_identity"]["command"], "fixture.exe");
+        }
+    }
 }

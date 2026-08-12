@@ -78,7 +78,7 @@ test('native loader keeps a runtime-proxy child across stateful task-lifecycle c
     },
   }), 'utf8');
 
-  const processHandle = spawn(executable, ['--allowed-site-root', root, '--allowed-entrypoint-prefix', root, '--attach-timeout-ms', '3000', '--tool-call-timeout-ms', '3000'], {
+  const processHandle = spawn(executable, ['--standalone-ambient-attachment', '--allowed-site-root', root, '--allowed-entrypoint-prefix', root, '--attach-timeout-ms', '3000', '--tool-call-timeout-ms', '3000'], {
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true,
   });

@@ -1,0 +1,10 @@
+[package]
+name = "narada-mcp-fabric-contracts"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+hex = "0.4"
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"

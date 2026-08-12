@@ -7,7 +7,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, extname, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path';
 import { describeUnknownError } from './error-description.js';
 
 export const WORKSPACE_ARTIFACT_MANIFEST_SCHEMA = 'narada.workspace_artifact_manifest.v1';
@@ -56,7 +56,7 @@ export type WorkspaceArtifactPreflight = {
   entrypoint: string;
   artifact_manifest_path: string | null;
   manifest_fingerprint: string | null;
-  code?: 'workspace_manifest_missing' | 'workspace_manifest_stale' | 'workspace_export_target_missing' | 'workspace_artifact_missing' | 'workspace_dependency_unverified' | 'runtime_contract_version_missing' | 'runtime_contract_version_mismatch' | 'materialization_generation_missing' | 'materialization_generation_stale';
+  code?: 'workspace_manifest_missing' | 'workspace_manifest_stale' | 'workspace_export_target_missing' | 'workspace_artifact_missing' | 'workspace_dependency_unverified' | 'runtime_contract_version_missing' | 'runtime_contract_version_mismatch' | 'materialization_generation_missing' | 'materialization_generation_obsolete' | 'materialization_generation_stale' | 'materialization_managed_projection_stale';
   reason?: string;
   details?: JsonRecord;
 };
@@ -65,6 +65,7 @@ export function buildWorkspaceArtifactManifest(input: {
   workspaceRoot: string;
   packageRoots: string[];
   outputPath: string;
+  runtimeArtifactPaths?: string[];
 }): WorkspaceArtifactManifest {
   const workspaceRoot = resolve(input.workspaceRoot);
   const roots = uniquePaths(input.packageRoots);
@@ -82,9 +83,14 @@ export function buildWorkspaceArtifactManifest(input: {
     .map(({ root, packageJsonPath }) => buildPackageRecord(root, packageJsonPath, packageNames))
     .sort((left, right) => left.name.localeCompare(right.name));
   const artifacts = uniqueFingerprints(
-    packages.flatMap((pkg) => pkg.export_targets
-      .map((target) => target.fingerprint)
-      .filter((value): value is ArtifactFingerprint => value !== null)),
+    [
+      ...packages.flatMap((pkg) => pkg.export_targets
+        .map((target) => target.fingerprint)
+        .filter((value): value is ArtifactFingerprint => value !== null)),
+      ...(input.runtimeArtifactPaths ?? [])
+        .map((path) => fingerprintFile(resolve(path)))
+        .filter((value): value is ArtifactFingerprint => value !== null),
+    ],
   ).sort((left, right) => left.path.localeCompare(right.path));
   const unsigned: Omit<WorkspaceArtifactManifest, 'manifest_fingerprint'> = {
     schema: WORKSPACE_ARTIFACT_MANIFEST_SCHEMA,
@@ -102,6 +108,16 @@ export function buildWorkspaceArtifactManifest(input: {
 }
 
 function expandRuntimeTarget(root: string, target: string): string[] {
+  if (/[/\\]dist[/\\]native[/\\]versions[/\\]\*$/.test(target)) {
+    const pointerPath = resolve(root, target.replace(/[/\\]versions[/\\]\*$/, '/current.json'));
+    if (!existsSync(pointerPath)) return [target];
+    const pointer = readJson(pointerPath);
+    const artifacts = asRecord(pointer.artifacts);
+    const selected = Object.values(artifacts)
+      .filter((value): value is string => typeof value === 'string')
+      .map((value) => relative(root, resolve(dirname(pointerPath), value)));
+    return selected.length > 0 ? selected : [target];
+  }
   const wildcardIndex = target.search(/[\\*]/);
   if (wildcardIndex < 0) return [target];
   const directory = resolve(root, target.slice(0, wildcardIndex));
@@ -281,7 +297,11 @@ function declaredRuntimeTargets(packageJson: JsonRecord): string[] {
   }
   const nativeArtifacts = asRecord(packageJson.naradaRuntimeArtifacts)[process.platform];
   if (Array.isArray(nativeArtifacts)) {
-    for (const value of nativeArtifacts) if (typeof value === 'string') targets.add(value);
+    for (const value of nativeArtifacts) {
+      if (typeof value === 'string' && !/[/\\]dist[/\\]native[/\\]current\.json$/i.test(value)) {
+        targets.add(value);
+      }
+    }
   }
   return [...targets].filter((target) => target.startsWith('./') || target.startsWith('../'));
 }
@@ -334,10 +354,16 @@ function fingerprintFile(path: string): ArtifactFingerprint | null {
   try {
     const stat = statSync(path);
     if (!stat.isFile()) return null;
+    const physical = readFileSync(path);
+    let identity = physical;
+    if (basename(path).toLowerCase() === 'current.json') {
+      const parsed = JSON.parse(physical.toString('utf8')) as unknown;
+      identity = Buffer.from(JSON.stringify(stripVolatileManifestMetadata(parsed)), 'utf8');
+    }
     return {
       path: resolve(path),
-      sha256: createHash('sha256').update(readFileSync(path)).digest('hex'),
-      size: stat.size,
+      sha256: createHash('sha256').update(identity).digest('hex'),
+      size: identity.length,
       mtime_ms: stat.mtimeMs,
     };
   } catch {

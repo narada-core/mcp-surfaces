@@ -12,7 +12,13 @@ const packageRoots = [
 ];
 const outputPath = join(workspaceRoot, '.ai', 'runtime', 'workspace-artifact-manifest.json');
 mkdirSync(resolve(outputPath, '..'), { recursive: true });
-const manifest = buildWorkspaceArtifactManifest({ workspaceRoot, packageRoots, outputPath });
+const materializerPointerPath = join(workspaceRoot, 'packages', 'shared', 'mcp-materializer-native', 'dist', 'native', 'current.json');
+const materializerPointer = existsSync(materializerPointerPath) ? JSON.parse(readFileSync(materializerPointerPath, 'utf8')) : null;
+const materializerRelative = materializerPointer?.artifacts?.['narada-mcp-materializer.exe'];
+const runtimeArtifactPaths = typeof materializerRelative === 'string'
+  ? [resolve(materializerPointerPath, '..', materializerRelative)]
+  : [];
+const manifest = buildWorkspaceArtifactManifest({ workspaceRoot, packageRoots, outputPath, runtimeArtifactPaths });
 const missingExports = manifest.packages.flatMap((pkg) => pkg.export_targets
   .filter((target) => target.fingerprint === null)
   .map((target) => `${pkg.name}:${target.target}`));

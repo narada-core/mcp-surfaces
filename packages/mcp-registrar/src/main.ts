@@ -13,7 +13,9 @@ import { defineNativeSurface, parseSurfaceDescriptorV2, surfaceDescriptorDigest,
 import {
   MCP_RUNTIME_CONTRACT_VERSION,
   buildMaterializationGeneration,
+  formatMaterializedJson,
   materializationSidecarPath,
+  mergeCodexMaterializedConfiguration,
   validateMaterializedConfiguration,
   writeMaterializationGeneration,
 } from '@narada-core/mcp-runtime-proxy/materialization-contract';
@@ -1423,8 +1425,8 @@ function sitePathInterpolation(siteRoot: string, workspaceRoot = siteRoot): Site
   };
 }
 
-function interpolateArgs(args: string[], siteId: string, siteRoot: string): string[] {
-  const paths = sitePathInterpolation(siteRoot);
+function interpolateArgs(args: string[], siteId: string, siteRoot: string, workspaceRoot = siteRoot): string[] {
+  const paths = sitePathInterpolation(siteRoot, workspaceRoot);
   return args.map((a) => interpolateArg(a, siteId, paths));
 }
 
@@ -1712,9 +1714,9 @@ function rootsNeedingAllowedRoot(surfaceId: string): boolean {
   return ['local-filesystem', 'git', 'structured-command', 'delegated-task', 'worker-delegation'].includes(surfaceId);
 }
 
-function resolveSurfaceArgs(surface: RegistrarSurfaceRecord, siteId: string, siteRoot: string, extraRoots: string[], projection?: McpSurfaceProjection): string[] {
-  const args = interpolateArgs(projection?.args ?? surface.args, siteId, siteRoot);
-  if (extraRoots.length === 0 || !rootsNeedingAllowedRoot(surface.id)) return args;
+function resolveSurfaceArgs(surface: RegistrarSurfaceRecord, siteId: string, siteRoot: string, extraRoots: string[], projection?: McpSurfaceProjection, workspaceRoot = siteRoot): string[] {
+  const args = interpolateArgs(projection?.args ?? surface.args, siteId, siteRoot, workspaceRoot);
+  if (extraRoots.length === 0 || (!rootsNeedingAllowedRoot(surface.id) && !args.includes('--allowed-root'))) return args;
   const out: string[] = [];
   for (let i = 0; i < args.length; i++) {
     out.push(args[i]);
@@ -1741,6 +1743,22 @@ function dedupeRoots(roots: string[]): string[] {
     }
   }
   return result;
+}
+
+function siteExtraAllowedRoots(site: SiteDef, additionalRoots: string[] = []): string[] {
+  const siteRoot = canonicalWorkspaceRoot(site.root).replace(/\\/g, '/');
+  const configPath = join(sitePathInterpolation(siteRoot).siteControlRoot, 'allowed-roots.json');
+  let configuredRoots: string[] = [];
+  try {
+    const config = asRecord(JSON.parse(readFileSync(configPath, 'utf8')));
+    const configured = config.extra_allowed_roots;
+    if (Array.isArray(configured)) {
+      configuredRoots = configured.filter((root): root is string => typeof root === 'string' && root.trim().length > 0);
+    }
+  } catch {
+    // The config is optional; carrier-specific roots are still applied below.
+  }
+  return dedupeRoots([...configuredRoots, ...additionalRoots]).filter((root) => root !== siteRoot);
 }
 
 export function appendLoaderAllowedSiteRoots(args: string[], siteRoots: string[]): string[] {
@@ -1791,7 +1809,11 @@ function writeSiteSurfaceRegistriesForCarrier(carrier: CarrierDef): JsonRecord[]
     if (seen.has(binding.site_id)) continue;
     seen.add(binding.site_id);
     const site = lookupSite(binding.site_id);
-    const siteFabricRefresh = refreshRegistrarOwnedSiteFabric(site);
+    const carrierAllowedRoots = dedupeRoots([
+      ...(carrier.extra_allowed_roots ?? []),
+      ...(binding.extra_allowed_roots ?? []),
+    ]);
+    const siteFabricRefresh = refreshRegistrarOwnedSiteFabric(site, carrierAllowedRoots);
     if (siteFabricRefresh.status === 'error') {
       throw diagnosticError(
         'registrar_site_fabric_refresh_failed',
@@ -1950,6 +1972,26 @@ export function sharedSurfaceIdsForBinding(binding: SiteBinding, site?: SiteDef)
 
 function collectCarrierServers(carrier: CarrierDef): Record<string, MaterializedServer> {
   const servers: Record<string, MaterializedServer> = {};
+  const bindingBySurface = new Map<string, string>();
+  const addServer = (key: string, server: MaterializedServer, surfaceId: string): void => {
+    const predecessor = bindingBySurface.get(surfaceId);
+    if (predecessor !== undefined) {
+      throw diagnosticError(
+        'registrar_carrier_surface_binding_conflict',
+        `Carrier '${carrier.carrier_id}' admits more than one binding for surface '${surfaceId}'.`,
+        { carrier_id: carrier.carrier_id, surface_id: surfaceId, binding_keys: [predecessor, key] },
+      );
+    }
+    if (servers[key] !== undefined) {
+      throw diagnosticError(
+        'registrar_carrier_server_key_conflict',
+        `Carrier '${carrier.carrier_id}' has duplicate private server key '${key}'.`,
+        { carrier_id: carrier.carrier_id, surface_id: surfaceId, server_key: key },
+      );
+    }
+    bindingBySurface.set(surfaceId, key);
+    servers[key] = server;
+  };
   for (const binding of carrier.site_bindings) {
     const site = lookupSite(binding.site_id);
     const siteRoot = canonicalWorkspaceRoot(site.root);
@@ -1957,19 +1999,13 @@ function collectCarrierServers(carrier: CarrierDef): Record<string, Materialized
     const sharedSurfaceIds = sharedSurfaceIdsForBinding(binding, site);
     for (const surfaceId of sharedSurfaceIds) {
       const { key, server } = materializeSharedSurface(binding, site, surfaceId, extraRoots);
-      if (servers[key]) {
-        console.warn(`mcp-registrar: duplicate server key '${key}' from shared surface '${surfaceId}' overwrites previous`);
-      }
-      servers[key] = server;
+      addServer(key, server, surfaceId);
     }
     if (binding.surfaces === 'all' || binding.surfaces.some((s) => s.endsWith('.local'))) {
       for (const local of readSiteConfig(site)) {
         if (binding.surfaces !== 'all' && !binding.surfaces.includes(local.surface_id)) continue;
         const { key, server } = materializeLocalSurface(binding, site, local, extraRoots);
-        if (servers[key]) {
-          console.warn(`mcp-registrar: duplicate server key '${key}' from local surface '${local.surface_id}' overwrites shared/local predecessor`);
-        }
-        servers[key] = server;
+        addServer(key, server, local.surface_id);
       }
     }
   }
@@ -2224,6 +2260,7 @@ function carrierLaunchCommand(
 
 type RuntimeMaterializationPlanServer = {
   server_key: string;
+  carrier_server_name: string;
   surface_id: string;
   component_kind: string;
   runtime_profile_kind: RuntimeProfileKind;
@@ -2269,6 +2306,7 @@ function compileCarrierRuntimeMaterializationPlan(
     launches.set(serverKey, launch);
     return {
       server_key: serverKey,
+      carrier_server_name: surfaceId,
       surface_id: surfaceId,
       component_kind: launch.component_kind ?? componentKindForSurface(surfaceId),
       runtime_profile_kind: launch.runtime_profile_kind ?? String(resolvedPlan.runtime_profile_kind) as RuntimeProfileKind,
@@ -2498,15 +2536,21 @@ function emitOpencodeConfig(carrier: CarrierDef, configPath?: string, compilatio
     const surfaceId = server.kind === 'local' ? (server.local as SiteLocalSurface).surface_id : (server.surface as RegistrarSurfaceRecord).id;
     const overridden = applySurfaceOverrides(carrier, server, surfaceId);
     const launch = compilation?.launches.get(key) ?? carrierLaunchCommand(overridden, surfaceId, configPath, carrier);
-    mcp[key] = {
+    mcp[surfaceId] = {
       type: 'local',
       command: [launch.command, ...launch.args],
       enabled: overridden.enabled ?? true,
     };
   }
   const structured = { $schema: 'https://opencode.ai/config.json', mcp };
-  const header = '// Generated by mcp-registrar. Do not hand-edit; changes will be overwritten on next materialize.\n';
-  return { content: header + JSON.stringify(structured, null, 2) + '\n', structured };
+  return {
+    content: formatMaterializedJson({
+      materializationContractEntrypoint: nativeMaterializerEntrypoint(),
+      value: structured,
+      header: '// Narada owns this entire OpenCode carrier document; use materialization to change it.',
+    }),
+    structured,
+  };
 }
 
 function emitKimiConfig(carrier: CarrierDef, configPath?: string, compilation?: CarrierRuntimeMaterializationCompilation): { content: string; structured: JsonRecord } {
@@ -2524,17 +2568,20 @@ function emitKimiConfig(carrier: CarrierDef, configPath?: string, compilation?: 
     };
     if (approval) base.approval_mode = approval;
     if (overridden.env_vars) base.env_vars = overridden.env_vars;
-    mcpServers[key] = base;
+    mcpServers[surfaceId] = base;
   }
   const structured = { mcpServers };
-  return { content: JSON.stringify(structured, null, 2) + '\n', structured };
+  return {
+    content: formatMaterializedJson({ materializationContractEntrypoint: nativeMaterializerEntrypoint(), value: structured }),
+    structured,
+  };
 }
 
 function emitCodexConfig(carrier: CarrierDef, configPath?: string, compilation?: CarrierRuntimeMaterializationCompilation): { content: string; structured: JsonRecord } {
   const rawServers = collectCarrierServers(carrier);
   const codexPluginOverrides = carrier.codex_plugin_overrides ?? {};
   const lines: string[] = [];
-  lines.push('# Generated by mcp-registrar. Do not hand-edit; changes will be overwritten on next materialize.');
+  lines.push('# Narada manages only recorded MCP and carrier policy settings; other Codex settings are preserved.');
   lines.push('');
   lines.push('# Codex Apps/connectors are opt-in for profile-less launches.');
   lines.push('[features]');
@@ -2547,8 +2594,7 @@ function emitCodexConfig(carrier: CarrierDef, configPath?: string, compilation?:
   }
   const trustProjects = dedupeRoots([...(carrier.trust_projects ?? []), ...(carrier.extra_allowed_roots ?? [])]);
   for (const project of trustProjects) {
-    const escaped = project.replace(/\\/g, '\\\\');
-    lines.push(`[projects.'${escaped}']`);
+    lines.push(`[projects.${tomlBasicString(project)}]`);
     lines.push('trust_level = "trusted"');
     lines.push('');
   }
@@ -2557,10 +2603,10 @@ function emitCodexConfig(carrier: CarrierDef, configPath?: string, compilation?:
     const surfaceId = server.kind === 'local' ? (server.local as SiteLocalSurface).surface_id : (server.surface as RegistrarSurfaceRecord).id;
     const overridden = applySurfaceOverrides(carrier, server, surfaceId);
     const launch = compilation?.launches.get(key) ?? carrierLaunchCommand(overridden, surfaceId, configPath, carrier);
-    lines.push(`[mcp_servers.${key}]`);
+    lines.push(`[mcp_servers.${surfaceId}]`);
     lines.push(`command = "${launch.command}"`);
     lines.push(`args = ${JSON.stringify(launch.args)}`);
-    lines.push('approval_mode = "approve"');
+    lines.push('default_tools_approval_mode = "approve"');
     const startupTimeoutSec = server.surface?.codex_startup_timeout_sec;
     if (startupTimeoutSec !== undefined) {
       lines.push(`startup_timeout_sec = ${startupTimeoutSec}`);
@@ -2569,10 +2615,10 @@ function emitCodexConfig(carrier: CarrierDef, configPath?: string, compilation?:
       lines.push(`env_vars = ${JSON.stringify(overridden.env_vars)}`);
     }
     lines.push('');
-    mcpServers[key] = {
+    mcpServers[surfaceId] = {
       command: launch.command,
       args: launch.args,
-      approval_mode: 'approve',
+      default_tools_approval_mode: 'approve',
       ...(overridden.env_vars === undefined ? {} : { env_vars: overridden.env_vars }),
       ...(startupTimeoutSec === undefined ? {} : { startup_timeout_sec: startupTimeoutSec }),
     };
@@ -2705,6 +2751,11 @@ function validateCarrierMaterialization(
       carrierKind: carrier.kind,
       configPath,
       content: result.content,
+      materializationContractEntrypoint: nativeMaterializerEntrypoint(),
+      managedPluginIds: carrier.kind === 'codex' ? Object.keys(carrier.codex_plugin_overrides ?? {}) : [],
+      managedProjectPaths: carrier.kind === 'codex'
+        ? dedupeRoots([...(carrier.trust_projects ?? []), ...(carrier.extra_allowed_roots ?? [])])
+        : [],
       artifactManifestPath: MCP_WORKSPACE_ARTIFACT_MANIFEST,
       artifactManifestFingerprint: readWorkspaceManifestFingerprint(),
       runtimeProfileKind: String(runtimePlan.runtime_profile_kind) as RuntimeProfileKind,
@@ -2857,7 +2908,20 @@ function prepareCarrierMaterialization(
   switch (carrier.kind) {
     case 'opencode': result = emitOpencodeConfig(carrier, outputPath, compilation); break;
     case 'kimi': result = emitKimiConfig(carrier, outputPath, compilation); break;
-    case 'codex': result = emitCodexConfig(carrier, outputPath, compilation); break;
+    case 'codex': {
+      const desired = emitCodexConfig(carrier, outputPath, compilation);
+      result = {
+        ...desired,
+        content: mergeCodexMaterializedConfiguration({
+          materializationContractEntrypoint: nativeMaterializerEntrypoint(),
+          configPath: outputPath,
+          desiredContent: desired.content,
+          pluginIds: Object.keys(carrier.codex_plugin_overrides ?? {}),
+          projectPaths: dedupeRoots([...(carrier.trust_projects ?? []), ...(carrier.extra_allowed_roots ?? [])]),
+        }),
+      };
+      break;
+    }
     default: throw diagnosticError('registrar_unknown_carrier_kind', `registrar_unknown_carrier_kind:${carrier.kind}`);
   }
   const { validation, generation } = validateCarrierMaterialization(carrier, result, outputPath, runtimeMaterializationPlan, compilation.plan, compilation.runtimeProxyImplementation);
@@ -3949,13 +4013,17 @@ export function siteSurfaceServerKey(siteId: string, surfaceId: string): string 
   return `${siteSurfacePrefix(siteId)}-${surfaceId}`;
 }
 
+export function siteSurfaceBindingId(siteId: string, surfaceId: string): string {
+  return `${siteId}-${surfaceId}`;
+}
+
 function siteSurfacePrefix(siteId: string): string {
   // User Site uses an explicit kind boundary so its key cannot resemble a retired alias.
   if (siteId === 'andrey-user') return 'narada-site-andrey-user';
   return siteId.startsWith('narada-') ? siteId : 'narada-' + siteId;
 }
 
-export function buildSiteBindConfig(site: SiteDef, surface: RegistrarSurfaceRecord, projectionId?: string | null, runtimeKind?: McpRuntimeKind): { fileName: string; serverKey: string; config: JsonRecord } {
+export function buildSiteBindConfig(site: SiteDef, surface: RegistrarSurfaceRecord, projectionId?: string | null, runtimeKind?: McpRuntimeKind, additionalAllowedRoots: string[] = []): { fileName: string; serverKey: string; config: JsonRecord } {
   const siteId = site.site_id;
   const surfaceId = surface.id;
   const selected = selectSurfaceProjection(surfaceId, projectionId, runtimeKind, {
@@ -3969,8 +4037,12 @@ export function buildSiteBindConfig(site: SiteDef, surface: RegistrarSurfaceReco
   const siteRoot = canonicalWorkspaceRoot(site.root);
   const workspaceRoot = canonicalWorkspaceRoot(siteWorkspaceRoot(site));
   const paths = sitePathInterpolation(siteRoot, workspaceRoot);
+  const extraRoots = siteExtraAllowedRoots(site, additionalAllowedRoots);
   const resolvedArgs = [
-    ...(projection.args ?? surface.args).map((arg) => interpolateArg(arg, siteId, paths)),
+    ...resolveSurfaceArgs(surface, siteId, siteRoot, extraRoots, {
+      ...projection,
+      args: projection.args ?? surface.args,
+    }, workspaceRoot),
     ...projectionLaunchArgs(projection),
   ];
   const resolvedEntrypoint = resolveEntrypoint(surface, siteId, siteRoot, projection);
@@ -3999,6 +4071,7 @@ export function buildSiteBindConfig(site: SiteDef, surface: RegistrarSurfaceReco
       description: `${surface.package} MCP surface bound by registrar.`,
       mcpServers: {
         [serverKey]: {
+          binding_id: siteSurfaceBindingId(siteId, surfaceId),
           transport: 'stdio',
           command: launch.command,
           args: launch.args,
@@ -4031,7 +4104,7 @@ function mergeGeneratedRecord(current: JsonRecord, generated: JsonRecord): JsonR
   return merged;
 }
 
-export function refreshRegistrarOwnedSiteFabric(site: SiteDef): JsonRecord {
+export function refreshRegistrarOwnedSiteFabric(site: SiteDef, additionalAllowedRoots: string[] = []): JsonRecord {
   const configDir = join(siteMcpControlRoot(site), '.ai', 'mcp');
   if (!existsSync(configDir)) {
     return { status: 'not_present', site_id: site.site_id, config_dir: configDir, refreshed_count: 0, unchanged_count: 0, skipped_count: 0, error_count: 0 };
@@ -4087,7 +4160,7 @@ export function refreshRegistrarOwnedSiteFabric(site: SiteDef): JsonRecord {
     const runtimeKind = projection.runtime_kind === 'nars' ? 'nars' : undefined;
     let refreshed: ReturnType<typeof buildSiteBindConfig>;
     try {
-      refreshed = buildSiteBindConfig(site, surface, projectionId, runtimeKind);
+      refreshed = buildSiteBindConfig(site, surface, projectionId, runtimeKind, additionalAllowedRoots);
     } catch (error) {
       errors.push({ file: fileName, code: 'registrar_site_fabric_refresh_failed', surface_id: surfaceId, message: String(error) });
       continue;
@@ -4295,6 +4368,7 @@ function registrarSurfaceUsage(args: JsonRecord): JsonRecord {
 }
 
 type SiteMcpFabricServer = {
+  binding_id: string;
   server_key: string;
   command: string;
   args: string[];
@@ -4436,6 +4510,7 @@ function discoverMcpConfigDirectory(
       // Materialized fabric is executable data, never a template. Validation reports any token verbatim.
       const unwrapped = unwrapRuntimeProxyLaunch(launchCommand, entrypoint, args);
       servers.push({
+        binding_id: optionalString(server.binding_id) ?? siteSurfaceBindingId(site.site_id, surfaceId),
         server_key: serverKey,
         command: materializedExecutableCommand(unwrapped.childCommand ?? launchCommand),
         args: unwrapped.args,
@@ -4673,6 +4748,7 @@ function siteLocalDescriptorForFabricServer(
 }
 
 type SiteSurfaceRegistrySurface = {
+  binding_id: string;
   surface_id: string;
   surface_projection: JsonRecord;
   surface_type: string;
@@ -4809,6 +4885,7 @@ function registrySurfaceForFabricServer(site: SiteDef, server: SiteMcpFabricServ
   }
   const toolContract = surfaceToolContract(descriptor, registeredTools);
   return {
+    binding_id: server.binding_id,
     surface_id: `${server.server_key}.local`,
     surface_projection: surfaceProjection,
     surface_type: catalog?.kind ?? 'site_local_mcp_surface',
@@ -5361,7 +5438,7 @@ function kimiBind(configPath: string, surfaceId: string, entrypoint: string, res
     command: launch.command,
     args: launch.args,
   };
-  const nextContent = JSON.stringify(cfg, null, 2) + '\n';
+  const nextContent = formatMaterializedJson({ materializationContractEntrypoint: nativeMaterializerEntrypoint(), value: cfg });
   return { result: { status: 'bound', carrier_id: 'kimi-andrey', surface_id: surfaceId, server_key: serverKey }, content: nextContent, structured: cfg };
 }
 
@@ -5373,7 +5450,7 @@ function kimiUnbind(configPath: string, surfaceId: string): JsonRecord {
   const serverKey = siteSurfaceServerKey('andrey-user', surfaceId);
   if (!mcp[serverKey]) return { status: 'not_bound', carrier_id: 'kimi-andrey', surface_id: surfaceId };
   delete mcp[serverKey];
-  writeFileSync(configPath, JSON.stringify(cfg, null, 2) + '\n', 'utf8');
+  writeFileSync(configPath, formatMaterializedJson({ materializationContractEntrypoint: nativeMaterializerEntrypoint(), value: cfg }), 'utf8');
   return { status: 'unbound', carrier_id: 'kimi-andrey', surface_id: surfaceId, server_key: serverKey };
 }
 

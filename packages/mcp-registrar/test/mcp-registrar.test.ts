@@ -36,6 +36,10 @@ const nativeSharedSurfaceArtifactName = process.platform === 'win32' ? 'narada-m
 const nativeSharedSurfaceEntrypoint = resolveNativeArtifact(nativeSharedSurfacePackageRoot, nativeSharedSurfaceArtifactName)
   ?? workspacePath('packages', 'shared', 'mcp-surfaces-native', 'dist', 'native', nativeSharedSurfaceArtifactName);
 const nativeSharedSurfaceArtifactAvailable = process.platform === 'win32' && existsSync(nativeSharedSurfaceEntrypoint);
+const nativeAgentContextEntrypoint = resolveNativeArtifact(
+  join(workspaceRoot, 'packages', 'agent-context-mcp'),
+  process.platform === 'win32' ? 'narada-agent-context-mcp.exe' : 'narada-agent-context-mcp',
+);
 assert.equal(
   defaultRuntimeProxyImplementation(process.platform, nativeRuntimeArtifactAvailable),
   nativeRuntimeArtifactAvailable ? 'native' : 'bun',
@@ -382,7 +386,12 @@ try {
     'default',
   );
   const agentContextBoundServer: any = (agentContextBindConfig.config.mcpServers as Record<string, any>)[agentContextBindConfig.serverKey];
-  assertRuntimeProxy(agentContextBoundServer, agentContextSurface.entrypoint, 'bun');
+  if (nativeAgentContextEntrypoint) {
+    assert.equal(agentContextBoundServer.args[agentContextBoundServer.args.indexOf('--child-invocation-kind') + 1], 'native_entrypoint');
+    assertRuntimeProxy(agentContextBoundServer, nativeAgentContextEntrypoint, 'narada-agent-context-mcp');
+  } else {
+    assertRuntimeProxy(agentContextBoundServer, agentContextSurface.entrypoint, 'bun');
+  }
   assert.deepEqual(agentContextBoundServer.env_vars, agentContextEnvironment);
   assert.deepEqual(agentContextBoundServer.tools, [
     'agent_orientation_read',
@@ -688,7 +697,7 @@ try {
         transport: 'stdio',
         command: 'node',
         args: ['C:/workspace/mcp-surfaces/packages/git-mcp/dist/src/main.js'],
-        tools: ['git_add', 'git_begin_work_scope', 'git_branch_create', 'git_branch_delete', 'git_branch_delete_remote', 'git_branch_list', 'git_branch_rename', 'git_branch_set_upstream', 'git_branch_switch', 'git_branch_unset_upstream', 'git_changed_summary', 'git_commit', 'git_diff', 'git_fetch', 'git_guidance', 'git_log', 'git_merge', 'git_merge_abort', 'git_merge_continue', 'git_output_show', 'git_policy_inspect', 'git_push', 'git_rebase', 'git_rebase_abort', 'git_rebase_continue', 'git_repositories_summary', 'git_show', 'git_status', 'git_sync_status', 'git_unstage', 'git_workflow_record'],
+        tools: ['git_add', 'git_begin_work_scope', 'git_branch_create', 'git_branch_delete', 'git_branch_delete_remote', 'git_branch_list', 'git_branch_rename', 'git_branch_set_upstream', 'git_branch_switch', 'git_branch_unset_upstream', 'git_changed_summary', 'git_commit', 'git_commit_paths', 'git_diff', 'git_end_work_scope', 'git_fetch', 'git_guidance', 'git_log', 'git_merge', 'git_merge_abort', 'git_merge_continue', 'git_output_show', 'git_policy_inspect', 'git_push', 'git_rebase', 'git_rebase_abort', 'git_rebase_continue', 'git_reconcile_index', 'git_repositories_summary', 'git_show', 'git_status', 'git_sync_status', 'git_unstage', 'git_workflow_record'],
         surface_id: 'git',
       },
     },
@@ -1080,6 +1089,29 @@ try {
   assert.equal(schedServer.injection_scope, 'local_site');
   assert.deepEqual(schedServer.authority_locus, { kind: 'local_site', site_root: root });
   assert.equal(schedServer.narada_scope.scope_source, 'registrar_surface_catalog');
+
+  const allowedRootSiteRoot = join(root, 'allowed-root-site');
+  const allowedRoot = join(root, 'allowed-root-target').replace(/\\/g, '/');
+  mkdirSync(join(allowedRootSiteRoot, '.narada'), { recursive: true });
+  writeFileSync(join(allowedRootSiteRoot, 'site.json'), JSON.stringify({ site_id: 'allowed-root-site' }), 'utf8');
+  writeFileSync(join(allowedRootSiteRoot, '.narada', 'allowed-roots.json'), JSON.stringify({
+    schema: 'narada.site.allowed_roots.v1',
+    generated_by: 'mcp-registrar',
+    site_id: 'allowed-root-site',
+    extra_allowed_roots: [allowedRoot],
+  }), 'utf8');
+  const allowedRootBindConfig: any = buildSiteBindConfig(
+    { site_id: 'allowed-root-site', root: allowedRootSiteRoot, config_path: join(allowedRootSiteRoot, 'site.json'), surfaces: [] },
+    { id: 'scheduler', package: 'scheduler-mcp', entrypoint: 'C:/workspace/mcp-surfaces/packages/scheduler-mcp/dist/src/main.js', kind: 'mcp_surface', args: ['--allowed-root', '{site_root}'], tools: ['scheduler_task_list'] },
+  );
+  const allowedRootServer: any = Object.values(allowedRootBindConfig.config.mcpServers as Record<string, any>)[0];
+  const allowedRootSeparator = allowedRootServer.args.indexOf('--');
+  const allowedRootChildArgs = allowedRootSeparator >= 0 ? allowedRootServer.args.slice(allowedRootSeparator + 1) : allowedRootServer.args;
+  const materializedAllowedRoots = allowedRootChildArgs.flatMap((value: string, index: number) =>
+    value === '--allowed-root' && allowedRootChildArgs[index + 1]
+      ? [String(allowedRootChildArgs[index + 1]).replace(/\\/g, '/')]
+      : []);
+  assert.deepEqual(materializedAllowedRoots, [allowedRootSiteRoot.replace(/\\/g, '/'), allowedRoot]);
   if (nativeRuntimeArtifactAvailable) {
     const structuredBindConfig: any = buildSiteBindConfig(
       { site_id: 'structured-site', root, config_path: join(root, 'site.json'), surfaces: [] },

@@ -71,6 +71,46 @@ pub(crate) struct State {
     snapshots: HashMap<String, Vec<String>>,
 }
 
+pub(crate) fn site_allowed_roots_config_path(output_root: &Path) -> PathBuf {
+    let control_root = if output_root
+        .file_name()
+        .map(|name| name.to_string_lossy().eq_ignore_ascii_case(".narada"))
+        .unwrap_or(false)
+    {
+        output_root.to_path_buf()
+    } else {
+        output_root.join(".narada")
+    };
+    control_root.join("allowed-roots.json")
+}
+
+fn parse_site_root_config(output_root: &Path, keys: &[&str]) -> Vec<String> {
+    let path = site_allowed_roots_config_path(output_root);
+    let Ok(text) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        return Vec::new();
+    };
+    keys.iter()
+        .flat_map(|key| {
+            value
+                .get(*key)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flat_map(|items| items.iter().filter_map(Value::as_str).map(str::to_string))
+        })
+        .collect()
+}
+
+pub(crate) fn parse_site_allowed_roots(output_root: &Path) -> Vec<String> {
+    parse_site_root_config(output_root, &["extra_allowed_roots", "temp_allowed_roots"])
+}
+
+pub(crate) fn parse_site_extra_allowed_roots(output_root: &Path) -> Vec<String> {
+    parse_site_root_config(output_root, &["extra_allowed_roots"])
+}
+
 #[derive(Debug)]
 struct FsError {
     code: String,
@@ -183,18 +223,49 @@ fn parse_state(args: &[String]) -> Result<State, String> {
         }
         index += 1;
     }
+    let output_root = absolute(
+        output_root
+            .map(PathBuf::from)
+            .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
+    );
+    let mut root_specs = roots
+        .into_iter()
+        .map(|root| {
+            (
+                root,
+                json!({"source": "explicit_flag", "flag": "--allowed-root"}),
+            )
+        })
+        .collect::<Vec<_>>();
     if let Some(path) = roots_config {
-        roots.extend(parse_roots_config(Path::new(&path)));
+        let config_path = PathBuf::from(path);
+        let config_path_text = config_path.to_string_lossy().to_string();
+        root_specs.extend(parse_roots_config(&config_path).into_iter().map(|root| {
+            (
+                root,
+                json!({"source": "roots_config", "config_path": config_path_text.clone()}),
+            )
+        }));
     }
+    let site_config_path = site_allowed_roots_config_path(&output_root);
+    root_specs.extend(parse_site_allowed_roots(&output_root).into_iter().map(|root| {
+        (
+            root,
+            json!({"source": "site_allowed_roots_config", "config_path": site_config_path.to_string_lossy()}),
+        )
+    }));
     for spec in anchored {
-        roots.push(resolve_anchor(&spec)?);
+        root_specs.push((
+            resolve_anchor(&spec)?,
+            json!({"source": "anchored_allowed_root", "flag": "--anchored-allowed-root", "spec": spec}),
+        ));
     }
     if mode != "read" && mode != "write" {
         return Err("filesystem_mode_must_be_read_or_write".to_string());
     }
     let mut entries = Vec::new();
     let mut allowed_roots = Vec::new();
-    for root in roots {
+    for (root, provenance) in root_specs {
         let path = absolute(PathBuf::from(root));
         let key = normalize_path(&path);
         if allowed_roots
@@ -203,7 +274,7 @@ fn parse_state(args: &[String]) -> Result<State, String> {
         {
             continue;
         }
-        entries.push(json!({"root": path.to_string_lossy(), "provenance": {"source": "explicit_flag", "flag": "--allowed-root"}}));
+        entries.push(json!({"root": path.to_string_lossy(), "provenance": provenance}));
         allowed_roots.push(path);
     }
     if allowed_roots.is_empty() {
@@ -213,11 +284,7 @@ fn parse_state(args: &[String]) -> Result<State, String> {
         mode,
         allowed_roots,
         root_entries: entries,
-        output_root: absolute(
-            output_root
-                .map(PathBuf::from)
-                .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
-        ),
+        output_root,
         audit_log_dir: audit_log_dir.map(|value| absolute(PathBuf::from(value))),
         cache: HashMap::new(),
         snapshots: HashMap::new(),

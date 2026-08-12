@@ -1,3 +1,6 @@
+use narada_mcp_materialization_contract::{
+    describe_config, generation_fingerprint, pretty_json, CONTRACT_VERSION,
+};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::env;
@@ -417,7 +420,23 @@ fn carrier_unbind(contract: &Value, args: &Value) -> Result<Value, MutationFailu
         let mut parsed = parse_jsonc(&content).unwrap();
         let key = format!("narada-site-andrey-user-{surface_id}");
         parsed["mcpServers"].as_object_mut().unwrap().remove(&key);
-        (serde_json::to_string_pretty(&parsed).unwrap() + "\n", key)
+        (
+            String::from_utf8(pretty_json(&parsed).map_err(|error| {
+                mutation_failure(
+                    "registrar_json_emit_failed",
+                    error,
+                    json!({"config_path":path}),
+                )
+            })?)
+            .map_err(|error| {
+                mutation_failure(
+                    "registrar_json_emit_failed",
+                    error.to_string(),
+                    json!({"config_path":path}),
+                )
+            })?,
+            key,
+        )
     } else {
         let section = format!("[mcp_servers.{surface_id}]");
         let index = content.find(&section).unwrap();
@@ -437,6 +456,37 @@ fn carrier_unbind(contract: &Value, args: &Value) -> Result<Value, MutationFailu
     let mut runtime_plan = template["runtime_materialization_plan"].clone();
     let validation = template["materialization_validation"].clone();
     let mut generation = template["generation_unsigned"].clone();
+    let current_sidecar_path = format!("{path}.narada-generation.json");
+    let current_generation: Value = serde_json::from_slice(
+        &fs::read(&current_sidecar_path).map_err(|error| {
+            mutation_failure(
+                "registrar_generation_sidecar_read_failed",
+                error.to_string(),
+                json!({"path":current_sidecar_path}),
+            )
+        })?,
+    )
+    .map_err(|error| {
+        mutation_failure(
+            "registrar_generation_sidecar_invalid",
+            error.to_string(),
+            json!({"path":current_sidecar_path}),
+        )
+    })?;
+    let artifact_manifest_fingerprint = current_generation
+        .get("artifact_manifest_fingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            mutation_failure(
+                "registrar_artifact_manifest_fingerprint_missing",
+                "registrar_artifact_manifest_fingerprint_missing".into(),
+                json!({"path":current_sidecar_path}),
+            )
+        })?;
+    generation.as_object_mut().unwrap().insert(
+        "artifact_manifest_fingerprint".into(),
+        json!(artifact_manifest_fingerprint),
+    );
     if path != declared_path {
         replace_value_string(&mut runtime_plan, declared_path, path);
         replace_value_string(&mut generation, declared_path, path);
@@ -449,9 +499,54 @@ fn carrier_unbind(contract: &Value, args: &Value) -> Result<Value, MutationFailu
         "runtime_materialization_plan_fingerprint".into(),
         json!(fingerprint),
     );
+    let selectors = generation
+        .pointer("/managed_projection/selectors")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            mutation_failure(
+                "registrar_managed_selectors_missing",
+                "registrar_managed_selectors_missing".into(),
+                json!({"config_path":path}),
+            )
+        })?
+        .iter()
+        .map(|value| {
+            value.as_str().map(str::to_string).ok_or_else(|| {
+                mutation_failure(
+                    "registrar_managed_selector_invalid",
+                    "registrar_managed_selector_invalid".into(),
+                    json!({"config_path":path}),
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let description =
+        describe_config(kind, next_content.as_bytes(), &selectors).map_err(|error| {
+            mutation_failure(
+                "registrar_materialization_contract_failed",
+                format!("registrar_materialization_contract_failed:{error}"),
+                json!({"config_path":path}),
+            )
+        })?;
     generation.as_object_mut().unwrap().insert(
-        "config_sha256".into(),
-        json!(materialization_config_fingerprint(kind, &next_content)),
+        "config_artifact".into(),
+        serde_json::to_value(description.config_artifact).map_err(|error| {
+            mutation_failure(
+                "registrar_materialization_contract_failed",
+                error.to_string(),
+                json!({"config_path":path}),
+            )
+        })?,
+    );
+    generation.as_object_mut().unwrap().insert(
+        "managed_projection".into(),
+        serde_json::to_value(description.managed_projection).map_err(|error| {
+            mutation_failure(
+                "registrar_materialization_contract_failed",
+                error.to_string(),
+                json!({"config_path":path}),
+            )
+        })?,
     );
     let generated_at = time::OffsetDateTime::now_utc()
         .format(&time::macros::format_description!(
@@ -464,7 +559,13 @@ fn carrier_unbind(contract: &Value, args: &Value) -> Result<Value, MutationFailu
         .as_object_mut()
         .unwrap()
         .insert("generated_at".into(), json!(generated_at));
-    let fingerprint = sha256_text(&serde_json::to_string(&generation).unwrap());
+    let fingerprint = generation_fingerprint(&generation).map_err(|error| {
+        mutation_failure(
+            "registrar_generation_fingerprint_failed",
+            format!("registrar_generation_fingerprint_failed:{error}"),
+            json!({"config_path":path}),
+        )
+    })?;
     generation
         .as_object_mut()
         .unwrap()
@@ -493,7 +594,7 @@ fn carrier_unbind(contract: &Value, args: &Value) -> Result<Value, MutationFailu
         )
     })?;
     Ok(
-        json!({"status":"unbound","carrier_id":carrier_id,"surface_id":surface_id,"server_key":server_key,"runtime_contract_version":6,"materialization_validation":validation,"materialization_generation":generation,"generation_sidecar_path":sidecar_path,"runtime_materialization_plan":runtime_plan,"runtime_materialization_plan_path":plan_path,"recovery_escape_hatch":true}),
+        json!({"status":"unbound","carrier_id":carrier_id,"surface_id":surface_id,"server_key":server_key,"runtime_contract_version":CONTRACT_VERSION,"materialization_validation":validation,"materialization_generation":generation,"generation_sidecar_path":sidecar_path,"runtime_materialization_plan":runtime_plan,"runtime_materialization_plan_path":plan_path,"recovery_escape_hatch":true}),
     )
 }
 fn write_pretty_json(path: &str, value: &Value) -> Result<(), String> {
@@ -544,43 +645,24 @@ fn rebind_native_registrar(contract: &mut Value) -> Result<(), String> {
         .and_then(Value::as_str)
         .ok_or("native_registrar_binding_missing")?
         .to_string();
-    let current = native_artifact_entrypoint("mcp-registrar", if cfg!(windows) { "narada-mcp-registrar.exe" } else { "narada-mcp-registrar" })
-        .ok_or("native_registrar_artifact_unavailable")?;
+    let current = native_artifact_entrypoint(
+        "mcp-registrar",
+        if cfg!(windows) {
+            "narada-mcp-registrar.exe"
+        } else {
+            "narada-mcp-registrar"
+        },
+    )
+    .ok_or("native_registrar_artifact_unavailable")?;
     if declared != current {
         replace_value_string(contract, &declared, &current);
-        replace_value_string(contract, &declared.replace('/', "\\"), &current.replace('/', "\\"));
+        replace_value_string(
+            contract,
+            &declared.replace('/', "\\"),
+            &current.replace('/', "\\"),
+        );
     }
     Ok(())
-}
-fn materialization_config_fingerprint(kind: &str, content: &str) -> String {
-    let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
-    if kind != "codex" {
-        return sha256_text(&normalized);
-    }
-    let mut canonical = vec![];
-    let mut inside = false;
-    let mut saw = false;
-    for line in normalized.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("[mcp_servers.") && trimmed.ends_with(']') {
-            inside = true;
-            saw = true;
-            canonical.push(line);
-            continue;
-        }
-        if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            inside = false
-        }
-        if inside {
-            canonical.push(line)
-        }
-    }
-    let value = if saw {
-        canonical.join("\n").trim_end_matches('\n').to_string()
-    } else {
-        normalized.trim_end_matches('\n').to_string()
-    };
-    sha256_text(&value)
 }
 fn registrar_sync(contract: &Value, args: &Value) -> Result<Value, String> {
     let target = required_argument(args, "target", "registrar_requires_target")?;
@@ -3526,7 +3608,7 @@ fn site_launch(
             })
             .unwrap_or_default(),
         "--runtime-contract-version".into(),
-        "6".into(),
+        CONTRACT_VERSION.to_string(),
         "--entrypoint".into(),
         effective_entrypoint,
     ];

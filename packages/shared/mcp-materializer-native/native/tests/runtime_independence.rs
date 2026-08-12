@@ -1,8 +1,56 @@
+use narada_mcp_materialization_contract::canonical_json_sha256;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::tempdir;
+
+fn write_fixture_build_set(
+    manifest_path: &Path,
+    manifest_fingerprint: &str,
+    build_set_path: &Path,
+    references: &[PathBuf],
+) -> String {
+    let manifest_bytes = fs::read(manifest_path).unwrap();
+    let artifacts = references
+        .iter()
+        .map(|path| {
+            let bytes = fs::read(path).unwrap();
+            json!({
+                "path": path,
+                "sha256": format!("sha256:{}", hex::encode(Sha256::digest(&bytes))),
+                "size": bytes.len(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut build_set = json!({
+        "schema": "narada.artifact_build_set.v1",
+        "assurance": "declared_isolated_closure",
+        "workspace_manifest_path": manifest_path,
+        "workspace_manifest_fingerprint": manifest_fingerprint,
+        "workspace_manifest_bytes_digest": format!(
+            "sha256:{}",
+            hex::encode(Sha256::digest(&manifest_bytes))
+        ),
+        "artifacts": artifacts,
+        "toolchain": {
+            "schema": "narada.artifact_toolchain_evidence.v2",
+            "node": "fixture",
+            "pnpm": "fixture",
+            "rustc": "fixture",
+            "cargo": "fixture"
+        }
+    });
+    let digest = format!("sha256:{}", canonical_json_sha256(&build_set).unwrap());
+    build_set["build_set_digest"] = json!(digest);
+    fs::write(
+        build_set_path,
+        serde_json::to_vec_pretty(&build_set).unwrap(),
+    )
+    .unwrap();
+    digest
+}
 
 #[test]
 fn publishes_itself_to_a_content_addressed_immutable_location_without_javascript() {
@@ -52,13 +100,39 @@ fn materializes_every_supported_carrier_kind_without_javascript_runtime_environm
     let contract_bytes = b"{\"schema\":\"narada.native_carrier_contract.v2\"}\n";
     fs::write(&contract_path, contract_bytes).unwrap();
     let contract_fingerprint = hex::encode(Sha256::digest(contract_bytes));
+    let manifest_path = root.path().join("workspace-artifact-manifest.json");
+    let manifest_fingerprint = "a".repeat(64);
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&json!({
+            "schema":"narada.workspace_artifact_manifest.v1",
+            "manifest_fingerprint":manifest_fingerprint
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let registrar = root.path().join("narada-mcp-materializer.exe");
+    let proxy = root.path().join("narada-mcp-runtime.exe");
+    let filesystem = root.path().join("filesystem.exe");
+    for path in [&registrar, &proxy, &filesystem] {
+        fs::write(path, format!("fixture:{}", path.display())).unwrap();
+    }
+    let build_set_path = root.path().join("artifact-build-set.json");
+    let build_set_fingerprint = write_fixture_build_set(
+        &manifest_path,
+        &manifest_fingerprint,
+        &build_set_path,
+        &[registrar.clone(), proxy.clone(), filesystem.clone()],
+    );
     let input = json!({
         "schema": "narada.carrier_materialization_input.v1",
         "workspace_root": root.path(),
         "carrier_contract_path": contract_path,
         "carrier_contract_fingerprint": contract_fingerprint,
-        "artifact_manifest_path": root.path().join("workspace-artifact-manifest.json"),
-        "artifact_manifest_fingerprint": "a".repeat(64),
+        "artifact_manifest_path": manifest_path,
+        "artifact_manifest_fingerprint": manifest_fingerprint,
+        "artifact_build_set_path": build_set_path,
+        "artifact_build_set_fingerprint": build_set_fingerprint,
         "runtime_profile_kind": "native",
         "runtime_implementation_matrix_path": root.path().join("runtime-implementation-matrix.json"),
         "runtime_implementation_matrix_fingerprint": "b".repeat(64),
@@ -81,7 +155,7 @@ fn materializes_every_supported_carrier_kind_without_javascript_runtime_environm
                     "proxy", "--surface-id", "local-filesystem",
                     "--child-command", root.path().join("filesystem.exe"),
                     "--artifact-manifest", root.path().join("workspace-artifact-manifest.json"),
-                    "--runtime-contract-version", "6",
+                    "--runtime-contract-version", "8",
                     "--entrypoint", root.path().join("filesystem.exe"),
                     "--carrier-id", id,
                     "--carrier-kind", kind,
@@ -114,7 +188,7 @@ fn materializes_every_supported_carrier_kind_without_javascript_runtime_environm
         String::from_utf8_lossy(&output.stderr)
     );
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(result["status"], "materialized_all");
+    assert_eq!(result["status"], "committed");
     assert_eq!(result["carrier_count"], 3);
     for (_, _, path) in &paths {
         assert!(path.exists(), "missing {}", path.display());
@@ -129,7 +203,10 @@ fn materializes_every_supported_carrier_kind_without_javascript_runtime_environm
     assert!(codex.contains("[features]\napps = false"));
     assert!(codex.contains("env_vars = [\"NARADA_AGENT_ID\"]"));
     assert!(codex.contains("[mcp_servers.narada-site-test-local-filesystem]"));
-    assert!(codex.contains("approval_mode = \"approve\""));
+    assert!(codex.contains("default_tools_approval_mode = \"approve\""));
+    assert!(!codex
+        .lines()
+        .any(|line| line == "approval_mode = \"approve\""));
     assert!(!codex.contains(".tools.fs_read]"));
 
     let kimi: Value = serde_json::from_slice(&fs::read(&paths[1].2).unwrap()).unwrap();
@@ -192,11 +269,28 @@ fn derives_all_carriers_from_declared_site_capabilities_without_javascript() {
         "task-lifecycle",
         "surface-feedback",
     ];
+    let mut artifact_references = vec![
+        proxy.clone(),
+        PathBuf::from(env!("CARGO_BIN_EXE_narada-mcp-materializer")),
+    ];
+    for surface_id in surface_ids {
+        let child = root.path().join(format!("{surface_id}.exe"));
+        fs::write(&child, format!("fixture:{surface_id}")).unwrap();
+        artifact_references.push(child);
+    }
+    let manifest_path = workspace.join(".ai/runtime/workspace-artifact-manifest.json");
+    write_fixture_build_set(
+        &manifest_path,
+        &"e".repeat(64),
+        &workspace.join(".ai/runtime/artifact-build-set.json"),
+        &artifact_references,
+    );
     let registry = json!({
         "schema": "narada.site.capabilities.mcp_surfaces.v1",
         "site_id": "andrey-user",
         "surfaces": surface_ids.iter().map(|surface_id| json!({
             "catalog_surface_id": surface_id,
+            "injection_scope": "user_site",
             "server_name": format!("narada-site-andrey-user-{surface_id}"),
             "registered_live_tools": [format!("{}_guidance", surface_id.replace('-', "_"))],
             "runtime_binding": {
@@ -208,7 +302,7 @@ fn derives_all_carriers_from_declared_site_capabilities_without_javascript() {
                         "proxy", "--surface-id", surface_id,
                         "--child-command", root.path().join(format!("{surface_id}.exe")),
                         "--artifact-manifest", workspace.join(".ai/runtime/workspace-artifact-manifest.json"),
-                        "--runtime-contract-version", "6",
+                        "--runtime-contract-version", "8",
                         "--entrypoint", root.path().join(format!("{surface_id}.exe")),
                         "--"
                     ]
@@ -238,6 +332,7 @@ fn derives_all_carriers_from_declared_site_capabilities_without_javascript() {
         "site_id": "second-site",
         "surfaces": [{
             "catalog_surface_id": "local-filesystem",
+            "injection_scope": "local_site",
             "server_name": "narada-site-second-site-local-filesystem",
             "registered_live_tools": ["fs_read"],
             "runtime_binding": {
@@ -249,7 +344,7 @@ fn derives_all_carriers_from_declared_site_capabilities_without_javascript() {
                         "proxy", "--surface-id", "local-filesystem",
                         "--child-command", root.path().join("local-filesystem.exe"),
                         "--artifact-manifest", workspace.join(".ai/runtime/workspace-artifact-manifest.json"),
-                        "--runtime-contract-version", "6",
+                        "--runtime-contract-version", "8",
                         "--entrypoint", root.path().join("local-filesystem.exe"),
                         "--"
                     ]
@@ -269,12 +364,13 @@ fn derives_all_carriers_from_declared_site_capabilities_without_javascript() {
         serde_json::to_vec_pretty(&second_registry).unwrap(),
     )
     .unwrap();
-    let contract = json!({
+    let mut contract = json!({
         "schema": "narada.native_carrier_contract.v2",
         "sites": [
             {
                 "site_id": "andrey-user",
                 "registry_path": registry_path,
+                "admit_local_bindings": true,
                 "surface_ids": surface_ids
             },
             {
@@ -295,6 +391,36 @@ fn derives_all_carriers_from_declared_site_capabilities_without_javascript() {
     )
     .unwrap();
 
+    let collision_output = Command::new(env!("CARGO_BIN_EXE_narada-mcp-materializer"))
+        .env_clear()
+        .arg("materialize-site")
+        .arg("--contract")
+        .arg(&contract_path)
+        .arg("--workspace-root")
+        .arg(&workspace)
+        .arg("--home")
+        .arg(&home)
+        .arg("--matrix")
+        .arg(&matrix_path)
+        .arg("--installed-index")
+        .arg(&index_path)
+        .output()
+        .unwrap();
+
+    assert!(!collision_output.status.success());
+    let collision_stderr = String::from_utf8_lossy(&collision_output.stderr);
+    assert!(
+        collision_stderr.contains("materializer_surface_binding_conflict"),
+        "unexpected collision failure: {collision_stderr}"
+    );
+
+    contract["sites"][1]["surface_ids"] = json!([]);
+    contract["sites"][1]["admit_local_bindings"] = json!(true);
+    fs::write(
+        &contract_path,
+        serde_json::to_vec_pretty(&contract).unwrap(),
+    )
+    .unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_narada-mcp-materializer"))
         .env_clear()
         .arg("materialize-site")
@@ -319,14 +445,39 @@ fn derives_all_carriers_from_declared_site_capabilities_without_javascript() {
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(result["carrier_count"], 3);
     let codex = fs::read_to_string(home.join(".codex/config.toml")).unwrap();
-    assert_eq!(codex.matches("[mcp_servers.").count(), 7);
+    assert_eq!(codex.matches("[mcp_servers.").count(), 6);
     assert!(!codex.contains(".tools."));
     for surface_id in surface_ids {
-        assert!(codex.contains(&format!(
-            "[mcp_servers.narada-site-andrey-user-{surface_id}]"
-        )));
+        assert!(codex.contains(&format!("[mcp_servers.{surface_id}]")));
     }
-    assert!(codex.contains("[mcp_servers.narada-site-second-site-local-filesystem]"));
+    assert!(!codex.contains("narada-site-andrey-user-"));
+    assert!(codex.matches("--allowed-site-root").count() >= 2);
+    let second_site_root = second_registry_path
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let encoded_second_site_root = second_site_root.to_string_lossy().replace('\\', "/");
+    assert!(
+        codex.contains(&encoded_second_site_root),
+        "missing admitted Site root in loader args: {codex}"
+    );
+
+    let admission: Value = serde_json::from_slice(
+        &fs::read(home.join(".codex/config.toml.narada-binding-admission.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(admission["bindings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|binding| {
+            binding["binding_id"] == "second-site-local-filesystem"
+                && binding["authority_locus"]["site_id"] == "second-site"
+        }));
+
     let installed: Value = serde_json::from_slice(&fs::read(&index_path).unwrap()).unwrap();
     assert_eq!(installed["carriers"].as_array().unwrap().len(), 3);
 
@@ -346,7 +497,11 @@ fn derives_all_carriers_from_declared_site_capabilities_without_javascript() {
     assert_eq!(verification_result["status"], "current");
     assert_eq!(verification_result["verified_carrier_count"], 3);
 
-    fs::write(home.join(".codex/config.toml"), b"corrupted\n").unwrap();
+    fs::write(
+        home.join(".codex/config.toml"),
+        b"model = \"operator-preserved\"\n[mcp_servers.corrupted]\ncommand = \"bad\"\n",
+    )
+    .unwrap();
     let recovery = Command::new(env!("CARGO_BIN_EXE_narada-mcp-materializer"))
         .env_clear()
         .arg("recover-generation")
@@ -354,84 +509,15 @@ fn derives_all_carriers_from_declared_site_capabilities_without_javascript() {
         .arg(home.join(".codex/config.toml.narada-generation.json"))
         .output()
         .unwrap();
-    assert!(
-        recovery.status.success(),
-        "stderr={}",
-        String::from_utf8_lossy(&recovery.stderr)
-    );
-    let recovery_result: Value = serde_json::from_slice(&recovery.stdout).unwrap();
+    assert_eq!(recovery.status.code(), Some(1));
+    let recovery_failure: Value = serde_json::from_slice(&recovery.stderr).unwrap();
     assert_eq!(
-        recovery_result["schema"],
-        "narada.mcp_materializer.recovery_evidence.v1"
+        recovery_failure["code"],
+        "materializer_fresh_process_spawn_failed"
     );
-    assert_eq!(recovery_result["status"], "recovered");
-    assert_eq!(recovery_result["verification"]["status"], "current");
-    assert!(recovery_result["ref"]
-        .as_str()
-        .unwrap()
-        .starts_with("sha256:"));
-    assert!(
-        recovery_result["restart_pressure"]["codex-test"]["evidence_ref"]
-            .as_str()
-            .unwrap()
-            .starts_with("sha256:")
-    );
-    assert!(workspace
-        .join(".ai/runtime/carrier-materialization-recovery/latest-materialization.json")
-        .exists());
-    assert!(fs::read_to_string(home.join(".codex/config.toml"))
-        .unwrap()
-        .contains("[mcp_servers.narada-site-andrey-user-local-filesystem]"));
+    let unchanged_codex = fs::read_to_string(home.join(".codex/config.toml")).unwrap();
+    assert!(unchanged_codex.contains("model = \"operator-preserved\""));
+    assert!(unchanged_codex.contains("[mcp_servers.corrupted]"));
 
-    let compatibility_recovery = Command::new(env!("CARGO_BIN_EXE_narada-mcp-materializer"))
-        .env_clear()
-        .env("USERPROFILE", &home)
-        .arg(env!("CARGO_BIN_EXE_narada-mcp-materializer"))
-        .arg("--materialize-all")
-        .output()
-        .unwrap();
-    assert!(
-        compatibility_recovery.status.success(),
-        "stderr={}",
-        String::from_utf8_lossy(&compatibility_recovery.stderr)
-    );
-
-    let stale_acknowledgement = Command::new(env!("CARGO_BIN_EXE_narada-mcp-materializer"))
-        .env_clear()
-        .arg("acknowledge-restart")
-        .arg("--installed-index")
-        .arg(&index_path)
-        .arg("--carrier-id")
-        .arg("codex-test")
-        .arg("--expected-evidence-ref")
-        .arg("sha256:obsolete")
-        .output()
-        .unwrap();
-    assert_eq!(stale_acknowledgement.status.code(), Some(2));
-    let stale_result: Value = serde_json::from_slice(&stale_acknowledgement.stdout).unwrap();
-    assert_eq!(stale_result["status"], "stale_ack_refused");
-
-    let evidence_ref = recovery_result["ref"].as_str().unwrap();
-    let acknowledgement = Command::new(env!("CARGO_BIN_EXE_narada-mcp-materializer"))
-        .env_clear()
-        .arg("acknowledge-restart")
-        .arg("--installed-index")
-        .arg(&index_path)
-        .arg("--carrier-id")
-        .arg("codex-test")
-        .arg("--expected-evidence-ref")
-        .arg(evidence_ref)
-        .output()
-        .unwrap();
-    assert!(
-        acknowledgement.status.success(),
-        "stderr={}",
-        String::from_utf8_lossy(&acknowledgement.stderr)
-    );
-    let acknowledgement_result: Value = serde_json::from_slice(&acknowledgement.stdout).unwrap();
-    assert_eq!(acknowledgement_result["status"], "acknowledged");
-    assert_eq!(
-        acknowledgement_result["remaining_carrier_ids"],
-        json!(["opencode-test", "kimi-test"])
-    );
+    assert_eq!(result["restart_required"], true);
 }

@@ -16,9 +16,9 @@ function git(root: string, args: string[]): string {
   return execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }).trim();
 }
 
-function run(root: string, requests: JsonRecord[], mode = 'read'): Promise<JsonRecord[]> {
+function run(root: string, requests: JsonRecord[], mode = 'read', outputRoot = root): Promise<JsonRecord[]> {
   return new Promise((resolvePromise, rejectPromise) => {
-    const child = spawn(executable, ['git', '--mode', mode, '--allowed-root', root, '--output-root', root], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+    const child = spawn(executable, ['git', '--mode', mode, '--allowed-root', root, '--output-root', outputRoot], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
     let stdout = '';
     let stderr = '';
     child.stdout.setEncoding('utf8');
@@ -38,6 +38,8 @@ function run(root: string, requests: JsonRecord[], mode = 'read'): Promise<JsonR
 }
 
 const root = mkdtempSync(join(tmpdir(), 'narada-native-git-'));
+const extraRoot = mkdtempSync(join(tmpdir(), 'narada-native-git-extra-'));
+const siteRoot = mkdtempSync(join(tmpdir(), 'narada-native-git-site-'));
 try {
   git(root, ['init', '-q']);
   git(root, ['config', 'user.email', 'native-git@example.invalid']);
@@ -49,6 +51,8 @@ try {
   git(root, ['commit', '-qm', 'initial']);
   writeFileSync(join(root, 'src', 'main.txt'), 'one\ntwo\n', 'utf8');
   writeFileSync(join(root, 'untracked.txt'), 'untracked\n', 'utf8');
+  mkdirSync(join(siteRoot, '.narada'), { recursive: true });
+  writeFileSync(join(siteRoot, '.narada', 'allowed-roots.json'), JSON.stringify({ extra_allowed_roots: [extraRoot] }), 'utf8');
 
   const modernMeta = {
     "io.modelcontextprotocol/protocolVersion": "2026-07-28",
@@ -76,7 +80,7 @@ try {
     { jsonrpc: "2.0", id: 21, method: "tools/list", params: { _meta: modernMeta } },
     { jsonrpc: "2.0", id: 22, method: "tools/call", params: { _meta: modernMeta, name: "git_policy_inspect", arguments: {} } },
     { jsonrpc: "2.0", id: 23, method: "initialize", params: { _meta: modernMeta } },
-  ]);
+  ], 'read', siteRoot);
   const byId = new Map(responses.map((response) => [response.id, response]));
   assert.equal(byId.get(20)?.result?.resultType, 'complete');
   assert.equal(byId.get(20)?.result?.supportedVersions?.includes('2026-07-28'), true);
@@ -106,6 +110,7 @@ try {
   assert.equal(byId.get(3)?.result?.structuredContent?.surface_id, 'git');
   assert.equal(byId.get(4)?.result?.structuredContent?.schema, 'narada.git.policy.v1');
   assert.equal(byId.get(4)?.result?.structuredContent?.mode, 'read');
+  assert.equal(byId.get(4)?.result?.structuredContent?.allowed_roots?.includes(extraRoot), true);
   const workScope = byId.get(5)?.result?.structuredContent;
   assert.equal(workScope?.schema, 'narada.git.work_scope.v1');
   assert.deepEqual(workScope?.allowed_paths, ['src']);
@@ -133,7 +138,7 @@ try {
     { jsonrpc: '2.0', id: 30, method: 'tools/call', params: { name: 'git_workflow_record', arguments: { scope_label: 'native-write-canary', summary: 'bounded audit record', repositories: [{ working_directory: root, push_status: 'not_attempted' }] } } },
     { jsonrpc: '2.0', id: 31, method: 'tools/call', params: { name: 'git_add', arguments: { working_directory: root, paths: ['src/main.txt'] } } },
     { jsonrpc: '2.0', id: 32, method: 'tools/call', params: { name: 'git_unstage', arguments: { working_directory: root, paths: ['src/main.txt'] } } },
-  ], 'write');
+  ], 'write', siteRoot);
   const workflow = writeResponses.find((response) => response.id === 30)?.result?.structuredContent;
   assert.equal(workflow?.schema, 'narada.git.workflow_record.v1');
   assert.equal(workflow?.status, 'recorded');
@@ -148,7 +153,7 @@ try {
     { jsonrpc: '2.0', id: 12, method: 'tools/call', params: { name: 'git_show', arguments: { working_directory: root, commit, include_patch: false } } },
     { jsonrpc: '2.0', id: 13, method: 'tools/call', params: { name: 'git_status', arguments: { working_directory: join(root, '..') } } },
     { jsonrpc: '2.0', id: 14, method: 'tools/call', params: { name: 'git_show', arguments: { working_directory: root, commit: 'bad!commit', include_patch: false } } },
-  ]);
+  ], 'read', siteRoot);
   const show = showResponses.find((response) => response.id === 12);
   const refused = showResponses.find((response) => response.id === 13);
   const invalidCommit = showResponses.find((response) => response.id === 14);
@@ -159,4 +164,6 @@ try {
   assert.equal(readFileSync(join(root, 'README.md'), 'utf8'), 'native git\n');
 } finally {
   rmSync(root, { recursive: true, force: true });
+  rmSync(extraRoot, { recursive: true, force: true });
+  rmSync(siteRoot, { recursive: true, force: true });
 }

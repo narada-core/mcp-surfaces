@@ -14,7 +14,17 @@ const executable = resolve(process.env.NARADA_NATIVE_STRUCTURED_COMMAND_TEST_EXE
 
 function run(root: string, requests: JsonRecord[], auditLogDir: string): Promise<JsonRecord[]> {
   return new Promise((resolvePromise, rejectPromise) => {
-    const child = spawn(executable, ['structured-command', '--allowed-root', root, '--allow-command', 'node', '--audit-log-dir', auditLogDir], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+    const child = spawn(executable, ['structured-command', '--allowed-root', root, '--allow-command', 'node', '--allow-command', 'pnpm', '--audit-log-dir', auditLogDir], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
+      env: {
+        ...process.env,
+        WT_SESSION: 'must-not-reach-child',
+        WT_PROFILE_ID: 'must-not-reach-child',
+        TERM_PROGRAM: 'must-not-reach-child',
+        TERM_PROGRAM_VERSION: 'must-not-reach-child',
+      },
+    });
     let stdout = '';
     let stderr = '';
     child.stdout.setEncoding('utf8');
@@ -48,6 +58,9 @@ try {
     { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'structured_command_execute', arguments: { command: 'node', args: ['-e', 'process.stdout.write("native-structured")'], working_directory: root, timeout_ms: 5000 } } },
     { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'structured_command_execute', arguments: { command: 'cmd.exe', args: ['/c', 'echo refused'], working_directory: root } } },
     { jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'structured_command_execute', arguments: { command: 'node', args: ['-e', 'setTimeout(() => {}, 1000)'], working_directory: root, timeout_ms: 100 } } },
+    { jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'structured_command_execute', arguments: { command: 'pnpm', args: ['--version'], working_directory: root, timeout_ms: 5000 } } },
+    { jsonrpc: '2.0', id: 8, method: 'tools/call', params: { name: 'structured_command_execute', arguments: { command: 'node', args: ['-e', 'process.stdout.write(JSON.stringify({WT_SESSION:process.env.WT_SESSION,WT_PROFILE_ID:process.env.WT_PROFILE_ID,TERM_PROGRAM:process.env.TERM_PROGRAM,TERM_PROGRAM_VERSION:process.env.TERM_PROGRAM_VERSION}))'], working_directory: root } } },
+    { jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'structured_command_execute', arguments: { command: 'wt.exe', args: ['new-tab'], working_directory: root } } },
     { jsonrpc: "2.0", id: 20, method: "server/discover", params: { _meta: modernMeta } },
     { jsonrpc: "2.0", id: 21, method: "tools/list", params: { _meta: modernMeta } },
     { jsonrpc: "2.0", id: 22, method: "tools/call", params: { _meta: modernMeta, name: "structured_command_execution_policy_inspect", arguments: {} } },
@@ -74,6 +87,11 @@ try {
   assert.equal(byId.get(5)?.result?.structuredContent?.status, 'refused');
   assert.equal(byId.get(5)?.result?.structuredContent?.decision?.reasons?.some((reason: string) => reason.startsWith('blocked_command:')), true);
   assert.equal(byId.get(6)?.result?.structuredContent?.status, 'timed_out');
+  assert.equal(byId.get(7)?.result?.structuredContent?.status, 'ok');
+  assert.match(byId.get(7)?.result?.structuredContent?.stdout ?? '', /^\d+\.\d+\.\d+/);
+  assert.deepEqual(JSON.parse(byId.get(8)?.result?.structuredContent?.stdout ?? 'null'), {});
+  assert.equal(byId.get(9)?.result?.structuredContent?.status, 'refused');
+  assert.equal(byId.get(9)?.result?.structuredContent?.decision?.reasons?.includes('blocked_command:wt.exe'), true);
   assert.equal(byId.get(20)?.result?.resultType, 'complete');
   assert.equal(byId.get(20)?.result?.supportedVersions?.includes('2026-07-28'), true);
   assert.equal(byId.get(21)?.result?.resultType, 'complete');

@@ -48,7 +48,7 @@ export function buildGuidanceResult(args: GuidanceRecord = {}): GuidanceRecord {
       'For missing live observations, rerun mcp_loader_site_tool_inventory_check and pass its new observation_ref.',
       'For live_tool_semantics_partition_incomplete, add an explicit boolean readOnlyHint at the owning surface; do not default it.',
       'For registry drift, repair the named layer and then rematerialize and rerun the full proof.',
-      'If mcp-registrar itself cannot start because carrier materialization is stale, use the direct native bootstrap recovery (not an MCP call): run pnpm materialize:carrier from the mcp-surfaces workspace. It invokes the installed immutable Rust authority without building the JavaScript workspace; restart affected carrier sessions afterward.',
+      'If mcp-registrar itself cannot start because carrier materialization is stale, use the direct CLI bootstrap recovery (not an MCP call): do not wait for mcp-loader or mcp-registrar. Run pnpm materialize:carrier from the mcp-surfaces workspace; it invokes the installed immutable Rust authority without building the JavaScript workspace. Restart affected carrier sessions afterward.',
       'Canonical native recovery always rematerializes the complete declared carrier set transactionally. It has no single-carrier escape hatch.',
       'For unclear behavior, submit surface_feedback_submit with reproduction steps, expected behavior, and impact.',
     ],

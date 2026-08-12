@@ -19,6 +19,7 @@ internal static class Program
     public static int Main(string[] args)
     {
         ParseArguments(args);
+        LoadSiteAllowedRoots();
         if (AllowedRoots.Count == 0)
         {
             AllowedRoots.Add(CanonicalPath(Environment.CurrentDirectory));
@@ -713,6 +714,46 @@ internal static class Program
         if (!Mode.Equals("read", StringComparison.OrdinalIgnoreCase))
         {
             Mode = "read";
+        }
+    }
+
+    private static void LoadSiteAllowedRoots()
+    {
+        var outputRoot = CanonicalPath(OutputRoot ?? Environment.CurrentDirectory);
+        var controlRoot = Path.GetFileName(outputRoot).Equals(".narada", StringComparison.OrdinalIgnoreCase)
+            ? outputRoot
+            : Path.Combine(outputRoot, ".narada");
+        var configPath = Path.Combine(controlRoot, "allowed-roots.json");
+        try
+        {
+            using var document = JsonDocument.Parse(File.ReadAllText(configPath));
+            var configured = new List<string>();
+            foreach (var propertyName in new[] { "extra_allowed_roots", "temp_allowed_roots" })
+            {
+                if (!document.RootElement.TryGetProperty(propertyName, out var values)
+                    || values.ValueKind != JsonValueKind.Array)
+                {
+                    continue;
+                }
+                foreach (var value in values.EnumerateArray())
+                {
+                    if (value.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(value.GetString()))
+                    {
+                        configured.Add(CanonicalPath(value.GetString()!));
+                    }
+                }
+            }
+            foreach (var root in configured.AsEnumerable().Reverse())
+            {
+                if (!AllowedRoots.Contains(root, StringComparer.OrdinalIgnoreCase))
+                {
+                    AllowedRoots.Insert(0, root);
+                }
+            }
+        }
+        catch
+        {
+            // Site root configuration is optional.
         }
     }
 

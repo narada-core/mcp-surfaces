@@ -124,6 +124,10 @@ struct Connection {
     lease_expires_ms: u128,
     site_root: String,
     surface_id: String,
+    binding_id: Option<String>,
+    admission_envelope_id: Option<String>,
+    admitted_binding_digest: Option<String>,
+    authority_epoch: Option<u64>,
     runtime_kind: Option<String>,
     runtime_requirements: Vec<String>,
     runtime_command: String,
@@ -164,6 +168,9 @@ struct Options {
     child_command: Option<String>,
     child_entrypoint: Option<String>,
     child_args: Vec<String>,
+    binding_admission_path: Option<String>,
+    binding_admission_digest: Option<String>,
+    standalone_ambient_attachment: bool,
 }
 
 impl Default for Options {
@@ -182,6 +189,9 @@ impl Default for Options {
             child_command: None,
             child_entrypoint: None,
             child_args: Vec::new(),
+            binding_admission_path: None,
+            binding_admission_digest: None,
+            standalone_ambient_attachment: false,
         }
     }
 }
@@ -211,6 +221,8 @@ struct LoaderState {
     ownership_marker: String,
     connections: HashMap<String, Connection>,
     handles: HashMap<String, SurfaceHandle>,
+    binding_admission: Option<Value>,
+    standalone_ambient_attachment: bool,
 }
 
 struct WireReader<R> {
@@ -656,6 +668,9 @@ fn parse_options(args: Vec<String>) -> Result<Options, Diagnostic> {
             "--child-command" => options.child_command = Some(next()?),
             "--child-entrypoint" => options.child_entrypoint = Some(next()?),
             "--child-arg" => options.child_args.push(next()?),
+            "--binding-admission-path" => options.binding_admission_path = Some(next()?),
+            "--binding-admission-digest" => options.binding_admission_digest = Some(next()?),
+            "--standalone-ambient-attachment" => options.standalone_ambient_attachment = true,
             "--" => {
                 options
                     .child_args
@@ -700,7 +715,132 @@ fn bounded_u64(value: &str, flag: &str, min: u64, max: u64) -> Result<u64, Diagn
     Ok(parsed.clamp(min, max))
 }
 
+fn load_binding_admission(options: &Options) -> Result<Option<Value>, Diagnostic> {
+    let required = env::var("NARADA_MCP_BINDING_ADMISSION_REQUIRED")
+        .ok()
+        .as_deref()
+        == Some("1");
+    let path = options
+        .binding_admission_path
+        .clone()
+        .or_else(|| env::var("NARADA_MCP_BINDING_ADMISSION_PATH").ok())
+        .filter(|value| !value.trim().is_empty());
+    let Some(path) = path else {
+        if required {
+            return Err(Diagnostic::new(
+                "mcp_binding_admission_required",
+                "mcp_binding_admission_required",
+            ));
+        }
+        return Ok(None);
+    };
+    let text = read_to_string(&path).map_err(|error| {
+        Diagnostic::new(
+            "mcp_binding_admission_unreadable",
+            format!("mcp_binding_admission_unreadable:{error}"),
+        )
+    })?;
+    let envelope: Value = serde_json::from_str(&text).map_err(|error| {
+        Diagnostic::new(
+            "mcp_binding_admission_invalid",
+            format!("mcp_binding_admission_invalid:{error}"),
+        )
+    })?;
+    if envelope.get("schema").and_then(Value::as_str)
+        != Some("narada.mcp.binding_admission_envelope.v1")
+    {
+        return Err(Diagnostic::new(
+            "mcp_binding_admission_schema_invalid",
+            "mcp_binding_admission_schema_invalid",
+        ));
+    }
+    let digest = envelope
+        .get("envelope_digest")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let mut unsigned = envelope.clone();
+    if let Some(object) = unsigned.as_object_mut() {
+        object.remove("envelope_digest");
+    }
+    if sha256(&stable_json(&unsigned)) != digest {
+        return Err(Diagnostic::new(
+            "mcp_binding_admission_envelope_digest_mismatch",
+            "mcp_binding_admission_envelope_digest_mismatch",
+        ));
+    }
+    let expected_digest = options
+        .binding_admission_digest
+        .clone()
+        .or_else(|| env::var("NARADA_MCP_BINDING_ADMISSION_DIGEST").ok());
+    if expected_digest
+        .as_deref()
+        .is_some_and(|expected| expected != digest)
+    {
+        return Err(Diagnostic::new(
+            "mcp_binding_admission_digest_mismatch",
+            "mcp_binding_admission_digest_mismatch",
+        ));
+    }
+    let expected_session = env::var("NARADA_NARS_SESSION_ID")
+        .or_else(|_| env::var("NARADA_RUNTIME_SESSION_ID"))
+        .or_else(|_| env::var("NARADA_CARRIER_SESSION_ID"))
+        .ok();
+    if expected_session.as_deref().is_some_and(|expected| {
+        envelope.get("carrier_session_id").and_then(Value::as_str) != Some(expected)
+    }) {
+        return Err(Diagnostic::new(
+            "mcp_binding_admission_session_mismatch",
+            "mcp_binding_admission_session_mismatch",
+        ));
+    }
+    if let Ok(expected) = env::var("NARADA_SESSION_AUTHORITY_PRINCIPAL_KEY") {
+        if envelope.get("principal_key").and_then(Value::as_str) != Some(expected.as_str()) {
+            return Err(Diagnostic::new(
+                "mcp_binding_admission_principal_mismatch",
+                "mcp_binding_admission_principal_mismatch",
+            ));
+        }
+    }
+    if let Some(expected) = env::var("NARADA_SESSION_AUTHORITY_EPOCH")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+    {
+        if envelope.get("authority_epoch").and_then(Value::as_u64) != Some(expected) {
+            return Err(Diagnostic::new(
+                "mcp_binding_admission_epoch_mismatch",
+                "mcp_binding_admission_epoch_mismatch",
+            ));
+        }
+    }
+    let now = OffsetDateTime::now_utc();
+    if envelope
+        .get("issued_at")
+        .and_then(Value::as_str)
+        .and_then(|value| OffsetDateTime::parse(value, &Rfc3339).ok())
+        .is_some_and(|issued| issued > now)
+    {
+        return Err(Diagnostic::new(
+            "mcp_binding_admission_not_yet_issued",
+            "mcp_binding_admission_not_yet_issued",
+        ));
+    }
+    if envelope
+        .get("valid_until")
+        .and_then(Value::as_str)
+        .and_then(|value| OffsetDateTime::parse(value, &Rfc3339).ok())
+        .is_some_and(|expiry| expiry <= now)
+    {
+        return Err(Diagnostic::new(
+            "mcp_binding_admission_expired",
+            "mcp_binding_admission_expired",
+        ));
+    }
+    Ok(Some(envelope))
+}
+
 fn run_server(options: Options) -> Result<(), Diagnostic> {
+    let binding_admission = load_binding_admission(&options)?;
     let executable = env::current_exe()
         .map_err(|error| Diagnostic::new("runtime_path_unavailable", error.to_string()))?;
     let native_dir = executable
@@ -729,6 +869,7 @@ fn run_server(options: Options) -> Result<(), Diagnostic> {
     let owner_pid = std::process::id();
     let ownership_marker = format!("narada.mcp.loader/{}", run_id);
     let policy = build_policy(&options, &surface_root, &workspace_root);
+    let standalone_ambient_attachment = options.standalone_ambient_attachment;
     let mut state = LoaderState {
         options,
         policy,
@@ -740,6 +881,8 @@ fn run_server(options: Options) -> Result<(), Diagnostic> {
         ownership_marker,
         connections: HashMap::new(),
         handles: HashMap::new(),
+        binding_admission,
+        standalone_ambient_attachment,
     };
     let stdin = io::stdin();
     let mut reader = WireReader::new(stdin.lock());
@@ -807,11 +950,26 @@ fn build_policy(options: &Options, surface_root: &str, workspace_root: &str) -> 
         .collect();
     allowed_prefixes.sort_by_key(|value| std::cmp::Reverse(value.len()));
     allowed_prefixes.dedup();
+    let mut allowed_site_roots: Vec<String> = site_roots
+        .into_iter()
+        .map(|value| normalize_path(&value))
+        .collect();
+    allowed_site_roots.sort_by_key(|value| {
+        if cfg!(windows) {
+            value.to_lowercase()
+        } else {
+            value.clone()
+        }
+    });
+    allowed_site_roots.dedup_by(|left, right| {
+        if cfg!(windows) {
+            left.to_lowercase() == right.to_lowercase()
+        } else {
+            left == right
+        }
+    });
     Policy {
-        allowed_site_roots: site_roots
-            .into_iter()
-            .map(|value| normalize_path(&value))
-            .collect(),
+        allowed_site_roots,
         allowed_entrypoint_prefixes: allowed_prefixes,
         allowed_surface_ids: options.allowed_surface_ids.clone(),
         allowed_env_vars: options.allowed_env_vars.clone().unwrap_or_else(|| {
@@ -895,7 +1053,9 @@ fn modernize_result(value: Value, method: &str) -> Value {
     result.insert("resultType".to_string(), json!("complete"));
     if matches!(method, "tools/list" | "resources/list" | "resources/read") {
         result.entry("ttlMs".to_string()).or_insert(json!(300_000));
-        result.entry("cacheScope".to_string()).or_insert(json!("public"));
+        result
+            .entry("cacheScope".to_string())
+            .or_insert(json!("public"));
     }
     let mut meta = result
         .remove("_meta")
@@ -943,13 +1103,19 @@ fn dispatch(request: &Value, state: &mut LoaderState) -> Result<Value, Diagnosti
                 "initialize_removed",
                 "The 2026-07-28 protocol has no initialize handshake.",
             )),
-            _ => dispatch_legacy(method, &params, state).map(|value| modernize_result(value, method)),
+            _ => {
+                dispatch_legacy(method, &params, state).map(|value| modernize_result(value, method))
+            }
         };
     }
     dispatch_legacy(method, &params, state)
 }
 
-fn dispatch_legacy(method: &str, params: &Value, state: &mut LoaderState) -> Result<Value, Diagnostic> {
+fn dispatch_legacy(
+    method: &str,
+    params: &Value,
+    state: &mut LoaderState,
+) -> Result<Value, Diagnostic> {
     match method {
         "initialize" => Ok(json!({
             "protocolVersion": PROTOCOL_VERSION,
@@ -1676,11 +1842,19 @@ fn runtime_metadata(
 
 fn ensure_site_root_allowed(site_root: &str, policy: &Policy) -> Result<(), Diagnostic> {
     let normalized = normalize_path(site_root);
-    if policy
-        .allowed_site_roots
-        .iter()
-        .any(|allowed| normalized == *allowed || normalized.starts_with(&(allowed.clone() + "/")))
-    {
+    let candidate = if cfg!(windows) {
+        normalized.to_lowercase()
+    } else {
+        normalized.clone()
+    };
+    if policy.allowed_site_roots.iter().any(|allowed| {
+        let boundary = if cfg!(windows) {
+            allowed.to_lowercase()
+        } else {
+            allowed.clone()
+        };
+        candidate == boundary || candidate.starts_with(&(boundary + "/"))
+    }) {
         Ok(())
     } else {
         Err(Diagnostic::new(
@@ -1739,6 +1913,72 @@ fn ensure_entrypoint_allowed(
         "entrypoint_not_allowed",
         format!("entrypoint_not_allowed:{}", entrypoint),
     ))
+}
+
+fn assert_binding_admission_available(state: &LoaderState) -> Result<(), Diagnostic> {
+    if state.binding_admission.is_some() || state.standalone_ambient_attachment {
+        Ok(())
+    } else {
+        Err(Diagnostic::new("mcp_binding_admission_required", "mcp_binding_admission_required")
+            .with_details(json!({"child_spawned":false,"remediation":"Launch through an admitted Narada carrier session or use --standalone-ambient-attachment only for explicit development fixtures."})))
+    }
+}
+
+fn admitted_binding(
+    state: &LoaderState,
+    _site_root: &str,
+    binding_id: &str,
+    operation: &str,
+) -> Result<Option<(Value, Value)>, Diagnostic> {
+    assert_binding_admission_available(state)?;
+    let Some(envelope) = &state.binding_admission else {
+        return Ok(None);
+    };
+    let entry = envelope
+        .get("bindings")
+        .and_then(Value::as_array)
+        .and_then(|bindings| {
+            bindings.iter().find(|binding| {
+                binding.get("binding_id").and_then(Value::as_str) == Some(binding_id)
+            })
+        })
+        .cloned()
+        .ok_or_else(|| {
+            Diagnostic::new(
+                "mcp_binding_not_admitted",
+                format!("mcp_binding_not_admitted:{binding_id}:{operation}"),
+            )
+        })?;
+    let operation_allowed = entry
+        .get("operations")
+        .and_then(Value::as_array)
+        .is_some_and(|operations| {
+            operations
+                .iter()
+                .any(|value| value.as_str() == Some(operation))
+        });
+    if !operation_allowed {
+        return Err(Diagnostic::new(
+            "mcp_binding_not_admitted",
+            format!("mcp_binding_not_admitted:{binding_id}:{operation}"),
+        ));
+    }
+    let server = entry.get("binding_identity").cloned().ok_or_else(|| {
+        Diagnostic::new(
+            "mcp_binding_identity_required",
+            format!("mcp_binding_identity_required:{binding_id}"),
+        )
+    })?;
+    let actual = narada_mcp_fabric_contracts::binding_admission_entry_digest_v1(&entry);
+    let expected = entry
+        .get("binding_digest")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if actual != expected {
+        return Err(Diagnostic::new("mcp_binding_digest_mismatch", format!("mcp_binding_digest_mismatch:{binding_id}"))
+            .with_details(json!({"child_spawned":false,"expected_binding_digest":expected,"actual_binding_digest":actual})));
+    }
+    Ok(Some((entry, server)))
 }
 
 fn supervisor_restart_action() -> Value {
@@ -1843,8 +2083,8 @@ fn list_tools() -> Vec<Value> {
         tool_definition("mcp_loader_list_site_surfaces","List resolvable MCP surfaces declared in a site's local fabric.",json!({"site_root":{"type":"string"}}),&["site_root"],true,false),
         tool_definition("mcp_loader_site_fabric_diagnostics","Inspect site MCP fabric provenance and classify shared-registry drift or intentional entrypoint overrides.",json!({"site_root":{"type":"string"}}),&["site_root"],true,false),
         tool_definition("mcp_loader_site_tool_inventory_check","Compare site fabric declarations with fresh child tools/list responses; compact output includes per-finding status and tool-name deltas, runtime-skipped surfaces produce partial coverage, and an immutable observation_ref is materialized for Registrar conformance checks.",json!({"site_root":{"type":"string"},"surface_ids":{"type":"array","items":{"type":"string"}},"runtime_kind":{"type":"string"},"include_ok":{"type":"boolean"}}),&["site_root"],true,false),
-        tool_definition("mcp_loader_attach_surface","Spawn and initialize a stdio MCP surface, return a connection id, and report loader-managed restartability.",json!({"site_root":{"type":"string"},"surface_id":{"type":"string"},"runtime_kind":{"type":"string"},"entrypoint":{"type":"string"},"args":{"type":"array","items":{"type":"string"}}}),&["site_root","surface_id"],false,false),
-        tool_definition("mcp_loader_open_surface","Open a surface and return a stable logical handle for calls across loader-managed child generations. The handle is scoped to this loader process and does not survive loader restart.",json!({"site_root":{"type":"string"},"surface_id":{"type":"string"},"runtime_kind":{"type":"string"},"entrypoint":{"type":"string"},"args":{"type":"array","items":{"type":"string"}}}),&["site_root","surface_id"],false,false),
+        tool_definition("mcp_loader_attach_surface","Spawn and initialize an exactly admitted stdio MCP binding, return a connection id, and report loader-managed restartability.",json!({"site_root":{"type":"string"},"binding_id":{"type":"string"},"surface_id":{"type":"string"},"runtime_kind":{"type":"string"},"entrypoint":{"type":"string"},"args":{"type":"array","items":{"type":"string"}}}),&["site_root","binding_id"],false,false),
+        tool_definition("mcp_loader_open_surface","Open an exactly admitted binding and return a stable logical handle for calls across loader-managed child generations.",json!({"site_root":{"type":"string"},"binding_id":{"type":"string"},"surface_id":{"type":"string"},"runtime_kind":{"type":"string"},"entrypoint":{"type":"string"},"args":{"type":"array","items":{"type":"string"}}}),&["site_root","binding_id"],false,false),
         tool_definition("mcp_loader_surface_handle_inventory","List stable logical surface handles and the current child generation, without spawning or replacing a surface.",json!({}),&[],true,false),
         tool_definition("mcp_loader_list_tools","List tools exposed by an attached MCP surface.",json!({"connection_id":{"type":"string"}}),&["connection_id"],true,false),
         tool_definition("mcp_loader_surface_status","Inspect the runtime status and loader-managed restartability of an attached MCP surface child process.",json!({"connection_id":{"type":"string"}}),&["connection_id"],true,false),
@@ -2345,10 +2585,40 @@ fn observed_tool_digest(tools: &[Value], _descriptor: Option<&Value>) -> Option<
 fn attach_surface(arguments: &JsonObject, state: &mut LoaderState) -> Result<Value, Diagnostic> {
     let explicit_entrypoint = value_string(arguments.get("entrypoint"));
     let site_root = value_string(arguments.get("site_root")).map(|value| normalize_path(&value));
-    let standalone = site_root.is_none() && explicit_entrypoint.is_some();
+    let standalone =
+        state.standalone_ambient_attachment && site_root.is_none() && explicit_entrypoint.is_some();
     let site_root = site_root.unwrap_or_else(|| normalize_path("."));
-    let surface_id = value_string(arguments.get("surface_id"))
+    let binding_id = value_string(arguments.get("binding_id"));
+    let admitted = if state.binding_admission.is_some() {
+        let id = binding_id
+            .as_deref()
+            .ok_or_else(|| Diagnostic::new("missing_binding_id", "missing_binding_id"))?;
+        admitted_binding(state, &site_root, id, "attach")?
+    } else {
+        assert_binding_admission_available(state)?;
+        None
+    };
+    let surface_id = admitted
+        .as_ref()
+        .and_then(|(entry, _)| {
+            entry
+                .get("surface_id")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| value_string(arguments.get("surface_id")))
         .unwrap_or_else(|| "native-loader-child".to_string());
+    if admitted.is_some()
+        && value_string(arguments.get("surface_id")).is_some_and(|asserted| asserted != surface_id)
+    {
+        return Err(Diagnostic::new(
+            "mcp_binding_surface_assertion_mismatch",
+            format!(
+                "mcp_binding_surface_assertion_mismatch:{}",
+                binding_id.clone().unwrap_or_default()
+            ),
+        ));
+    }
     if !standalone {
         ensure_site_root_allowed(&site_root, &state.policy)?;
         ensure_surface_allowed(&surface_id, &site_root, &state.policy, state)?;
@@ -2405,6 +2675,16 @@ fn attach_surface(arguments: &JsonObject, state: &mut LoaderState) -> Result<Val
             .with_details(json!({"max_connections":inventory["max_connections"],"connection_count":inventory["connection_count"],"available_slots":inventory["available_slots"],"closed_connection_ids":inventory["closed_connection_ids"],"recovery":inventory["recovery"]})));
     }
     let extra_args = string_array(arguments.get("args"))?.unwrap_or_default();
+    if admitted.is_some() && (explicit_entrypoint.is_some() || !extra_args.is_empty()) {
+        return Err(Diagnostic::new(
+            "mcp_binding_invocation_override_not_allowed",
+            format!(
+                "mcp_binding_invocation_override_not_allowed:{}",
+                binding_id.clone().unwrap_or_default()
+            ),
+        )
+        .with_details(json!({"child_spawned":false})));
+    }
     if explicit_entrypoint.is_none() && !extra_args.is_empty() {
         return Err(Diagnostic::new(
             "site_fabric_invocation_override_not_allowed",
@@ -2415,7 +2695,9 @@ fn attach_surface(arguments: &JsonObject, state: &mut LoaderState) -> Result<Val
             "remediation": "Change and rematerialize the authoritative Site fabric instead of supplying per-call arguments."
         })));
     }
-    let (entrypoint, resolved_args, command, child_invocation_kind) = if let Some(explicit) = explicit_entrypoint.clone() {
+    let (entrypoint, resolved_args, command, child_invocation_kind) = if let Some(explicit) =
+        explicit_entrypoint.clone()
+    {
         (
             normalize_path(&explicit),
             extra_args.clone(),
@@ -2459,12 +2741,13 @@ fn attach_surface(arguments: &JsonObject, state: &mut LoaderState) -> Result<Val
                             format!("surface_command_unsupported:runtime-proxy:{}", command),
                         )
                     })?;
-                let child_entrypoint = extract_proxy_child_entrypoint(&raw_args).ok_or_else(|| {
-                    Diagnostic::new(
-                        "surface_command_unsupported",
-                        format!("surface_command_unsupported:runtime-proxy:{}", command),
-                    )
-                })?;
+                let child_entrypoint =
+                    extract_proxy_child_entrypoint(&raw_args).ok_or_else(|| {
+                        Diagnostic::new(
+                            "surface_command_unsupported",
+                            format!("surface_command_unsupported:runtime-proxy:{}", command),
+                        )
+                    })?;
                 let child_invocation_kind = extract_proxy_child_invocation_kind(&raw_args);
                 let child_args = extract_proxy_child_args(&raw_args).ok_or_else(|| {
                     Diagnostic::new(
@@ -2489,17 +2772,26 @@ fn attach_surface(arguments: &JsonObject, state: &mut LoaderState) -> Result<Val
                         )
                     }
                     "native_applet" => {
-                        let child_applet = extract_proxy_child_applet(&raw_args).ok_or_else(|| {
-                            Diagnostic::new(
-                                "surface_native_child_unsupported",
-                                format!("surface_native_child_unsupported:{}", child_invocation_kind),
-                            )
-                        })?;
+                        let child_applet =
+                            extract_proxy_child_applet(&raw_args).ok_or_else(|| {
+                                Diagnostic::new(
+                                    "surface_native_child_unsupported",
+                                    format!(
+                                        "surface_native_child_unsupported:{}",
+                                        child_invocation_kind
+                                    ),
+                                )
+                            })?;
                         let native_entrypoint = normalize_path(&child_command);
                         let mut native_args = vec![child_applet];
                         native_args.extend(child_args);
                         native_args.extend(extra_args.clone());
-                        (native_entrypoint, native_args, child_command, child_invocation_kind)
+                        (
+                            native_entrypoint,
+                            native_args,
+                            child_command,
+                            child_invocation_kind,
+                        )
                     }
                     _ => {
                         return Err(Diagnostic::new(
@@ -2514,12 +2806,13 @@ fn attach_surface(arguments: &JsonObject, state: &mut LoaderState) -> Result<Val
                     }
                 }
             } else {
-                let declared = extract_runtime_entrypoint(&command, &raw_args).ok_or_else(|| {
-                    Diagnostic::new(
-                        "surface_command_unsupported",
-                        format!("surface_command_unsupported:{}:{}", surface_id, command),
-                    )
-                })?;
+                let declared =
+                    extract_runtime_entrypoint(&command, &raw_args).ok_or_else(|| {
+                        Diagnostic::new(
+                            "surface_command_unsupported",
+                            format!("surface_command_unsupported:{}:{}", surface_id, command),
+                        )
+                    })?;
                 (
                     normalize_path(&declared),
                     remove_entrypoint_arg(&raw_args, &declared)
@@ -2580,6 +2873,7 @@ fn attach_surface(arguments: &JsonObject, state: &mut LoaderState) -> Result<Val
         descriptor,
         descriptor_digest,
         declared_digest,
+        admitted.as_ref().map(|(entry, _)| entry.clone()),
     )?;
     let id = connection.connection_id.clone();
     let response = attached_response(&connection, state);
@@ -2598,11 +2892,7 @@ fn resolve_javascript_runtime() -> String {
         .and_then(|name| name.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    if [
-        "node.exe", "node", "bun.exe", "bun", "deno.exe", "deno",
-    ]
-    .contains(&exec_base.as_str())
-    {
+    if ["node.exe", "node", "bun.exe", "bun", "deno.exe", "deno"].contains(&exec_base.as_str()) {
         return exec.to_string_lossy().to_string();
     }
     let home = env::var("USERPROFILE")
@@ -2622,9 +2912,10 @@ fn resolve_javascript_runtime() -> String {
         }
     }
     if cfg!(windows) {
-        let program_files = env::var("PROGRAMFILES").unwrap_or_else(|_| "C:\\Program Files".to_string());
-        let program_files_x86 = env::var("PROGRAMFILES(X86)")
-            .unwrap_or_else(|_| "C:\\Program Files (x86)".to_string());
+        let program_files =
+            env::var("PROGRAMFILES").unwrap_or_else(|_| "C:\\Program Files".to_string());
+        let program_files_x86 =
+            env::var("PROGRAMFILES(X86)").unwrap_or_else(|_| "C:\\Program Files (x86)".to_string());
         let node_candidates = [
             format!("{}\\nodejs\\node.exe", program_files),
             format!("{}\\nodejs\\node.exe", program_files_x86),
@@ -2723,7 +3014,9 @@ fn resolve_child_command(command: &str) -> String {
         .next()
         .unwrap_or(command)
         .to_ascii_lowercase();
-    if ["bun", "bun.exe", "node", "node.exe"].contains(&base.as_str()) && !Path::new(command).is_absolute() {
+    if ["bun", "bun.exe", "node", "node.exe"].contains(&base.as_str())
+        && !Path::new(command).is_absolute()
+    {
         resolve_javascript_runtime()
     } else {
         command.to_string()
@@ -2749,6 +3042,7 @@ fn open_connection(
     descriptor: Option<Value>,
     descriptor_digest: Option<String>,
     declared_digest: Option<String>,
+    admitted_binding: Option<Value>,
 ) -> Result<Connection, Diagnostic> {
     let connection_id = new_id("connection");
     let logical_connection_id = connection_id.clone();
@@ -2756,7 +3050,12 @@ fn open_connection(
     let owner_run_id = state.run_id.clone();
     let owner_pid = state.owner_pid;
     let ownership_marker = state.ownership_marker.clone();
-    let child_spec = build_child_spec(&command, &entrypoint, &resolved_args, &child_invocation_kind);
+    let child_spec = build_child_spec(
+        &command,
+        &entrypoint,
+        &resolved_args,
+        &child_invocation_kind,
+    );
     let env_map = build_child_env(
         &site_root,
         &state.policy,
@@ -2769,38 +3068,41 @@ fn open_connection(
         Ok(session) => session,
         Err(error) => return Err(error),
     };
-    let (server_info, tools_result) =
-        match session.request("server/discover", modern_request_params(), state.policy.attach_timeout_ms) {
-            Ok(discovery) if modern_discovery_is_valid(&discovery) => {
-                let server_info = discovery
-                    .get("_meta")
-                    .and_then(|meta| meta.get("io.modelcontextprotocol/serverInfo"))
-                    .cloned()
-                    .unwrap_or_else(|| json!({}));
-                let tools_result = match session.request(
-                    "tools/list",
-                    modern_request_params(),
-                    state.policy.attach_timeout_ms,
-                ) {
-                    Ok(value) => value,
-                    Err(error) => {
-                        session.terminate();
-                        return Err(error.with_details(json!({
-                            "connection_id":connection_id,
-                            "surface_id":surface_id,
-                            "entrypoint":entrypoint,
-                            "args":resolved_args,
-                            "exit_code":session.exit_code(),
-                            "signal_code":session.signal_code(),
-                            "stderr_tail":session.stderr_tail(),
-                            "runtime_lifecycle":runtime_lifecycle(Some(&connection_id),Some(&lifecycle))
-                        })));
-                    }
-                };
-                (server_info, tools_result)
-            }
-            Ok(_) | Err(_) => {
-                let init = match session.request(
+    let (server_info, tools_result) = match session.request(
+        "server/discover",
+        modern_request_params(),
+        state.policy.attach_timeout_ms,
+    ) {
+        Ok(discovery) if modern_discovery_is_valid(&discovery) => {
+            let server_info = discovery
+                .get("_meta")
+                .and_then(|meta| meta.get("io.modelcontextprotocol/serverInfo"))
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            let tools_result = match session.request(
+                "tools/list",
+                modern_request_params(),
+                state.policy.attach_timeout_ms,
+            ) {
+                Ok(value) => value,
+                Err(error) => {
+                    session.terminate();
+                    return Err(error.with_details(json!({
+                        "connection_id":connection_id,
+                        "surface_id":surface_id,
+                        "entrypoint":entrypoint,
+                        "args":resolved_args,
+                        "exit_code":session.exit_code(),
+                        "signal_code":session.signal_code(),
+                        "stderr_tail":session.stderr_tail(),
+                        "runtime_lifecycle":runtime_lifecycle(Some(&connection_id),Some(&lifecycle))
+                    })));
+                }
+            };
+            (server_info, tools_result)
+        }
+        Ok(_) | Err(_) => {
+            let init = match session.request(
                     "initialize",
                     json!({"protocolVersion":PROTOCOL_VERSION,"capabilities":{},"clientInfo":{"name":SERVER_NAME,"version":SERVER_VERSION}}),
                     state.policy.attach_timeout_ms,
@@ -2820,33 +3122,36 @@ fn open_connection(
                         })));
                     }
                 };
-                if let Err(error) = session.notify("notifications/initialized", json!({})) {
-                    session.terminate();
-                    return Err(error);
-                }
-                let tools_result =
-                    match session.request("tools/list", json!({}), state.policy.attach_timeout_ms) {
-                        Ok(value) => value,
-                        Err(error) => {
-                            session.terminate();
-                            return Err(error.with_details(json!({
-                                "connection_id":connection_id,
-                                "surface_id":surface_id,
-                                "entrypoint":entrypoint,
-                                "args":resolved_args,
-                                "exit_code":session.exit_code(),
-                                "signal_code":session.signal_code(),
-                                "stderr_tail":session.stderr_tail(),
-                                "runtime_lifecycle":runtime_lifecycle(Some(&connection_id),Some(&lifecycle))
-                            })));
-                        }
-                    };
-                (
-                    init.get("serverInfo").cloned().unwrap_or_else(|| json!({})),
-                    tools_result,
-                )
+            if let Err(error) = session.notify("notifications/initialized", json!({})) {
+                session.terminate();
+                return Err(error);
             }
-        };
+            let tools_result = match session.request(
+                "tools/list",
+                json!({}),
+                state.policy.attach_timeout_ms,
+            ) {
+                Ok(value) => value,
+                Err(error) => {
+                    session.terminate();
+                    return Err(error.with_details(json!({
+                        "connection_id":connection_id,
+                        "surface_id":surface_id,
+                        "entrypoint":entrypoint,
+                        "args":resolved_args,
+                        "exit_code":session.exit_code(),
+                        "signal_code":session.signal_code(),
+                        "stderr_tail":session.stderr_tail(),
+                        "runtime_lifecycle":runtime_lifecycle(Some(&connection_id),Some(&lifecycle))
+                    })));
+                }
+            };
+            (
+                init.get("serverInfo").cloned().unwrap_or_else(|| json!({})),
+                tools_result,
+            )
+        }
+    };
     let tools = tools_result
         .get("tools")
         .and_then(Value::as_array)
@@ -2874,6 +3179,27 @@ fn open_connection(
         lease_expires_ms: attached_ms + DEFAULT_RUNTIME_LEASE_MS as u128,
         site_root,
         surface_id,
+        binding_id: admitted_binding
+            .as_ref()
+            .and_then(|entry| entry.get("binding_id"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        admission_envelope_id: state
+            .binding_admission
+            .as_ref()
+            .and_then(|value| value.get("envelope_id"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        admitted_binding_digest: admitted_binding
+            .as_ref()
+            .and_then(|entry| entry.get("binding_digest"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        authority_epoch: state
+            .binding_admission
+            .as_ref()
+            .and_then(|value| value.get("authority_epoch"))
+            .and_then(Value::as_u64),
         runtime_kind,
         runtime_requirements,
         runtime_command: command,
@@ -2893,7 +3219,12 @@ fn open_connection(
     Ok(connection)
 }
 
-fn build_child_spec(command: &str, entrypoint: &str, args: &[String], child_invocation_kind: &str) -> ChildSpec {
+fn build_child_spec(
+    command: &str,
+    entrypoint: &str,
+    args: &[String],
+    child_invocation_kind: &str,
+) -> ChildSpec {
     let base = command
         .replace('\\', "/")
         .rsplit('/')
@@ -2976,6 +3307,8 @@ fn attached_response(connection: &Connection, state: &LoaderState) -> Value {
         "schema":"narada.mcp_loader.surface_attached.v1",
         "connection_id":connection.connection_id,"logical_connection_id":connection.logical_connection_id,
         "generation_id":connection.generation_id,"site_root":connection.site_root,"surface_id":connection.surface_id,
+        "binding_id":connection.binding_id,"admission_envelope_id":connection.admission_envelope_id,
+        "binding_digest":connection.admitted_binding_digest,"authority_epoch":connection.authority_epoch,
         "runtime_kind":connection.runtime_kind,"runtime_requirements":connection.runtime_requirements,
         "runtime_lifecycle":runtime_lifecycle(Some(&connection.connection_id),Some(&connection.lifecycle)),
         "runtime_freshness":runtime_freshness(state),"runtime_command":connection.runtime_command,"entrypoint":connection.entrypoint,"args":connection.args,"child_invocation_kind":connection.child_invocation_kind,
@@ -3026,7 +3359,12 @@ fn open_surface(arguments: &JsonObject, state: &mut LoaderState) -> Result<Value
 }
 
 fn policy_inspect(state: &LoaderState) -> Value {
-    json!({"schema":"narada.mcp_loader.policy.v1","policy":{
+    let admission = state.binding_admission.as_ref().map(|envelope| json!({
+        "status":"admitted","envelope_id":envelope.get("envelope_id"),"envelope_digest":envelope.get("envelope_digest"),
+        "binding_count":envelope.get("bindings").and_then(Value::as_array).map(Vec::len).unwrap_or(0),
+        "authority_epoch":envelope.get("authority_epoch"),"carrier_session_id":envelope.get("carrier_session_id")
+    })).unwrap_or_else(|| json!({"status":if state.standalone_ambient_attachment{"standalone_ambient"}else{"required_missing"}}));
+    json!({"schema":"narada.mcp_loader.policy.v1","binding_admission":admission,"policy":{
         "allowedSiteRoots":state.policy.allowed_site_roots,"allowedEntrypointPrefixes":state.policy.allowed_entrypoint_prefixes,
         "allowedSurfaceIds":state.policy.allowed_surface_ids.as_ref().map(|ids| json!(ids)).unwrap_or_else(|| json!("site_fabric")),
         "allowedEnvVars":state.policy.allowed_env_vars,"maxConnections":state.policy.max_connections,
@@ -3136,6 +3474,7 @@ fn list_site_surfaces(arguments: &JsonObject, state: &LoaderState) -> Result<Val
         "missing_site_root",
     )?);
     ensure_site_root_allowed(&site_root, &state.policy)?;
+    assert_binding_admission_available(state)?;
     let bundle = read_site_fabric(&site_root)?;
     let servers = bundle
         .fabric
@@ -3145,6 +3484,29 @@ fn list_site_surfaces(arguments: &JsonObject, state: &LoaderState) -> Result<Val
         .unwrap_or_default();
     let mut surfaces = Vec::new();
     for (server_id, server) in servers {
+        let binding_id = server
+            .get("binding_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if let Some(envelope) = &state.binding_admission {
+            let discoverable = envelope
+                .get("bindings")
+                .and_then(Value::as_array)
+                .is_some_and(|bindings| {
+                    bindings.iter().any(|binding| {
+                        binding.get("binding_id").and_then(Value::as_str) == Some(binding_id)
+                            && binding
+                                .get("operations")
+                                .and_then(Value::as_array)
+                                .is_some_and(|ops| {
+                                    ops.iter().any(|op| op.as_str() == Some("discover"))
+                                })
+                    })
+                });
+            if !discoverable {
+                continue;
+            }
+        }
         let surface_id = server
             .get("surface_id")
             .and_then(Value::as_str)
@@ -3157,7 +3519,7 @@ fn list_site_surfaces(arguments: &JsonObject, state: &LoaderState) -> Result<Val
             .unwrap_or_default();
         let requirements = surface_requirements(Some(&server));
         surfaces.push(json!({
-            "surface_id":surface_id,"server_name":server_id,"command":server.get("command").cloned().unwrap_or(Value::Null),
+            "binding_id":if binding_id.is_empty(){Value::Null}else{json!(binding_id)},"surface_id":surface_id,"server_name":server_id,"command":server.get("command").cloned().unwrap_or(Value::Null),
             "args":server.get("args").cloned().unwrap_or_else(|| json!([])),"env_vars":env_vars,
             "runtime_requirements":requirements,"runtime_lifecycle":runtime_lifecycle(None,None)
         }));
@@ -3438,6 +3800,13 @@ fn call_attached_tool(
 ) -> Result<Value, Diagnostic> {
     let connection_id = required_string(arguments, "connection_id", "missing_connection_id")?;
     let tool_name = required_string(arguments, "tool_name", "missing_tool_name")?;
+    if let Some(connection) = state.connections.get(&connection_id) {
+        if let Some(binding_id) = connection.binding_id.as_deref() {
+            admitted_binding(state, &connection.site_root, binding_id, "attach")?;
+        } else {
+            assert_binding_admission_available(state)?;
+        }
+    }
     let tool_arguments = arguments
         .get("arguments")
         .cloned()
@@ -3669,6 +4038,16 @@ fn restart_connection(
     state: &mut LoaderState,
 ) -> Result<Value, Diagnostic> {
     let id = required_string(arguments, "connection_id", "missing_connection_id")?;
+    let admitted = if let Some(existing) = state.connections.get(&id) {
+        if let Some(binding_id) = existing.binding_id.as_deref() {
+            admitted_binding(state, &existing.site_root, binding_id, "restart")?
+        } else {
+            assert_binding_admission_available(state)?;
+            None
+        }
+    } else {
+        None
+    };
     let mut previous = state.connections.remove(&id).ok_or_else(|| {
         Diagnostic::new(
             "connection_not_found",
@@ -3705,6 +4084,7 @@ fn restart_connection(
         previous.descriptor.clone(),
         previous.descriptor_digest.clone(),
         previous.declared_tool_contract_digest.clone(),
+        admitted.map(|(entry, _)| entry),
     ) {
         Ok(mut connection) => {
             connection.logical_connection_id = previous.logical_connection_id.clone();
@@ -4486,7 +4866,11 @@ mod tests {
     fn proxy_child_args_require_separator() {
         assert_eq!(extract_proxy_child_args(&["proxy".to_string()]), None);
         assert_eq!(
-            extract_proxy_child_args(&["proxy".to_string(), "--".to_string(), "--site-root".to_string()]),
+            extract_proxy_child_args(&[
+                "proxy".to_string(),
+                "--".to_string(),
+                "--site-root".to_string()
+            ]),
             Some(vec!["--site-root".to_string()]),
         );
     }
@@ -4505,7 +4889,10 @@ mod modern_protocol_tests {
         assert_eq!(result["resultType"], "complete");
         assert_eq!(result["cacheScope"], "public");
         assert!(result["ttlMs"].as_u64().unwrap_or_default() > 0);
-        assert_eq!(result["_meta"]["io.modelcontextprotocol/serverInfo"]["name"], SERVER_NAME);
+        assert_eq!(
+            result["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+            SERVER_NAME
+        );
         let discovery = modernize_result(modern_discover_result(), "server/discover");
         assert_eq!(discovery["supportedVersions"][0], MODERN_PROTOCOL_VERSION);
         assert!(modern_discovery_is_valid(&discovery));
@@ -4513,7 +4900,8 @@ mod modern_protocol_tests {
 
     #[test]
     fn modern_loader_requests_require_client_metadata() {
-        let missing = json!({"_meta": {"io.modelcontextprotocol/protocolVersion": MODERN_PROTOCOL_VERSION}});
+        let missing =
+            json!({"_meta": {"io.modelcontextprotocol/protocolVersion": MODERN_PROTOCOL_VERSION}});
         let error = validate_modern_request(&missing).expect_err("missing metadata must refuse");
         assert_eq!(error.code, "modern_metadata_required");
     }

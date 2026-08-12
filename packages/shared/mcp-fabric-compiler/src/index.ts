@@ -22,6 +22,7 @@ export * from './reconciliation.js';
 export type CarrierKind = 'codex' | 'kimi' | 'opencode';
 
 export type ApprovalDecision = {
+  binding_id: string;
   server_name: string;
   tool_name: string;
   decision: 'allow' | 'prompt';
@@ -184,7 +185,7 @@ function resolveEnabledBindings(manifest: FabricManifestV2): ResolvedBinding[] {
       }
       return { binding, descriptor, projection };
     })
-    .sort((left, right) => left.binding.server_name.localeCompare(right.binding.server_name));
+    .sort((left, right) => left.binding.surface_id.localeCompare(right.binding.surface_id));
 }
 
 function deriveApprovalDecisions(resolved: ResolvedBinding[]): ApprovalDecision[] {
@@ -199,14 +200,15 @@ function deriveApprovalDecisions(resolved: ResolvedBinding[]): ApprovalDecision[
         reasons.push(...projection.authority_requirements.map((requirement) => `authority=${requirement}`));
       }
       return {
-        server_name: binding.server_name,
+        binding_id: binding.binding_id,
+        server_name: binding.surface_id,
         tool_name: tool.name,
         decision: reasons.length === 0 ? 'allow' as const : 'prompt' as const,
         reasons,
       };
     }),
   ).sort((left, right) =>
-    left.server_name.localeCompare(right.server_name)
+    left.binding_id.localeCompare(right.binding_id)
     || left.tool_name.localeCompare(right.tool_name));
 }
 
@@ -216,7 +218,7 @@ function carrierDocument(
   approvals: ApprovalDecision[],
 ): Record<string, unknown> {
   const entries = Object.fromEntries(resolved.map((item) => [
-    item.binding.server_name,
+    item.binding.surface_id,
     transportDocument(carrierKind, item),
   ]));
   if (carrierKind === 'codex') {
@@ -271,7 +273,7 @@ function filterDeclaredRecord(value: unknown, declared: string[]): Record<string
 }
 
 function approvalKey(entry: ApprovalDecision): string {
-  return `${entry.server_name}/${entry.tool_name}`;
+  return `${entry.binding_id}/${entry.tool_name}`;
 }
 
 function transformAnyOfParentTypes(

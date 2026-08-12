@@ -101,7 +101,7 @@ test('workspace artifact manifest refuses missing, stale, and missing export art
 });
 
 
-test('versioned native artifacts remain admitted after rotation', () => {
+test('only the native artifacts selected by current.json are admitted', () => {
   const root = mkdtempSync(join(tmpdir(), 'workspace-native-artifacts-'));
   try {
     const packageRoot = join(root, 'package');
@@ -113,13 +113,20 @@ test('versioned native artifacts remain admitted after rotation', () => {
       name: '@test/versioned-native-package',
       version: '1.0.0',
       type: 'module',
-      naradaRuntimeArtifacts: { [process.platform]: ['./dist/native/versions/*'] },
+      naradaRuntimeArtifacts: { [process.platform]: ['./dist/native/current.json', './dist/native/versions/*'] },
     }), 'utf8');
     writeFileSync(versionOne, 'generation-one', 'utf8');
     writeFileSync(versionTwo, 'generation-two', 'utf8');
+    writeFileSync(join(packageRoot, 'dist', 'native', 'current.json'), JSON.stringify({
+      artifacts: { 'narada-mcp-runtime.exe': 'versions/two/narada-mcp-runtime.exe' },
+    }), 'utf8');
     const manifestPath = join(root, 'manifest.json');
     buildWorkspaceArtifactManifest({ workspaceRoot: root, packageRoots: [packageRoot], outputPath: manifestPath });
-    assert.equal(preflightWorkspaceArtifacts({ surfaceId: 'native-one', entrypoint: versionOne, artifactManifestPath: manifestPath }).status, 'ok');
+    writeFileSync(join(packageRoot, 'dist', 'native', 'current.json'), JSON.stringify({
+      generated_at: '2099-01-01T00:00:00Z',
+      artifacts: { 'narada-mcp-runtime.exe': 'versions/two/narada-mcp-runtime.exe' },
+    }), 'utf8');
+    assert.equal(preflightWorkspaceArtifacts({ surfaceId: 'native-one', entrypoint: versionOne, artifactManifestPath: manifestPath }).code, 'workspace_artifact_missing');
     assert.equal(preflightWorkspaceArtifacts({ surfaceId: 'native-two', entrypoint: versionTwo, artifactManifestPath: manifestPath }).status, 'ok');
   } finally {
     rmSync(root, { recursive: true, force: true });

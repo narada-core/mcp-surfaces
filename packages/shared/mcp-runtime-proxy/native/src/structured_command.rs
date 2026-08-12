@@ -38,7 +38,17 @@ const DEFAULT_BLOCKED_COMMANDS: &[&str] = &[
     "powershell.exe",
     "wsl",
     "wsl.exe",
+    "wt",
+    "wt.exe",
+    "windowsterminal",
+    "windowsterminal.exe",
+    "openconsole",
+    "openconsole.exe",
 ];
+const TERMINAL_INTEGRATION_ENVIRONMENT: &[&str] =
+    &["WT_SESSION", "WT_PROFILE_ID", "TERM_PROGRAM", "TERM_PROGRAM_VERSION"];
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const TRANSIENT_EXTENSIONS: &[&str] = &[".ps1", ".psm1", ".js", ".mjs", ".cjs", ".ts"];
 
 #[derive(Clone)]
@@ -1332,14 +1342,17 @@ fn run_process(
     cancellation: Option<Arc<AtomicBool>>,
     environment: &std::collections::HashMap<String, String>,
 ) -> ProcessResult {
-    let child_result = Command::new(command)
-        .args(args)
+    let (spawn_command, spawn_args) = resolve_command_for_spawn(command, args, environment);
+    let mut process = Command::new(spawn_command);
+    process
+        .args(spawn_args)
         .current_dir(cwd)
         .envs(environment)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn();
+        .stderr(Stdio::piped());
+    apply_headless_process_posture(&mut process);
+    let child_result = process.spawn();
     let Ok(mut child) = child_result else {
         return ProcessResult {
             exit_code: None,
@@ -1403,6 +1416,89 @@ fn run_process(
     }
 }
 
+fn resolve_command_for_spawn(
+    command: &str,
+    args: &[String],
+    environment: &std::collections::HashMap<String, String>,
+) -> (PathBuf, Vec<String>) {
+    if !cfg!(windows) || Path::new(command).extension().is_some() {
+        return (PathBuf::from(command), args.to_vec());
+    }
+    let Some(path) = environment
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("PATH"))
+        .map(|(_, value)| value)
+    else {
+        return (PathBuf::from(command), args.to_vec());
+    };
+    for directory in env::split_paths(path) {
+        for extension in [".exe", ".com", ".ps1", ".cmd", ".bat", ""] {
+            let candidate = directory.join(format!("{command}{extension}"));
+            if !candidate.is_file() {
+                continue;
+            }
+            if extension == ".ps1" {
+                let mut wrapped = vec![
+                    "-NoLogo".to_string(),
+                    "-NoProfile".to_string(),
+                    "-NonInteractive".to_string(),
+                    "-ExecutionPolicy".to_string(),
+                    "Bypass".to_string(),
+                    "-File".to_string(),
+                    candidate.to_string_lossy().to_string(),
+                ];
+                wrapped.extend_from_slice(args);
+                return (resolve_noninteractive_powershell(environment), wrapped);
+            }
+            if extension == ".cmd" || extension == ".bat" {
+                let script = candidate.with_extension("ps1");
+                if script.is_file() {
+                    let mut wrapped = vec![
+                        "-NoLogo".to_string(),
+                        "-NoProfile".to_string(),
+                        "-NonInteractive".to_string(),
+                        "-ExecutionPolicy".to_string(),
+                        "Bypass".to_string(),
+                        "-File".to_string(),
+                        script.to_string_lossy().to_string(),
+                    ];
+                    wrapped.extend_from_slice(args);
+                    return (resolve_noninteractive_powershell(environment), wrapped);
+                }
+            }
+            return (candidate, args.to_vec());
+        }
+    }
+    (PathBuf::from(command), args.to_vec())
+}
+
+fn resolve_noninteractive_powershell(
+    environment: &std::collections::HashMap<String, String>,
+) -> PathBuf {
+    let native_pwsh = environment
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("PATH"))
+        .and_then(|(_, value)| {
+            env::split_paths(value)
+                .map(|directory| directory.join("pwsh.exe"))
+                .find(|candidate| {
+                    candidate.is_file()
+                        && !candidate
+                            .to_string_lossy()
+                            .to_ascii_lowercase()
+                            .contains("\\windowsapps\\")
+                })
+        });
+    if let Some(executable) = native_pwsh {
+        return executable;
+    }
+    let system_root = environment
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("SystemRoot"))
+        .map(|(_, value)| PathBuf::from(value))
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    system_root.join(r"System32\WindowsPowerShell\v1.0\powershell.exe")
+}
 fn read_bounded<R: Read>(mut reader: R, max: usize) -> (Vec<u8>, bool) {
     let mut output = Vec::with_capacity(max.min(8192));
     let mut buffer = [0_u8; 8192];
@@ -1427,16 +1523,29 @@ fn read_bounded<R: Read>(mut reader: R, max: usize) -> (Vec<u8>, bool) {
     (output, truncated)
 }
 
+fn apply_headless_process_posture(command: &mut Command) {
+    for variable in TERMINAL_INTEGRATION_ENVIRONMENT {
+        command.env_remove(variable);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+}
+
 fn kill_child(child: &mut Child) {
     #[cfg(windows)]
     {
         let pid = child.id();
-        let _ = Command::new("taskkill")
+        let mut command = Command::new("taskkill");
+        command
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+            .stderr(Stdio::null());
+        apply_headless_process_posture(&mut command);
+        let _ = command.status();
     }
     #[cfg(not(windows))]
     {

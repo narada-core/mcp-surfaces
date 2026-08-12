@@ -1,4 +1,9 @@
-use serde_json::{json, Map, Value};
+use narada_mcp_materialization_contract::{
+    canonical_json_sha256, describe_config, generation_fingerprint,
+    AMBIGUOUS_GENERATION_SCHEMA, CONTRACT_VERSION, GENERATION_SCHEMA,
+    LEGACY_GENERATION_SCHEMA,
+};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::env;
@@ -20,7 +25,6 @@ mod protocol;
 #[allow(dead_code)]
 mod structured_command;
 
-const CONTRACT_VERSION: u64 = 6;
 const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 240_000;
 const DEFAULT_TOOL_TIMEOUT_GRACE_MS: u64 = 15_000;
 const MAX_TRANSPORT_TIMEOUT_MS: u64 = 900_000;
@@ -795,7 +799,7 @@ fn run_proxy(args: &[String]) -> Result<(), String> {
         Ok(value) => value,
         Err(refusal) => return preflight_refusal(&options, refusal),
     };
-    if options.runtime_contract_version != Some(CONTRACT_VERSION) {
+    if options.runtime_contract_version != Some(CONTRACT_VERSION.into()) {
         let (code, reason) = if options.runtime_contract_version.is_none() {
             (
                 "runtime_contract_version_missing",
@@ -1786,6 +1790,124 @@ fn verify_fingerprint(value: Option<&Value>, code: &str, reason: &str) -> Result
     Ok(())
 }
 
+fn preflight_generation_bundle(generation: &Value, sidecar: &Path) -> Result<(), Refusal> {
+    let stale = |reason: &str, details: Value| {
+        refusal("materialization_generation_stale", reason, details)
+    };
+    let required = |field: &'static str| {
+        generation
+            .get(field)
+            .and_then(Value::as_str)
+            .ok_or_else(|| stale(
+                "The materialization generation has an incomplete bundle chain.",
+                json!({"field":field,"admission_state":"integrity_refused"}),
+            ))
+    };
+    let bundle_id = required("bundle_id")?;
+    let expected_fingerprint = required("bundle_fingerprint")?;
+    let bundle_path = PathBuf::from(required("bundle_path")?);
+    let mut bundle = read_json(&bundle_path).map_err(|error| {
+        stale(
+            "The committed carrier bundle is missing or unreadable.",
+            json!({"error":error,"bundle_path":bundle_path,"admission_state":"integrity_refused"}),
+        )
+    })?;
+    if bundle.get("schema").and_then(Value::as_str)
+        != Some("narada.carrier_generation_bundle.v1")
+        || bundle.get("bundle_id").and_then(Value::as_str) != Some(bundle_id)
+        || bundle.get("bundle_fingerprint").and_then(Value::as_str)
+            != Some(expected_fingerprint)
+    {
+        return Err(stale(
+            "The carrier bundle identity does not match the generation.",
+            json!({"bundle_path":bundle_path,"admission_state":"integrity_refused"}),
+        ));
+    }
+    let object = bundle.as_object_mut().ok_or_else(|| {
+        stale(
+            "The carrier bundle is not an object.",
+            json!({"bundle_path":bundle_path,"admission_state":"integrity_refused"}),
+        )
+    })?;
+    object.remove("bundle_id");
+    object.remove("bundle_id");
+    object.remove("bundle_fingerprint");
+    object.remove("generated_at");
+    if canonical_json_sha256(&bundle).as_deref() != Ok(expected_fingerprint) {
+        return Err(stale(
+            "The carrier bundle fingerprint does not match its contents.",
+            json!({"bundle_path":bundle_path,"admission_state":"integrity_refused"}),
+        ));
+    }
+    let carrier_id = required("carrier_id")?;
+    let member = bundle
+        .get("carriers")
+        .and_then(Value::as_array)
+        .and_then(|carriers| {
+            carriers.iter().find(|carrier| {
+                carrier.get("carrier_id").and_then(Value::as_str) == Some(carrier_id)
+            })
+        })
+        .ok_or_else(|| {
+            stale(
+                "The carrier generation is absent from its selected-carrier bundle.",
+                json!({"bundle_id":bundle_id,"carrier_id":carrier_id,"admission_state":"integrity_refused"}),
+            )
+        })?;
+    if member
+        .get("generation_sidecar_path")
+        .and_then(Value::as_str)
+        .is_none_or(|path| !same_path(path, &sidecar.to_string_lossy()))
+    {
+        return Err(stale(
+            "The bundle maps the carrier to a different generation sidecar.",
+            json!({"bundle_id":bundle_id,"carrier_id":carrier_id,"admission_state":"integrity_refused"}),
+        ));
+    }
+    let pointer_path = PathBuf::from(required("bundle_commit_pointer_path")?);
+    let pointer = read_json(&pointer_path).map_err(|error| {
+        stale(
+            "The carrier bundle commit pointer is missing or unreadable.",
+            json!({"error":error,"commit_pointer_path":pointer_path,"admission_state":"integrity_refused"}),
+        )
+    })?;
+    if pointer.get("schema").and_then(Value::as_str)
+        != Some("narada.carrier_generation_bundle_pointer.v1")
+        || pointer.get("bundle_id").and_then(Value::as_str) != Some(bundle_id)
+        || pointer.get("bundle_fingerprint").and_then(Value::as_str)
+            != Some(expected_fingerprint)
+        || pointer
+            .get("bundle_path")
+            .and_then(Value::as_str)
+            .is_none_or(|path| !same_path(path, &bundle_path.to_string_lossy()))
+    {
+        return Err(stale(
+            "The generation does not belong to the currently committed bundle.",
+            json!({"bundle_id":bundle_id,"commit_pointer_path":pointer_path,"admission_state":"integrity_refused"}),
+        ));
+    }
+    let build_set_path = PathBuf::from(required("artifact_build_set_path")?);
+    let build_set = read_json(&build_set_path).map_err(|error| {
+        stale(
+            "The sealed artifact build set is missing or unreadable.",
+            json!({"error":error,"artifact_build_set_path":build_set_path,"admission_state":"integrity_refused"}),
+        )
+    })?;
+    if build_set.get("schema").and_then(Value::as_str)
+        != Some("narada.artifact_build_set.v1")
+        || build_set.get("build_set_digest").and_then(Value::as_str)
+            != generation
+                .get("artifact_build_set_fingerprint")
+                .and_then(Value::as_str)
+    {
+        return Err(stale(
+            "The generation references a different artifact build set.",
+            json!({"artifact_build_set_path":build_set_path,"admission_state":"integrity_refused"}),
+        ));
+    }
+    Ok(())
+}
+
 fn preflight_materialization(
     options: &Options,
     sidecar: &Path,
@@ -1798,9 +1920,17 @@ fn preflight_materialization(
             json!({ "error": error }),
         )
     })?;
-    if generation.get("schema").and_then(Value::as_str)
-        != Some("narada.mcp_materialization_generation.v1")
-    {
+    if matches!(
+        generation.get("schema").and_then(Value::as_str),
+        Some(LEGACY_GENERATION_SCHEMA) | Some(AMBIGUOUS_GENERATION_SCHEMA)
+    ) {
+        return Err(refusal(
+            "materialization_generation_obsolete",
+            "The materialization generation predates committed bundle admission.",
+            json!({"remediation":"Regenerate this carrier with the current materializer; legacy generations remain readable only as untrusted recovery input."}),
+        ));
+    }
+    if generation.get("schema").and_then(Value::as_str) != Some(GENERATION_SCHEMA) {
         return Err(refusal(
             "materialization_generation_stale",
             "The materialization generation sidecar has an unsupported schema.",
@@ -1817,47 +1947,56 @@ fn preflight_materialization(
                 json!({}),
             )
         })?;
-    let fields = [
-        "schema",
-        "contract_version",
-        "carrier_id",
-        "carrier_kind",
-        "config_path",
-        "config_sha256",
-        "artifact_manifest_path",
-        "artifact_manifest_fingerprint",
-        "runtime_profile_kind",
-        "runtime_materialization_plan_path",
-        "runtime_materialization_plan_fingerprint",
-        "runtime_implementation_matrix_path",
-        "runtime_implementation_matrix_fingerprint",
-        "registrar_entrypoint",
-        "registrar_fingerprint",
-        "proxy_implementation",
-        "proxy_entrypoint",
-        "proxy_fingerprint",
-        "server_count",
-        "proxy_count",
-        "generated_at",
-    ];
-    let mut unsigned = Map::new();
-    for field in fields {
-        unsigned.insert(
-            field.to_string(),
-            generation.get(field).cloned().unwrap_or(Value::Null),
-        );
-    }
-    if sha256_bytes(&serde_json::to_vec(&Value::Object(unsigned)).unwrap_or_default()) != expected {
+    if generation_fingerprint(&generation).as_deref() != Ok(expected) {
         return Err(refusal(
             "materialization_generation_stale",
             "The materialization generation fingerprint does not match its contents.",
             generation_context(&generation),
         ));
     }
-    if generation.get("contract_version").and_then(Value::as_u64) != Some(CONTRACT_VERSION) {
+    if generation.get("contract_version").and_then(Value::as_u64) != Some(CONTRACT_VERSION.into()) {
         return Err(refusal(
             "materialization_generation_stale",
             "The materialization contract version is obsolete.",
+            generation_context(&generation),
+        ));
+    }
+    preflight_generation_bundle(&generation, sidecar)?;
+    let trusted_contract_entrypoint = options.registrar_entrypoint.as_ref().ok_or_else(|| {
+        refusal(
+            "materialization_generation_stale",
+            "The trusted materialization contract authority is absent from the carrier launch.",
+            generation_context(&generation),
+        )
+    })?;
+    let generation_contract_entrypoint = generation
+        .get("materialization_contract_entrypoint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            refusal(
+                "materialization_generation_stale",
+                "The materialization generation sidecar has no contract authority.",
+                generation_context(&generation),
+            )
+        })?;
+    if !same_path(
+        generation_contract_entrypoint,
+        &trusted_contract_entrypoint.to_string_lossy(),
+    ) {
+        return Err(refusal(
+            "materialization_generation_stale",
+            "The materialization generation references a different contract authority than the carrier launch.",
+            generation_context(&generation),
+        ));
+    }
+    if sha256_file(trusted_contract_entrypoint).as_deref()
+        != generation
+            .get("materialization_contract_fingerprint")
+            .and_then(Value::as_str)
+    {
+        return Err(refusal(
+            "materialization_generation_stale",
+            "The materialization contract authority changed after generation.",
             generation_context(&generation),
         ));
     }
@@ -1914,6 +2053,23 @@ fn preflight_materialization(
                 generation_context(&generation),
             )
         })?;
+    let current_proxy_entrypoint = std::env::current_exe().map_err(|error| {
+        refusal(
+            "materialization_generation_stale",
+            "The current runtime proxy identity cannot be resolved.",
+            json!({"generation":generation_context(&generation),"error":error.to_string()}),
+        )
+    })?;
+    if !same_path(
+        proxy_entrypoint,
+        &current_proxy_entrypoint.to_string_lossy(),
+    ) {
+        return Err(refusal(
+            "materialization_generation_stale",
+            "The materialization generation references a different runtime proxy than the carrier launch.",
+            generation_context(&generation),
+        ));
+    }
     if sha256_file(Path::new(proxy_entrypoint)).as_deref()
         != generation.get("proxy_fingerprint").and_then(Value::as_str)
     {
@@ -1987,6 +2143,8 @@ fn preflight_materialization(
                 .get("runtime_profile_kind")
                 .and_then(Value::as_str)
         || plan.get("plan_fingerprint").and_then(Value::as_str) != Some(expected_plan_fingerprint)
+        || generation.get("launch_catalog_fingerprint").and_then(Value::as_str)
+            != Some(expected_plan_fingerprint)
         || runtime_plan_fingerprint(&plan).as_deref() != Some(expected_plan_fingerprint)
     {
         return Err(refusal(
@@ -2039,49 +2197,64 @@ fn preflight_materialization(
         .get("carrier_kind")
         .and_then(Value::as_str)
         .unwrap_or("");
-    if sha256_bytes(canonical_config(kind, &config).as_bytes())
+    let selectors = generation
+        .pointer("/managed_projection/selectors")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            refusal(
+                "materialization_generation_stale",
+                "The materialization generation sidecar has no managed selector set.",
+                generation_context(&generation),
+            )
+        })?
+        .iter()
+        .map(|value| {
+            value.as_str().map(str::to_string).ok_or_else(|| {
+                refusal(
+                    "materialization_generation_stale",
+                    "The materialization generation sidecar has an invalid managed selector.",
+                    generation_context(&generation),
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let current = describe_config(kind, config.as_bytes(), &selectors).map_err(|error| {
+        refusal(
+            "materialization_managed_projection_stale",
+            "The Narada-managed configuration projection cannot be read.",
+            json!({"generation":generation_context(&generation),"error":error}),
+        )
+    })?;
+    if current.managed_projection.sha256
         != generation
-            .get("config_sha256")
+            .pointer("/managed_projection/sha256")
             .and_then(Value::as_str)
             .unwrap_or("")
     {
         return Err(refusal(
-            "materialization_generation_stale",
-            "The materialized configuration changed after generation.",
+            "materialization_managed_projection_stale",
+            "The Narada-managed configuration projection changed after generation.",
             generation_context(&generation),
         ));
     }
+    let expected_bytes = generation
+        .pointer("/config_artifact/bytes_sha256")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if current.config_artifact.bytes_sha256 != expected_bytes {
+        eprintln!(
+            "{}",
+            json!({
+                "schema":"narada.mcp_runtime_proxy.observation.v1",
+                "code":"materialization_artifact_bytes_drift",
+                "config_path":config_path,
+                "expected_bytes_sha256":expected_bytes,
+                "actual_bytes_sha256":current.config_artifact.bytes_sha256,
+                "managed_projection_unchanged":true
+            })
+        );
+    }
     Ok(())
-}
-
-fn canonical_config(kind: &str, content: &str) -> String {
-    let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
-    if kind != "codex" {
-        return normalized.trim_end_matches('\n').to_string();
-    }
-    let mut canonical = Vec::new();
-    let mut in_mcp = false;
-    let mut saw_mcp = false;
-    for line in normalized.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("[mcp_servers.") && trimmed.ends_with(']') {
-            in_mcp = true;
-            saw_mcp = true;
-            canonical.push(line);
-            continue;
-        }
-        if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            in_mcp = false;
-        }
-        if in_mcp {
-            canonical.push(line);
-        }
-    }
-    if saw_mcp {
-        canonical.join("\n").trim_end_matches('\n').to_string()
-    } else {
-        normalized.trim_end_matches('\n').to_string()
-    }
 }
 
 fn preflight_refusal(options: &Options, mut refusal: Refusal) -> Result<(), String> {
@@ -2383,6 +2556,8 @@ fn generation_context(generation: &Value) -> Value {
         "carrier_id": generation.get("carrier_id"),
         "carrier_kind": generation.get("carrier_kind"),
         "config_path": generation.get("config_path"),
+        "materialization_contract_entrypoint": generation.get("materialization_contract_entrypoint"),
+        "materialization_contract_fingerprint": generation.get("materialization_contract_fingerprint"),
         "registrar_entrypoint": generation.get("registrar_entrypoint"),
         "registrar_fingerprint": generation.get("registrar_fingerprint"),
         "proxy_implementation": generation.get("proxy_implementation"),

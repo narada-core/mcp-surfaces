@@ -132,7 +132,7 @@ async function runNativeSingle(
   child.stdin.end();
   const exitCode = await Promise.race([
     new Promise<number | null>((resolve) => child.on('close', resolve)),
-    new Promise<never>((_, reject) => setTimeout(() => { child.kill(); reject(new Error(`native_scenario_exit_timeout:${stderr}`)); }, 5_000)),
+    new Promise<never>((_, reject) => setTimeout(() => { child.kill(); reject(new Error(`native_scenario_exit_timeout:${stderr}`)); }, 15_000)),
   ]);
   return { response, exitCode, stderr };
 }

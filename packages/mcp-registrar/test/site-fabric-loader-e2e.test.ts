@@ -30,6 +30,7 @@ writeFileSync(`${siteRoot}/.ai/mcp/fixture-mailbox-mcp.json`, JSON.stringify({
 
 const loader = spawnJsonlMcpServer(process.execPath, [
   loaderPath,
+  '--standalone-ambient-attachment',
   '--allowed-site-root', siteRoot,
   '--allowed-entrypoint-prefix', fileURLToPath(new URL('../../../', import.meta.url)),
 ], {

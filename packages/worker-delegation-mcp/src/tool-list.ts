@@ -36,10 +36,10 @@ export function listTools(): WorkerToolDefinition[] {
       intent: intentSchema(),
       constraints: constraintRequestSchema(),
     }, ['intent', 'constraints']) },
-    { name: 'worker_edit', description: 'Start one edit-capable worker run shortcut using write authority. Canonical narada-agent-runtime-server runs require invocation_plan_ref and do not receive a synthetic cognition tier.', inputSchema: objectSchema({
+    { name: 'worker_edit', description: 'Start one edit-capable worker run shortcut using write authority. The agent runtime resolves a canonical plan during preflight when no invocation_plan_ref is supplied.', inputSchema: objectSchema({
       cwd: { type: 'string' },
       site_root: { type: 'string', description: 'Explicit Narada Site root for narada-agent-runtime-server workers. Defaults to nearest Site marker above cwd.' },
-      invocation_plan_ref: { type: 'string', description: 'Immutable canonical Narada invocation-plan reference. Required for narada-agent-runtime-server; provider/model/cognition overrides are rejected there.' },
+      invocation_plan_ref: { type: 'string', description: 'Optional immutable canonical Narada invocation-plan reference. When omitted, narada-agent-runtime-server resolves and admits its plan during canonical preflight.' },
       provider: { type: 'string', description: 'Legacy compatibility provider selector. Rejected for runtime narada-agent-runtime-server; that runtime uses the canonical invocation plan.' },
       instruction: { type: 'string' },
       required_mcp_tools: { type: 'array', items: { type: 'string' }, description: 'Exact MCP tool names to project for narada-agent-runtime-server workers. Other runtimes report the request as unprojectable.' },
@@ -185,7 +185,7 @@ function constraintRequestSchema(): Record<string, unknown> {
   return objectSchema({
     cwd: { type: 'string' },
     site_root: { type: 'string', description: 'Explicit Narada Site root for narada-agent-runtime-server workers. Defaults to nearest Site marker above cwd.' },
-    invocation_plan_ref: { type: 'string', description: 'Immutable canonical Narada invocation-plan reference. Required for narada-agent-runtime-server; provider/model/cognition overrides are rejected there.' },
+    invocation_plan_ref: { type: 'string', description: 'Optional immutable canonical Narada invocation-plan reference. When omitted, narada-agent-runtime-server resolves and admits its plan during canonical preflight.' },
     provider: { type: 'string', description: 'Legacy compatibility provider selector. Rejected for runtime narada-agent-runtime-server; that runtime uses the canonical invocation plan.' },
     authority: { type: 'string', enum: ['read', 'write', 'command'] },
     cognition: { type: 'string', enum: ['low', 'medium', 'high'], description: 'Legacy compatibility cognition tier; canonical offerings declare their own plan-scoped capability vocabulary.' },

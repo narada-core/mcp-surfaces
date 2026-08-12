@@ -560,8 +560,17 @@ export async function runProxy(argv = process.argv.slice(2)): Promise<void> {
       sidecarPath: options.materializationSidecarPath,
       manifestPath: options.artifactManifestPath!,
       manifestFingerprint: artifactPreflight.manifest_fingerprint,
+      materializationContractEntrypoint: options.registrarEntrypoint,
+      runtimeProxyEntrypoint: fileURLToPath(import.meta.url),
     })
     : { ok: true, generation_fingerprint: null };
+  for (const observation of materializationPreflight.observations ?? []) {
+    process.stderr.write(JSON.stringify({
+      schema: 'narada.mcp_runtime_proxy.observation.v1',
+      code: observation.code,
+      ...observation.detail,
+    }) + '\n');
+  }
   if (!materializationPreflight.ok) {
     const recovery = buildMaterializationRecovery(options, materializationPreflight);
     await writePreflightRefusal({

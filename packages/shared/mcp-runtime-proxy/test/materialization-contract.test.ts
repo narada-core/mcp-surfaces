@@ -2,16 +2,26 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { test } from 'node:test';
 import {
   MCP_RUNTIME_CONTRACT_VERSION,
   buildMaterializationGeneration,
+  describeMaterializedConfiguration,
   materializationSidecarPath,
   preflightMaterializationGeneration,
   validateMaterializedConfiguration,
   writeMaterializationGeneration,
 } from '../src/materialization-contract.js';
+
+type FingerprintVector = {
+  id: string;
+  carrier_kind: string;
+  content: string;
+  selectors: string[];
+  expected_bytes_sha256: string;
+  expected_managed_sha256: string;
+};
 
 function sha256(value: string | Buffer): string {
   return createHash('sha256').update(value).digest('hex');
@@ -39,6 +49,11 @@ function fixture() {
   const childPath = join(root, 'child.js');
   const manifestPath = join(root, 'workspace-artifact-manifest.json');
   const registrarPath = join(root, 'registrar.js');
+  const contractEntrypoint = resolve(
+    process.cwd(),
+    '../mcp-materializer-native/native/target/debug/',
+    `narada-mcp-materializer${process.platform === 'win32' ? '.exe' : ''}`,
+  );
   const matrixPath = join(root, 'runtime-implementation-matrix.json');
   const configPath = join(root, 'carrier.json');
   const sidecarPath = materializationSidecarPath(configPath);
@@ -59,7 +74,7 @@ function fixture() {
     '--',
   ];
   const structured = { mcpServers: { fixture: { command: process.execPath, args } } };
-  return { root, proxyPath, childPath, manifestPath, registrarPath, matrixPath, configPath, sidecarPath, planPath: plan.path, planFingerprint: plan.fingerprint, args, structured };
+  return { root, proxyPath, childPath, manifestPath, registrarPath, contractEntrypoint, matrixPath, configPath, sidecarPath, planPath: plan.path, planFingerprint: plan.fingerprint, args, structured };
 }
 
 test('materialized configuration validates the runtime contract and generation preflight', () => {
@@ -80,9 +95,10 @@ test('materialized configuration validates the runtime contract and generation p
     writeFileSync(f.configPath, content, 'utf8');
     const generation = buildMaterializationGeneration({
       carrierId: 'fixture-carrier',
-      carrierKind: 'codex',
+      carrierKind: 'kimi',
       configPath: f.configPath,
       content,
+      materializationContractEntrypoint: f.contractEntrypoint,
       artifactManifestPath: f.manifestPath,
       artifactManifestFingerprint: 'fixture-manifest-fingerprint',
       runtimeProfileKind: 'bun',
@@ -103,15 +119,41 @@ test('materialized configuration validates the runtime contract and generation p
         sidecarPath: f.sidecarPath,
         manifestPath: f.manifestPath,
         manifestFingerprint: 'fixture-manifest-fingerprint',
+        materializationContractEntrypoint: f.contractEntrypoint,
+        runtimeProxyEntrypoint: f.proxyPath,
       }),
       { ok: true, generation_fingerprint: generation.generation_fingerprint },
     );
+
+    writeFileSync(f.sidecarPath, JSON.stringify({ ...generation, materialization_contract_entrypoint: f.proxyPath }) + '\n', 'utf8');
+    const untrustedAuthority = preflightMaterializationGeneration({
+      sidecarPath: f.sidecarPath,
+      manifestPath: f.manifestPath,
+      manifestFingerprint: 'fixture-manifest-fingerprint',
+      materializationContractEntrypoint: f.contractEntrypoint,
+      runtimeProxyEntrypoint: f.proxyPath,
+    });
+    assert.equal(untrustedAuthority.code, 'materialization_generation_stale');
+    assert.match(untrustedAuthority.reason ?? '', /different contract authority/);
+    writeMaterializationGeneration(f.sidecarPath, generation);
+
+    const untrustedProxy = preflightMaterializationGeneration({
+      sidecarPath: f.sidecarPath,
+      manifestPath: f.manifestPath,
+      manifestFingerprint: 'fixture-manifest-fingerprint',
+      materializationContractEntrypoint: f.contractEntrypoint,
+      runtimeProxyEntrypoint: f.childPath,
+    });
+    assert.equal(untrustedProxy.code, 'materialization_generation_stale');
+    assert.match(untrustedProxy.reason ?? '', /different runtime proxy/);
 
     writeFileSync(f.planPath, JSON.stringify({ schema: 'narada.runtime_materialization_plan.v1', status: 'accepted', runtime_profile_kind: 'bun', plan_fingerprint: f.planFingerprint }) + '\n', 'utf8');
     assert.equal(preflightMaterializationGeneration({
       sidecarPath: f.sidecarPath,
       manifestPath: f.manifestPath,
       manifestFingerprint: 'fixture-manifest-fingerprint',
+      materializationContractEntrypoint: f.contractEntrypoint,
+      runtimeProxyEntrypoint: f.proxyPath,
     }).code, 'materialization_generation_stale');
     writePlan(f.root, f.configPath, f.matrixPath);
     writeFileSync(f.matrixPath, '{"schema":"fixture.matrix.changed"}\n', 'utf8');
@@ -119,15 +161,19 @@ test('materialized configuration validates the runtime contract and generation p
       sidecarPath: f.sidecarPath,
       manifestPath: f.manifestPath,
       manifestFingerprint: 'fixture-manifest-fingerprint',
+      materializationContractEntrypoint: f.contractEntrypoint,
+      runtimeProxyEntrypoint: f.proxyPath,
     }).code, 'materialization_generation_stale');
     writeFileSync(f.matrixPath, '{"schema":"fixture.matrix"}\n', 'utf8');
     writePlan(f.root, f.configPath, f.matrixPath);
 
-    writeFileSync(f.sidecarPath, JSON.stringify({ ...generation, config_sha256: 'tampered' }) + '\n', 'utf8');
+    writeFileSync(f.sidecarPath, JSON.stringify({ ...generation, managed_projection: { ...generation.managed_projection, sha256: 'tampered' } }) + '\n', 'utf8');
     assert.equal(preflightMaterializationGeneration({
       sidecarPath: f.sidecarPath,
       manifestPath: f.manifestPath,
       manifestFingerprint: 'fixture-manifest-fingerprint',
+      materializationContractEntrypoint: f.contractEntrypoint,
+      runtimeProxyEntrypoint: f.proxyPath,
     }).code, 'materialization_generation_stale');
     writeMaterializationGeneration(f.sidecarPath, generation);
 
@@ -136,7 +182,18 @@ test('materialized configuration validates the runtime contract and generation p
       sidecarPath: f.sidecarPath,
       manifestPath: f.manifestPath,
       manifestFingerprint: 'fixture-manifest-fingerprint',
-    }).code, 'materialization_generation_stale');
+      materializationContractEntrypoint: f.contractEntrypoint,
+      runtimeProxyEntrypoint: f.proxyPath,
+    }).code, 'materialization_managed_projection_stale');
+
+    writeFileSync(f.configPath, Buffer.from([0xff, 0x0a]));
+    assert.equal(preflightMaterializationGeneration({
+      sidecarPath: f.sidecarPath,
+      manifestPath: f.manifestPath,
+      manifestFingerprint: 'fixture-manifest-fingerprint',
+      materializationContractEntrypoint: f.contractEntrypoint,
+      runtimeProxyEntrypoint: f.proxyPath,
+    }).code, 'materialization_managed_projection_stale');
   } finally {
     rmSync(f.root, { recursive: true, force: true });
   }
@@ -227,7 +284,31 @@ test('materialized configuration refuses missing or obsolete launch invariants',
       sidecarPath: join(f.root, 'missing-generation.json'),
       manifestPath: f.manifestPath,
       manifestFingerprint: null,
+      materializationContractEntrypoint: f.contractEntrypoint,
+      runtimeProxyEntrypoint: f.proxyPath,
     }).code, 'materialization_generation_missing');
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('TypeScript compatibility wrapper consumes the shared Rust fingerprint vectors', () => {
+  const f = fixture();
+  try {
+    const corpus = JSON.parse(readFileSync(resolve(
+      process.cwd(),
+      '../mcp-materialization-contract-native/contracts/fingerprint-vectors.json',
+    ), 'utf8')) as { vectors: FingerprintVector[] };
+    for (const vector of corpus.vectors) {
+      const description = describeMaterializedConfiguration({
+        entrypoint: f.contractEntrypoint,
+        carrierKind: vector.carrier_kind,
+        content: vector.content,
+        selectors: vector.selectors,
+      });
+      assert.equal(description.config_artifact.bytes_sha256, vector.expected_bytes_sha256, `${vector.id} bytes`);
+      assert.equal(description.managed_projection.sha256, vector.expected_managed_sha256, `${vector.id} managed`);
+    }
   } finally {
     rmSync(f.root, { recursive: true, force: true });
   }
@@ -263,6 +344,8 @@ test('Codex project trust updates do not invalidate the managed MCP projection',
       carrierKind: 'codex',
       configPath,
       content,
+      managedSelectors: ['/mcp_servers'],
+      materializationContractEntrypoint: f.contractEntrypoint,
       artifactManifestPath: f.manifestPath,
       artifactManifestFingerprint: 'fixture-manifest-fingerprint',
       runtimeProfileKind: 'bun',
@@ -290,31 +373,35 @@ test('Codex project trust updates do not invalidate the managed MCP projection',
       '',
     ].join('\n');
     writeFileSync(configPath, codexUserSettings, 'utf8');
-    assert.deepEqual(
-      preflightMaterializationGeneration({
-        sidecarPath,
-        manifestPath: f.manifestPath,
-        manifestFingerprint: 'fixture-manifest-fingerprint',
-      }),
-      { ok: true, generation_fingerprint: generation.generation_fingerprint },
-    );
+    const userSettingsPreflight = preflightMaterializationGeneration({
+      sidecarPath,
+      manifestPath: f.manifestPath,
+      manifestFingerprint: 'fixture-manifest-fingerprint',
+      materializationContractEntrypoint: f.contractEntrypoint,
+      runtimeProxyEntrypoint: f.proxyPath,
+    });
+    assert.equal(userSettingsPreflight.ok, true);
+    assert.equal(userSettingsPreflight.observations?.[0]?.code, 'materialization_artifact_bytes_drift');
 
     writeFileSync(configPath, `${codexUserSettings}[projects.'C:\\Users\\Andrey']\ntrust_level = "trusted"\n\n`, 'utf8');
-    assert.deepEqual(
-      preflightMaterializationGeneration({
-        sidecarPath,
-        manifestPath: f.manifestPath,
-        manifestFingerprint: 'fixture-manifest-fingerprint',
-      }),
-      { ok: true, generation_fingerprint: generation.generation_fingerprint },
-    );
+    const projectTrustPreflight = preflightMaterializationGeneration({
+      sidecarPath,
+      manifestPath: f.manifestPath,
+      manifestFingerprint: 'fixture-manifest-fingerprint',
+      materializationContractEntrypoint: f.contractEntrypoint,
+      runtimeProxyEntrypoint: f.proxyPath,
+    });
+    assert.equal(projectTrustPreflight.ok, true);
+    assert.equal(projectTrustPreflight.observations?.[0]?.code, 'materialization_artifact_bytes_drift');
 
     writeFileSync(configPath, codexUserSettings.replace(`command = ${JSON.stringify(process.execPath)}`, 'command = "pnpm"'), 'utf8');
     assert.equal(preflightMaterializationGeneration({
       sidecarPath,
       manifestPath: f.manifestPath,
       manifestFingerprint: 'fixture-manifest-fingerprint',
-    }).code, 'materialization_generation_stale');
+      materializationContractEntrypoint: f.contractEntrypoint,
+      runtimeProxyEntrypoint: f.proxyPath,
+    }).code, 'materialization_managed_projection_stale');
   } finally {
     rmSync(f.root, { recursive: true, force: true });
   }

@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 flate2 = "1"
+narada-mcp-materialization-contract = { path = "../../shared/mcp-materialization-contract-native/native" }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"

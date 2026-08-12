@@ -1,0 +1,51 @@
+{
+  "schema": "narada.mcp.binding_identity_vectors.v1",
+  "vectors": [
+    {
+      "name": "windows-paths-env-order-and-explicit-empty-fields",
+      "unsigned": {
+        "binding_id": "binding/windows-local-filesystem",
+        "surface_id": "local-filesystem",
+        "projection_id": "operator",
+        "authority_locus": {
+          "site_root": "C:\\Users\\andrey\\Sites\\sonar",
+          "kind": "local_site"
+        },
+        "injection_scope": "local_site",
+        "operations": [
+          "attach",
+          "discover",
+          "restart"
+        ],
+      "launch_identity": {
+        "schema": "narada.mcp.binding_identity.v1",
+          "binding_id": "binding/windows-local-filesystem",
+          "surface_id": "local-filesystem",
+          "projection_id": "operator",
+          "injection_scope": "local_site",
+          "authority_locus": {
+            "site_root": "C:\\Users\\andrey\\Sites\\sonar",
+            "kind": "local_site"
+          },
+          "transport": "stdio",
+          "command": "C:\\Program Files\\Narada\\narada-mcp-runtime.exe",
+          "args": [
+            "--surface",
+            "local-filesystem",
+            "--label=two words"
+          ],
+          "env": {
+            "ZETA": "last",
+            "ALPHA": "first",
+            "PATH_HINT": "C:\\Users\\andrey\\src"
+          },
+          "env_vars": [],
+          "target_site_root": "C:\\Users\\andrey\\Sites\\sonar",
+          "surface_projection": null
+        }
+      },
+      "canonical_json": "{\"authority_locus\":{\"kind\":\"local_site\",\"site_root\":\"C:\\\\Users\\\\andrey\\\\Sites\\\\sonar\"},\"binding_id\":\"binding/windows-local-filesystem\",\"injection_scope\":\"local_site\",\"launch_identity\":{\"args\":[\"--surface\",\"local-filesystem\",\"--label=two words\"],\"authority_locus\":{\"kind\":\"local_site\",\"site_root\":\"C:\\\\Users\\\\andrey\\\\Sites\\\\sonar\"},\"binding_id\":\"binding/windows-local-filesystem\",\"command\":\"C:\\\\Program Files\\\\Narada\\\\narada-mcp-runtime.exe\",\"env\":{\"ALPHA\":\"first\",\"PATH_HINT\":\"C:\\\\Users\\\\andrey\\\\src\",\"ZETA\":\"last\"},\"env_vars\":[],\"injection_scope\":\"local_site\",\"projection_id\":\"operator\",\"schema\":\"narada.mcp.binding_identity.v1\",\"surface_id\":\"local-filesystem\",\"surface_projection\":null,\"target_site_root\":\"C:\\\\Users\\\\andrey\\\\Sites\\\\sonar\",\"transport\":\"stdio\"},\"operations\":[\"attach\",\"discover\",\"restart\"],\"projection_id\":\"operator\",\"surface_id\":\"local-filesystem\"}",
+      "sha256": "ece347afa390b7c4e4e1c8cc6f7bb52bd92e4a2a5f7cb90029cd956e3861eb1a"
+    }
+  ]
+}

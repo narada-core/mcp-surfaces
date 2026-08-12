@@ -113,8 +113,8 @@ test('one immutable manifest deterministically compiles all carrier projections'
       },
     },
     approvals: {
-      allow: ['compiler-fixture/compiler_fixture_guidance'],
-      prompt: ['compiler-fixture/compiler_fixture_update'],
+      allow: ['compiler-fixture-binding/compiler_fixture_guidance'],
+      prompt: ['compiler-fixture-binding/compiler_fixture_update'],
     },
   });
   assert.deepEqual(first.artifacts.opencode.document, {
@@ -127,12 +127,14 @@ test('one immutable manifest deterministically compiles all carrier projections'
     },
     approvals: [
       {
+        binding_id: 'compiler-fixture-binding',
         server_name: 'compiler-fixture',
         tool_name: 'compiler_fixture_guidance',
         decision: 'allow',
         reasons: [],
       },
       {
+        binding_id: 'compiler-fixture-binding',
         server_name: 'compiler-fixture',
         tool_name: 'compiler_fixture_update',
         decision: 'prompt',
@@ -140,6 +142,19 @@ test('one immutable manifest deterministically compiles all carrier projections'
       },
     ],
   });
+});
+
+test('private materialization alias changes do not alter the carrier projection', () => {
+  const { surface, binding } = fixture();
+  const compile = (server_name: string) => compileAllCarrierArtifacts(compileFabricManifest({
+    manifest_id: `alias-${server_name}`,
+    site_id: 'test-site',
+    generated_at: '2026-07-19T00:00:00.000Z',
+    descriptors: [surface.descriptor],
+    bindings: [{ ...binding, server_name }],
+  })).artifacts.kimi.document;
+
+  assert.deepEqual(compile('first-alias'), compile('second-alias'));
 });
 
 test('reconciliation deterministically assigns one bounded actuator and guards apply', () => {
@@ -158,7 +173,7 @@ test('reconciliation deterministically assigns one bounded actuator and guards a
     site_id: 'test-site',
     manifest_digest: manifestDigest,
     servers: [{
-      server_name: binding.server_name,
+      server_name: binding.surface_id,
       surface_id: surface.descriptor.surface_id,
       projection_id: binding.projection_id,
       transport: surface.descriptor.projections[0]!.transport,
@@ -173,7 +188,7 @@ test('reconciliation deterministically assigns one bounded actuator and guards a
     runtime_state_root: 'C:/runtime',
     manifest_digest: manifestDigest,
     servers: [{
-      server_name: binding.server_name,
+      server_name: binding.surface_id,
       surface_id: surface.descriptor.surface_id,
       projection_id: binding.projection_id,
       logical_connection_id: 'connection-test',
@@ -263,7 +278,7 @@ test('reconciliation deterministically assigns one bounded actuator and guards a
   });
   assert.deepEqual(
     [rematerialize.actions[0]!.action, rematerialize.actions[0]!.actuator],
-    ['rematerialize_all_carrier_configs', 'mcp-registrar'],
+    ['rematerialize_all_carrier_configs', 'narada-mcp-materializer'],
   );
 
   const unsupported = reconcileFabricState({

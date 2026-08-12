@@ -10,6 +10,8 @@ import {
   RuntimeObservationV2Schema,
   liveToolsContractDigest,
   parseSurfaceDescriptorV2,
+  parseMcpBindingAdmissionEnvelopeV1,
+  mcpBindingAdmissionEntryDigestV1,
   surfaceExecutionDeclaration,
   stableDigest,
   LifecycleRequirementSchema,
@@ -17,6 +19,8 @@ import {
   type McpToolDefinition,
   type SurfaceDescriptorV2,
   type SurfaceExecutionDeclaration,
+  type McpBindingAdmissionEnvelopeV1,
+  type McpBindingAdmissionEntryV1,
 } from '@narada-core/mcp-fabric-contracts';
 import { createRuntimeObservationSink, type RuntimeObservationSink } from '@narada-core/mcp-runtime-observation';
 import { buildBoundedToolResult, outputShow, outputShowAsync, payloadCreate, prunePayloadWorkspaces } from '@narada-core/mcp-transport';
@@ -531,6 +535,10 @@ type ChildConnection = {
   leaseExpiresAt: string;
   siteRoot: string;
   surfaceId: string;
+  bindingId: string | null;
+  admissionEnvelopeId: string | null;
+  admittedBindingDigest: string | null;
+  authorityEpoch: number | null;
   runtimeKind: McpRuntimeKind | null;
   runtimeRequirements: McpRuntimeKind[];
   entrypoint: string;
@@ -567,7 +575,32 @@ type LoaderState = {
   policy: LoaderPolicy;
   connections: Map<string, ChildConnection>;
   surfaceHandles: Map<string, SurfaceHandle>;
+  bindingAdmission: McpBindingAdmissionEnvelopeV1 | null;
+  standaloneAmbientAttachment: boolean;
 };
+
+function loadBindingAdmission(options: JsonRecord): McpBindingAdmissionEnvelopeV1 | null {
+  const required = process.env.NARADA_MCP_BINDING_ADMISSION_REQUIRED === '1';
+  const path = String(options.bindingAdmissionPath ?? process.env.NARADA_MCP_BINDING_ADMISSION_PATH ?? '').trim();
+  if (!path) {
+    if (required) throw diagnosticError('mcp_binding_admission_required', 'mcp_binding_admission_required');
+    return null;
+  }
+  const envelope = parseMcpBindingAdmissionEnvelopeV1(JSON.parse(readFileSync(path, 'utf8')));
+  const expectedDigest = String(options.bindingAdmissionDigest ?? process.env.NARADA_MCP_BINDING_ADMISSION_DIGEST ?? '').trim();
+  if (expectedDigest && expectedDigest !== envelope.envelope_digest) {
+    throw diagnosticError('mcp_binding_admission_digest_mismatch', 'mcp_binding_admission_digest_mismatch');
+  }
+  const expectedSession = String(process.env.NARADA_NARS_SESSION_ID ?? process.env.NARADA_RUNTIME_SESSION_ID ?? process.env.NARADA_CARRIER_SESSION_ID ?? '').trim();
+  const expectedPrincipal = String(process.env.NARADA_SESSION_AUTHORITY_PRINCIPAL_KEY ?? '').trim();
+  const expectedEpoch = Number(process.env.NARADA_SESSION_AUTHORITY_EPOCH);
+  if (expectedSession && envelope.carrier_session_id !== expectedSession) throw diagnosticError('mcp_binding_admission_session_mismatch', 'mcp_binding_admission_session_mismatch');
+  if (expectedPrincipal && envelope.principal_key !== expectedPrincipal) throw diagnosticError('mcp_binding_admission_principal_mismatch', 'mcp_binding_admission_principal_mismatch');
+  if (Number.isInteger(expectedEpoch) && envelope.authority_epoch !== expectedEpoch) throw diagnosticError('mcp_binding_admission_epoch_mismatch', 'mcp_binding_admission_epoch_mismatch');
+  if (Date.parse(envelope.issued_at) > Date.now()) throw diagnosticError('mcp_binding_admission_not_yet_issued', 'mcp_binding_admission_not_yet_issued');
+  if (envelope.valid_until !== null && Date.parse(envelope.valid_until) <= Date.now()) throw diagnosticError('mcp_binding_admission_expired', 'mcp_binding_admission_expired');
+  return envelope;
+}
 
 export function createServerState(options: JsonRecord = {}): LoaderState {
   const rawAllowedSiteRoots = normalizeStringArray(options.allowedSiteRoots) ?? defaultAllowedSiteRoots();
@@ -575,7 +608,11 @@ export function createServerState(options: JsonRecord = {}): LoaderState {
   const rawAllowedSurfaces = normalizeStringArray(options.allowedSurfaceIds);
   const allowedSurfaceIds: string[] | 'site_fabric' = rawAllowedSurfaces && rawAllowedSurfaces.length > 0 ? rawAllowedSurfaces : 'site_fabric';
   const policy: LoaderPolicy = {
-    allowedSiteRoots: rawAllowedSiteRoots.map((p) => normalizePath(p)),
+    allowedSiteRoots: [...new Map(rawAllowedSiteRoots.map((p) => {
+      const normalized = normalizePath(p);
+      const key = process.platform === 'win32' ? normalized.toLocaleLowerCase('en-US') : normalized;
+      return [key, normalized] as const;
+    })).values()],
     allowedEntrypointPrefixes: [...new Set(rawAllowedPrefixes.map((p) => normalizePolicyPrefix(p)))].sort((a, b) => b.length - a.length),
     allowedSurfaceIds,
     allowedEnvVars: normalizeStringArray(options.allowedEnvVars) ?? DEFAULT_ALLOWED_ENV_VARS,
@@ -586,7 +623,13 @@ export function createServerState(options: JsonRecord = {}): LoaderState {
     toolCallTimeoutMs: integer(options.toolCallTimeoutMs, DEFAULT_TOOL_CALL_TIMEOUT_MS, 1000, 900000),
     toolCallGraceMs: integer(options.toolCallGraceMs, DEFAULT_TOOL_TIMEOUT_GRACE_MS, 0, 60000),
   };
-  return { policy, connections: new Map(), surfaceHandles: new Map() };
+  return {
+    policy,
+    connections: new Map(),
+    surfaceHandles: new Map(),
+    bindingAdmission: loadBindingAdmission(options),
+    standaloneAmbientAttachment: options.standaloneAmbientAttachment === true,
+  };
 }
 
 export async function handleRequest(request: JsonRecord, state: LoaderState) {
@@ -668,18 +711,20 @@ export function listTools() {
     }, ['site_root'], { readOnly: true }),
     tool('mcp_loader_attach_surface', 'Spawn and initialize a stdio MCP surface, return a connection id, and report loader-managed restartability.', {
       site_root: { type: 'string', description: 'Site root directory.' },
-      surface_id: { type: 'string', description: 'Surface identifier from the site fabric or shared surface registry.' },
+      binding_id: { type: 'string', description: 'Exact binding identity from the admitted session envelope.' },
+      surface_id: { type: 'string', description: 'Optional consistency assertion for the admitted binding.' },
       runtime_kind: { type: 'string', description: 'Explicit runtime context required when the selected surface projection declares runtime_requirements.' },
       entrypoint: { type: 'string', description: 'Optional explicit entrypoint path; must be allowed by policy if provided.' },
       args: { type: 'array', items: { type: 'string' }, description: 'Optional additional args appended after resolved args.' },
-    }, ['site_root', 'surface_id'], { readOnly: false }),
+    }, ['site_root', 'binding_id'], { readOnly: false }),
     tool('mcp_loader_open_surface', 'Open a surface and return a stable logical handle for calls across loader-managed child generations. The handle is scoped to this loader process and does not survive loader restart.', {
       site_root: { type: 'string', description: 'Site root directory.' },
-      surface_id: { type: 'string', description: 'Surface identifier from the site fabric or shared surface registry.' },
+      binding_id: { type: 'string', description: 'Exact binding identity from the admitted session envelope.' },
+      surface_id: { type: 'string', description: 'Optional consistency assertion for the admitted binding.' },
       runtime_kind: { type: 'string', description: 'Explicit runtime context required when the selected surface projection declares runtime_requirements.' },
       entrypoint: { type: 'string', description: 'Optional explicit entrypoint path; must be allowed by policy if provided.' },
       args: { type: 'array', items: { type: 'string' }, description: 'Optional additional args appended after resolved args.' },
-    }, ['site_root', 'surface_id'], { readOnly: false }),
+    }, ['site_root', 'binding_id'], { readOnly: false }),
     tool('mcp_loader_surface_handle_inventory', 'List stable logical surface handles and the current child generation, without spawning or replacing a surface.', {}, [], { readOnly: true }),
     tool('mcp_loader_list_tools', 'List tools exposed by an attached MCP surface.', {
       connection_id: { type: 'string', description: 'Connection id returned by mcp_loader_attach_surface.' },
@@ -772,7 +817,18 @@ async function callTool(params: JsonRecord, state: LoaderState): Promise<JsonRec
 }
 
 function policyInspect(state: LoaderState): JsonRecord {
-  return { schema: 'narada.mcp_loader.policy.v1', policy: state.policy };
+  return {
+    schema: 'narada.mcp_loader.policy.v1',
+    policy: state.policy,
+    binding_admission: state.bindingAdmission ? {
+      status: 'admitted',
+      envelope_id: state.bindingAdmission.envelope_id,
+      envelope_digest: state.bindingAdmission.envelope_digest,
+      binding_count: state.bindingAdmission.bindings.length,
+      authority_epoch: state.bindingAdmission.authority_epoch,
+      carrier_session_id: state.bindingAdmission.carrier_session_id,
+    } : { status: state.standaloneAmbientAttachment ? 'standalone_ambient' : 'required_missing' },
+  };
 }
 
 function connectionInventory(state: LoaderState): JsonRecord {
@@ -952,12 +1008,17 @@ function mcpLoaderTopologyDiagnostics(state: LoaderState): JsonRecord {
 function listSiteSurfaces(args: JsonRecord, state: LoaderState): JsonRecord {
   const siteRoot = normalizePath(requiredString(args.site_root, 'missing_site_root'));
   ensureSiteRootAllowed(siteRoot, state.policy);
+  assertBindingAdmissionAvailable(state);
   const fabric = readSiteFabric(siteRoot);
   const servers = asRecord(fabric.mcpServers);
   const surfaces: JsonRecord[] = [];
   for (const [surfaceId, server] of Object.entries(servers)) {
     const rec = asRecord(server);
+    const bindingId = typeof rec.binding_id === 'string' ? rec.binding_id : '';
+    const admission = state.bindingAdmission?.bindings.find((binding) => binding.binding_id === bindingId);
+    if (state.bindingAdmission && (!admission || !admission.operations.includes('discover'))) continue;
     surfaces.push({
+      binding_id: bindingId || null,
       surface_id: typeof rec.surface_id === 'string' ? rec.surface_id : surfaceId,
       server_name: surfaceId,
       command: rec.command,
@@ -968,6 +1029,43 @@ function listSiteSurfaces(args: JsonRecord, state: LoaderState): JsonRecord {
     });
   }
   return { schema: 'narada.mcp_loader.site_surfaces.v1', site_root: siteRoot, runtime_freshness: loaderRuntimeFreshness(), surfaces };
+}
+
+function assertBindingAdmissionAvailable(state: LoaderState): void {
+  if (!state.bindingAdmission && !state.standaloneAmbientAttachment) {
+    throw diagnosticError('mcp_binding_admission_required', 'mcp_binding_admission_required', {
+      child_spawned: false,
+      remediation: 'Launch this loader through an admitted Narada carrier session or use --standalone-ambient-attachment only for explicit development fixtures.',
+    });
+  }
+}
+
+function currentBindingDigest(entry: McpBindingAdmissionEntryV1): string {
+  return mcpBindingAdmissionEntryDigestV1(entry);
+}
+
+function admitBindingForOperation(
+  state: LoaderState,
+  siteRoot: string,
+  bindingId: string,
+  operation: 'attach' | 'restart',
+): { entry: McpBindingAdmissionEntryV1; server: JsonRecord } | null {
+  assertBindingAdmissionAvailable(state);
+  if (!state.bindingAdmission) return null;
+  const entry = state.bindingAdmission.bindings.find((candidate) => candidate.binding_id === bindingId);
+  if (!entry || !entry.operations.includes(operation)) {
+    throw diagnosticError('mcp_binding_not_admitted', `mcp_binding_not_admitted:${bindingId}:${operation}`, { child_spawned: false });
+  }
+  const server = asRecord(entry.binding_identity);
+  const digest = currentBindingDigest(entry);
+  if (digest !== entry.binding_digest) {
+    throw diagnosticError('mcp_binding_digest_mismatch', `mcp_binding_digest_mismatch:${bindingId}`, {
+      child_spawned: false,
+      expected_binding_digest: entry.binding_digest,
+      actual_binding_digest: digest,
+    });
+  }
+  return { entry, server };
 }
 
 function siteFabricDiagnostics(args: JsonRecord, state: LoaderState): JsonRecord {
@@ -1042,7 +1140,14 @@ function siteFabricDiagnostics(args: JsonRecord, state: LoaderState): JsonRecord
 async function attachSurface(args: JsonRecord, state: LoaderState): Promise<JsonRecord> {
   const siteRoot = normalizePath(requiredString(args.site_root, 'missing_site_root'));
   assertLoaderRuntimeCurrentForSpawn('mcp_loader_attach_surface');
-  const surfaceId = requiredString(args.surface_id, 'missing_surface_id');
+  const bindingId = state.bindingAdmission
+    ? requiredString(args.binding_id, 'missing_binding_id')
+    : optionalString(args.binding_id) ?? null;
+  const admitted = bindingId ? admitBindingForOperation(state, siteRoot, bindingId, 'attach') : (assertBindingAdmissionAvailable(state), null);
+  const surfaceId = admitted?.entry.surface_id ?? requiredString(args.surface_id, 'missing_surface_id');
+  if (admitted && optionalString(args.surface_id) && optionalString(args.surface_id) !== surfaceId) {
+    throw diagnosticError('mcp_binding_surface_assertion_mismatch', `mcp_binding_surface_assertion_mismatch:${bindingId}`);
+  }
   const runtimeKind = optionalRuntimeKind(args.runtime_kind);
   ensureSiteRootAllowed(siteRoot, state.policy);
   ensureSurfaceAllowed(surfaceId, siteRoot, state.policy);
@@ -1075,6 +1180,9 @@ async function attachSurface(args: JsonRecord, state: LoaderState): Promise<Json
   }
 
   const explicitEntrypoint = optionalString(args.entrypoint);
+  if (admitted && (explicitEntrypoint || stringArray(args.args)?.length)) {
+    throw diagnosticError('mcp_binding_invocation_override_not_allowed', `mcp_binding_invocation_override_not_allowed:${bindingId}`, { child_spawned: false });
+  }
   const extraArgs = stringArray(args.args);
   if (!explicitEntrypoint && extraArgs && extraArgs.length > 0) {
     throw diagnosticError(
@@ -1086,7 +1194,12 @@ async function attachSurface(args: JsonRecord, state: LoaderState): Promise<Json
       },
     );
   }
-  const launch = await resolveSurfaceEntrypoint(siteRoot, surfaceId, explicitEntrypoint, extraArgs);
+  const launch = admitted
+    ? resolveFabricLaunch(
+        requiredString(admitted.entry.binding_identity.command, 'mcp_binding_identity_command_required'),
+        stringArray(admitted.entry.binding_identity.args) ?? [],
+      )
+    : await resolveSurfaceEntrypoint(siteRoot, surfaceId, explicitEntrypoint, extraArgs);
   const { entrypoint, resolvedArgs } = launch;
   if (explicitEntrypoint) ensureEntrypointAllowed(siteRoot, entrypoint, state.policy);
   assertSurfaceLaunchMetadata(launch.childInvocationKind, entrypoint, launch.runtimeCommand);
@@ -1108,6 +1221,7 @@ async function attachSurface(args: JsonRecord, state: LoaderState): Promise<Json
     requestedEntrypoint: explicitEntrypoint,
     extraArgs: extraArgs ?? [],
     metadata: runtimeMetadata,
+    bindingAdmission: admitted?.entry ?? null,
   });
   return attachedResponse(connection);
 }
@@ -1139,6 +1253,10 @@ async function openSurfaceHandle(args: JsonRecord, state: LoaderState): Promise<
     ownership: connectionOwnershipFields(connection),
     generation_id: connection.generationId,
     site_root: connection.siteRoot,
+    binding_id: connection.bindingId,
+    admission_envelope_id: connection.admissionEnvelopeId,
+    binding_digest: connection.admittedBindingDigest,
+    authority_epoch: connection.authorityEpoch,
     surface_id: connection.surfaceId,
     runtime_kind: connection.runtimeKind,
     runtime_requirements: connection.runtimeRequirements,
@@ -1195,8 +1313,9 @@ async function openConnection(input: {
   extraArgs: string[];
   logicalConnectionId?: string;
   metadata: RuntimeSurfaceMetadata;
+  bindingAdmission?: McpBindingAdmissionEntryV1 | null;
 }): Promise<ChildConnection> {
-  const { state, siteRoot, surfaceId, runtimeKind, runtimeRequirements, runtimeCommand, entrypoint, resolvedArgs, childInvocationKind, requestedEntrypoint, extraArgs, logicalConnectionId, metadata } = input;
+  const { state, siteRoot, surfaceId, runtimeKind, runtimeRequirements, runtimeCommand, entrypoint, resolvedArgs, childInvocationKind, requestedEntrypoint, extraArgs, logicalConnectionId, metadata, bindingAdmission = null } = input;
   const connectionId = randomUUID();
   assertLoaderRuntimeCurrentForSpawn('mcp_loader_child_spawn');
   const stableLogicalConnectionId = logicalConnectionId ?? connectionId;
@@ -1230,6 +1349,10 @@ async function openConnection(input: {
     leaseExpiresAt: new Date(Date.parse(attachedAt) + DEFAULT_RUNTIME_LEASE_MS).toISOString(),
     siteRoot,
     surfaceId,
+    bindingId: bindingAdmission?.binding_id ?? null,
+    admissionEnvelopeId: state.bindingAdmission?.envelope_id ?? null,
+    admittedBindingDigest: bindingAdmission?.binding_digest ?? null,
+    authorityEpoch: state.bindingAdmission?.authority_epoch ?? null,
     runtimeKind,
     runtimeRequirements,
     runtimeCommand,
@@ -1354,6 +1477,8 @@ async function toolDiscoveryManifest(args: JsonRecord, state: LoaderState): Prom
 
 async function callAttachedTool(args: JsonRecord, state: LoaderState): Promise<JsonRecord> {
   const connection = getConnection(args, state);
+  if (connection.bindingId) admitBindingForOperation(state, connection.siteRoot, connection.bindingId, 'attach');
+  else assertBindingAdmissionAvailable(state);
   const toolName = requiredString(args.tool_name, 'missing_tool_name');
   const toolArgs = asRecord(args.arguments);
   enforceRequestSize(toolArgs, state.policy.maxRequestBytes);
@@ -1523,6 +1648,9 @@ async function detachConnection(args: JsonRecord, state: LoaderState): Promise<J
 
 async function restartConnection(args: JsonRecord, state: LoaderState): Promise<JsonRecord> {
   const connection = getConnection(args, state);
+  const admitted = connection.bindingId
+    ? admitBindingForOperation(state, connection.siteRoot, connection.bindingId, 'restart')
+    : (assertBindingAdmissionAvailable(state), null);
   assertLoaderRuntimeCurrentForSpawn('mcp_loader_surface_restart');
   if (connection.lifecycle.mode !== 'replayable') {
     throw diagnosticError(
@@ -1563,6 +1691,7 @@ async function restartConnection(args: JsonRecord, state: LoaderState): Promise<
       descriptorDigest: connection.descriptorDigest,
       declaredToolContractDigest: connection.declaredToolContractDigest,
     },
+    bindingAdmission: admitted?.entry ?? null,
   });
   return {
     schema: 'narada.mcp_loader.surface_restarted.v1',
@@ -1943,7 +2072,9 @@ function buildChildEnv(siteRoot: string, policy: LoaderPolicy, ownership: { conn
 function ensureSiteRootAllowed(siteRoot: string, policy: LoaderPolicy) {
   const realSiteRoot = normalizePath(siteRoot);
   for (const allowed of policy.allowedSiteRoots) {
-    if (realSiteRoot === allowed || realSiteRoot.startsWith(allowed + '/')) return;
+    const candidate = process.platform === 'win32' ? realSiteRoot.toLocaleLowerCase('en-US') : realSiteRoot;
+    const boundary = process.platform === 'win32' ? allowed.toLocaleLowerCase('en-US') : allowed;
+    if (candidate === boundary || candidate.startsWith(boundary + '/')) return;
   }
   throw diagnosticError('site_root_not_allowed', `site_root_not_allowed:${siteRoot}`);
 }
@@ -2573,6 +2704,9 @@ export function parseArgs(argv: string[]) {
     else if (arg === '--attach-timeout-ms') options.attachTimeoutMs = argv[++i];
     else if (arg === '--tool-call-timeout-ms') options.toolCallTimeoutMs = argv[++i];
     else if (arg === '--tool-timeout-grace-ms') options.toolCallGraceMs = argv[++i];
+    else if (arg === '--binding-admission-path') options.bindingAdmissionPath = argv[++i];
+    else if (arg === '--binding-admission-digest') options.bindingAdmissionDigest = argv[++i];
+    else if (arg === '--standalone-ambient-attachment') options.standaloneAmbientAttachment = true;
   }
   return options;
 }

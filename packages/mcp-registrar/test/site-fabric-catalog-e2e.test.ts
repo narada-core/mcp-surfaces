@@ -96,6 +96,7 @@ try {
 
   loader = spawnJsonlMcpServer(process.execPath, [
     loaderPath,
+    '--standalone-ambient-attachment',
     '--allowed-site-root', siteRoot,
     '--allowed-entrypoint-prefix', fileURLToPath(new URL('../../../', import.meta.url)),
     '--attach-timeout-ms', '120000',

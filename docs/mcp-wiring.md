@@ -52,7 +52,7 @@ generation or workspace-preflight evidence.
 
 Progressive carriers do not need to start every surface process. Use
 `mcp_loader_list_site_surfaces` to discover admissible surfaces, then
-`mcp_loader_open_surface` with the exact `surface_id` and `site_root`.
+`mcp_loader_open_surface` with the exact admitted `binding_id` and `site_root`.
 Use `mcp_loader_list_tools` or `mcp_loader_tool_discovery_manifest` for the
 attached interface schemas, and invoke the selected surface through the loader
 proxy. This does not promote the child tools into native top-level carrier
@@ -62,6 +62,19 @@ required.
 Progressive bindings reject `surfaces: "all"`, require the four bootstrap
 surfaces above, and reject bulk carrier binding. These guards prevent a
 registrar operation from silently rebuilding the full startup inventory.
+
+The Site fabric declares possible bindings; carrier-session authority admits an exact, digest-bound subset before launch. The loader may activate only that subset. A class selector may help the authority compile the set, but adding a later class member does not expand an existing session.
+
+### User-Site carrier admission across Sites
+
+A User-Site-bound carrier may admit more than one registered Site. Materialization compiles that finite Site set from the User Site's carrier contract after the User Site has resolved which registered Site roots fall within its authorized roots. For every Site marked `admit_local_bindings`, one transaction must project both:
+
+- the Site's exact, digest-bound binding identities into the carrier admission envelope; and
+- the canonical Site root into the loader's `--allowed-site-root` arguments.
+
+These are two halves of one admission decision. A binding without its Site root is unusable; a Site root without exact admitted bindings grants no activation authority. The materializer must test and publish them together.
+
+Cross-Site admission does not merge authority. Activating a Cintamani binding from a User-Site-bound carrier retains Cintamani's `local_site` authority locus, configuration, and permissions. The User Site authorizes the carrier to discover and activate that exact binding; it does not convert the binding into User-Site authority. Sites added after materialization require a new materialization and carrier restart.
 
 ### Codex
 
@@ -78,7 +91,7 @@ enabled = false
 [mcp_servers.narada-andrey-user-local-filesystem]
 command = "<registrar-selected runtime command>"
 args = ["<registrar-selected runtime arguments>"]
-approval_mode = "approve"
+default_tools_approval_mode = "approve"
 ```
 
 The command and arguments above are schematic. The registrar-generated Codex

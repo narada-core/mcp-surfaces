@@ -3,7 +3,8 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { assertLoaderRuntimeFreshnessCurrent, assertSurfaceLaunchMetadata, classifyLoaderRuntimeFreshness, createServerState } from '../src/main.js';
+import { assertLoaderRuntimeFreshnessCurrent, assertSurfaceLaunchMetadata, classifyLoaderRuntimeFreshness, createServerState, handleRequest } from '../src/main.js';
+import { bindingAdmissionEntryDigest, bindingAdmissionEnvelopeDigest } from '@narada-core/mcp-fabric-contracts';
 import { runMcpProtocolSmoke, spawnJsonlMcpServer } from '@narada-core/mcp-e2e-harness';
 import { resolveNativeArtifact, requireNativeArtifact } from '@narada-core/mcp-runtime-proxy/native-artifact';
 
@@ -13,10 +14,57 @@ const nativeLoader = process.env.MCP_LOADER_NATIVE === '1';
 const nativeExecutable = nativeLoader ? requireNativeArtifact(resolve(dirname(serverPath), '..', '..'), process.platform === 'win32' ? 'narada-mcp-loader.exe' : 'narada-mcp-loader') : '';
 const loaderCommand = nativeLoader ? nativeExecutable : process.execPath;
 const loaderArgs = nativeLoader ? [] : [serverPath];
-const server = spawnJsonlMcpServer(loaderCommand, [...loaderArgs, '--allowed-site-root', root], { label: nativeLoader ? 'mcp-loader-mcp native protocol smoke' : 'mcp-loader-mcp protocol smoke' });
+const server = spawnJsonlMcpServer(loaderCommand, [...loaderArgs, '--standalone-ambient-attachment', '--allowed-site-root', root], { label: nativeLoader ? 'mcp-loader-mcp native protocol smoke' : 'mcp-loader-mcp protocol smoke' });
 
 try {
   const defaultState = createServerState();
+  const unauthorisedState = createServerState({ allowedSiteRoots: [root] });
+  const duplicateRootState = createServerState({
+    allowedSiteRoots: process.platform === 'win32' ? [root, root.toUpperCase()] : [root, root],
+  });
+  assert.equal(duplicateRootState.policy.allowedSiteRoots.length, 1);
+  const unauthorised = await handleRequest({ jsonrpc: '2.0', id: 991, method: 'tools/call', params: { name: 'mcp_loader_list_site_surfaces', arguments: { site_root: root } } }, unauthorisedState) as any;
+  assert.equal(unauthorised.error?.data?.code, 'mcp_binding_admission_required');
+
+  const governedRoot = join(root, 'governed');
+  const governedMcp = join(governedRoot, '.ai', 'mcp');
+  mkdirSync(governedMcp, { recursive: true });
+  const serverRecord: any = {
+    binding_id: 'governed-echo', surface_id: 'echo', projection_id: 'default', transport: 'stdio',
+    command: process.execPath, args: [], env: {}, env_vars: [], target_site_root: governedRoot.replaceAll('\\', '/'),
+    injection_scope: 'local_site', authority_locus: { kind: 'local_site', site_root: governedRoot.replaceAll('\\', '/') },
+  };
+  writeFileSync(join(governedMcp, 'config.json'), JSON.stringify({ mcpServers: { 'narada-governed-echo': serverRecord } }));
+  const unsignedEntry: any = {
+    binding_id: 'governed-echo', surface_id: 'echo', projection_id: 'default',
+    authority_locus: serverRecord.authority_locus, injection_scope: 'local_site', operations: ['attach', 'discover', 'restart'],
+  };
+  const launchIdentity = {
+    schema: 'narada.mcp.binding_identity.v1', binding_id: 'governed-echo', surface_id: 'echo', projection_id: 'default', injection_scope: 'local_site',
+    authority_locus: serverRecord.authority_locus, transport: 'stdio', command: process.execPath, args: [], env: {}, env_vars: [],
+    target_site_root: serverRecord.target_site_root, surface_projection: null,
+  };
+  const entry = { ...unsignedEntry, binding_identity: launchIdentity, binding_digest: bindingAdmissionEntryDigest({ ...unsignedEntry, launch_identity: launchIdentity }) };
+  const unsignedEnvelope: any = {
+    schema: 'narada.mcp.binding_admission_envelope.v1', envelope_id: 'governed-envelope', decision: 'admitted',
+    issued_at: new Date().toISOString(), valid_until: null, principal_key: 'local:test:agent', site_id: 'test-site',
+    carrier_session_id: 'test-session', carrier_kind: 'codex', runtime_kind: 'test-runtime', authority_epoch: 1,
+    carrier_session_admission_receipt_ref: 'receipt:test', authority_readback_ref: 'authority:test',
+    fabric_digest: 'a'.repeat(64), bindings: [entry],
+  };
+  const envelopePath = join(governedRoot, 'binding-admission.json');
+  writeFileSync(envelopePath, JSON.stringify({ ...unsignedEnvelope, envelope_digest: bindingAdmissionEnvelopeDigest(unsignedEnvelope) }));
+  const governedState = createServerState({ allowedSiteRoots: [governedRoot], bindingAdmissionPath: envelopePath });
+  const listed = await handleRequest({ jsonrpc: '2.0', id: 992, method: 'tools/call', params: { name: 'mcp_loader_list_site_surfaces', arguments: { site_root: governedRoot } } }, governedState) as any;
+  assert.equal(listed.error, undefined, JSON.stringify(listed));
+  assert.deepEqual(listed.result?.structuredContent?.surfaces?.map((surface: any) => surface.binding_id) ?? listed.result?.surfaces?.map((surface: any) => surface.binding_id), ['governed-echo']);
+  if (process.platform === 'win32') {
+    const differentlyCasedRoot = governedRoot.toUpperCase();
+    const caseInsensitive = await handleRequest({ jsonrpc: '2.0', id: 994, method: 'tools/call', params: { name: 'mcp_loader_list_site_surfaces', arguments: { site_root: differentlyCasedRoot } } }, governedState) as any;
+    assert.equal(caseInsensitive.error, undefined, JSON.stringify(caseInsensitive));
+  }
+  const absent = await handleRequest({ jsonrpc: '2.0', id: 993, method: 'tools/call', params: { name: 'mcp_loader_attach_surface', arguments: { site_root: governedRoot, binding_id: 'not-admitted' } } }, governedState) as any;
+  assert.equal(absent.error?.data?.code, 'mcp_binding_not_admitted');
   const surfacesRoot = resolve(dirname(serverPath), '..', '..', '..');
   const userProfile = process.env.USERPROFILE || process.env.HOME;
   assert.ok(defaultState.policy.allowedSiteRoots.includes(resolve(surfacesRoot, '..').replace(/\\/g, '/')));

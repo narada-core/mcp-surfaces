@@ -75,7 +75,7 @@ field, not package entrypoints or source-language presence, decides the default.
 | `calendar` | Rust-native default | The native shared surface owns the calendar contract and uses the native Graph authority adapter for guarded reads/writes; the native profile selects Rust and Node remains an opt-in rollback. |
 | `catalog-observation` | Rust-native default | The native shared surface owns the bounded catalog/fabric observation contract; descriptor authority remains explicit at the boundary. |
 | `cloudflare-carrier` | Rust-native default | The native shared surface owns the carrier contract and exposes Cloudflare/provider authority boundaries explicitly; the native profile selects Rust and Node remains an opt-in rollback. |
-| `delegated-task` | Rust-native default | The native shared surface owns the bounded delegated-task contract and exposes durable domain authority boundaries explicitly; the native profile selects Rust and Node remains an opt-in rollback. |
+| `delegated-task` | Node operational fallback | Rust currently implements only bounded reads and explicitly lacks worker mutation/execution authority. The native profile selects Node until end-to-end worker authority parity is proven. |
 | `graph-mail` | Rust-native default | The native shared surface owns the mail contract and uses the native Graph authority adapter for guarded operations; the native profile selects Rust and Node remains an opt-in rollback. |
 | `mailbox` | Rust-native default | The native shared surface owns bounded projection reads, durable outbox consumers, first-observation reconciliation, admission, and Graph-backed synchronization. Same-runtime and Node/Rust replay parity cover the shared SQLite, fact, projection, cursor, and receipt contracts; the native profile selects Rust and Node remains an opt-in rollback. |
 | `nars-session` | Rust-native default | The native shared surface owns the NARS session adapter and uses the native session/health authority bridge; the native profile selects Rust and Node remains an opt-in rollback. |
@@ -92,17 +92,16 @@ field, not package entrypoints or source-language presence, decides the default.
 | `surface-feedback` | Rust-native default | The native shared surface owns the bounded feedback contract and exposes routing/cross-site authority boundaries explicitly; the native profile selects Rust and Node remains an opt-in rollback. |
 | `task-lifecycle` | Rust-native default | The shared Rust authority and native adapter implement the 69-tool contract, SQLite preparation/migration, payload revisions, evidence/review dependency gates, output resources, and Markdown compatibility. Catalog parity, smoke, refusal, migration, cross-runtime parity, and benchmark evidence admit and select Rust; TypeScript remains an explicit rollback. |
 | `work-lifecycle` | Rust-native default | The same Rust authority and native adapter implement the 80-tool ticket/outbox contract, dynamic task revision triggers, SQLite transactions, and task/work cross-surface parity. Catalog parity, smoke, refusal, migration, cross-runtime parity, and benchmark evidence admit and select Rust; TypeScript remains an explicit rollback. |
-| `worker-delegation` | Rust-native default | The native shared surface owns the bounded worker-delegation contract and exposes runtime admission/affinity/handoff authority boundaries explicitly; the native profile selects Rust and Node remains an opt-in rollback. |
+| `worker-delegation` | Node operational fallback | Rust currently implements bounded worker projections but not the complete launch/execution authority. The native profile selects Node until end-to-end execution parity is proven. |
 
 The Rust proxy itself is shared infrastructure rather than a catalog surface;
 it is already Rust-native and is benchmarked independently from child-surface
 implementations.
 
-The runtime matrix records every concrete native-profile component as
-`rust: admitted` and selects Rust. “Admitted” means the native entrypoint is
-the default process and its contract/boundary tests pass; it does not hide an
-authority boundary behind a fake success. Bun/Node remain available as
-explicit rollback profiles. Only the abstract generic JavaScript-surface row
+The runtime matrix selects Rust only where the implementation has operational
+parity for the authority advertised by the surface. A boundary/refusal test is
+not execution-parity evidence. Components with read-only Rust slices use an
+admitted Node fallback until their mutation and execution authority is proven. Only the abstract generic JavaScript-surface row
 remains outside the Rust-default set.
 
 ## Default and rollback controls

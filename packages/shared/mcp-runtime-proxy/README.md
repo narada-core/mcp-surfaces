@@ -49,14 +49,16 @@ longer matches an export target. Re-run the workspace build before retrying;
 the proxy never starts a server against an unverified workspace.
 
 Carrier materialization adds a second contract gate. Every generated proxy
-launch declares `--runtime-contract-version 6`, the current
+launch declares `--runtime-contract-version 7`, the current
 `--artifact-manifest`, and, for a materialized carrier file, a
 `--materialization-sidecar` path. The registrar validates every generated
 proxy, child entrypoint, and manifest reference before writing the carrier
-file. It records `<carrier-config>.narada-generation.json` with the config,
-manifest, registrar-build, and contract fingerprints. The proxy refuses to
-spawn the child when that sidecar is missing or stale, including after the
-carrier config or registrar build changes.
+file. It records `<carrier-config>.narada-generation.json` with separate exact
+artifact and managed-projection fingerprints plus manifest, registrar-build,
+and native-contract fingerprints. The proxy refuses to spawn the child when
+the sidecar is missing or when the managed projection is stale. For Codex,
+formatting, newline, and non-managed setting changes produce a non-blocking
+byte-drift observation instead.
 
 Materialization requests run through the installed immutable Rust materializer.
 A failed validation is a structured refusal; the proxy does not rebuild or
@@ -72,7 +74,7 @@ pnpm materialize:carrier
 ```
 
 The command is owned by the native materializer and remains usable when the MCP
-registrar surface itself cannot start. It rewrites every declared carrier. The
+registrar surface itself cannot start. It refreshes every declared carrier. The
 generated sidecars are the proof that the carrier configs and current workspace
 generation were produced together. There is no targeted compatibility escape
 hatch.

@@ -97,7 +97,7 @@ The ref's `created_by` and payload-id namespace provide declarative lineage and 
 
 Edits config files (JSON/TOML) but does not start or stop servers, mutate the surfaces themselves, or grant runtime authority.
 
-Carrier approval controls are treated as volatile carrier UX/admission mechanics, not Narada policy authority. The registrar may generate carrier availability metadata, such as Codex `approval_mode = "approve"`, so registered Narada MCP tools are available without redundant carrier prompts. Authorization, refusal, audit, and semantic constraints remain owned by the MCP surfaces themselves.
+Carrier approval controls are treated as volatile carrier UX/admission mechanics, not Narada policy authority. The registrar may generate carrier availability metadata, such as Codex `default_tools_approval_mode = "approve"`, so registered Narada MCP tools are available without redundant carrier prompts. Authorization, refusal, audit, and semantic constraints remain owned by the MCP surfaces themselves.
 
 This is the `CarrierAdmissionNeutralization` concept in Narada proper. The
 [cross-repository contract register](../../docs/cross-repository-contracts.md#contract-register)
@@ -143,9 +143,10 @@ The registrar writes one `[plugins."<plugin-id>"] enabled = ...` table into
 the generated Codex config. Plugin IDs must be exact Codex IDs; there is no
 wildcard. Unlisted plugins receive no generated override, so Codex's normal
 installed/default state applies; existing hand-edits to the generated file
-are not preserved. Disabling every installed plugin therefore requires
-listing each one explicitly. Unset the variables and rematerialize to remove
-those additional generated overrides. These settings apply only
+outside Narada's recorded selectors are preserved. Previously managed plugin
+selectors are removed when they are no longer declared. Disabling every
+installed plugin therefore requires listing each one explicitly. Unset the
+variables and rematerialize to remove those additional generated overrides. These settings apply only
 to the Codex carrier; Kimi and opencode projections do not receive them. They
 are written to Codex's base config for naked launches, and a selected Codex
 profile may layer over them.

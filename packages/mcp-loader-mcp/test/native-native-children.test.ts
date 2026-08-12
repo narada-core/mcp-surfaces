@@ -17,6 +17,7 @@ type Pending = { resolve: (value: any) => void; reject: (error: Error) => void }
 
 function startLoader(root: string) {
   const child = spawn(loaderExecutable, [
+    '--standalone-ambient-attachment',
     '--allowed-site-root', root,
     '--allowed-entrypoint-prefix', root,
     '--allowed-entrypoint-prefix', dirname(process.execPath),

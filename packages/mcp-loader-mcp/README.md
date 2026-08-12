@@ -106,6 +106,8 @@ The bounded loader benchmark is pnpm run benchmark:loader. It measures Node/Node
 
 MCP Loader owns child attachment, initialization, tool discovery, call proxying, and detachment. It does not own the attached surfaces, authorize their domain operations, or materialize the Site action-admission registry.
 
+Dynamic attachment in a governed carrier session is exact-binding activation, not authority creation. The session authority supplies `narada.mcp.binding_admission_envelope.v1`; discovery, attach, and restart refuse unless the exact `binding_id` and current declaration digest are present. Site roots, surface ids, aliases, entrypoint prefixes, and inherited identity variables are consistency or routing evidence and never substitute for admission. Ambient attachment is available only through the explicit `--standalone-ambient-attachment` development mode.
+
 ## Verification
 
 ```powershell

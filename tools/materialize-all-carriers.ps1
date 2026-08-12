@@ -77,6 +77,25 @@ function Invoke-NativeMaterializer {
   }
 }
 
+function Invoke-CarrierArtifactBuild {
+  $stdoutPath = Join-Path ([System.IO.Path]::GetTempPath()) "narada-carrier-build-$PID.stdout.log"
+  $stderrPath = Join-Path ([System.IO.Path]::GetTempPath()) "narada-carrier-build-$PID.stderr.log"
+  try {
+    $pnpm = (Get-Command pnpm.cmd -ErrorAction Stop).Source
+    $process = Start-Process -FilePath $pnpm -ArgumentList @('run', 'build:carrier-artifacts') -WorkingDirectory $repoRoot -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -NoNewWindow -PassThru -Wait
+    foreach ($path in @($stdoutPath, $stderrPath)) {
+      if (Test-Path -LiteralPath $path -PathType Leaf) {
+        Get-Content -LiteralPath $path -TotalCount 1000 | Add-Content -LiteralPath $logPath -Encoding utf8
+      }
+    }
+    if ($process.ExitCode -ne 0) {
+      throw "Carrier artifact preparation failed with exit code $($process.ExitCode)."
+    }
+  } finally {
+    Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
+  }
+}
+
 function Show-SuccessNotification {
   try {
     Add-Type -AssemblyName System.Drawing
@@ -110,13 +129,30 @@ try {
     New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
   }
   [System.IO.File]::WriteAllText($logPath, '', (New-Object System.Text.UTF8Encoding($false)))
+  $operationLockPath = Join-Path $repoRoot '.ai\runtime\carrier-promotion.lock'
+  $operationLockDirectory = Split-Path -Parent $operationLockPath
+  if (-not (Test-Path -LiteralPath $operationLockDirectory)) {
+    New-Item -ItemType Directory -Path $operationLockDirectory -Force | Out-Null
+  }
+  try {
+    $script:operationLock = [System.IO.File]::Open(
+      $operationLockPath,
+      [System.IO.FileMode]::OpenOrCreate,
+      [System.IO.FileAccess]::ReadWrite,
+      [System.IO.FileShare]::None
+    )
+  } catch {
+    throw "Another carrier promotion operation holds the workspace lock: $operationLockPath"
+  }
+  Write-Status 'Preparing and sealing the native carrier artifact graph.' ([ConsoleColor]::Cyan)
+  Invoke-CarrierArtifactBuild
   $materializer = Resolve-Materializer
-  Write-Status 'Narada native all-carrier materialization starting.' ([ConsoleColor]::Cyan)
+  Write-Status 'Narada native bundle promotion starting.' ([ConsoleColor]::Cyan)
   Write-Status "Authority: $materializer"
   Write-Status "Detailed output: $logPath"
   Write-LogLine "Authority: $materializer"
   Invoke-NativeMaterializer -Executable $materializer -Arguments @(
-    'materialize-site',
+    'promote-site',
     '--contract', $contract,
     '--workspace-root', $repoRoot,
     '--home', $carrierRoot,

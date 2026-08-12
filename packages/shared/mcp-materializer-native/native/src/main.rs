@@ -1,19 +1,29 @@
+use fs2::FileExt;
+use narada_mcp_materialization_contract::{
+    canonical_json_sha256, codex_managed_selectors, describe_config, generation_fingerprint,
+    merge_codex_configuration, pretty_json as contract_pretty_json, ConfigArtifact,
+    ManagedProjection, AMBIGUOUS_GENERATION_SCHEMA, CONTRACT_VERSION, GENERATION_SCHEMA,
+    LEGACY_GENERATION_SCHEMA,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration as StdDuration, Instant};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 mod derive;
 
 const INPUT_SCHEMA: &str = "narada.carrier_materialization_input.v1";
-const GENERATION_SCHEMA: &str = "narada.mcp_materialization_generation.v1";
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct MaterializationInput {
     schema: String,
@@ -22,6 +32,8 @@ struct MaterializationInput {
     carrier_contract_fingerprint: String,
     artifact_manifest_path: PathBuf,
     artifact_manifest_fingerprint: Option<String>,
+    artifact_build_set_path: PathBuf,
+    artifact_build_set_fingerprint: String,
     runtime_profile_kind: String,
     runtime_implementation_matrix_path: PathBuf,
     runtime_implementation_matrix_fingerprint: String,
@@ -33,8 +45,7 @@ struct MaterializationInput {
     installed_carrier_index_path: PathBuf,
     carriers: Vec<CarrierInput>,
 }
-
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct CarrierInput {
     carrier_id: String,
@@ -44,6 +55,10 @@ struct CarrierInput {
     codex_plugin_overrides: BTreeMap<String, bool>,
     #[serde(default)]
     trust_projects: Vec<String>,
+    #[serde(default)]
+    binding_admission_path: Option<PathBuf>,
+    #[serde(default)]
+    binding_admission_envelope: Option<Value>,
     servers: Vec<ServerInput>,
 }
 
@@ -55,9 +70,15 @@ enum CarrierKind {
     Opencode,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 struct ServerInput {
+    /// Stable machine identity. Legacy plans may omit it and fall back to the alias.
+    #[serde(default)]
+    binding_id: Option<String>,
+    /// Private registrar/materialization identity; never used as the carrier-visible name.
+    #[serde(default)]
+    source_server_key: Option<String>,
     name: String,
     command: String,
     #[serde(default)]
@@ -77,11 +98,50 @@ struct ServerInput {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 struct ToolInput {
     name: String,
     approval_mode: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContractDescribeInput {
+    carrier_kind: String,
+    config_path: PathBuf,
+    #[serde(default)]
+    selectors: Vec<String>,
+    #[serde(default)]
+    server_ids: Vec<String>,
+    #[serde(default)]
+    plugin_ids: Vec<String>,
+    #[serde(default)]
+    project_paths: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContractMergeCodexInput {
+    existing_path: Option<PathBuf>,
+    desired_path: PathBuf,
+    output_path: PathBuf,
+    #[serde(default)]
+    previous_selectors: Vec<String>,
+    #[serde(default)]
+    server_ids: Vec<String>,
+    #[serde(default)]
+    plugin_ids: Vec<String>,
+    #[serde(default)]
+    project_paths: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContractFormatJsonInput {
+    source_path: PathBuf,
+    output_path: PathBuf,
+    header: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -91,9 +151,22 @@ struct Generation {
     carrier_id: String,
     carrier_kind: CarrierKind,
     config_path: String,
-    config_sha256: String,
+    config_artifact: ConfigArtifact,
+    managed_projection: ManagedProjection,
+    materialization_contract_entrypoint: String,
+    materialization_contract_fingerprint: Option<String>,
     artifact_manifest_path: String,
     artifact_manifest_fingerprint: Option<String>,
+    artifact_build_set_path: String,
+    artifact_build_set_fingerprint: String,
+    materialization_input_digest: String,
+    bundle_id: String,
+    bundle_path: String,
+    bundle_commit_pointer_path: String,
+    bundle_fingerprint: String,
+    launch_catalog_fingerprint: String,
+    validation_policy_identity: String,
+    migration_provenance: String,
     runtime_profile_kind: String,
     runtime_materialization_plan_path: String,
     runtime_materialization_plan_fingerprint: String,
@@ -110,7 +183,6 @@ struct Generation {
     generated_at: String,
 }
 
-#[derive(Clone)]
 struct Publication {
     path: PathBuf,
     content: Vec<u8>,
@@ -204,7 +276,7 @@ fn run() -> Result<(), Failure> {
         })?;
         let index = PathBuf::from(user_profile).join(".narada/carriers/installed-carriers.json");
         let input = derive::derive_input(derive::options_from_installed_index(&index)?)?;
-        let result = materialize(input)?;
+        let result = materialize(input, true)?;
         println!("{result}");
         return Ok(());
     }
@@ -231,9 +303,130 @@ fn run() -> Result<(), Failure> {
         println!("{}", publish_self(&artifact_root)?);
         return Ok(());
     }
-    if command == "materialize-site" {
+    if matches!(
+        command.as_str(),
+        "contract-describe"
+            | "contract-fingerprint-generation"
+            | "contract-merge-codex"
+            | "contract-format-json"
+    ) {
+        let flag = args.next().and_then(|value| value.into_string().ok());
+        if flag.as_deref() != Some("--input") {
+            return Err(Failure::new(
+                "materializer_contract_input_required",
+                format!("Expected {command} --input <path>."),
+            ));
+        }
+        let input_path = args.next().map(PathBuf::from).ok_or_else(|| {
+            Failure::new(
+                "materializer_contract_input_required",
+                "Expected an input path.",
+            )
+        })?;
+        if args.next().is_some() {
+            return Err(Failure::new(
+                "materializer_argument_unknown",
+                "Unexpected trailing argument.",
+            ));
+        }
+        if command == "contract-describe" {
+            let input: ContractDescribeInput =
+                serde_json::from_slice(&fs::read(&input_path).map_err(|error| {
+                    Failure::new("materializer_contract_input_read_failed", error.to_string())
+                })?)
+                .map_err(|error| {
+                    Failure::new("materializer_contract_input_invalid", error.to_string())
+                })?;
+            let content = fs::read(&input.config_path).map_err(|error| {
+                Failure::new("materializer_config_read_failed", error.to_string())
+            })?;
+            let selectors = if input.carrier_kind == "codex" && input.selectors.is_empty() {
+                codex_managed_selectors(&input.server_ids, &input.plugin_ids, &input.project_paths)
+            } else {
+                input.selectors
+            };
+            let description = describe_config(&input.carrier_kind, &content, &selectors)
+                .map_err(|error| Failure::new("materializer_contract_describe_failed", error))?;
+            println!(
+                "{}",
+                serde_json::to_value(description).map_err(json_failure)?
+            );
+        } else if command == "contract-fingerprint-generation" {
+            let generation = read_json(&input_path, "materializer_contract_input_invalid")?;
+            println!(
+                "{}",
+                json!({"generation_fingerprint": generation_fingerprint(&generation).map_err(|error| Failure::new("materializer_generation_fingerprint_failed", error))?})
+            );
+        } else if command == "contract-merge-codex" {
+            let input: ContractMergeCodexInput =
+                serde_json::from_slice(&fs::read(&input_path).map_err(|error| {
+                    Failure::new("materializer_contract_input_read_failed", error.to_string())
+                })?)
+                .map_err(|error| {
+                    Failure::new("materializer_contract_input_invalid", error.to_string())
+                })?;
+            let desired = fs::read(&input.desired_path).map_err(|error| {
+                Failure::new("materializer_config_read_failed", error.to_string())
+            })?;
+            let existing = input
+                .existing_path
+                .as_ref()
+                .map(|path| {
+                    fs::read(path).map_err(|error| {
+                        Failure::new("materializer_config_read_failed", error.to_string())
+                    })
+                })
+                .transpose()?;
+            let selectors =
+                codex_managed_selectors(&input.server_ids, &input.plugin_ids, &input.project_paths);
+            let merged = merge_codex_configuration(
+                existing.as_deref(),
+                &desired,
+                &input.previous_selectors,
+                &selectors,
+            )
+            .map_err(|error| Failure::new("materializer_codex_merge_failed", error))?;
+            fs::write(&input.output_path, merged).map_err(|error| {
+                Failure::new(
+                    "materializer_contract_output_write_failed",
+                    error.to_string(),
+                )
+            })?;
+            println!("{}", json!({"status":"merged","selectors":selectors}));
+        } else {
+            let input: ContractFormatJsonInput =
+                serde_json::from_slice(&fs::read(&input_path).map_err(|error| {
+                    Failure::new("materializer_contract_input_read_failed", error.to_string())
+                })?)
+                .map_err(|error| {
+                    Failure::new("materializer_contract_input_invalid", error.to_string())
+                })?;
+            let value = read_json(&input.source_path, "materializer_json_source_invalid")?;
+            let mut output = pretty_json(&value)?;
+            if let Some(header) = input.header {
+                let mut prefix = header
+                    .trim_end_matches(['\r', '\n'])
+                    .replace("\r\n", "\n")
+                    .replace('\r', "\n")
+                    .into_bytes();
+                prefix.push(b'\n');
+                prefix.extend(output);
+                output = prefix;
+            }
+            fs::write(&input.output_path, output).map_err(|error| {
+                Failure::new(
+                    "materializer_contract_output_write_failed",
+                    error.to_string(),
+                )
+            })?;
+            println!("{}", json!({"status":"formatted"}));
+        }
+        return Ok(());
+    }
+    if matches!(command.as_str(), "materialize-site" | "promote-site") {
+        let require_fresh_validation = command == "promote-site";
         let options = derive::DeriveOptions::parse(args)?;
-        let result = materialize(derive::derive_input(options)?)?;
+        let result = materialize(derive::derive_input(options)?, require_fresh_validation)?;
         println!("{result}");
         return Ok(());
     }
@@ -266,7 +459,7 @@ fn run() -> Result<(), Failure> {
             .iter()
             .map(|carrier| carrier.carrier_id.clone())
             .collect::<Vec<_>>();
-        let materialization = materialize(input)?;
+        let materialization = materialize(input, true)?;
         let verification = verify_all(&installed_index)?;
         let recovered_at = OffsetDateTime::now_utc()
             .format(&Rfc3339)
@@ -436,7 +629,7 @@ fn run() -> Result<(), Failure> {
         Failure::new("materializer_input_invalid", error.to_string())
             .with_details(json!({"input_path": path_text(&input_path)}))
     })?;
-    let result = materialize(input)?;
+    let result = materialize(input, false)?;
     println!("{result}");
     Ok(())
 }
@@ -595,49 +788,28 @@ fn verify_generation(
             path_text(sidecar_path),
         ));
     }
-    let fields = [
-        "schema",
-        "contract_version",
-        "carrier_id",
-        "carrier_kind",
-        "config_path",
-        "config_sha256",
-        "artifact_manifest_path",
-        "artifact_manifest_fingerprint",
-        "runtime_profile_kind",
-        "runtime_materialization_plan_path",
-        "runtime_materialization_plan_fingerprint",
-        "runtime_implementation_matrix_path",
-        "runtime_implementation_matrix_fingerprint",
-        "registrar_entrypoint",
-        "registrar_fingerprint",
-        "proxy_implementation",
-        "proxy_entrypoint",
-        "proxy_fingerprint",
-        "server_count",
-        "proxy_count",
-        "generated_at",
-    ];
-    let mut unsigned = Map::new();
-    for field in fields {
-        unsigned.insert(
-            field.to_string(),
-            generation.get(field).cloned().unwrap_or(Value::Null),
-        );
-    }
-    if sha256(&serde_json::to_vec(&Value::Object(unsigned)).map_err(json_failure)?) != expected {
+    if generation_fingerprint(generation)
+        .map_err(|error| Failure::new("materializer_generation_fingerprint_failed", error))?
+        != expected
+    {
         return Err(Failure::new(
             "materializer_generation_fingerprint_mismatch",
             path_text(sidecar_path),
         ));
     }
-    if generation.get("contract_version").and_then(Value::as_u64) != Some(6) {
+    if generation.get("contract_version").and_then(Value::as_u64) != Some(CONTRACT_VERSION.into()) {
         return Err(Failure::new(
             "materializer_generation_contract_obsolete",
             path_text(sidecar_path),
         ));
     }
+    verify_generation_bundle(generation, sidecar_path)?;
     verify_file_fingerprint(generation, "registrar_entrypoint", "registrar_fingerprint")?;
+    verify_file_fingerprint(
+        generation,
+        "materialization_contract_entrypoint",
+        "materialization_contract_fingerprint",
+    )?;
     verify_file_fingerprint(generation, "proxy_entrypoint", "proxy_fingerprint")?;
     verify_file_fingerprint(
         generation,
@@ -673,19 +845,38 @@ fn verify_generation(
             path_text(sidecar_path),
         ));
     }
-    let kind = match json_field_string(generation, "carrier_kind")? {
-        "codex" => CarrierKind::Codex,
-        "kimi" => CarrierKind::Kimi,
-        "opencode" => CarrierKind::Opencode,
-        value => return Err(Failure::new("materializer_carrier_kind_unsupported", value)),
-    };
+    let kind = json_field_string(generation, "carrier_kind")?;
     let config = fs::read(&config_path)
         .map_err(|error| Failure::new("materializer_config_read_failed", error.to_string()))?;
-    if materialization_config_fingerprint(kind, &config)?
-        != json_field_string(generation, "config_sha256")?
+    let selectors = generation
+        .pointer("/managed_projection/selectors")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            Failure::new(
+                "materializer_managed_selectors_missing",
+                path_text(sidecar_path),
+            )
+        })?
+        .iter()
+        .map(|value| {
+            value.as_str().map(str::to_string).ok_or_else(|| {
+                Failure::new(
+                    "materializer_managed_selector_invalid",
+                    path_text(sidecar_path),
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let current = describe_config(kind, &config, &selectors)
+        .map_err(|error| Failure::new("materializer_contract_describe_failed", error))?;
+    if current.managed_projection.sha256
+        != generation
+            .pointer("/managed_projection/sha256")
+            .and_then(Value::as_str)
+            .unwrap_or("")
     {
         return Err(Failure::new(
-            "materializer_config_fingerprint_mismatch",
+            "materializer_managed_projection_fingerprint_mismatch",
             path_text(&config_path),
         ));
     }
@@ -701,6 +892,10 @@ fn verify_generation(
         .and_then(|object| object.remove("plan_fingerprint"))
         .and_then(|value| value.as_str().map(str::to_string));
     if embedded_plan.as_deref() != Some(expected_plan)
+        || generation
+            .get("launch_catalog_fingerprint")
+            .and_then(Value::as_str)
+            != Some(expected_plan)
         || sha256(&serde_json::to_vec(&unsigned_plan).map_err(json_failure)?) != expected_plan
     {
         return Err(Failure::new(
@@ -729,6 +924,91 @@ fn verify_generation(
         return Err(Failure::new(
             "materializer_carrier_contract_fingerprint_mismatch",
             path_text(&contract_path),
+        ));
+    }
+    Ok(())
+}
+
+fn verify_generation_bundle(generation: &Value, sidecar_path: &Path) -> Result<(), Failure> {
+    let bundle_id = json_field_string(generation, "bundle_id")?;
+    let expected_bundle_fingerprint = json_field_string(generation, "bundle_fingerprint")?;
+    let bundle_path = PathBuf::from(json_field_string(generation, "bundle_path")?);
+    let mut bundle = read_json(&bundle_path, "materializer_bundle_invalid")?;
+    if bundle.get("schema").and_then(Value::as_str) != Some("narada.carrier_generation_bundle.v1")
+        || bundle.get("bundle_id").and_then(Value::as_str) != Some(bundle_id)
+        || bundle.get("bundle_fingerprint").and_then(Value::as_str)
+            != Some(expected_bundle_fingerprint)
+    {
+        return Err(Failure::new(
+            "materializer_bundle_identity_mismatch",
+            path_text(&bundle_path),
+        ));
+    }
+    let object = bundle
+        .as_object_mut()
+        .ok_or_else(|| Failure::new("materializer_bundle_invalid", path_text(&bundle_path)))?;
+    object.remove("bundle_id");
+    object.remove("bundle_fingerprint");
+    let actual = canonical_json_sha256(&bundle)
+        .map_err(|error| Failure::new("materializer_bundle_fingerprint_failed", error))?;
+    if actual != expected_bundle_fingerprint {
+        return Err(Failure::new(
+            "materializer_bundle_fingerprint_mismatch",
+            path_text(&bundle_path),
+        ));
+    }
+    let carrier_id = json_field_string(generation, "carrier_id")?;
+    let member = bundle
+        .get("carriers")
+        .and_then(Value::as_array)
+        .and_then(|carriers| {
+            carriers.iter().find(|carrier| {
+                carrier.get("carrier_id").and_then(Value::as_str) == Some(carrier_id)
+            })
+        })
+        .ok_or_else(|| {
+            Failure::new(
+                "materializer_bundle_carrier_missing",
+                format!("{bundle_id}:{carrier_id}"),
+            )
+        })?;
+    if member
+        .get("generation_sidecar_path")
+        .and_then(Value::as_str)
+        .is_none_or(|path| !path_eq(Path::new(path), sidecar_path))
+    {
+        return Err(Failure::new(
+            "materializer_bundle_sidecar_mismatch",
+            path_text(sidecar_path),
+        ));
+    }
+    let pointer_path = PathBuf::from(json_field_string(generation, "bundle_commit_pointer_path")?);
+    let pointer = read_json(&pointer_path, "materializer_bundle_pointer_invalid")?;
+    if pointer.get("schema").and_then(Value::as_str)
+        != Some("narada.carrier_generation_bundle_pointer.v1")
+        || pointer.get("bundle_id").and_then(Value::as_str) != Some(bundle_id)
+        || pointer.get("bundle_fingerprint").and_then(Value::as_str)
+            != Some(expected_bundle_fingerprint)
+        || pointer
+            .get("bundle_path")
+            .and_then(Value::as_str)
+            .is_none_or(|path| !path_eq(Path::new(path), &bundle_path))
+    {
+        return Err(Failure::new(
+            "materializer_bundle_not_committed",
+            path_text(&pointer_path),
+        ));
+    }
+    let build_set_path = PathBuf::from(json_field_string(generation, "artifact_build_set_path")?);
+    let build_set = read_json(&build_set_path, "materializer_artifact_build_set_invalid")?;
+    if build_set.get("build_set_digest").and_then(Value::as_str)
+        != generation
+            .get("artifact_build_set_fingerprint")
+            .and_then(Value::as_str)
+    {
+        return Err(Failure::new(
+            "materializer_artifact_build_set_identity_mismatch",
+            path_text(&build_set_path),
         ));
     }
     Ok(())
@@ -832,18 +1112,166 @@ fn publish_self(artifact_root: &Path) -> Result<Value, Failure> {
     }))
 }
 
-fn materialize(input: MaterializationInput) -> Result<Value, Failure> {
+fn previous_managed_selectors(sidecar_path: &Path) -> Result<Vec<String>, Failure> {
+    if !sidecar_path.exists() {
+        return Ok(vec![]);
+    }
+    let generation = read_json(sidecar_path, "materializer_generation_invalid")?;
+    match generation.get("schema").and_then(Value::as_str) {
+        Some(GENERATION_SCHEMA) | Some(LEGACY_GENERATION_SCHEMA) => generation
+            .pointer("/managed_projection/selectors")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                Failure::new(
+                    "materializer_managed_selectors_missing",
+                    path_text(sidecar_path),
+                )
+            })?
+            .iter()
+            .map(|selector| {
+                selector.as_str().map(str::to_string).ok_or_else(|| {
+                    Failure::new(
+                        "materializer_managed_selector_invalid",
+                        path_text(sidecar_path),
+                    )
+                })
+            })
+            .collect(),
+        Some(AMBIGUOUS_GENERATION_SCHEMA) => Ok(vec!["/mcp_servers".to_string()]),
+        Some(schema) => Err(Failure::new(
+            "materializer_generation_schema_unsupported",
+            schema,
+        )),
+        None => Err(Failure::new(
+            "materializer_generation_schema_missing",
+            path_text(sidecar_path),
+        )),
+    }
+}
+
+fn materialize(
+    input: MaterializationInput,
+    require_fresh_validation: bool,
+) -> Result<Value, Failure> {
     validate_input(&input)?;
+    verify_artifact_build_set(&input)?;
     let generated_at = OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .map_err(|error| Failure::new("materializer_clock_failed", error.to_string()))?;
+    let materialization_input_digest =
+        canonical_json_sha256(&serde_json::to_value(&input).map_err(json_failure)?)
+            .map_err(|error| Failure::new("materializer_input_fingerprint_failed", error))?;
+    let validation_policy_identity =
+        sha256(b"narada.fresh_process_validation.v1:initialize+tools/list+deterministic_readiness");
+    let carrier_root = input
+        .installed_carrier_index_path
+        .parent()
+        .ok_or_else(|| {
+            Failure::new(
+                "materializer_carrier_root_unresolved",
+                path_text(&input.installed_carrier_index_path),
+            )
+        })?
+        .to_path_buf();
+    let bundle_commit_pointer_path = carrier_root.join("current-bundle.json");
+    let bundle_carriers = input
+        .carriers
+        .iter()
+        .map(|carrier| {
+            let sidecar_path = suffix_path(&carrier.config_path, ".narada-generation.json");
+            json!({
+                "carrier_id": carrier.carrier_id,
+                "carrier_kind": carrier.carrier_kind,
+                "config_path": path_text(&carrier.config_path),
+                "generation_sidecar_path": path_text(&sidecar_path),
+            })
+        })
+        .collect::<Vec<_>>();
+    let bundle_unsigned = json!({
+        "schema": "narada.carrier_generation_bundle.v1",
+        "consistency_domain": "selected_carrier_bundle",
+        "materialization_input_digest": materialization_input_digest,
+        "artifact_build_set_path": path_text(&input.artifact_build_set_path),
+        "artifact_build_set_fingerprint": input.artifact_build_set_fingerprint,
+        "artifact_manifest_path": path_text(&input.artifact_manifest_path),
+        "artifact_manifest_fingerprint": input.artifact_manifest_fingerprint,
+        "validation_policy_identity": validation_policy_identity,
+        "carriers": bundle_carriers,
+    });
+    let bundle_fingerprint = canonical_json_sha256(&bundle_unsigned)
+        .map_err(|error| Failure::new("materializer_bundle_fingerprint_failed", error))?;
+    let bundle_id = bundle_fingerprint.clone();
+    let bundle_path = carrier_root
+        .join("bundles")
+        .join(&bundle_id)
+        .join("bundle.json");
+    let mut bundle = bundle_unsigned;
+    bundle
+        .as_object_mut()
+        .expect("bundle is an object")
+        .insert("bundle_id".to_string(), Value::String(bundle_id.clone()));
+    bundle.as_object_mut().expect("bundle is an object").insert(
+        "bundle_fingerprint".to_string(),
+        Value::String(bundle_fingerprint.clone()),
+    );
+    let migration_provenance = if input.carriers.iter().any(|carrier| {
+        let sidecar = suffix_path(&carrier.config_path, ".narada-generation.json");
+        read_json(&sidecar, "materializer_generation_invalid")
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("schema")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .is_some_and(|schema| {
+                schema == LEGACY_GENERATION_SCHEMA || schema == AMBIGUOUS_GENERATION_SCHEMA
+            })
+    }) {
+        "legacy_baseline_untrusted"
+    } else {
+        "native_v3"
+    };
     let mut publications = Vec::new();
     let mut index_carriers = Vec::new();
     for carrier in &input.carriers {
-        let config = emit_carrier(carrier)?;
-        let config_hash = materialization_config_fingerprint(carrier.carrier_kind, &config)?;
         let plan_path = suffix_path(&carrier.config_path, ".narada-runtime-plan.json");
         let sidecar_path = suffix_path(&carrier.config_path, ".narada-generation.json");
+        let desired = emit_carrier(carrier)?;
+        let selectors = if matches!(carrier.carrier_kind, CarrierKind::Codex) {
+            codex_managed_selectors(
+                carrier.servers.iter().map(|server| &server.name),
+                carrier.codex_plugin_overrides.keys(),
+                carrier.trust_projects.iter(),
+            )
+        } else {
+            vec![]
+        };
+        let config = if matches!(carrier.carrier_kind, CarrierKind::Codex) {
+            let previous_selectors = previous_managed_selectors(&sidecar_path)?;
+            let existing = fs::read(&carrier.config_path).ok();
+            merge_codex_configuration(
+                existing.as_deref(),
+                &desired,
+                &previous_selectors,
+                &selectors,
+            )
+            .map_err(|error| {
+                Failure::new("materializer_codex_merge_failed", error).with_details(json!({
+                    "config_path": path_text(&carrier.config_path),
+                    "mutation_status": "not_started",
+                }))
+            })?
+        } else {
+            desired
+        };
+        let carrier_kind = match carrier.carrier_kind {
+            CarrierKind::Codex => "codex",
+            CarrierKind::Kimi => "kimi",
+            CarrierKind::Opencode => "opencode",
+        };
+        let description = describe_config(carrier_kind, &config, &selectors)
+            .map_err(|error| Failure::new("materializer_contract_describe_failed", error))?;
         let plan_unsigned = json!({
             "schema": "narada.runtime_materialization_plan.v1",
             "status": "accepted",
@@ -853,9 +1281,17 @@ fn materialize(input: MaterializationInput) -> Result<Value, Failure> {
                 "matrix_fingerprint": input.runtime_implementation_matrix_fingerprint,
                 "carrier_contract_path": path_text(&input.carrier_contract_path),
                 "carrier_contract_fingerprint": input.carrier_contract_fingerprint,
+                "artifact_build_set_path": path_text(&input.artifact_build_set_path),
+                "artifact_build_set_fingerprint": input.artifact_build_set_fingerprint,
             },
             "carrier_id": carrier.carrier_id,
-            "servers": carrier.servers.iter().map(|server| json!({"name":server.name,"command":server.command,"args":server.args})).collect::<Vec<_>>(),
+            "servers": carrier.servers.iter().map(|server| json!({
+                "binding_id":server.binding_id.as_deref().unwrap_or(&server.name),
+                "name":server.name,
+                "source_server_key":server.source_server_key,
+                "command":server.command,
+                "args":server.args,
+            })).collect::<Vec<_>>(),
         });
         let plan_hash = sha256(&serde_json::to_vec(&plan_unsigned).map_err(json_failure)?);
         let mut plan = plan_unsigned;
@@ -865,13 +1301,26 @@ fn materialize(input: MaterializationInput) -> Result<Value, Failure> {
         );
         let mut generation = Generation {
             schema: GENERATION_SCHEMA,
-            contract_version: 6,
+            contract_version: CONTRACT_VERSION,
             carrier_id: carrier.carrier_id.clone(),
             carrier_kind: carrier.carrier_kind,
             config_path: path_text(&carrier.config_path),
-            config_sha256: config_hash,
+            config_artifact: description.config_artifact,
+            managed_projection: description.managed_projection,
+            materialization_contract_entrypoint: path_text(&input.registrar_entrypoint),
+            materialization_contract_fingerprint: input.registrar_fingerprint.clone(),
             artifact_manifest_path: path_text(&input.artifact_manifest_path),
             artifact_manifest_fingerprint: input.artifact_manifest_fingerprint.clone(),
+            artifact_build_set_path: path_text(&input.artifact_build_set_path),
+            artifact_build_set_fingerprint: input.artifact_build_set_fingerprint.clone(),
+            materialization_input_digest: materialization_input_digest.clone(),
+            bundle_id: bundle_id.clone(),
+            bundle_path: path_text(&bundle_path),
+            bundle_commit_pointer_path: path_text(&bundle_commit_pointer_path),
+            bundle_fingerprint: bundle_fingerprint.clone(),
+            launch_catalog_fingerprint: plan_hash.clone(),
+            validation_policy_identity: validation_policy_identity.clone(),
+            migration_provenance: migration_provenance.to_string(),
             runtime_profile_kind: input.runtime_profile_kind.clone(),
             runtime_materialization_plan_path: path_text(&plan_path),
             runtime_materialization_plan_fingerprint: plan_hash,
@@ -896,8 +1345,8 @@ fn materialize(input: MaterializationInput) -> Result<Value, Failure> {
             .as_object_mut()
             .expect("generation is an object")
             .remove("generation_fingerprint");
-        let generation_fingerprint =
-            sha256(&serde_json::to_vec(&unsigned_generation).map_err(json_failure)?);
+        let generation_fingerprint = generation_fingerprint(&unsigned_generation)
+            .map_err(|error| Failure::new("materializer_generation_fingerprint_failed", error))?;
         generation.generation_fingerprint = generation_fingerprint.clone();
         publications.push(Publication {
             path: carrier.config_path.clone(),
@@ -911,14 +1360,35 @@ fn materialize(input: MaterializationInput) -> Result<Value, Failure> {
             path: sidecar_path.clone(),
             content: pretty_json(&serde_json::to_value(&generation).map_err(json_failure)?)?,
         });
+        match (
+            &carrier.binding_admission_path,
+            &carrier.binding_admission_envelope,
+        ) {
+            (Some(path), Some(envelope)) => publications.push(Publication {
+                path: path.clone(),
+                content: pretty_json(envelope)?,
+            }),
+            (None, None) => {}
+            _ => {
+                return Err(Failure::new(
+                    "materializer_binding_admission_incomplete",
+                    carrier.carrier_id.clone(),
+                ))
+            }
+        }
         index_carriers.push(json!({
             "carrier_id": carrier.carrier_id,
             "carrier_kind": carrier.carrier_kind,
             "config_path": path_text(&carrier.config_path),
             "generation_sidecar_path": path_text(&sidecar_path),
             "materialization_generation_fingerprint": generation_fingerprint,
+            "bundle_id": bundle_id,
         }));
     }
+    publications.push(Publication {
+        path: bundle_path.clone(),
+        content: pretty_json(&bundle)?,
+    });
     publications.push(Publication {
         path: input.installed_carrier_index_path.clone(),
         content: pretty_json(&json!({
@@ -927,16 +1397,770 @@ fn materialize(input: MaterializationInput) -> Result<Value, Failure> {
             "carrier_contract_path": path_text(&input.carrier_contract_path),
             "carrier_contract_fingerprint": input.carrier_contract_fingerprint,
             "artifact_manifest_path": path_text(&input.artifact_manifest_path),
+            "artifact_build_set_path": path_text(&input.artifact_build_set_path),
+            "artifact_build_set_fingerprint": input.artifact_build_set_fingerprint,
+            "bundle_id": bundle_id,
+            "bundle_path": path_text(&bundle_path),
+            "bundle_fingerprint": bundle_fingerprint,
+            "bundle_commit_pointer_path": path_text(&bundle_commit_pointer_path),
             "carriers": index_carriers,
         }))?,
     });
-    transactional_publish(&publications)?;
+    if require_fresh_validation {
+        fresh_process_validate(&input)?;
+    }
+    let commit_pointer = json!({
+        "schema": "narada.carrier_generation_bundle_pointer.v1",
+        "bundle_id": bundle_id,
+        "bundle_path": path_text(&bundle_path),
+        "bundle_fingerprint": bundle_fingerprint,
+        "committed_at": generated_at,
+    });
+    publications.push(Publication {
+        path: bundle_commit_pointer_path.clone(),
+        content: pretty_json(&commit_pointer)?,
+    });
+    let transaction = durable_bundle_publish(
+        &publications,
+        &carrier_root,
+        &bundle_commit_pointer_path,
+        &bundle_id,
+    )?;
     Ok(json!({
-        "schema": "narada.mcp_materializer.result.v1",
-        "status": "materialized_all",
+        "schema": "narada.materialization_operation_result.v1",
+        "status": "committed",
+        "bundle_id": bundle_id,
+        "bundle_path": path_text(&bundle_path),
+        "bundle_commit_pointer_path": path_text(&bundle_commit_pointer_path),
         "carrier_count": input.carriers.len(),
         "installed_carrier_index_path": path_text(&input.installed_carrier_index_path),
+        "transaction": transaction,
+        "restart_required": true,
+        "restart_scope": "selected_carrier_bundle",
     }))
+}
+
+fn verify_artifact_build_set(input: &MaterializationInput) -> Result<(), Failure> {
+    let mut build_set = read_json(
+        &input.artifact_build_set_path,
+        "materializer_artifact_build_set_invalid",
+    )?;
+    if build_set.get("schema").and_then(Value::as_str) != Some("narada.artifact_build_set.v1")
+        || build_set.get("assurance").and_then(Value::as_str) != Some("declared_isolated_closure")
+    {
+        return Err(Failure::new(
+            "materializer_artifact_build_set_schema_unsupported",
+            path_text(&input.artifact_build_set_path),
+        ));
+    }
+    let expected_digest = json_field_string(&build_set, "build_set_digest")?.to_string();
+    if expected_digest != input.artifact_build_set_fingerprint {
+        return Err(Failure::new(
+            "materializer_artifact_build_set_identity_mismatch",
+            path_text(&input.artifact_build_set_path),
+        ));
+    }
+    let unsigned = build_set
+        .as_object_mut()
+        .ok_or_else(|| Failure::new("materializer_artifact_build_set_invalid", "not_object"))?;
+    unsigned.remove("build_set_digest");
+    unsigned.remove("generated_at");
+    let actual_digest = format!(
+        "sha256:{}",
+        canonical_json_sha256(&build_set)
+            .map_err(|error| Failure::new("materializer_artifact_build_set_invalid", error))?
+    );
+    if actual_digest != expected_digest {
+        return Err(Failure::new(
+            "materializer_artifact_build_set_fingerprint_mismatch",
+            path_text(&input.artifact_build_set_path),
+        ));
+    }
+    let manifest_path = json_field_string(&build_set, "workspace_manifest_path")?;
+    if !path_eq(Path::new(manifest_path), &input.artifact_manifest_path)
+        || build_set
+            .get("workspace_manifest_fingerprint")
+            .and_then(Value::as_str)
+            != input.artifact_manifest_fingerprint.as_deref()
+    {
+        return Err(Failure::new(
+            "materializer_artifact_build_set_manifest_mismatch",
+            manifest_path,
+        ));
+    }
+    let manifest_bytes = fs::read(&input.artifact_manifest_path).map_err(|error| {
+        Failure::new(
+            "materializer_artifact_manifest_read_failed",
+            error.to_string(),
+        )
+    })?;
+    if build_set
+        .get("workspace_manifest_bytes_digest")
+        .and_then(Value::as_str)
+        != Some(format!("sha256:{}", sha256(&manifest_bytes)).as_str())
+    {
+        return Err(Failure::new(
+            "materializer_artifact_build_set_manifest_bytes_mismatch",
+            path_text(&input.artifact_manifest_path),
+        ));
+    }
+    let artifacts = build_set
+        .get("artifacts")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            Failure::new(
+                "materializer_artifact_build_set_artifacts_required",
+                path_text(&input.artifact_build_set_path),
+            )
+        })?;
+    let mut declared = BTreeMap::<String, String>::new();
+    for artifact in artifacts {
+        let path = PathBuf::from(json_field_string(artifact, "path")?);
+        let expected = json_field_string(artifact, "sha256")?;
+        let size = artifact
+            .get("size")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| {
+                Failure::new(
+                    "materializer_artifact_build_set_size_required",
+                    path_text(&path),
+                )
+            })?;
+        let bytes = fs::read(&path).map_err(|error| {
+            Failure::new(
+                "materializer_artifact_build_set_artifact_missing",
+                error.to_string(),
+            )
+            .with_details(json!({"path":path_text(&path)}))
+        })?;
+        if bytes.len() as u64 != size || format!("sha256:{}", sha256(&bytes)) != expected {
+            return Err(Failure::new(
+                "materializer_artifact_build_set_artifact_stale",
+                path_text(&path),
+            ));
+        }
+        declared.insert(path_text(&path).to_lowercase(), expected.to_string());
+    }
+    let mut references = BTreeSet::<PathBuf>::new();
+    references.insert(input.registrar_entrypoint.clone());
+    references.insert(input.proxy_entrypoint.clone());
+    for carrier in &input.carriers {
+        for server in &carrier.servers {
+            let command = PathBuf::from(&server.command);
+            if command.is_absolute() {
+                references.insert(command);
+            }
+            for index in 0..server.args.len().saturating_sub(1) {
+                if matches!(
+                    server.args[index].as_str(),
+                    "--child-command"
+                        | "--entrypoint"
+                        | "--registrar-command"
+                        | "--registrar-entrypoint"
+                ) {
+                    let reference = PathBuf::from(&server.args[index + 1]);
+                    if reference.is_absolute() {
+                        references.insert(reference);
+                    }
+                }
+            }
+        }
+    }
+    let missing = references
+        .iter()
+        .filter(|path| !declared.contains_key(&path_text(path).to_lowercase()))
+        .map(|path| path_text(path))
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(Failure::new(
+            "materializer_artifact_build_set_reference_missing",
+            "A launch reference is absent from the sealed build set.",
+        )
+        .with_details(json!({"missing_references":missing})));
+    }
+    Ok(())
+}
+
+fn fresh_process_validate(input: &MaterializationInput) -> Result<(), Failure> {
+    let mut validated = BTreeSet::<String>::new();
+    for carrier in &input.carriers {
+        for server in &carrier.servers {
+            let descriptor = serde_json::to_vec(&json!({
+                "command": server.command,
+                "args": server.args,
+            }))
+            .map_err(json_failure)?;
+            let descriptor_digest = sha256(&descriptor);
+            if !validated.insert(descriptor_digest.clone()) {
+                continue;
+            }
+            validate_launch_descriptor(server).map_err(|failure| {
+                failure.with_details(json!({
+                    "carrier_id": carrier.carrier_id,
+                    "server_name": server.name,
+                    "descriptor_digest": descriptor_digest,
+                    "scope": "fresh_process_validation",
+                }))
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_launch_descriptor(server: &ServerInput) -> Result<(), Failure> {
+    let mut validation_args = Vec::<String>::new();
+    let mut arguments = server.args.iter();
+    while let Some(argument) = arguments.next() {
+        if matches!(
+            argument.as_str(),
+            "--materialization-sidecar" | "--binding-admission-path" | "--binding-admission-digest"
+        ) {
+            arguments.next();
+            continue;
+        }
+        validation_args.push(argument.clone());
+    }
+    let mut child = Command::new(&server.command)
+        .args(&validation_args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| {
+            Failure::new("materializer_fresh_process_spawn_failed", error.to_string())
+        })?;
+    let requests = [
+        json!({
+            "jsonrpc":"2.0",
+            "id":1,
+            "method":"initialize",
+            "params":{
+                "protocolVersion":"2025-03-26",
+                "capabilities":{},
+                "clientInfo":{"name":"narada-mcp-materializer","version":"0.1.0"}
+            }
+        }),
+        json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}),
+    ];
+    {
+        let stdin = child.stdin.as_mut().ok_or_else(|| {
+            Failure::new(
+                "materializer_fresh_process_stdin_missing",
+                server.name.clone(),
+            )
+        })?;
+        for request in requests {
+            let bytes = serde_json::to_vec(&request).map_err(json_failure)?;
+            stdin.write_all(&bytes).map_err(|error| {
+                Failure::new("materializer_fresh_process_write_failed", error.to_string())
+            })?;
+            stdin.write_all(b"\n").map_err(|error| {
+                Failure::new("materializer_fresh_process_write_failed", error.to_string())
+            })?;
+        }
+        stdin.flush().map_err(|error| {
+            Failure::new("materializer_fresh_process_write_failed", error.to_string())
+        })?;
+    }
+    let stdout = child.stdout.take().ok_or_else(|| {
+        Failure::new(
+            "materializer_fresh_process_stdout_missing",
+            server.name.clone(),
+        )
+    })?;
+    let (sender, receiver) = mpsc::channel::<String>();
+    thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    if sender.send(line).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    let timeout = StdDuration::from_secs(server.startup_timeout_sec.unwrap_or(30).clamp(5, 120));
+    let deadline = Instant::now() + timeout;
+    let mut initialized = false;
+    let mut tools_listed = false;
+    while Instant::now() < deadline && !(initialized && tools_listed) {
+        if child
+            .try_wait()
+            .map_err(|error| {
+                Failure::new("materializer_fresh_process_wait_failed", error.to_string())
+            })?
+            .is_some()
+        {
+            break;
+        }
+        match receiver.recv_timeout(StdDuration::from_millis(100)) {
+            Ok(line) => {
+                let trimmed = line.trim();
+                if !trimmed.starts_with('{') {
+                    continue;
+                }
+                let Ok(response) = serde_json::from_str::<Value>(trimmed) else {
+                    continue;
+                };
+                if response.get("id").and_then(Value::as_i64) == Some(1)
+                    && response.get("result").is_some()
+                {
+                    initialized = true;
+                }
+                if response.get("id").and_then(Value::as_i64) == Some(2)
+                    && response
+                        .pointer("/result/tools")
+                        .and_then(Value::as_array)
+                        .is_some()
+                {
+                    tools_listed = true;
+                }
+                if response.get("error").is_some() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(Failure::new(
+                        "materializer_fresh_process_protocol_refused",
+                        server.name.clone(),
+                    )
+                    .with_details(json!({"response":response})));
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    if !initialized || !tools_listed {
+        return Err(Failure::new(
+            "materializer_fresh_process_validation_failed",
+            server.name.clone(),
+        )
+        .with_details(json!({
+            "initialize_succeeded":initialized,
+            "tools_list_succeeded":tools_listed,
+            "timeout_seconds":timeout.as_secs(),
+        })));
+    }
+    Ok(())
+}
+
+fn acquire_publication_lock(carrier_root: &Path) -> Result<fs::File, Failure> {
+    let lock_root = carrier_root.join("locks");
+    fs::create_dir_all(&lock_root).map_err(|error| {
+        Failure::new(
+            "materializer_publication_lock_directory_failed",
+            error.to_string(),
+        )
+    })?;
+    let lock_path = lock_root.join("carrier-publication.lock");
+    let mut lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&lock_path)
+        .map_err(|error| {
+            Failure::new(
+                "materializer_publication_lock_open_failed",
+                error.to_string(),
+            )
+        })?;
+    lock.try_lock_exclusive().map_err(|error| {
+        Failure::new("materializer_publication_locked", error.to_string())
+            .with_details(json!({"lock_path": path_text(&lock_path)}))
+    })?;
+    lock.set_len(0).map_err(|error| {
+        Failure::new(
+            "materializer_publication_lock_metadata_failed",
+            error.to_string(),
+        )
+    })?;
+    lock.write_all(
+        format!(
+            "{{\"schema\":\"narada.carrier_publication_lock.v1\",\"pid\":{},\"acquired_at\":{}}}\n",
+            std::process::id(),
+            serde_json::to_string(
+                &OffsetDateTime::now_utc()
+                    .format(&Rfc3339)
+                    .unwrap_or_default()
+            )
+            .unwrap_or_else(|_| "\"\"".to_string())
+        )
+        .as_bytes(),
+    )
+    .map_err(|error| {
+        Failure::new(
+            "materializer_publication_lock_metadata_failed",
+            error.to_string(),
+        )
+    })?;
+    lock.sync_all().map_err(|error| {
+        Failure::new(
+            "materializer_publication_lock_metadata_failed",
+            error.to_string(),
+        )
+    })?;
+    Ok(lock)
+}
+
+fn durable_bundle_publish(
+    publications: &[Publication],
+    carrier_root: &Path,
+    commit_pointer_path: &Path,
+    bundle_id: &str,
+) -> Result<Value, Failure> {
+    if publications
+        .last()
+        .is_none_or(|publication| !path_eq(&publication.path, commit_pointer_path))
+    {
+        return Err(Failure::new(
+            "materializer_commit_pointer_not_last",
+            path_text(commit_pointer_path),
+        ));
+    }
+    let _publication_lock = acquire_publication_lock(carrier_root)?;
+    recover_pending_transactions(carrier_root)?;
+    let current_pointer_hash = fs::read(commit_pointer_path)
+        .ok()
+        .map(|bytes| sha256(&bytes))
+        .unwrap_or_else(|| "absent".to_string());
+    let transaction_id = sha256(
+        format!(
+            "{bundle_id}:{current_pointer_hash}:{}:{}",
+            std::process::id(),
+            OffsetDateTime::now_utc().unix_timestamp_nanos()
+        )
+        .as_bytes(),
+    );
+    let transaction_root = carrier_root.join("transactions").join(&transaction_id);
+    fs::create_dir_all(&transaction_root).map_err(|error| {
+        Failure::new(
+            "materializer_transaction_directory_failed",
+            error.to_string(),
+        )
+    })?;
+    for publication in publications {
+        if !same_volume(&transaction_root, &publication.path) {
+            return Err(Failure::new(
+                "materializer_transaction_cross_volume_refused",
+                path_text(&publication.path),
+            )
+            .with_details(json!({"transaction_root":path_text(&transaction_root)})));
+        }
+    }
+    let candidate_root = transaction_root.join("candidates");
+    let preimage_root = transaction_root.join("preimages");
+    fs::create_dir_all(&candidate_root).map_err(|error| {
+        Failure::new(
+            "materializer_transaction_directory_failed",
+            error.to_string(),
+        )
+    })?;
+    fs::create_dir_all(&preimage_root).map_err(|error| {
+        Failure::new(
+            "materializer_transaction_directory_failed",
+            error.to_string(),
+        )
+    })?;
+    let mut items = Vec::new();
+    let mut snapshots = Vec::new();
+    for (index, publication) in publications.iter().enumerate() {
+        let preimage = fs::read(&publication.path).ok();
+        let candidate_path = candidate_root.join(format!("{index}.bin"));
+        atomic_write(&candidate_path, &publication.content).map_err(|error| {
+            Failure::new(
+                "materializer_transaction_candidate_write_failed",
+                error.to_string(),
+            )
+        })?;
+        let preimage_path = preimage
+            .as_ref()
+            .map(|content| {
+                let path = preimage_root.join(format!("{index}.bin"));
+                atomic_write(&path, content).map(|_| path).map_err(|error| {
+                    Failure::new(
+                        "materializer_transaction_preimage_write_failed",
+                        error.to_string(),
+                    )
+                })
+            })
+            .transpose()?;
+        items.push(json!({
+            "order": index,
+            "path": path_text(&publication.path),
+            "candidate_path": path_text(&candidate_path),
+            "candidate_sha256": sha256(&publication.content),
+            "preimage_path": preimage_path.as_ref().map(|path|path_text(path)),
+            "preimage_sha256": preimage.as_ref().map(|content|sha256(content)),
+            "state": "prepared",
+        }));
+        snapshots.push(Snapshot {
+            path: publication.path.clone(),
+            content: preimage,
+        });
+    }
+    let journal_path = transaction_root.join("journal.json");
+    let mut journal = json!({
+        "schema": "narada.carrier_generation_transaction.v1",
+        "transaction_id": transaction_id,
+        "bundle_id": bundle_id,
+        "state": "prepared",
+        "commit_pointer_path": path_text(commit_pointer_path),
+        "items": items,
+        "threat_model": "cooperating_same_user_processes_and_crash_recovery",
+    });
+    write_transaction_journal(&journal_path, &journal)?;
+    journal["state"] = json!("promoting");
+    write_transaction_journal(&journal_path, &journal)?;
+    for (index, publication) in publications.iter().enumerate() {
+        let current = fs::read(&publication.path).ok();
+        let preimage = &snapshots[index].content;
+        if current.as_deref() != preimage.as_deref()
+            && current.as_deref() != Some(publication.content.as_slice())
+        {
+            journal["state"] = json!("blocked_recovery");
+            write_transaction_journal(&journal_path, &journal)?;
+            return Err(Failure::new(
+                "materializer_transaction_cas_conflict",
+                path_text(&publication.path),
+            )
+            .with_details(json!({"transaction_id":transaction_id})));
+        }
+        if current.as_deref() != Some(publication.content.as_slice()) {
+            if let Err(error) = atomic_write(&publication.path, &publication.content) {
+                journal["state"] = json!("recovery_required");
+                write_transaction_journal(&journal_path, &journal)?;
+                if index + 1 < publications.len() {
+                    let rollback_errors = rollback(&snapshots);
+                    if rollback_errors.is_empty() {
+                        journal["state"] = json!("aborted");
+                        write_transaction_journal(&journal_path, &journal)?;
+                    }
+                }
+                return Err(
+                    Failure::new("materializer_transaction_failed", error.to_string())
+                        .with_details(json!({
+                            "failed_path":path_text(&publication.path),
+                            "transaction_id":transaction_id,
+                        })),
+                );
+            }
+        }
+        let installed = fs::read(&publication.path).map_err(|error| {
+            Failure::new("materializer_transaction_verify_failed", error.to_string())
+        })?;
+        if sha256(&installed) != sha256(&publication.content) {
+            journal["state"] = json!("recovery_required");
+            write_transaction_journal(&journal_path, &journal)?;
+            return Err(Failure::new(
+                "materializer_transaction_verify_failed",
+                path_text(&publication.path),
+            ));
+        }
+        journal["items"][index]["state"] = json!("published");
+        write_transaction_journal(&journal_path, &journal)?;
+        if env::var("NARADA_MATERIALIZER_CRASH_AFTER_WRITE")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            == Some(index + 1)
+        {
+            std::process::exit(86);
+        }
+    }
+    journal["state"] = json!("committed");
+    write_transaction_journal(&journal_path, &journal)?;
+    Ok(json!({
+        "schema":"narada.carrier_generation_transaction_result.v1",
+        "status":"committed",
+        "transaction_id":transaction_id,
+        "journal_path":path_text(&journal_path),
+        "publication_count":publications.len(),
+    }))
+}
+
+fn write_transaction_journal(path: &Path, journal: &Value) -> Result<(), Failure> {
+    let content = pretty_json(journal)?;
+    atomic_write(path, &content).map_err(|error| {
+        Failure::new(
+            "materializer_transaction_journal_write_failed",
+            error.to_string(),
+        )
+    })?;
+    let installed = fs::read(path).map_err(|error| {
+        Failure::new(
+            "materializer_transaction_journal_verify_failed",
+            error.to_string(),
+        )
+    })?;
+    if installed != content {
+        return Err(Failure::new(
+            "materializer_transaction_journal_verify_failed",
+            path_text(path),
+        ));
+    }
+    Ok(())
+}
+
+fn recover_pending_transactions(carrier_root: &Path) -> Result<Value, Failure> {
+    let transactions_root = carrier_root.join("transactions");
+    if !transactions_root.exists() {
+        return Ok(json!({"status":"nothing_to_recover","recovered":[]}));
+    }
+    let mut recovered = Vec::new();
+    for entry in fs::read_dir(&transactions_root).map_err(|error| {
+        Failure::new(
+            "materializer_transaction_inventory_failed",
+            error.to_string(),
+        )
+    })? {
+        let entry = entry.map_err(|error| {
+            Failure::new(
+                "materializer_transaction_inventory_failed",
+                error.to_string(),
+            )
+        })?;
+        if !entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let journal_path = entry.path().join("journal.json");
+        if !journal_path.exists() {
+            continue;
+        }
+        let mut journal = read_json(&journal_path, "materializer_transaction_journal_invalid")?;
+        let state = journal.get("state").and_then(Value::as_str).unwrap_or("");
+        if matches!(state, "committed" | "aborted") {
+            continue;
+        }
+        let commit_pointer_path =
+            PathBuf::from(json_field_string(&journal, "commit_pointer_path")?);
+        let items = journal
+            .get("items")
+            .and_then(Value::as_array)
+            .cloned()
+            .ok_or_else(|| {
+                Failure::new(
+                    "materializer_transaction_journal_invalid",
+                    path_text(&journal_path),
+                )
+            })?;
+        let commit_item = items
+            .iter()
+            .find(|item| {
+                item.get("path")
+                    .and_then(Value::as_str)
+                    .is_some_and(|path| path_eq(Path::new(path), &commit_pointer_path))
+            })
+            .ok_or_else(|| {
+                Failure::new(
+                    "materializer_transaction_commit_item_missing",
+                    path_text(&journal_path),
+                )
+            })?;
+        let pointer_committed = fs::read(&commit_pointer_path).ok().is_some_and(|bytes| {
+            commit_item.get("candidate_sha256").and_then(Value::as_str)
+                == Some(sha256(&bytes).as_str())
+        });
+        let ordered: Box<dyn Iterator<Item = &Value>> = if pointer_committed {
+            Box::new(items.iter())
+        } else {
+            Box::new(items.iter().rev())
+        };
+        for item in ordered {
+            let target = PathBuf::from(json_field_string(item, "path")?);
+            let candidate_path = PathBuf::from(json_field_string(item, "candidate_path")?);
+            let candidate = fs::read(&candidate_path).map_err(|error| {
+                Failure::new(
+                    "materializer_transaction_candidate_missing",
+                    error.to_string(),
+                )
+            })?;
+            let preimage_path = item.get("preimage_path").and_then(Value::as_str);
+            let preimage = preimage_path
+                .map(|path| {
+                    fs::read(path).map_err(|error| {
+                        Failure::new(
+                            "materializer_transaction_preimage_missing",
+                            error.to_string(),
+                        )
+                    })
+                })
+                .transpose()?;
+            let current = fs::read(&target).ok();
+            if current.as_deref() != Some(candidate.as_slice())
+                && current.as_deref() != preimage.as_deref()
+            {
+                journal["state"] = json!("blocked_recovery");
+                write_transaction_journal(&journal_path, &journal)?;
+                return Err(Failure::new(
+                    "materializer_transaction_recovery_cas_conflict",
+                    path_text(&target),
+                )
+                .with_details(json!({"journal_path":path_text(&journal_path)})));
+            }
+            let desired = if pointer_committed {
+                Some(candidate.as_slice())
+            } else {
+                preimage.as_deref()
+            };
+            match desired {
+                Some(content) if current.as_deref() != Some(content) => {
+                    atomic_write(&target, content).map_err(|error| {
+                        Failure::new(
+                            "materializer_transaction_recovery_write_failed",
+                            error.to_string(),
+                        )
+                    })?;
+                }
+                None if current.is_some() => {
+                    fs::remove_file(&target).map_err(|error| {
+                        Failure::new(
+                            "materializer_transaction_recovery_remove_failed",
+                            error.to_string(),
+                        )
+                    })?;
+                }
+                _ => {}
+            }
+        }
+        journal["state"] = json!(if pointer_committed {
+            "committed"
+        } else {
+            "aborted"
+        });
+        write_transaction_journal(&journal_path, &journal)?;
+        recovered.push(json!({
+            "transaction_id":journal.get("transaction_id"),
+            "resolution":journal.get("state"),
+        }));
+    }
+    Ok(json!({"status":"recovered","recovered":recovered}))
+}
+
+fn same_volume(left: &Path, right: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        use std::path::Component;
+        let prefix = |path: &Path| {
+            path.components()
+                .next()
+                .and_then(|component| match component {
+                    Component::Prefix(prefix) => {
+                        Some(prefix.as_os_str().to_string_lossy().to_lowercase())
+                    }
+                    _ => None,
+                })
+        };
+        prefix(left) == prefix(right)
+    }
+    #[cfg(not(windows))]
+    {
+        left.is_absolute() == right.is_absolute()
+    }
 }
 
 fn validate_input(input: &MaterializationInput) -> Result<(), Failure> {
@@ -996,6 +2220,7 @@ fn validate_input(input: &MaterializationInput) -> Result<(), Failure> {
             ));
         }
         let mut server_names = BTreeSet::new();
+        let mut binding_ids = BTreeSet::new();
         for server in &carrier.servers {
             validate_identifier(&server.name, "server_name")?;
             if !server_names.insert(&server.name) {
@@ -1003,6 +2228,15 @@ fn validate_input(input: &MaterializationInput) -> Result<(), Failure> {
                     "materializer_server_name_duplicate",
                     server.name.clone(),
                 ));
+            }
+            if let Some(binding_id) = &server.binding_id {
+                validate_identifier(binding_id, "binding_id")?;
+                if !binding_ids.insert(binding_id) {
+                    return Err(Failure::new(
+                        "materializer_binding_id_duplicate",
+                        binding_id.clone(),
+                    ));
+                }
             }
             if server.command.trim().is_empty() {
                 return Err(Failure::new(
@@ -1035,7 +2269,7 @@ fn validate_proxy_launch(
         ));
     }
     let required = [
-        ("--runtime-contract-version", "6".to_string()),
+        ("--runtime-contract-version", CONTRACT_VERSION.to_string()),
         (
             "--artifact-manifest",
             path_text(&input.artifact_manifest_path),
@@ -1171,14 +2405,14 @@ fn emit_json_carrier(carrier: &CarrierInput, field: &str) -> Result<Vec<u8>, Fai
     if matches!(carrier.carrier_kind, CarrierKind::Opencode) {
         output.splice(
             0..0,
-            b"// Generated by narada-mcp-materializer. Do not hand-edit; changes will be overwritten on next materialize.\n".iter().copied(),
+            b"// Narada owns this entire OpenCode carrier document; use materialization to change it.\n".iter().copied(),
         );
     }
     Ok(output)
 }
 
 fn emit_codex(carrier: &CarrierInput) -> Result<Vec<u8>, Failure> {
-    let mut out = String::from("# Generated by narada-mcp-materializer. Do not hand-edit; changes will be overwritten on next materialize.\n\n# Codex Apps/connectors are opt-in for profile-less launches.\n[features]\napps = false\n\n");
+    let mut out = String::from("# Narada manages only recorded MCP and carrier policy settings; other Codex settings are preserved.\n\n# Codex Apps/connectors are opt-in for profile-less launches.\n[features]\napps = false\n\n");
     for (plugin, enabled) in &carrier.codex_plugin_overrides {
         out.push_str(&format!(
             "[plugins.{}]\nenabled = {}\n\n",
@@ -1189,7 +2423,7 @@ fn emit_codex(carrier: &CarrierInput) -> Result<Vec<u8>, Failure> {
     for project in &carrier.trust_projects {
         out.push_str(&format!(
             "[projects.{}]\ntrust_level = \"trusted\"\n\n",
-            json_string(&project.replace('\\', "\\\\"))?
+            json_string(project)?
         ));
     }
     for server in &carrier.servers {
@@ -1197,7 +2431,7 @@ fn emit_codex(carrier: &CarrierInput) -> Result<Vec<u8>, Failure> {
         out.push_str(&format!("command = {}\n", json_string(&server.command)?));
         out.push_str(&format!("args = {}\n", string_array(&server.args)?));
         out.push_str(&format!(
-            "approval_mode = {}\n",
+            "default_tools_approval_mode = {}\n",
             json_string(server.approval_mode.as_deref().unwrap_or("approve"))?
         ));
         if let Some(timeout) = server.startup_timeout_sec {
@@ -1265,7 +2499,8 @@ fn atomic_write(path: &Path, content: &[u8]) -> std::io::Result<()> {
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or("materialized");
-    let temporary = parent.join(format!(".{name}.narada-{}.tmp", std::process::id()));
+    let nonce = OffsetDateTime::now_utc().unix_timestamp_nanos();
+    let temporary = parent.join(format!(".{name}.narada-{}-{nonce}.tmp", std::process::id()));
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -1273,10 +2508,71 @@ fn atomic_write(path: &Path, content: &[u8]) -> std::io::Result<()> {
     file.write_all(content)?;
     file.sync_all()?;
     drop(file);
-    if path.exists() {
-        fs::remove_file(path)?;
+    replace_file(&temporary, path)?;
+    let installed = fs::read(path)?;
+    if installed != content {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "durable_replace_verification_failed",
+        ));
     }
-    fs::rename(&temporary, path)
+    Ok(())
+}
+
+#[cfg(windows)]
+fn replace_file(temporary: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::ptr;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, ReplaceFileW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+        REPLACEFILE_WRITE_THROUGH,
+    };
+    let wide = |path: &Path| {
+        path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>()
+    };
+    let temporary_wide = wide(temporary);
+    let destination_wide = wide(destination);
+    let mut result = unsafe {
+        if destination.exists() {
+            ReplaceFileW(
+                destination_wide.as_ptr(),
+                temporary_wide.as_ptr(),
+                ptr::null(),
+                REPLACEFILE_WRITE_THROUGH,
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        } else {
+            MoveFileExW(
+                temporary_wide.as_ptr(),
+                destination_wide.as_ptr(),
+                MOVEFILE_WRITE_THROUGH,
+            )
+        }
+    };
+    if result == 0 && destination.exists() {
+        result = unsafe {
+            MoveFileExW(
+                temporary_wide.as_ptr(),
+                destination_wide.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+    }
+    if result == 0 {
+        let error = std::io::Error::last_os_error();
+        let _ = fs::remove_file(temporary);
+        return Err(error);
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn replace_file(temporary: &Path, destination: &Path) -> std::io::Result<()> {
+    fs::rename(temporary, destination)
 }
 
 fn rollback(snapshots: &[Snapshot]) -> Vec<String> {
@@ -1294,13 +2590,11 @@ fn rollback(snapshots: &[Snapshot]) -> Vec<String> {
     errors
 }
 
-fn pretty_json(value: &Value) -> Result<Vec<u8>, Failure> {
-    let mut bytes = serde_json::to_vec_pretty(value).map_err(json_failure)?;
-    bytes.push(b'\n');
-    Ok(bytes)
-}
 fn json_failure(error: serde_json::Error) -> Failure {
     Failure::new("materializer_json_failed", error.to_string())
+}
+fn pretty_json(value: &Value) -> Result<Vec<u8>, Failure> {
+    contract_pretty_json(value).map_err(|error| Failure::new("materializer_json_failed", error))
 }
 fn sha256(value: &[u8]) -> String {
     hex::encode(Sha256::digest(value))
@@ -1312,50 +2606,65 @@ fn path_text(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-fn materialization_config_fingerprint(
-    carrier_kind: CarrierKind,
-    content: &[u8],
-) -> Result<String, Failure> {
-    let normalized = String::from_utf8(content.to_vec())
-        .map_err(|error| Failure::new("materializer_config_not_utf8", error.to_string()))?
-        .replace("\r\n", "\n")
-        .replace('\r', "\n");
-    let canonical = if matches!(carrier_kind, CarrierKind::Codex) {
-        let mut lines = Vec::new();
-        let mut in_mcp_table = false;
-        let mut saw_mcp_table = false;
-        for line in normalized.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with("[mcp_servers.") && trimmed.ends_with(']') {
-                in_mcp_table = true;
-                saw_mcp_table = true;
-                lines.push(line);
-                continue;
-            }
-            if trimmed.starts_with('[') && trimmed.ends_with(']') {
-                in_mcp_table = false;
-            }
-            if in_mcp_table {
-                lines.push(line);
-            }
-        }
-        if saw_mcp_table {
-            lines.join("\n")
-        } else {
-            normalized.clone()
-        }
-    } else {
-        normalized
-    };
-    Ok(sha256(canonical.trim_end_matches('\n').as_bytes()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
 
     fn fixture(root: &Path) -> MaterializationInput {
+        fs::write(root.join("narada-mcp-materializer.exe"), b"materializer").unwrap();
+        fs::write(root.join("narada-mcp-runtime.exe"), b"runtime").unwrap();
+        fs::write(root.join("child.exe"), b"child").unwrap();
+        fs::write(root.join("matrix.json"), b"matrix").unwrap();
+        fs::write(root.join("carrier-contract.json"), b"contract").unwrap();
+        let manifest = json!({
+            "schema":"narada.workspace_artifact_manifest.v1",
+            "workspace_root":path_text(root),
+            "manifest_fingerprint":"a".repeat(64),
+            "packages":[],
+            "artifacts":[]
+        });
+        let manifest_bytes = pretty_json(&manifest).unwrap();
+        fs::write(root.join("manifest.json"), &manifest_bytes).unwrap();
+        let artifacts = [
+            ("narada-mcp-materializer.exe", b"materializer".as_slice()),
+            ("narada-mcp-runtime.exe", b"runtime".as_slice()),
+            ("child.exe", b"child".as_slice()),
+        ]
+        .into_iter()
+        .map(|(name, bytes)| {
+            json!({
+                "path":path_text(&root.join(name)),
+                "size":bytes.len(),
+                "sha256":format!("sha256:{}",sha256(bytes)),
+            })
+        })
+        .collect::<Vec<_>>();
+        let build_set_unsigned = json!({
+            "schema":"narada.artifact_build_set.v1",
+            "assurance":"declared_isolated_closure",
+            "workspace_root":path_text(root),
+            "workspace_manifest_path":path_text(&root.join("manifest.json")),
+            "workspace_manifest_fingerprint":"a".repeat(64),
+            "workspace_manifest_bytes_digest":format!("sha256:{}",sha256(&manifest_bytes)),
+            "source_closure_digest":format!("sha256:{}", "0".repeat(64)),
+            "toolchain":{},
+            "ambient_input_classes":[],
+            "required_references":[],
+            "artifacts":artifacts,
+        });
+        let build_set_digest = format!(
+            "sha256:{}",
+            canonical_json_sha256(&build_set_unsigned).unwrap()
+        );
+        let mut build_set = build_set_unsigned;
+        build_set["build_set_digest"] = json!(build_set_digest);
+        build_set["generated_at"] = json!("2026-08-12T00:00:00Z");
+        fs::write(
+            root.join("artifact-build-set.json"),
+            pretty_json(&build_set).unwrap(),
+        )
+        .unwrap();
         MaterializationInput {
             schema: INPUT_SCHEMA.into(),
             workspace_root: root.into(),
@@ -1363,6 +2672,8 @@ mod tests {
             carrier_contract_fingerprint: "e".repeat(64),
             artifact_manifest_path: root.join("manifest.json"),
             artifact_manifest_fingerprint: Some("a".repeat(64)),
+            artifact_build_set_path: root.join("artifact-build-set.json"),
+            artifact_build_set_fingerprint: build_set_digest,
             runtime_profile_kind: "native".into(),
             runtime_implementation_matrix_path: root.join("matrix.json"),
             runtime_implementation_matrix_fingerprint: "b".repeat(64),
@@ -1378,7 +2689,11 @@ mod tests {
                 config_path: root.join("config.toml"),
                 codex_plugin_overrides: BTreeMap::new(),
                 trust_projects: vec![],
+                binding_admission_path: None,
+                binding_admission_envelope: None,
                 servers: vec![ServerInput {
+                    binding_id: Some("fixture-binding".into()),
+                    source_server_key: Some("narada-site-fixture".into()),
                     name: "narada-test".into(),
                     command: path_text(&root.join("narada-mcp-runtime.exe")),
                     args: vec![
@@ -1390,7 +2705,7 @@ mod tests {
                         "--artifact-manifest".into(),
                         path_text(&root.join("manifest.json")),
                         "--runtime-contract-version".into(),
-                        "6".into(),
+                        CONTRACT_VERSION.to_string(),
                         "--entrypoint".into(),
                         path_text(&root.join("child.exe")),
                         "--carrier-id".into(),
@@ -1422,8 +2737,8 @@ mod tests {
     fn materializes_config_sidecars_and_index() {
         let root = tempdir().unwrap();
         let input = fixture(root.path());
-        let result = materialize(input).unwrap();
-        assert_eq!(result["status"], "materialized_all");
+        let result = materialize(input, false).unwrap();
+        assert_eq!(result["status"], "committed");
         assert!(root.path().join("config.toml").exists());
         assert!(root
             .path()
@@ -1440,22 +2755,158 @@ mod tests {
     }
 
     #[test]
+    fn recovery_rolls_back_when_the_commit_pointer_was_not_published() {
+        let root = tempdir().unwrap();
+        let carrier_root = root.path().join("carrier-state");
+        let transaction_root = carrier_root.join("transactions").join("crashed");
+        let candidates = transaction_root.join("candidates");
+        let preimages = transaction_root.join("preimages");
+        fs::create_dir_all(&candidates).unwrap();
+        fs::create_dir_all(&preimages).unwrap();
+        let target = root.path().join("config.toml");
+        let pointer = carrier_root.join("current-bundle.json");
+        fs::write(&target, b"candidate").unwrap();
+        fs::write(candidates.join("0.bin"), b"candidate").unwrap();
+        fs::write(preimages.join("0.bin"), b"preimage").unwrap();
+        fs::write(candidates.join("1.bin"), b"pointer").unwrap();
+        let journal = json!({
+            "schema":"narada.carrier_generation_transaction.v1",
+            "transaction_id":"crashed",
+            "bundle_id":"bundle",
+            "state":"promoting",
+            "commit_pointer_path":path_text(&pointer),
+            "items":[
+                {
+                    "order":0,
+                    "path":path_text(&target),
+                    "candidate_path":path_text(&candidates.join("0.bin")),
+                    "candidate_sha256":sha256(b"candidate"),
+                    "preimage_path":path_text(&preimages.join("0.bin")),
+                    "preimage_sha256":sha256(b"preimage"),
+                    "state":"published"
+                },
+                {
+                    "order":1,
+                    "path":path_text(&pointer),
+                    "candidate_path":path_text(&candidates.join("1.bin")),
+                    "candidate_sha256":sha256(b"pointer"),
+                    "preimage_path":Value::Null,
+                    "preimage_sha256":Value::Null,
+                    "state":"prepared"
+                }
+            ]
+        });
+        fs::write(
+            transaction_root.join("journal.json"),
+            pretty_json(&journal).unwrap(),
+        )
+        .unwrap();
+        let recovered = recover_pending_transactions(&carrier_root).unwrap();
+        assert_eq!(recovered["recovered"][0]["resolution"], "aborted");
+        assert_eq!(fs::read(&target).unwrap(), b"preimage");
+        assert!(!pointer.exists());
+    }
+
+    #[test]
+    fn recovery_rolls_forward_when_the_commit_pointer_was_published() {
+        let root = tempdir().unwrap();
+        let carrier_root = root.path().join("carrier-state");
+        let transaction_root = carrier_root.join("transactions").join("crashed");
+        let candidates = transaction_root.join("candidates");
+        let preimages = transaction_root.join("preimages");
+        fs::create_dir_all(&candidates).unwrap();
+        fs::create_dir_all(&preimages).unwrap();
+        let target = root.path().join("config.toml");
+        let pointer = carrier_root.join("current-bundle.json");
+        fs::write(&target, b"preimage").unwrap();
+        fs::write(candidates.join("0.bin"), b"candidate").unwrap();
+        fs::write(preimages.join("0.bin"), b"preimage").unwrap();
+        fs::write(candidates.join("1.bin"), b"pointer").unwrap();
+        fs::create_dir_all(pointer.parent().unwrap()).unwrap();
+        fs::write(&pointer, b"pointer").unwrap();
+        let journal = json!({
+            "schema":"narada.carrier_generation_transaction.v1",
+            "transaction_id":"crashed",
+            "bundle_id":"bundle",
+            "state":"promoting",
+            "commit_pointer_path":path_text(&pointer),
+            "items":[
+                {
+                    "order":0,
+                    "path":path_text(&target),
+                    "candidate_path":path_text(&candidates.join("0.bin")),
+                    "candidate_sha256":sha256(b"candidate"),
+                    "preimage_path":path_text(&preimages.join("0.bin")),
+                    "preimage_sha256":sha256(b"preimage"),
+                    "state":"prepared"
+                },
+                {
+                    "order":1,
+                    "path":path_text(&pointer),
+                    "candidate_path":path_text(&candidates.join("1.bin")),
+                    "candidate_sha256":sha256(b"pointer"),
+                    "preimage_path":Value::Null,
+                    "preimage_sha256":Value::Null,
+                    "state":"published"
+                }
+            ]
+        });
+        fs::write(
+            transaction_root.join("journal.json"),
+            pretty_json(&journal).unwrap(),
+        )
+        .unwrap();
+        let recovered = recover_pending_transactions(&carrier_root).unwrap();
+        assert_eq!(recovered["recovered"][0]["resolution"], "committed");
+        assert_eq!(fs::read(&target).unwrap(), b"candidate");
+        assert_eq!(fs::read(&pointer).unwrap(), b"pointer");
+    }
+
+    #[test]
+    fn identical_materialization_inputs_reuse_the_semantic_bundle_identity() {
+        let root = tempdir().unwrap();
+        let first = materialize(fixture(root.path()), false).unwrap();
+        let second = materialize(fixture(root.path()), false).unwrap();
+        assert_eq!(first["bundle_id"], second["bundle_id"]);
+    }
+
+    #[test]
+    fn publication_lock_refuses_a_concurrent_writer() {
+        let root = tempdir().unwrap();
+        let first = acquire_publication_lock(root.path()).unwrap();
+        let second = acquire_publication_lock(root.path()).unwrap_err();
+        assert_eq!(second.code, "materializer_publication_locked");
+        drop(first);
+        acquire_publication_lock(root.path()).unwrap();
+    }
+
+    #[test]
     fn invalid_input_writes_nothing() {
         let root = tempdir().unwrap();
         let mut input = fixture(root.path());
         input.carriers[0].servers[0].name = "bad name".into();
         assert_eq!(
-            materialize(input).unwrap_err().code,
+            materialize(input, false).unwrap_err().code,
             "materializer_identifier_invalid"
         );
-        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+        assert!(!root.path().join("config.toml").exists());
+        assert!(!root.path().join("installed-carriers.json").exists());
+        assert!(!root
+            .path()
+            .join(".narada")
+            .join("carrier-transactions")
+            .exists());
     }
 
     #[test]
     fn publication_failure_restores_every_previous_file() {
         let root = tempdir().unwrap();
         let mut input = fixture(root.path());
-        fs::write(root.path().join("config.toml"), b"operator-owned-before\n").unwrap();
+        fs::write(
+            root.path().join("config.toml"),
+            b"model = \"operator-owned-before\"\n",
+        )
+        .unwrap();
         fs::write(root.path().join("blocked-parent"), b"not-a-directory\n").unwrap();
         input.carriers.push(CarrierInput {
             carrier_id: "kimi-test".into(),
@@ -1463,15 +2914,17 @@ mod tests {
             config_path: root.path().join("blocked-parent").join("mcp.json"),
             codex_plugin_overrides: BTreeMap::new(),
             trust_projects: vec![],
+            binding_admission_path: None,
+            binding_admission_envelope: None,
             servers: vec![],
         });
 
-        let failure = materialize(input).unwrap_err();
+        let failure = materialize(input, false).unwrap_err();
 
         assert_eq!(failure.code, "materializer_transaction_failed");
         assert_eq!(
             fs::read(root.path().join("config.toml")).unwrap(),
-            b"operator-owned-before\n"
+            b"model = \"operator-owned-before\"\n"
         );
         assert!(!root
             .path()
@@ -1482,5 +2935,24 @@ mod tests {
             .join("config.toml.narada-runtime-plan.json")
             .exists());
         assert!(!root.path().join("installed-carriers.json").exists());
+    }
+
+    #[test]
+    fn malformed_existing_codex_toml_fails_before_writes() {
+        let root = tempdir().unwrap();
+        let input = fixture(root.path());
+        fs::write(root.path().join("config.toml"), b"[broken\n").unwrap();
+
+        let failure = materialize(input, false).unwrap_err();
+
+        assert_eq!(failure.code, "materializer_codex_merge_failed");
+        assert_eq!(
+            fs::read(root.path().join("config.toml")).unwrap(),
+            b"[broken\n"
+        );
+        assert!(!root
+            .path()
+            .join("config.toml.narada-generation.json")
+            .exists());
     }
 }

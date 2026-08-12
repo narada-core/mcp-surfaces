@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -17,10 +17,11 @@ const appletArgument = process.env.NARADA_NATIVE_FILESYSTEM_TEST_VARIANT === 'rh
   ? 'rhai-filesystem'
   : 'filesystem';
 
-function run(mode: 'read' | 'write', root: string, requests: JsonRecord[], auditLogDir?: string): Promise<JsonRecord[]> {
+function run(mode: 'read' | 'write', root: string, requests: JsonRecord[], auditLogDir?: string, outputRoot?: string): Promise<JsonRecord[]> {
   return new Promise((resolvePromise, rejectPromise) => {
     const args = [appletArgument, '--mode', mode, '--allowed-root', root];
     if (auditLogDir) args.push('--audit-log-dir', auditLogDir);
+    if (outputRoot) args.push('--output-root', outputRoot);
     const child = spawn(executable, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
     let stdout = '';
     let stderr = '';
@@ -41,8 +42,11 @@ function run(mode: 'read' | 'write', root: string, requests: JsonRecord[], audit
 }
 
 const root = mkdtempSync(join(tmpdir(), 'narada-native-filesystem-write-'));
+const extraRoot = mkdtempSync(join(tmpdir(), 'narada-native-filesystem-extra-'));
 const auditLogDir = join(root, 'audit');
 try {
+  mkdirSync(join(root, '.narada'), { recursive: true });
+  writeFileSync(join(root, '.narada', 'allowed-roots.json'), JSON.stringify({ extra_allowed_roots: [extraRoot] }), 'utf8');
   const responses = await run('write', root, [
     { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05' } },
     { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} },
@@ -67,7 +71,7 @@ try {
     { jsonrpc: '2.0', id: 21, method: 'tools/call', params: { name: 'fs_move_path', arguments: { from: 'nested/moved.txt', to: '../outside.txt' } } },
     { jsonrpc: '2.0', id: 22, method: 'tools/call', params: { name: 'fs_write_file', arguments: { path: 'nested/existing.txt', content: 'existing\n' } } },
     { jsonrpc: '2.0', id: 23, method: 'tools/call', params: { name: 'fs_move_path', arguments: { from: 'nested/moved.txt', to: 'nested/existing.txt' } } },
-  ], auditLogDir);
+  ], auditLogDir, root);
   const byId = new Map(responses.map((response) => [response.id, response]));
   assert.equal(byId.get(1)?.result?.serverInfo?.name, expectedServerName);
   assert.equal(byId.get(2)?.result?.tools?.some((tool: JsonRecord) => tool.name === 'fs_write_file'), true);
@@ -78,6 +82,8 @@ try {
   assert.equal(byId.get(2)?.result?.tools?.some((tool: JsonRecord) => tool.name === 'fs_rename_directory'), true);
   assert.equal(byId.get(2)?.result?.tools?.some((tool: JsonRecord) => tool.name === 'fs_delete_directory'), true);
   assert.equal(byId.get(3)?.result?.structuredContent?.effective_permissions?.can_write, true);
+  assert.equal(byId.get(3)?.result?.structuredContent?.allowed_roots?.includes(extraRoot), true);
+  assert.equal(byId.get(3)?.result?.structuredContent?.allowed_root_entries?.some((entry: JsonRecord) => entry.provenance?.source === 'site_allowed_roots_config'), true);
   assert.equal(byId.get(4)?.result?.structuredContent?.schema, 'local.filesystem.write_file.v1');
   assert.equal(byId.get(4)?.result?.structuredContent?.status, 'written');
   assert.equal(byId.get(5)?.result?.structuredContent?.content, 'hello native');
@@ -103,10 +109,11 @@ try {
   const readResponses = await run('read', root, [
     { jsonrpc: '2.0', id: 8, method: 'tools/list', params: {} },
     { jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'fs_write_file', arguments: { path: 'blocked.txt', content: 'nope' } } },
-  ]);
+  ], undefined, root);
   const readById = new Map(readResponses.map((response) => [response.id, response]));
   assert.equal(readById.get(8)?.result?.tools?.some((tool: JsonRecord) => tool.name === 'fs_write_file'), false);
   assert.equal(readById.get(9)?.error?.data?.code, 'tool_not_available_in_read_mode');
 } finally {
   rmSync(root, { recursive: true, force: true });
+  rmSync(extraRoot, { recursive: true, force: true });
 }

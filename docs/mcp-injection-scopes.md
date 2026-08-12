@@ -80,6 +80,8 @@ Expected properties:
 - mutation locus: user Narada site config or state;
 - restart owner: user-site launcher or carrier registration;
 - site visibility: injected into local site sessions by explicit binding;
+- a User-Site-bound carrier may activate exact bindings from every registered Site admitted within the User Site's authorized roots;
+- each such binding retains its own Site authority locus and permissions; root reachability is eligibility evidence, not authority merging;
 - local sites can observe or request through the surface, but do not own it.
 
 ### Local-Site Injection
