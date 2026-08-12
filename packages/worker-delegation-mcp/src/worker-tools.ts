@@ -16,7 +16,7 @@ import { audit, createRunRecord, registerActiveRun, readWorkerSessionRecord, unr
 import { candidateRunRoots, listActiveRunIds, listRunCandidates, listRunIds, locateRunResult, readRunIndexRecord, readRunResult, resolveRunInspectionSiteRoot, runArtifacts } from './run-store.js';
 import { reapEvidence } from './recovery.js';
 import { extractSessionEventEvidence } from './runtime-events.js';
-import { normalizeBatchRequests, normalizeOptionalRunIds, normalizeRunIds } from './tool-handlers/batch.js';
+import { normalizeBatchRequests, normalizeOptionalRunIds, normalizeRunIds, requireBatchRequestRecord } from './tool-handlers/batch.js';
 import { workerOperatorAffordances } from './tool-handlers/affordances.js';
 import { dashboardApiEndpoints, dashboardMode, dashboardPendingJoinGates, dashboardRun } from './tool-handlers/dashboard.js';
 import { workerEditRunArgs } from './tool-handlers/edit.js';
@@ -1237,7 +1237,7 @@ async function workerRunBatch(args: Record<string, unknown>, state: WorkerMcpSta
   for (let index = 0; index < requests.length; index += 1) {
     try {
       await waitForBatchCapacity();
-      const run = await workerRun(requests[index], state, null, context, 'worker_run_batch');
+      const run = await workerRun(requireBatchRequestRecord(requests[index]), state, null, context, 'worker_run_batch');
       runs.push({ index, ...runListItem(run, { verbose: true, includeSummary: true }) });
       const runId = String(run.run_id ?? '');
       if (runId && String(run.status ?? '') === 'running' && state.activeRunCompletions?.has(runId)) activeBatchRuns.add(runId);

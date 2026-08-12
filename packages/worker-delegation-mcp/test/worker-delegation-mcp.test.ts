@@ -1592,6 +1592,16 @@ assert.equal(batchSecondStatus.result?.structuredContent.mcp_tool_verification.r
 assert.equal(batchSecondStatus.result?.structuredContent.mcp_tool_verification.verification_state, 'projected_to_worker_runtime');
 assert.equal(batchSecondStatus.result?.structuredContent.mcp_tool_verification.fallback_reason_required, false);
 assert.equal(batchSecondStatus.result?.structuredContent.output_contract.confidence_level.minimum, 0);
+const invalidItemBatch = await rpc({ jsonrpc: '2.0', id: 523145, method: 'tools/call', params: { name: 'worker_run_batch', arguments: { requests: [
+  { intent: { instruction: 'batch valid before invalid item' }, constraints: { cwd: root, authority: 'read', cognition: 'low', wait_for_completion: true } },
+  null,
+] } } }, state);
+assert.equal(invalidItemBatch.result?.structuredContent.schema, 'narada.worker.run_batch.v1');
+assert.equal(invalidItemBatch.result?.structuredContent.status, 'completed_with_errors');
+assert.equal(invalidItemBatch.result?.structuredContent.started_count, 1);
+assert.equal(invalidItemBatch.result?.structuredContent.failed_count, 1);
+assert.equal(invalidItemBatch.result?.structuredContent.failures[0].index, 1);
+assert.equal(invalidItemBatch.result?.structuredContent.failures[0].code, 'worker_run_batch_item_invalid');
 const serializedBatchStartedAt = Date.now();
 const serializedBatch = await rpc({ jsonrpc: '2.0', id: 52315, method: 'tools/call', params: { name: 'worker_run_batch', arguments: {
   max_parallel_runs: 1,
