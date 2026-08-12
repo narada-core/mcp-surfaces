@@ -128,7 +128,9 @@ fn materializes_every_supported_carrier_kind_without_javascript_runtime_environm
     let codex = fs::read_to_string(&paths[0].2).unwrap();
     assert!(codex.contains("[features]\napps = false"));
     assert!(codex.contains("env_vars = [\"NARADA_AGENT_ID\"]"));
-    assert!(codex.contains("[mcp_servers.narada-site-test-local-filesystem.tools.fs_read]"));
+    assert!(codex.contains("[mcp_servers.narada-site-test-local-filesystem]"));
+    assert!(codex.contains("approval_mode = \"approve\""));
+    assert!(!codex.contains(".tools.fs_read]"));
 
     let kimi: Value = serde_json::from_slice(&fs::read(&paths[1].2).unwrap()).unwrap();
     let kimi_server = &kimi["mcpServers"]["narada-site-test-local-filesystem"];
@@ -317,7 +319,8 @@ fn derives_all_carriers_from_declared_site_capabilities_without_javascript() {
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(result["carrier_count"], 3);
     let codex = fs::read_to_string(home.join(".codex/config.toml")).unwrap();
-    assert_eq!(codex.matches("[mcp_servers.").count(), 14);
+    assert_eq!(codex.matches("[mcp_servers.").count(), 7);
+    assert!(!codex.contains(".tools."));
     for surface_id in surface_ids {
         assert!(codex.contains(&format!(
             "[mcp_servers.narada-site-andrey-user-{surface_id}]"

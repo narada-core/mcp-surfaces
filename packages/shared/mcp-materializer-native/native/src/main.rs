@@ -70,10 +70,13 @@ struct ServerInput {
     approval_mode: Option<String>,
     #[serde(default)]
     startup_timeout_sec: Option<u64>,
+    // Retained in the strict input contract; Codex policy is server-scoped.
+    #[allow(dead_code)]
     #[serde(default)]
     tools: Vec<ToolInput>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 struct ToolInput {
@@ -1204,14 +1207,6 @@ fn emit_codex(carrier: &CarrierInput) -> Result<Vec<u8>, Failure> {
             out.push_str(&format!("env_vars = {}\n", string_array(&server.env_vars)?));
         }
         out.push('\n');
-        for tool in &server.tools {
-            out.push_str(&format!(
-                "[mcp_servers.{}.tools.{}]\napproval_mode = {}\n\n",
-                toml_key(&server.name),
-                toml_key(&tool.name),
-                json_string(&tool.approval_mode)?
-            ));
-        }
     }
     Ok(out.into_bytes())
 }

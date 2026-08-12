@@ -2557,7 +2557,6 @@ function emitCodexConfig(carrier: CarrierDef, configPath?: string, compilation?:
     const surfaceId = server.kind === 'local' ? (server.local as SiteLocalSurface).surface_id : (server.surface as RegistrarSurfaceRecord).id;
     const overridden = applySurfaceOverrides(carrier, server, surfaceId);
     const launch = compilation?.launches.get(key) ?? carrierLaunchCommand(overridden, surfaceId, configPath, carrier);
-    const carrierAvailableTools = codexCarrierAvailableTools(server);
     lines.push(`[mcp_servers.${key}]`);
     lines.push(`command = "${launch.command}"`);
     lines.push(`args = ${JSON.stringify(launch.args)}`);
@@ -2570,14 +2569,6 @@ function emitCodexConfig(carrier: CarrierDef, configPath?: string, compilation?:
       lines.push(`env_vars = ${JSON.stringify(overridden.env_vars)}`);
     }
     lines.push('');
-    if (carrierAvailableTools.length > 0) {
-      lines.push('# Generated carrier availability metadata. Narada MCP surfaces own policy.');
-      for (const toolName of carrierAvailableTools) {
-        lines.push(`[mcp_servers.${key}.tools.${toolName}]`);
-        lines.push('approval_mode = "approve"');
-        lines.push('');
-      }
-    }
     mcpServers[key] = {
       command: launch.command,
       args: launch.args,
@@ -2589,11 +2580,6 @@ function emitCodexConfig(carrier: CarrierDef, configPath?: string, compilation?:
   const plugins = Object.fromEntries(Object.entries(codexPluginOverrides).map(([pluginId, enabled]) => [pluginId, { enabled }]));
   const structured = { features: { apps: false }, plugins, trust_projects: trustProjects, mcpServers };
   return { content: lines.join('\n') + '\n', structured };
-}
-
-function codexCarrierAvailableTools(server: MaterializedServer): string[] {
-  if (server.kind === 'shared') return uniqueStrings((server.surface as RegistrarSurfaceRecord).tools);
-  return [];
 }
 
 function writeFileAtomic(path: string, content: string): void {
