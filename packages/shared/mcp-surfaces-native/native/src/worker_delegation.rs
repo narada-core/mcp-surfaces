@@ -975,6 +975,14 @@ fn complete_native_run(
         .env("NARADA_CARRIER_SESSION_ID", &runtime_session)
         .env("NARADA_INTELLIGENCE_PLAN_REF", &plan_ref)
         .env("NARADA_NATIVE_PROVIDER_MODE", provider_mode)
+        .env(
+            "NARADA_NATIVE_CODEX_SANDBOX",
+            if authority == "read" {
+                "read-only"
+            } else {
+                "workspace-write"
+            },
+        )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
