@@ -1,9 +1,12 @@
+use rusqlite::Connection;
 use serde_json::{json, Map, Value};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::thread;
+use std::time::Duration;
 use time::OffsetDateTime;
 
 const SERVER_NAME: &str = "worker-delegation-mcp";
@@ -590,6 +593,101 @@ fn runtime_command(root: &Path) -> Result<PathBuf, Value> {
         )
     })
 }
+fn invocation_plan_binding(root: &Path, plan_ref: &str) -> Result<(String, Option<String>), Value> {
+    let context =
+        read_json(&root.join(".narada/intelligence-launch-context.json")).map_err(|_| {
+            error(
+                "worker_intelligence_context_required",
+                "worker_intelligence_context_required",
+            )
+        })?;
+    let registry = context
+        .get("registry_db_path")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            error(
+                "worker_intelligence_registry_required",
+                "worker_intelligence_registry_required",
+            )
+        })?;
+    let registry = PathBuf::from(registry);
+    let registry = if registry.is_absolute() {
+        registry
+    } else {
+        root.join(registry)
+    };
+    let connection =
+        Connection::open_with_flags(registry, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(
+            |_| {
+                error(
+                    "worker_intelligence_registry_unavailable",
+                    "worker_intelligence_registry_unavailable",
+                )
+            },
+        )?;
+    let document: String = connection
+        .query_row(
+            "SELECT doc FROM invocation_plans WHERE id = ?1",
+            [plan_ref],
+            |row| row.get(0),
+        )
+        .map_err(|_| {
+            error(
+                "worker_canonical_invocation_plan_not_found",
+                "worker_canonical_invocation_plan_not_found",
+            )
+        })?;
+    let plan: Value = serde_json::from_str(&document).map_err(|_| {
+        error(
+            "worker_canonical_invocation_plan_invalid",
+            "worker_canonical_invocation_plan_invalid",
+        )
+    })?;
+    if plan.get("id").and_then(Value::as_str) != Some(plan_ref) {
+        return Err(error(
+            "worker_canonical_invocation_plan_mismatch",
+            "worker_canonical_invocation_plan_mismatch",
+        ));
+    }
+    let provider = plan
+        .pointer("/selected/inference_provider/id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            error(
+                "worker_canonical_invocation_provider_missing",
+                "worker_canonical_invocation_provider_missing",
+            )
+        })?;
+    let mode = match provider {
+        "inference-provider:codex-subscription" => "codex-subscription",
+        _ => {
+            return Err(error(
+                "worker_native_provider_unsupported",
+                "worker_native_provider_unsupported",
+            ))
+        }
+    };
+    let model = plan
+        .pointer("/selected/model/id")
+        .and_then(Value::as_str)
+        .and_then(|value| value.strip_prefix("model:"))
+        .map(str::to_string);
+    Ok((mode.to_string(), model))
+}
+fn codex_command() -> Option<PathBuf> {
+    if let Some(command) = std::env::var_os("NARADA_NATIVE_CODEX_COMMAND") {
+        return Some(PathBuf::from(command));
+    }
+    std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path).find_map(|directory| {
+            ["codex.exe", "codex.cmd", "codex"]
+                .into_iter()
+                .map(|name| directory.join(name))
+                .find(|candidate| candidate.is_file())
+        })
+    })
+}
 fn instruction(args: &Map<String, Value>) -> Result<String, Value> {
     let intent = args.get("intent").and_then(Value::as_object);
     for key in ["instruction", "task", "goal", "summary"] {
@@ -667,6 +765,7 @@ fn worker_run(
             "worker_canonical_invocation_plan_invalid",
         ));
     }
+    let (provider_mode, provider_model) = invocation_plan_binding(root, &plan_ref)?;
     let cwd = constraints
         .and_then(|v| v.get("cwd"))
         .and_then(Value::as_str)
@@ -695,6 +794,7 @@ fn worker_run(
     let dir_owned = dir.clone();
     let id_owned = id.clone();
     let session_owned = session.clone();
+    let resume_owned = resume.clone();
     let auth_owned = auth.clone();
     thread::Builder::new()
         .name(format!("worker-{id}"))
@@ -704,10 +804,14 @@ fn worker_run(
                 cwd,
                 root_owned,
                 dir_owned,
+                id_owned.clone(),
                 id_owned,
                 session_owned,
+                resume_owned,
                 auth_owned,
                 plan_ref,
+                provider_mode,
+                provider_model,
                 prompt,
             )
         })
@@ -841,9 +945,13 @@ fn complete_native_run(
     site_root: PathBuf,
     dir: PathBuf,
     id: String,
+    runtime_session: String,
     session: String,
+    resume_session: Option<String>,
     authority: String,
     plan_ref: String,
+    provider_mode: String,
+    provider_model: Option<String>,
     prompt: String,
 ) {
     let result_path = dir.join("result.json");
@@ -857,16 +965,26 @@ fn complete_native_run(
             "--authority",
             &authority,
             "--session",
-            &session,
+            &runtime_session,
         ])
         .current_dir(&cwd)
         .env("NARADA_SITE_ROOT", &site_root)
         .env("NARADA_WORKSPACE_ROOT", &cwd)
-        .env("NARADA_CARRIER_SESSION_ID", &session)
+        .env("NARADA_CARRIER_SESSION_ID", &runtime_session)
         .env("NARADA_INTELLIGENCE_PLAN_REF", &plan_ref)
+        .env("NARADA_NATIVE_PROVIDER_MODE", provider_mode)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some(model) = provider_model {
+        command.env("NARADA_NATIVE_CODEX_MODEL", model);
+    }
+    if let Some(codex) = codex_command() {
+        command.env("NARADA_NATIVE_CODEX_COMMAND", codex);
+    }
+    if let Some(resume_session) = resume_session {
+        command.env("NARADA_NATIVE_CODEX_RESUME_SESSION_ID", resume_session);
+    }
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(err) => {
@@ -894,10 +1012,34 @@ fn complete_native_run(
         let _ = stdin.flush();
         let mut events = fs::File::create(&events_path).ok();
         let mut assistant = None;
+        let mut provider_session = None;
         let mut runtime_error = None;
-        let mut terminal = false;
+        let mut close_sent = false;
         if let Some(stdout) = child.stdout.take() {
-            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            let (line_tx, line_rx) = mpsc::channel();
+            thread::spawn(move || {
+                for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                    if line_tx.send(line).is_err() {
+                        break;
+                    }
+                }
+            });
+            loop {
+                if read_json(&result_path)
+                    .ok()
+                    .and_then(|v| v.get("status").and_then(Value::as_str).map(str::to_string))
+                    .as_deref()
+                    == Some("cancelled")
+                {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return;
+                }
+                let line = match line_rx.recv_timeout(Duration::from_millis(50)) {
+                    Ok(line) => line,
+                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                };
                 if let Some(file) = events.as_mut() {
                     let _ = writeln!(file, "{line}");
                 }
@@ -912,30 +1054,39 @@ fn complete_native_run(
                 if kind == "assistant_message" {
                     assistant = event_text(&event);
                 }
+                if let Some(value) = event
+                    .get("provider_session_id")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                {
+                    provider_session = Some(value.to_string());
+                }
                 if matches!(
                     kind,
-                    "error" | "turn_failed" | "carrier_turn_failed" | "session_control_rejected"
+                    "error"
+                        | "turn_failed"
+                        | "carrier_turn_failed"
+                        | "carrier_turn_blocked"
+                        | "session_control_rejected"
                 ) {
                     runtime_error = event_text(&event).or_else(|| Some(kind.into()));
-                    terminal = true;
                 }
-                if matches!(kind, "turn_complete" | "carrier_turn_completed") {
-                    terminal = true;
-                }
-                if terminal {
+                if matches!(
+                    kind,
+                    "turn_complete"
+                        | "carrier_turn_completed"
+                        | "turn_failed"
+                        | "carrier_turn_failed"
+                        | "carrier_turn_blocked"
+                ) && !close_sent
+                {
+                    close_sent = true;
                     let close = json!({"id":format!("worker-close-{id}"),"method":"session.close","params":{}});
                     let _ = writeln!(stdin, "{close}");
                     let _ = stdin.flush();
-                    break;
                 }
-                if read_json(&result_path)
-                    .ok()
-                    .and_then(|v| v.get("status").and_then(Value::as_str).map(str::to_string))
-                    .as_deref()
-                    == Some("cancelled")
-                {
-                    let _ = child.kill();
-                    return;
+                if kind == "session_closed" {
+                    break;
                 }
             }
         }
@@ -951,7 +1102,7 @@ fn complete_native_run(
                 &json!({"summary":message,"deliverables":[],"open_questions":[],"next_actions":[]}),
             );
         }
-        let payload = json!({"schema":"narada.worker.run.v1","run_id":id,"status":if successful{"completed"}else{"failed"},"completion_state":if assistant.is_some(){"complete"}else{"absent"},"runtime":"narada-agent-runtime-server","authority":authority,"worker_session_id":session,"pid":child.id(),"summary":assistant,"error":runtime_error.or_else(||if successful{None}else{Some(format!("worker_runtime_exit:{:?}",status.and_then(|v|v.code())))}),"timing":{"started_at":Value::Null,"finished_at":finished,"duration_ms":started.elapsed().as_millis() as u64},"artifacts":{"request":dir.join("request.json").to_string_lossy(),"events":events_path.to_string_lossy(),"diagnostic":diagnostic_path.to_string_lossy(),"last_message":dir.join("last_message.json").to_string_lossy()}});
+        let payload = json!({"schema":"narada.worker.run.v1","run_id":id,"status":if successful{"completed"}else{"failed"},"completion_state":if assistant.is_some(){"complete"}else{"absent"},"runtime":"narada-agent-runtime-server","authority":authority,"worker_session_id":provider_session.unwrap_or(session),"pid":child.id(),"summary":assistant,"error":runtime_error.or_else(||if successful{None}else{Some(format!("worker_runtime_exit:{:?}",status.and_then(|v|v.code())))}),"timing":{"started_at":Value::Null,"finished_at":finished,"duration_ms":started.elapsed().as_millis() as u64},"artifacts":{"request":dir.join("request.json").to_string_lossy(),"events":events_path.to_string_lossy(),"diagnostic":diagnostic_path.to_string_lossy(),"last_message":dir.join("last_message.json").to_string_lossy()}});
         let _ = write_json_atomic(&result_path, &payload);
     }
 }

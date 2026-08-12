@@ -710,8 +710,16 @@ function runWorkerDelegationParity() {
       { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'worker_runs_list', arguments: { limit: 10 } } },
       { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'worker_run_wait', arguments: { run_id: completedId, timeout_ms: 0 } } },
     ];
-    const bun = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', [bunEntrypoint, '--site-root', root, '--allowed-root', root, '--run-root', runRoot], requests, workspaceRoot);
-    const rust = runMailbox(executable, ['--surface-id', 'worker-delegation', '--site-root', root], requests, workspaceRoot);
+    const fixtureEnv = {
+      ...process.env,
+      NARADA_WORKER_RUN_ROOT: runRoot,
+      NARADA_SITE_ROOT: root,
+      USERPROFILE: root,
+      HOME: root,
+      CODEX_HOME: join(root, '.codex'),
+    };
+    const bun = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', [bunEntrypoint, '--site-root', root, '--allowed-root', root, '--run-root', runRoot], requests, workspaceRoot, fixtureEnv);
+    const rust = runMailbox(executable, ['--surface-id', 'worker-delegation', '--site-root', root], requests, workspaceRoot, fixtureEnv);
     const projectDashboard = (value) => ({
       mode: value?.mode,
       include_terminal: value?.include_terminal,
