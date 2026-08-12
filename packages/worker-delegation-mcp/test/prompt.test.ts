@@ -21,8 +21,9 @@ assert.match(basePrompt, /Audit only: inspect and report/);
 assert.match(basePrompt, /Do not call any worker_\* MCP tools\./);
 assert.match(basePrompt, /Structured output contract\n\{"schema":"test\.contract"\}/);
 assert.doesNotMatch(basePrompt, /Exit interview/);
-assert.match(basePrompt, /narada\.worker\.capability_snapshot\.v1/);
+assert.match(basePrompt, /Effective mode: read_only \(injected at provider process boundary and runtime-validated\)/);
 assert.match(basePrompt, /codex_builtin_repo_tools/);
+assert.match(basePrompt, /narada\.worker\.refusal\.v1/);
 
 const narsPrompt = buildWorkerPrompt({
   intent: { instruction: 'Make the requested edit.', mode: 'implement' },

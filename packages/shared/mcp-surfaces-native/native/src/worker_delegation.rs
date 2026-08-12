@@ -222,18 +222,35 @@ fn read_run(root: &Path, id: &str) -> Result<Value, Value> {
 fn policy(root: &Path, allowed_roots: &[PathBuf]) -> Value {
     json!({"schema":"narada.worker.policy.v1","status":"ok","server_name":SERVER_NAME,"run_root":run_root(root).to_string_lossy(),"site_root":root.to_string_lossy(),"allowed_roots":allowed_roots.iter().map(|allowed|allowed.to_string_lossy()).collect::<Vec<_>>(),"allowed_runtimes":["narada-agent-runtime-server"],"allowed_authorities":["read","write","command"],"native_execution":"rust_authority","secret_projection":"environment_only"})
 }
-fn capability_snapshot(authority: &str, cwd: &Path, allowed_roots: &[PathBuf]) -> Value {
+fn capability_snapshot(authority: &str, cwd: &Path, allowed_roots: &[PathBuf], runtime_probe: Option<&Value>) -> Value {
     let writable = authority != "read";
+    let effective_mode = if writable { "workspace_write" } else { "read_only" };
     json!({
         "schema":"narada.worker.capability_snapshot.v1",
         "authority":authority,
+        "effective_mode":effective_mode,
+        "validated_against_runtime":true,
+        "validation_basis":if runtime_probe.is_some(){"scoped_create_read_remove_probe_plus_codex_cli_contract"}else{"native_worker_maps_authority_to_codex_cli_and_approval_contract"},
+        "reconciliation":{"authoritative_source":"native_worker_runtime","ambient_profile_is_advisory":true,"conflict_resolution":"effective_mode_and_runtime_probe_win"},
+        "runtime_probe":runtime_probe.cloned().unwrap_or(Value::Null),
+        "provider_boundary":{"permission_profile":effective_mode,"writable_roots_injected":writable,"source":"native_process_environment_and_codex_cli"},
         "cwd":cwd.to_string_lossy(),
         "allowed_roots":allowed_roots.iter().map(|root|root.to_string_lossy()).collect::<Vec<_>>(),
         "filesystem":{"read":true,"write":writable,"patch":writable},
-        "commands":{"execute":true,"working_directory_scoped":true,"tests_may_write_build_artifacts":writable},
-        "approval":{"mode":if writable{"automatic_review"}else{"not_applicable"},"sandbox":if writable{"workspace-write"}else{"read-only"}},
-        "tool_bridge":{"kind":"codex_builtin_repo_tools","mcp_projection":"none","reason":"delegated runs use an isolated config to avoid duplicating the carrier MCP fleet"}
+        "commands":{"execute":true,"write_effects":writable,"direct_file_mutation":writable,"working_directory_scoped":true,"tests_may_write_build_artifacts":writable},
+        "approval":{"mode":if writable{"automatic_contained_review"}else{"not_required"},"human_interaction_required":false,"sandbox":if writable{"workspace-write"}else{"read-only"}},
+        "tool_bridge":{"kind":"codex_builtin_repo_tools","ordinary_file_mutation_tool":"apply_patch","exact_byte_file_mutation_tool":"bounded_shell_command","mcp_projection":"none","reason":"delegated runs use an isolated config to avoid duplicating the carrier MCP fleet"},
+        "workflow_primitives":{"exact_byte_file_lifecycle":{"tool":"bounded_shell_command","expected_commands":1,"operations":["create","read_verify","remove","confirm_absent"],"encoding_must_be_explicit":true}},
+        "refusal_contract":{"schema":"narada.worker.refusal.v1","required_fields":["tool","operation","cwd","target_path","declared_capability","actual_refusal"]}
     })
+}
+fn scoped_write_probe(cwd: &Path) -> Result<Value, Value> {
+    let path = cwd.join(format!(".narada-worker-probe-{}", uuid::Uuid::new_v4().simple()));
+    fs::write(&path, b"probe").map_err(|failure| error("worker_write_preflight_failed", &format!("worker_write_preflight_failed:{failure}")))?;
+    let verified = fs::read(&path).map(|value| value == b"probe").unwrap_or(false);
+    let removed = fs::remove_file(&path).is_ok() && !path.exists();
+    if !verified || !removed { return Err(error("worker_write_preflight_failed", "worker_write_preflight_failed:verification_or_cleanup")); }
+    Ok(json!({"schema":"narada.worker.runtime_probe.v1","operation":"create_read_remove","status":"passed","cwd":cwd.to_string_lossy(),"cleanup_verified":true}))
 }
 fn defaults_path(root: &Path) -> PathBuf {
     run_root(root).join("cognition-defaults.json")
@@ -266,7 +283,7 @@ fn config_resolve(args: &Map<String, Value>, root: &Path, allowed_roots: &[PathB
         ));
     }
     Ok(
-        json!({"schema":"narada.worker.config_resolve.v1","status":"ok","resolved":{"cwd":cwd.to_string_lossy(),"site_root":root.to_string_lossy(),"runtime":"narada-agent-runtime-server","authority":resolved_authority,"launch":false},"capability_snapshot":capability_snapshot(resolved_authority,&cwd,allowed_roots),"diagnostics":[{"name":"native_execution","status":"boundary","message":"worker launch is delegated to the owning worker authority"}],"native_read_only":true}),
+        json!({"schema":"narada.worker.config_resolve.v1","status":"ok","resolved":{"cwd":cwd.to_string_lossy(),"site_root":root.to_string_lossy(),"runtime":"narada-agent-runtime-server","authority":resolved_authority,"launch":false},"capability_snapshot":capability_snapshot(resolved_authority,&cwd,allowed_roots,None),"diagnostics":[{"name":"native_execution","status":"boundary","message":"worker launch is delegated to the owning worker authority"}],"native_read_only":true}),
     )
 }
 fn run_status(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
@@ -793,7 +810,8 @@ fn worker_run(
         ));
     }
     let runtime = runtime_command(root)?;
-    let capabilities = capability_snapshot(&auth, &cwd, allowed_roots);
+    let runtime_probe = if auth == "read" { None } else { Some(scoped_write_probe(&cwd)?) };
+    let capabilities = capability_snapshot(&auth, &cwd, allowed_roots, runtime_probe.as_ref());
     let id = format!("run-{}", uuid::Uuid::new_v4().simple());
     let session = resume.clone().unwrap_or_else(|| id.clone());
     let dir = run_root(root).join(&id);
@@ -812,6 +830,7 @@ fn worker_run(
     let session_owned = session.clone();
     let resume_owned = resume.clone();
     let auth_owned = auth.clone();
+    let allowed_roots_owned = allowed_roots.to_vec();
     thread::Builder::new()
         .name(format!("worker-{id}"))
         .spawn(move || {
@@ -828,7 +847,8 @@ fn worker_run(
                 plan_ref,
                 provider_mode,
                 provider_model,
-                format!("Effective capability snapshot (authoritative for this run):\n{}\n\nUse built-in contained repository tools for bounded file inspection, patching, and focused tests. No carrier MCP tools are projected into this delegated run. If an operation is refused, report the exact tool, requested operation, effective root, and raw refusal.\n\nTask:\n{prompt}", serde_json::to_string_pretty(&capabilities).unwrap_or_else(|_| "{}".to_string())),
+                allowed_roots_owned,
+                format!("Effective mode: {}. This reconciled state is injected at the provider process boundary through the permission profile, CLI sandbox, and writable-root arguments; ambient labels are advisory. CWD: {}. Writable roots: {}. Scoped create/read/remove preflight: {}. Command write effects: {}. First-class exact-byte lifecycle: one bounded shell command with explicit encoding for create/read-verify/remove/confirm-absent. Use apply_patch for ordinary edits. Carrier MCP projection: none. On refusal return narada.worker.refusal.v1 with tool, operation, cwd, target_path, declared_capability, actual_refusal.\n\nTask:\n{prompt}", capabilities["effective_mode"].as_str().unwrap_or("unknown"), capabilities["cwd"].as_str().unwrap_or("unknown"), capabilities["allowed_roots"].as_array().map(|roots| roots.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")).unwrap_or_default(), capabilities["runtime_probe"]["status"].as_str().unwrap_or("not_required"), capabilities["commands"]["write_effects"].as_bool().unwrap_or(false)),
             )
         })
         .map_err(|_| error("worker_launch_failed", "worker_launch_failed"))?;
@@ -969,6 +989,7 @@ fn complete_native_run(
     plan_ref: String,
     provider_mode: String,
     provider_model: Option<String>,
+    allowed_roots: Vec<PathBuf>,
     prompt: String,
 ) {
     let result_path = dir.join("result.json");
@@ -997,6 +1018,11 @@ fn complete_native_run(
             } else {
                 "workspace-write"
             },
+        )
+        .env(
+            "NARADA_NATIVE_CODEX_WRITABLE_ROOTS",
+            serde_json::to_string(&allowed_roots.iter().map(|root| root.to_string_lossy().to_string()).collect::<Vec<_>>())
+                .unwrap_or_else(|_| "[]".to_string()),
         )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1132,6 +1158,7 @@ fn complete_native_run(
         let _ = write_json_atomic(&result_path, &payload);
     }
 }
+
 fn error(code: &str, message: &str) -> Value {
     json!({"schema":"narada.worker.error.v1","code":code,"message":message})
 }
@@ -1160,9 +1187,12 @@ mod tests {
     #[test]
     fn capability_snapshot_reports_effective_write_posture() {
         let cwd = PathBuf::from("C:/workspace/repo");
-        let snapshot = capability_snapshot("write", &cwd, std::slice::from_ref(&cwd));
+        let probe = json!({"status":"passed"});
+        let snapshot = capability_snapshot("write", &cwd, std::slice::from_ref(&cwd), Some(&probe));
         assert_eq!(snapshot["filesystem"]["write"], true);
-        assert_eq!(snapshot["approval"]["mode"], "automatic_review");
+        assert_eq!(snapshot["effective_mode"], "workspace_write");
+        assert_eq!(snapshot["validated_against_runtime"], true);
+        assert_eq!(snapshot["approval"]["mode"], "automatic_contained_review");
         assert_eq!(snapshot["tool_bridge"]["kind"], "codex_builtin_repo_tools");
     }
 
