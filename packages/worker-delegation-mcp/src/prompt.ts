@@ -30,6 +30,7 @@ export function buildWorkerPrompt(options: WorkerPromptOptions): string {
     approval: { mode: writable ? 'automatic_contained_review' : 'not_required', human_interaction_required: false, sandbox: writable ? 'workspace-write' : 'read-only' },
     tool_bridge: { kind: 'codex_builtin_repo_tools', ordinary_file_mutation_tool: 'apply_patch', exact_byte_file_mutation_tool: 'bounded_shell_command', mcp_projection: requiredMcpTools.length > 0 ? 'explicit_allowlist' : 'none' },
     workflow_primitives: { exact_byte_file_lifecycle: { tool: 'bounded_shell_command', expected_commands: 1, operations: ['create', 'read_verify', 'remove', 'confirm_absent'], encoding_must_be_explicit: true } },
+    evaluation_contract: { schema: 'narada.worker.observed_ergonomics.v1', basis: 'observed_fresh_run_only', score_5: 'no_material_observed_friction', score_reduction_requires: 'observed_failure_retry_human_intervention_or_ambiguity_that_changed_execution', speculative_improvements_field: 'non_scoring_observations' },
     refusal_contract: { schema: 'narada.worker.refusal.v1', required_fields: ['tool', 'operation', 'cwd', 'target_path', 'declared_capability', 'actual_refusal'] },
   };
   return [
@@ -45,6 +46,7 @@ export function buildWorkerPrompt(options: WorkerPromptOptions): string {
     `Effective mode: ${capabilitySnapshot.effective_mode} (injected at provider process boundary and runtime-validated). CWD: ${options.cwd}. Roots: ${options.allowedRoots.join(', ')}.`,
     `Repo bridge: ${capabilitySnapshot.tool_bridge.kind}; MCP projection: ${capabilitySnapshot.tool_bridge.mcp_projection}.`,
     'Use apply_patch for ordinary file edits; use one bounded shell command when exact byte content or atomic lifecycle verification requires it.',
+    'For ergonomics ratings, lower a score only for observed failure, retry, human intervention, or ambiguity that changed execution; put hypothetical improvements in non_scoring_observations.',
     'On refusal return narada.worker.refusal.v1 with tool, operation, cwd, target_path, declared_capability, and actual_refusal.',
     '',
     'Preflight evidence',
