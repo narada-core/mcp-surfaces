@@ -4,7 +4,7 @@ import { extname } from 'node:path';
 import { admitWorkerAiProcessInvocation, releaseWorkerAiProcessInvocation, workerAiProcessRefusalError } from './ai-process-invocation.js';
 import type { WorkerResolvedExecutionPolicy } from './worker-types.js';
 export { parseLastMessage, parseResult, resultStatus } from './output-contract.js';
-export type { WorkerBroadUnrelatedFailure, WorkerChange, WorkerExitInterview, WorkerOutput, WorkerOutputParseResult, WorkerRunTerminalStatus, WorkerVerification, WorkerVerificationCommandClassification } from './output-contract.js';
+export type { WorkerBroadUnrelatedFailure, WorkerChange, WorkerExitInterview, WorkerObservedErgonomics, WorkerOutput, WorkerOutputParseResult, WorkerRunTerminalStatus, WorkerVerification, WorkerVerificationCommandClassification } from './output-contract.js';
 
 export type ResolvedWorkerConfig = WorkerResolvedExecutionPolicy;
 
@@ -31,10 +31,15 @@ export function buildCodexArgv(options: {
   ephemeral: boolean;
   skipGitRepoCheck: boolean;
   config: Record<string, string | number | boolean>;
+  allowedRoots: string[];
 }): string[] {
-  const argv = ['exec'];
+  const argv = ['exec', '--ignore-user-config', '--ignore-rules'];
   if (options.ephemeral) argv.push('--ephemeral');
-  argv.push('-C', options.cwd, '--sandbox', options.sandbox, '--json', '--output-schema', options.schemaPath, '-o', options.lastMessagePath);
+  argv.push('-C', options.cwd);
+  if (options.sandbox === 'workspace-write') argv.push('--approve-for-me');
+  else argv.push('--sandbox', options.sandbox);
+  for (const root of options.allowedRoots) if (root !== options.cwd) argv.push('--add-dir', root);
+  argv.push('--json', '--output-schema', options.schemaPath, '-o', options.lastMessagePath);
   if (options.workerSessionId) argv.push('resume', options.workerSessionId);
   if (options.skipGitRepoCheck) argv.push('--skip-git-repo-check');
   for (const [key, value] of Object.entries(options.config).sort(([a], [b]) => a.localeCompare(b))) argv.push('-c', `${key}=${tomlValue(value)}`);
@@ -47,7 +52,9 @@ export function buildInvocation(resolvedWorkerConfig: ResolvedWorkerConfig, envi
     command: resolvedWorkerConfig.command,
     argv: [...resolvedWorkerConfig.command_args, ...resolvedWorkerConfig.argv],
     cwd: resolvedWorkerConfig.cwd,
-    environment,
+    environment: resolvedWorkerConfig.sandbox === 'workspace-write'
+      ? { ...environment, CODEX_PERMISSION_PROFILE: ':workspace-write' }
+      : environment,
   };
 }
 

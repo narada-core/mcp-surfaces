@@ -211,6 +211,7 @@ function workerConfigResolve(args: Record<string, unknown>, state: WorkerMcpStat
       ephemeral,
       skipGitRepoCheck,
       config: resolvedConfigInput.config,
+      allowedRoots: state.policy.allowedRoots,
     });
     resolvedWorkerConfig = {
       runtime: 'codex',
@@ -686,6 +687,7 @@ async function workerRunInner(args: Record<string, unknown>, state: WorkerMcpSta
       ephemeral,
       skipGitRepoCheck,
       config: resolvedConfigInput.config,
+      allowedRoots: state.policy.allowedRoots,
     });
     const baseConfig: ResolvedWorkerConfig = {
       runtime: 'codex',

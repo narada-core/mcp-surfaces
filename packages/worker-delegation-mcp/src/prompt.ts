@@ -62,13 +62,14 @@ export function buildWorkerPrompt(options: WorkerPromptOptions): string {
     'Tool use discipline',
     ...(requiredMcpTools.length > 0 ? [
       'Prefer the explicitly projected MCP filesystem, git, and structured-command tools for inspection and verification.',
+      'Do not use direct shell commands for file discovery or file reads when a projected MCP tool can do the work.',
+      'When a required MCP tool is unavailable or insufficient, include the concise shell fallback reason in verification.summary.',
     ] : [
       'Use built-in contained repository tools for bounded file inspection, patching, and focused tests.',
       'These built-in tools are the governed repo-work bridge for this isolated delegated run.',
+      'No MCP projection is intentional for this run. Built-in patch and bounded shell tools are the complete governed bridge; do not score the absence of MCP projection as friction or a missing affordance unless an operation actually fails.',
+      'Use one bounded shell command for exact-byte file lifecycle work and focused verification.',
     ]),
-    'Do not use direct shell commands for file discovery or file reads when MCP tools can do the work.',
-    'Use direct shell execution only when the delegated intent explicitly requires command execution and no narrower MCP surface fits.',
-    'When required_mcp_tools are listed in preflight, verify availability or use in the verification array; if falling back to shell, include a concise fallback reason in verification.summary.',
     '',
     'MCP tool projection',
     ...(requiredMcpTools.length > 0 ? [
@@ -79,7 +80,7 @@ export function buildWorkerPrompt(options: WorkerPromptOptions): string {
       'No MCP tools are projected into this worker run.',
       'Do not call MCP tools. If the intent requires MCP access, return the required JSON immediately with a clear summary that MCP tools were not projected and a failed not_applicable verification entry; do not probe guessed or hidden tool names.',
     ]),
-    ...(options.mode === 'audit_only' || options.mode === 'plan_only' ? [
+    ...(requiredMcpTools.length > 0 && (options.mode === 'audit_only' || options.mode === 'plan_only') ? [
       'For focused source inspection, read target files directly through available filesystem MCP tools such as fs_read_file_range and fs_grep_search. Do not ask the delegating caller to provide output_refs for ordinary source files.',
       'If a file is large, generated, or secret-bearing, keep reads bounded and cite the file/path plus relevant line window rather than copying full content.',
     ] : []),
@@ -115,6 +116,11 @@ export function buildWorkerPrompt(options: WorkerPromptOptions): string {
       '',
       'Exit interview',
       'Include exit_interview in the output JSON with ergonomics_feedback, friction_points, missing_affordances, observed_incoherencies, and suggested_improvements.',
+      'Also include exit_interview.observed_ergonomics with integer scores 1-5 for clarity_before_acting, confidence_in_writable_roots, predictability_of_tool_behavior, diagnostic_usefulness, remaining_ceremony, and remaining_weaknesses, plus non_scoring_observations.',
+      'Use narada.worker.observed_ergonomics.v1: lower a score only for observed failure, retry, human intervention, or ambiguity that changed execution.',
+      'Every score below 5 must cite the qualifying observed event in friction_points. Speculative alternatives and hypothetical improvements belong only in non_scoring_observations and do not lower scores.',
+      'If friction_points is empty, every observed_ergonomics score must be 5.',
+      'Intentional absence of MCP projection is not a qualifying event and must not appear in friction_points. A successful bounded-shell operation with complete output is diagnostically complete.',
       'Focus on concrete tool/interface friction encountered during this delegated run, including anything that made progress harder, ambiguous, slower, or less observable.',
     ] : []),
     '',

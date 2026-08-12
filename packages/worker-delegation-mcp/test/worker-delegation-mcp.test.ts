@@ -187,7 +187,8 @@ process.stdin.on('end', () => {
     friction_points: ['progress visibility was limited'],
     missing_affordances: ['no push notification'],
     observed_incoherencies: ['status naming was too coarse'],
-    suggested_improvements: ['surface latest progress in status']
+    suggested_improvements: ['surface latest progress in status'],
+    observed_ergonomics: { clarity_before_acting: 5, confidence_in_writable_roots: 5, predictability_of_tool_behavior: 5, diagnostic_usefulness: 5, remaining_ceremony: 5, remaining_weaknesses: 5, non_scoring_observations: [] }
   };
   fs.writeFileSync(lastMessagePath, JSON.stringify(output));
   };
@@ -331,6 +332,7 @@ process.stdin.on('data', (chunk) => {
           broad_unrelated_failures: [],
           exit_interview: {
             ergonomics_feedback: 'loose output preserved',
+            observed_ergonomics: { clarity_before_acting: 5, confidence_in_writable_roots: 5, predictability_of_tool_behavior: 5, diagnostic_usefulness: 5, remaining_ceremony: 5, remaining_weaknesses: 5, non_scoring_observations: [] },
             friction_points: ['verification object was not an array'],
             missing_affordances: ['normalizer should preserve exit interviews'],
             observed_incoherencies: [],
@@ -1619,11 +1621,12 @@ await rpc({ jsonrpc: '2.0', id: 523151, method: 'tools/call', params: { name: 'w
   timeout_ms: 5000,
   summary_only: true,
 } } }, state);
-const exitInterviewRun = await rpc({ jsonrpc: '2.0', id: 5233, method: 'tools/call', params: { name: 'worker_run', arguments: { intent: { instruction: 'ask for ergonomics feedback' }, constraints: { cwd: root, authority: 'read', cognition: 'low', wait_for_completion: true, exit_interview: true } } } }, state);
+const exitInterviewRun = await rpc({ jsonrpc: '2.0', id: 5233, method: 'tools/call', params: { name: 'worker_run', arguments: { intent: { instruction: 'ask for ergonomics feedback', mode: 'implement' }, constraints: { cwd: root, authority: 'write', cognition: 'low', wait_for_completion: true, exit_interview: true } } } }, state);
 assert.equal(exitInterviewRun.result?.structuredContent.status, 'completed');
 assert.equal(exitInterviewRun.result?.structuredContent.exit_interview.ergonomics_feedback, 'fake worker found the exit interview easy to answer');
 assert.deepEqual(exitInterviewRun.result?.structuredContent.exit_interview.friction_points, ['progress visibility was limited']);
 assert.deepEqual(exitInterviewRun.result?.structuredContent.exit_interview.observed_incoherencies, ['status naming was too coarse']);
+assert.equal(exitInterviewRun.result?.structuredContent.exit_interview.observed_ergonomics.remaining_weaknesses, 5);
 assert.match(readFileSync(join(exitInterviewRun.result?.structuredContent.run_dir, 'worker_prompt.txt'), 'utf8'), /Exit interview/);
 const orphanedRunId = 'run-20000101T000002Z-orphan1';
 const orphanedRunDir = join(runRoot, orphanedRunId);
@@ -1897,7 +1900,7 @@ const recoveredLastMessageResource = recoveredResources.result?.resources.find((
 assert.ok(recoveredLastMessageResource);
 const recoveredLastMessage = await rpc({ jsonrpc: '2.0', id: 52323, method: 'resources/read', params: { uri: recoveredLastMessageResource.uri } }, state);
 assert.match(recoveredLastMessage.result?.contents[0].text, /Recovered recommendation from events/);
-const recentRuns = await rpc({ jsonrpc: '2.0', id: 524, method: 'tools/call', params: { name: 'worker_runs_list', arguments: { limit: 10 } } }, state);
+const recentRuns = await rpc({ jsonrpc: '2.0', id: 524, method: 'tools/call', params: { name: 'worker_runs_list', arguments: { limit: 20 } } }, state);
 const recentAsyncRun = recentRuns.result?.structuredContent.runs.find((run: any) => run.run_id === asyncRun.result?.structuredContent.run_id);
 assert.ok(recentAsyncRun);
 assert.match(String(recentAsyncRun.progress_preview), /thread-created/);
@@ -2131,8 +2134,8 @@ assert.equal(resumableRun.result?.structuredContent.resolved_worker_config.ephem
 const resumableInvocation = JSON.parse(readFileSync(join(resumableRun.result?.structuredContent.run_dir, 'worker_invocation.json'), 'utf8'));
 assert.equal(resumableInvocation.argv.includes('--ephemeral'), false);
 assert.match(readFileSync(join(completedRunDir, 'worker_prompt.txt'), 'utf8'), /Do not call any worker_\* MCP tools\./);
-assert.match(readFileSync(join(completedRunDir, 'worker_prompt.txt'), 'utf8'), /Prefer available MCP filesystem, git, and structured-command tools/);
-assert.match(readFileSync(join(completedRunDir, 'worker_prompt.txt'), 'utf8'), /Do not use direct shell commands for file discovery or file reads/);
+assert.match(readFileSync(join(completedRunDir, 'worker_prompt.txt'), 'utf8'), /built-in contained repository tools/);
+assert.match(readFileSync(join(completedRunDir, 'worker_prompt.txt'), 'utf8'), /Use one bounded shell command for exact-byte file lifecycle work/);
 assert.match(readFileSync(join(completedRunDir, 'worker_prompt.txt'), 'utf8'), /Requested mode\naudit_only/);
 assert.match(readFileSync(join(completedRunDir, 'worker_prompt.txt'), 'utf8'), /Audit only: inspect and report/);
 assert.doesNotMatch(readFileSync(join(completedRunDir, 'worker_prompt.txt'), 'utf8'), /NARS worker completion guard/);
@@ -2149,9 +2152,10 @@ const argv = buildCodexArgv({
   ephemeral: true,
   skipGitRepoCheck: true,
   config: { model: 'gpt-test', model_reasoning_effort: 'medium' },
+  allowedRoots: ['C:/repo'],
 });
-assert.deepEqual(argv.slice(0, 11), ['exec', '--ephemeral', '-C', 'C:/repo', '--sandbox', 'read-only', '--json', '--output-schema', 'schema.json', '-o', 'last.json']);
-assert.deepEqual(argv.slice(11, 13), ['resume', 'thread-1']);
+assert.deepEqual(argv.slice(0, 13), ['exec', '--ignore-user-config', '--ignore-rules', '--ephemeral', '-C', 'C:/repo', '--sandbox', 'read-only', '--json', '--output-schema', 'schema.json', '-o', 'last.json']);
+assert.deepEqual(argv.slice(13, 15), ['resume', 'thread-1']);
 assert.equal(argv.includes('--skip-git-repo-check'), true);
 assert.equal(argv.at(-1), '-');
 

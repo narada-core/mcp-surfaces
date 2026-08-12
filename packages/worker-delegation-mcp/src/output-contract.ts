@@ -6,7 +6,8 @@ export type WorkerChange = { path: string; status: string; summary: string };
 export type WorkerVerificationCommandClassification = 'focused' | 'broad' | 'not_applicable';
 export type WorkerVerification = { tool: string | null; command: string | null; status: string; summary: string; command_classification: WorkerVerificationCommandClassification };
 export type WorkerBroadUnrelatedFailure = { command: string | null; status: string; summary: string };
-export type WorkerExitInterview = { ergonomics_feedback: string; friction_points: string[]; missing_affordances: string[]; observed_incoherencies: string[]; suggested_improvements: string[] };
+export type WorkerObservedErgonomics = { clarity_before_acting: number; confidence_in_writable_roots: number; predictability_of_tool_behavior: number; diagnostic_usefulness: number; remaining_ceremony: number; remaining_weaknesses: number; non_scoring_observations: string[] };
+export type WorkerExitInterview = { ergonomics_feedback: string; friction_points: string[]; missing_affordances: string[]; observed_incoherencies: string[]; suggested_improvements: string[]; observed_ergonomics?: WorkerObservedErgonomics };
 export type WorkerOutput = { summary: string; deliverables: { path: string; description: string }[]; open_questions: string[]; next_actions: string[]; edits_performed: boolean; target_state_changed: boolean; changes: WorkerChange[]; verification: WorkerVerification[]; verification_budget_respected: boolean | null; broad_unrelated_failures: WorkerBroadUnrelatedFailure[]; exit_interview: WorkerExitInterview | null; review_verdict: string | null; acceptance_verdict: string | null; verdict: string | null; structured_outputs?: Record<string, unknown> };
 export type WorkerOutputParseResult =
   | { ok: true; data: WorkerOutput }
@@ -106,13 +107,27 @@ export function workerOutputSchema(outputContract: Record<string, unknown> = {})
       broad_unrelated_failures: { type: 'array', items: { type: 'object', required: ['command', 'status', 'summary'], properties: { command: { type: ['string', 'null'] }, status: { type: 'string' }, summary: { type: 'string' } }, additionalProperties: false } },
       exit_interview: {
         type: ['object', 'null'],
-        required: ['ergonomics_feedback', 'friction_points', 'missing_affordances', 'observed_incoherencies', 'suggested_improvements'],
+        required: ['ergonomics_feedback', 'friction_points', 'missing_affordances', 'observed_incoherencies', 'suggested_improvements', 'observed_ergonomics'],
         properties: {
           ergonomics_feedback: { type: 'string' },
           friction_points: { type: 'array', items: { type: 'string' } },
           missing_affordances: { type: 'array', items: { type: 'string' } },
           observed_incoherencies: { type: 'array', items: { type: 'string' } },
           suggested_improvements: { type: 'array', items: { type: 'string' } },
+          observed_ergonomics: {
+            type: 'object',
+            required: ['clarity_before_acting', 'confidence_in_writable_roots', 'predictability_of_tool_behavior', 'diagnostic_usefulness', 'remaining_ceremony', 'remaining_weaknesses', 'non_scoring_observations'],
+            properties: {
+              clarity_before_acting: scoreSchema(),
+              confidence_in_writable_roots: scoreSchema(),
+              predictability_of_tool_behavior: scoreSchema(),
+              diagnostic_usefulness: scoreSchema(),
+              remaining_ceremony: scoreSchema(),
+              remaining_weaknesses: scoreSchema(),
+              non_scoring_observations: { type: 'array', items: { type: 'string' } },
+            },
+            additionalProperties: false,
+          },
         },
         additionalProperties: false,
       },
@@ -388,13 +403,25 @@ function asExitInterview(value: unknown): WorkerExitInterview | null {
   const record = value as Record<string, unknown>;
   if (typeof record.ergonomics_feedback !== 'string') return null;
   if (!stringArray(record.friction_points) || !stringArray(record.missing_affordances) || !stringArray(record.observed_incoherencies) || !stringArray(record.suggested_improvements)) return null;
+  const observedErgonomics = asObservedErgonomics(record.observed_ergonomics);
+  if (record.observed_ergonomics !== undefined && !observedErgonomics) return null;
   return {
     ergonomics_feedback: record.ergonomics_feedback,
     friction_points: record.friction_points,
     missing_affordances: record.missing_affordances,
     observed_incoherencies: record.observed_incoherencies,
     suggested_improvements: record.suggested_improvements,
+    ...(observedErgonomics ? { observed_ergonomics: observedErgonomics } : {}),
   };
+}
+
+function scoreSchema(): Record<string, unknown> { return { type: 'integer', minimum: 1, maximum: 5 }; }
+function asObservedErgonomics(value: unknown): WorkerObservedErgonomics | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const keys = ['clarity_before_acting', 'confidence_in_writable_roots', 'predictability_of_tool_behavior', 'diagnostic_usefulness', 'remaining_ceremony', 'remaining_weaknesses'] as const;
+  if (!keys.every((key) => Number.isInteger(record[key]) && Number(record[key]) >= 1 && Number(record[key]) <= 5) || !stringArray(record.non_scoring_observations)) return null;
+  return { clarity_before_acting: Number(record.clarity_before_acting), confidence_in_writable_roots: Number(record.confidence_in_writable_roots), predictability_of_tool_behavior: Number(record.predictability_of_tool_behavior), diagnostic_usefulness: Number(record.diagnostic_usefulness), remaining_ceremony: Number(record.remaining_ceremony), remaining_weaknesses: Number(record.remaining_weaknesses), non_scoring_observations: record.non_scoring_observations };
 }
 
 function stringArray(value: unknown): value is string[] {
