@@ -37,6 +37,7 @@ const MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
 struct Options {
     surface_id: String,
     site_root: PathBuf,
+    allowed_roots: Vec<PathBuf>,
     log_root: Option<PathBuf>,
     registry_path: Option<PathBuf>,
     native_authority: bool,
@@ -134,6 +135,7 @@ fn parse_options(args: Vec<String>) -> Result<Options, String> {
     let mut log_root = None;
     let mut registry_path = None;
     let mut native_authority = false;
+    let mut allowed_roots = Vec::new();
     let mut environment = Vec::new();
     let mut index = 0;
     while index < args.len() {
@@ -164,6 +166,7 @@ fn parse_options(args: Vec<String>) -> Result<Options, String> {
                 environment.push(("NARADA_DELEGATED_TASK_ROOT".to_string(), value.clone()));
             }
             "--allowed-root" => {
+                allowed_roots.push(PathBuf::from(value));
                 if site_root.is_none() {
                     site_root = Some(PathBuf::from(value));
                 }
@@ -230,9 +233,13 @@ fn parse_options(args: Vec<String>) -> Result<Options, String> {
     let surface_id = surface_id.ok_or("native_surface_missing_surface_id")?;
     let site_root =
         site_root.unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    if !allowed_roots.iter().any(|root| root == &site_root) {
+        allowed_roots.push(site_root.clone());
+    }
     Ok(Options {
         surface_id,
         site_root,
+        allowed_roots,
         log_root,
         registry_path,
         native_authority,
@@ -768,7 +775,7 @@ fn call_tool(
         ("sop", name) => sop::call_tool(name, &args, &options.site_root),
         ("delegated-task", name) => delegated_task::call_tool(name, &args, &options.site_root),
         ("worker-delegation", name) => {
-            worker_delegation::call_tool(name, &args, &options.site_root)
+            worker_delegation::call_tool(name, &args, &options.site_root, &options.allowed_roots)
         }
         ("artifacts", name) | ("nars-session", name) | ("quota-meter", name) => {
             local_admin::call_tool(surface_id, name, &args, &options.site_root)
@@ -1091,6 +1098,7 @@ mod tests {
             "site",
         ]);
         assert_eq!(delegated.site_root, PathBuf::from("site"));
+        assert_eq!(delegated.allowed_roots, vec![PathBuf::from("site")]);
         assert_eq!(
             environment_value(&delegated, "NARADA_DELEGATED_TASK_ROOT"),
             Some("task")
@@ -1120,6 +1128,21 @@ mod tests {
 
         let scheduler = parsed_options(&["--surface-id", "scheduler", "--allowed-root", "site"]);
         assert_eq!(scheduler.site_root, PathBuf::from("site"));
+
+        let worker = parsed_options(&[
+            "--surface-id",
+            "worker-delegation",
+            "--site-root",
+            "site",
+            "--allowed-root",
+            "site",
+            "--allowed-root",
+            "src",
+        ]);
+        assert_eq!(
+            worker.allowed_roots,
+            vec![PathBuf::from("site"), PathBuf::from("src")]
+        );
 
         let coherence = parsed_options(&["--surface-id", "site-coherence", "--repo-root", "repo"]);
         assert_eq!(coherence.site_root, PathBuf::from("repo"));

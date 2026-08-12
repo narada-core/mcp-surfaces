@@ -122,12 +122,12 @@ pub fn auxiliary(method: &str, params: &Map<String, Value>) -> Result<Value, Val
     }
 }
 
-pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path, allowed_roots: &[PathBuf]) -> Result<Value, Value> {
     match name {
         "worker_guidance" => Ok(guidance(args)),
-        "worker_policy_inspect" => Ok(policy(root)),
+        "worker_policy_inspect" => Ok(policy(root, allowed_roots)),
         "worker_cognition_defaults_inspect" => Ok(cognition_defaults(root)),
-        "worker_config_resolve" => config_resolve(args, root),
+        "worker_config_resolve" => config_resolve(args, root, allowed_roots),
         "worker_run_status" => run_status(args, root),
         "worker_runs_list" => runs_list(args, root),
         "worker_run_wait" => run_wait(args, root),
@@ -137,11 +137,11 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<V
         "worker_output_show" => output_show(args, root),
         "worker_operator_affordances" => Ok(affordances()),
         "worker_cognition_defaults_update" => cognition_defaults_update(args, root),
-        "worker_run" => worker_run(args, root, None, "worker_run"),
-        "worker_edit" => worker_edit(args, root),
-        "worker_resume" => worker_resume(args, root),
+        "worker_run" => worker_run(args, root, allowed_roots, None, "worker_run"),
+        "worker_edit" => worker_edit(args, root, allowed_roots),
+        "worker_resume" => worker_resume(args, root, allowed_roots),
         "worker_run_reap" => worker_run_reap(args, root),
-        "worker_run_batch" => worker_run_batch(args, root),
+        "worker_run_batch" => worker_run_batch(args, root, allowed_roots),
         _ => Err(error("unknown_tool", &format!("unknown_tool:{name}"))),
     }
 }
@@ -219,8 +219,8 @@ fn read_run(root: &Path, id: &str) -> Result<Value, Value> {
     read_json(&run_path(root, id)?)
 }
 
-fn policy(root: &Path) -> Value {
-    json!({"schema":"narada.worker.policy.v1","status":"ok","server_name":SERVER_NAME,"run_root":run_root(root).to_string_lossy(),"site_root":root.to_string_lossy(),"allowed_roots":[root.to_string_lossy()],"allowed_runtimes":["narada-agent-runtime-server"],"allowed_authorities":["read","write","command"],"native_execution":"rust_authority","secret_projection":"environment_only"})
+fn policy(root: &Path, allowed_roots: &[PathBuf]) -> Value {
+    json!({"schema":"narada.worker.policy.v1","status":"ok","server_name":SERVER_NAME,"run_root":run_root(root).to_string_lossy(),"site_root":root.to_string_lossy(),"allowed_roots":allowed_roots.iter().map(|allowed|allowed.to_string_lossy()).collect::<Vec<_>>(),"allowed_runtimes":["narada-agent-runtime-server"],"allowed_authorities":["read","write","command"],"native_execution":"rust_authority","secret_projection":"environment_only"})
 }
 fn defaults_path(root: &Path) -> PathBuf {
     run_root(root).join("cognition-defaults.json")
@@ -237,7 +237,7 @@ fn cognition_defaults_for(root: &Path) -> Value {
 fn cognition_defaults(root: &Path) -> Value {
     json!({"schema":"narada.worker.cognition_defaults.v1","status":"ok","defaults":cognition_defaults_for(root),"source":"native_contract","canonical_runtime":"narada-agent-runtime-server uses an immutable invocation plan","native_read_only":false})
 }
-fn config_resolve(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+fn config_resolve(args: &Map<String, Value>, root: &Path, allowed_roots: &[PathBuf]) -> Result<Value, Value> {
     let cwd = args
         .get("constraints")
         .and_then(Value::as_object)
@@ -245,7 +245,7 @@ fn config_resolve(args: &Map<String, Value>, root: &Path) -> Result<Value, Value
         .and_then(Value::as_str)
         .or_else(|| args.get("cwd").and_then(Value::as_str));
     let cwd = cwd.map(PathBuf::from).unwrap_or_else(|| root.to_path_buf());
-    if !is_within(&cwd, root) {
+    if !allowed_roots.iter().any(|allowed| is_within(&cwd, allowed)) {
         return Err(error(
             "worker_cwd_outside_allowed_roots",
             "worker_cwd_outside_allowed_roots",
@@ -724,6 +724,7 @@ fn authority(args: &Map<String, Value>) -> Result<&str, Value> {
 fn worker_run(
     args: &Map<String, Value>,
     root: &Path,
+    allowed_roots: &[PathBuf],
     resume: Option<String>,
     tool_name: &str,
 ) -> Result<Value, Value> {
@@ -771,7 +772,7 @@ fn worker_run(
         .and_then(Value::as_str)
         .map(PathBuf::from)
         .unwrap_or_else(|| root.to_path_buf());
-    if !is_within(&cwd, root) {
+    if !allowed_roots.iter().any(|allowed| is_within(&cwd, allowed)) {
         return Err(error(
             "worker_cwd_outside_allowed_roots",
             "worker_cwd_outside_allowed_roots",
@@ -818,7 +819,7 @@ fn worker_run(
         .map_err(|_| error("worker_launch_failed", "worker_launch_failed"))?;
     Ok(running)
 }
-fn worker_edit(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+fn worker_edit(args: &Map<String, Value>, root: &Path, allowed_roots: &[PathBuf]) -> Result<Value, Value> {
     let prompt =
         required_string(args, "instruction", "worker_edit_instruction_required")?.to_string();
     let mut constraints = args
@@ -838,16 +839,17 @@ fn worker_edit(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
             .as_object()
             .unwrap(),
         root,
+        allowed_roots,
         None,
         "worker_edit",
     )
 }
-fn worker_resume(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+fn worker_resume(args: &Map<String, Value>, root: &Path, allowed_roots: &[PathBuf]) -> Result<Value, Value> {
     let session =
         required_string(args, "worker_session_id", "worker_session_id_required")?.to_string();
-    worker_run(args, root, Some(session), "worker_resume")
+    worker_run(args, root, allowed_roots, Some(session), "worker_resume")
 }
-fn worker_run_batch(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+fn worker_run_batch(args: &Map<String, Value>, root: &Path, allowed_roots: &[PathBuf]) -> Result<Value, Value> {
     let requests = args
         .get("requests")
         .and_then(Value::as_array)
@@ -876,7 +878,7 @@ fn worker_run_batch(args: &Map<String, Value>, root: &Path) -> Result<Value, Val
                     "worker_run_batch_item_invalid",
                 )
             })
-            .and_then(|v| worker_run(v, root, None, "worker_run_batch"))
+            .and_then(|v| worker_run(v, root, allowed_roots, None, "worker_run_batch"))
         {
             Ok(run) => {
                 runs.push(json!({"index":index,"run_id":run["run_id"],"status":run["status"]}))
