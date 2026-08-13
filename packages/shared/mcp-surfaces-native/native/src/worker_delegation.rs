@@ -620,6 +620,20 @@ fn cognition_defaults_update(args: &Map<String, Value>, root: &Path) -> Result<V
     )
 }
 
+fn narada_source_root(root: &Path) -> PathBuf {
+    if let Some(path) = std::env::var_os("NARADA_SRC_ROOT").map(PathBuf::from) {
+        return path;
+    }
+    let parent = root.parent().unwrap_or(root);
+    if parent.join("narada").is_dir() {
+        return parent.to_path_buf();
+    }
+    let conventional = parent.join("src");
+    if conventional.join("narada").is_dir() {
+        return conventional;
+    }
+    conventional
+}
 fn runtime_command(root: &Path) -> Result<PathBuf, Value> {
     if let Some(path) = std::env::var_os("NARADA_AGENT_RUNTIME_SERVER_NATIVE")
         .map(PathBuf::from)
@@ -627,9 +641,7 @@ fn runtime_command(root: &Path) -> Result<PathBuf, Value> {
     {
         return Ok(path);
     }
-    let src = std::env::var_os("NARADA_SRC_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| root.parent().unwrap_or(root).join("src"));
+    let src = narada_source_root(root);
     let candidates=[src.join("narada/packages/agent-runtime-server/native/target/release/narada-agent-runtime-server-rust.exe"),src.join("narada/packages/agent-runtime-server/native/target/release/narada-agent-runtime-server-rust")];
     candidates.into_iter().find(|p| p.is_file()).ok_or_else(|| {
         error(
@@ -645,9 +657,7 @@ fn preflight_command(root: &Path) -> Result<PathBuf, Value> {
     {
         return Ok(path);
     }
-    let src = std::env::var_os("NARADA_SRC_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| root.parent().unwrap_or(root).join("src"));
+    let src = narada_source_root(root);
     [
         src.join("narada/packages/invokable-intelligence-runtime/native/target/release/narada-intelligence-preflight.exe"),
         src.join("narada/packages/invokable-intelligence-runtime/native/target/release/narada-intelligence-preflight"),
@@ -667,9 +677,42 @@ fn admitted_plan_binding(admission: &Value) -> Result<(String, String, String, S
     let evidence_ref = admission.get("evidence_ref").and_then(Value::as_str).unwrap_or_default().to_string();
     Ok((plan_ref.to_string(), mode.to_string(), model.to_string(), evidence_ref))
 }
+fn resolve_intelligence_context_path(
+    root: &Path,
+    explicit_context: Option<PathBuf>,
+    user_site_root: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> PathBuf {
+    if let Some(path) = explicit_context.filter(|path| path.is_file()) {
+        return path;
+    }
+    if let Some(path) = user_site_root
+        .map(|path| path.join(".narada/intelligence-launch-context.json"))
+        .filter(|path| path.is_file())
+    {
+        return path;
+    }
+    let local = root.join(".narada/intelligence-launch-context.json");
+    if local.is_file() {
+        return local;
+    }
+    home
+        .map(|home| home.join("Narada/.narada/intelligence-launch-context.json"))
+        .filter(|path| path.is_file())
+        .unwrap_or(local)
+}
+fn intelligence_context_path(root: &Path) -> PathBuf {
+    resolve_intelligence_context_path(
+        root,
+        std::env::var_os("NARADA_INTELLIGENCE_CONTEXT_PATH").map(PathBuf::from),
+        std::env::var_os("NARADA_USER_SITE_ROOT").map(PathBuf::from),
+        std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from),
+    )
+}
 fn invocation_plan_binding(root: &Path, requested_plan_ref: Option<&str>, cognition: Option<&str>) -> Result<(String, String, String, String, Option<String>), Value> {
+    let context_path = intelligence_context_path(root);
     let context =
-        read_json(&root.join(".narada/intelligence-launch-context.json")).map_err(|_| {
+        read_json(&context_path).map_err(|_| {
             error(
                 "worker_intelligence_context_required",
                 "worker_intelligence_context_required",
@@ -686,10 +729,11 @@ fn invocation_plan_binding(root: &Path, requested_plan_ref: Option<&str>, cognit
             )
         })?;
     let registry = PathBuf::from(registry);
+    let context_site_root = context_path.parent().and_then(Path::parent).unwrap_or(root);
     let registry = if registry.is_absolute() {
         registry
     } else {
-        root.join(registry)
+        context_site_root.join(registry)
     };
     let principal = context.get("principal_id").and_then(Value::as_str).ok_or_else(|| error("worker_intelligence_principal_required", "worker_intelligence_principal_required"))?;
     let defaults_path = root.join(".narada/worker-cognition-defaults.json");
@@ -1208,6 +1252,32 @@ mod tests {
     fn containment_is_path_component_aware() {
         assert!(path_components_equal_or_child(Path::new("C:/Users/Andrey/Narada/project"), Path::new("C:/Users/Andrey/Narada")));
         assert!(!path_components_equal_or_child(Path::new("C:/Users/Andrey/Narada-other"), Path::new("C:/Users/Andrey/Narada")));
+    }
+
+    #[test]
+    fn project_site_falls_back_to_user_site_intelligence_context() {
+        let base = std::env::temp_dir().join(format!("narada-worker-context-{}", uuid::Uuid::new_v4()));
+        let project = base.join("src/marici");
+        let user_site = base.join("Narada");
+        let expected = user_site.join(".narada/intelligence-launch-context.json");
+        fs::create_dir_all(expected.parent().expect("context parent")).expect("context dir");
+        fs::write(&expected, "{}").expect("context");
+        assert_eq!(
+            resolve_intelligence_context_path(&project, None, None, Some(base.clone())),
+            expected
+        );
+        fs::remove_dir_all(base).expect("cleanup");
+    }
+
+    #[test]
+    fn project_site_discovers_sibling_narada_source_root() {
+        let base = std::env::temp_dir().join(format!("narada-worker-source-{}", uuid::Uuid::new_v4()));
+        let source_root = base.join("src");
+        let project = source_root.join("marici");
+        fs::create_dir_all(source_root.join("narada")).expect("narada source dir");
+        fs::create_dir_all(&project).expect("project dir");
+        assert_eq!(narada_source_root(&project), source_root);
+        fs::remove_dir_all(base).expect("cleanup");
     }
 
     #[cfg(windows)]
