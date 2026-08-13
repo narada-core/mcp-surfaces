@@ -143,6 +143,24 @@ fn append_event(root:&Path,id:&str,kind:&str,payload:Value)->Result<Value,Value>
     writeln!(file,"{}",event).map_err(|_|error("delegated_task_event_write_failed","delegated_task_event_write_failed"))?; Ok(event)
 }
 fn objective(args:&Map<String,Value>)->Result<String,Value>{ args.get("objective").or_else(||args.get("intent").and_then(|v|v.get("objective"))).and_then(Value::as_str).map(str::trim).filter(|v|!v.is_empty()).map(str::to_string).ok_or_else(||error("delegated_task_requires_objective","delegated_task_requires_objective")) }
+fn normalize_workflow(input:Option<&Value>)->Value{
+    let mut workflow=input.and_then(Value::as_object).cloned().unwrap_or_default();
+    if !workflow.get("steps").is_some_and(Value::is_array){
+        let strategy=workflow.get("template_id").or_else(||workflow.get("strategy")).or_else(||workflow.get("template")).and_then(Value::as_str);
+        let template=strategy.and_then(|id|workflow_templates().into_iter().find(|item|item.get("template_id").and_then(Value::as_str)==Some(id)));
+        let steps=template.and_then(|item|item.get("steps").cloned()).unwrap_or_else(||json!([{"id":"primary","kind":"worker"}]));
+        workflow.insert("steps".into(),steps);
+    }
+    Value::Object(workflow)
+}
+fn initial_step_states(workflow:&Value)->Value{
+    let mut states=Map::new();
+    for step in workflow.get("steps").and_then(Value::as_array).into_iter().flatten(){
+        let Some(id)=step.get("id").and_then(Value::as_str) else {continue};
+        states.insert(id.to_string(),json!({"step_id":id,"kind":step.get("kind").and_then(Value::as_str).unwrap_or("worker"),"status":"pending","attempts":0,"run_ids":[],"current_run_id":null,"started_at":null,"finished_at":null,"error":null,"summary":null}));
+    }
+    Value::Object(states)
+}
 fn stable_task_id(args:&Map<String,Value>)->String {
     if let Some(id)=args.get("task_id").and_then(Value::as_str){return id.to_string()}
     if let Some(key)=args.get("idempotency_key").and_then(Value::as_str){let digest=Sha256::digest(key.as_bytes());let prefix=digest[..8].iter().map(|byte|format!("{byte:02x}")).collect::<String>();return format!("task_{prefix}")}
@@ -151,8 +169,8 @@ fn stable_task_id(args:&Map<String,Value>)->String {
 fn task_run(args:&Map<String,Value>,root:&Path)->Result<Value,Value>{
     let objective=objective(args)?; let id=stable_task_id(args); safe_id(&id)?;
     if task_path(root,&id)?.is_file(){ let task=read_task(root,&id)?; return Ok(json!({"schema":"narada.delegated_task.run.v1","status":"existing","request_status":"existing","execution_status":task["status"],"created":false,"task_id":id,"task_status":task["status"],"summary":task["summary"]})); }
-    let created=now(); let step=json!({"step_id":"implement","kind":"worker","status":"pending","attempts":0,"run_ids":[],"current_run_id":null,"started_at":null,"finished_at":null,"error":null,"summary":null});
-    let mut task=json!({"schema":"narada.delegated_task.task.v1","task_id":id,"status":"accepted_for_execution","objective":objective,"created_at":created,"updated_at":created,"cancelled_at":null,"idempotency_key":args.get("idempotency_key"),"constraints":args.get("constraints").cloned().unwrap_or_else(||json!({})),"workflow":args.get("workflow").cloned().unwrap_or_else(||json!({"strategy":"implement","steps":[{"id":"implement","kind":"worker"}]})),"execution":args.get("execution").cloned().unwrap_or_else(||json!({"start":true})),"acceptance":args.get("acceptance").cloned().unwrap_or_else(||json!({})),"result":{"schema":"narada.delegated_task.handoff.v1","acceptance_verdict":"pending","step_states":{"implement":step},"worker_refs":[],"residual_risks":[],"observed_incoherencies":[],"verification":[],"changed_files":[]},"summary":null});
+    let created=now(); let workflow=normalize_workflow(args.get("workflow")); let step_states=initial_step_states(&workflow);
+    let mut task=json!({"schema":"narada.delegated_task.task.v1","task_id":id,"status":"accepted_for_execution","objective":objective,"created_at":created,"updated_at":created,"cancelled_at":null,"idempotency_key":args.get("idempotency_key"),"constraints":args.get("constraints").cloned().unwrap_or_else(||json!({})),"workflow":workflow,"execution":args.get("execution").cloned().unwrap_or_else(||json!({"start":true})),"acceptance":args.get("acceptance").cloned().unwrap_or_else(||json!({})),"result":{"schema":"narada.delegated_task.handoff.v1","acceptance_verdict":"pending","step_states":step_states,"worker_refs":[],"residual_risks":[],"observed_incoherencies":[],"verification":[],"changed_files":[]},"summary":null});
     write_task(root,&task)?; append_event(root,&id,"task_created",json!({"objective":objective}))?;
     if task.pointer("/execution/start").and_then(Value::as_bool)!=Some(false){ task=advance_value(task,root)?; }
     Ok(json!({"schema":"narada.delegated_task.run.v1","status":"accepted_for_execution","request_status":"accepted_for_execution","execution_status":task["status"],"created":true,"task_id":id,"task_status":task["status"],"summary":task["summary"]}))
@@ -217,6 +235,17 @@ mod tests {
         task_run(json!({"task_id":"task_takeover","objective":"demo","execution":{"start":false}}).as_object().unwrap(), &root).expect("second run");
         let takeover = task_cancel(json!({"task_id":"task_takeover","parent_task_id":"parent"}).as_object().unwrap(), &root, true).expect("takeover");
         assert_eq!(takeover["status"], "parent_takeover_recorded");
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn native_delegated_task_preserves_explicit_dag_state() {
+        let root = std::env::temp_dir().join(format!("narada-delegated-task-dag-{}", uuid::Uuid::new_v4()));
+        task_run(json!({"task_id":"task_dag","objective":"demo","execution":{"start":false},"workflow":{"steps":[{"id":"research","kind":"research"},{"id":"synthesize","kind":"worker","depends_on":["research"]}]}}).as_object().unwrap(), &root).expect("run");
+        let task = read_task(&root, "task_dag").expect("task");
+        assert_eq!(task["workflow"]["steps"].as_array().map(Vec::len), Some(2));
+        assert_eq!(task["result"]["step_states"]["research"]["status"], "pending");
+        assert_eq!(task["result"]["step_states"]["synthesize"]["status"], "pending");
         fs::remove_dir_all(root).expect("cleanup");
     }
 }
