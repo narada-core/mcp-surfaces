@@ -3,8 +3,9 @@ use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::{Command, ExitCode, Stdio};
 use time::OffsetDateTime;
 
 const RUNTIME_PACKAGES: &[&str] = &[
@@ -262,7 +263,10 @@ fn native_manifest(
         "distribution_kind":"native",
         "build_authority":"cargo",
     });
-    let fingerprint = canonical_json_sha256(&value)?;
+    let fingerprint = sha256(
+        &serde_json::to_vec(&strip_volatile_manifest_metadata(&value))
+            .map_err(|error| error.to_string())?,
+    );
     value
         .as_object_mut()
         .unwrap()
@@ -365,6 +369,7 @@ fn materialize(root: &Path, options: &MaterializeOptions) -> Result<Value, Strin
         .installed_index
         .clone()
         .unwrap_or_else(|| home.join(".narada/carriers/installed-carriers.json"));
+    sync_site_registries(root, &contract)?;
     let materializer = current_artifact(
         root,
         "packages/shared/mcp-materializer-native/dist/native",
@@ -395,6 +400,73 @@ fn materialize(root: &Path, options: &MaterializeOptions) -> Result<Value, Strin
     )
 }
 
+fn sync_site_registries(root: &Path, contract_path: &Path) -> Result<(), String> {
+    let contract: Value = serde_json::from_slice(
+        &fs::read(contract_path).map_err(|error| format!("native_contract_read_failed:{error}"))?,
+    )
+    .map_err(|error| format!("native_contract_parse_failed:{error}"))?;
+    let site_ids = contract["sites"]
+        .as_array()
+        .ok_or("native_contract_sites_required")?
+        .iter()
+        .map(|site| {
+            site["site_id"]
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .ok_or("native_contract_site_id_required")
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let registrar = current_artifact(
+        root,
+        "packages/mcp-registrar/dist/native",
+        &executable_name("narada-mcp-registrar"),
+    )?;
+    for (index, site_id) in site_ids.iter().enumerate() {
+        let request = json!({
+            "jsonrpc":"2.0",
+            "id":index + 1,
+            "method":"tools/call",
+            "params":{
+                "name":"registrar_site_surface_registry_sync",
+                "arguments":{"site_id":site_id}
+            }
+        });
+        let body = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
+        let mut child = Command::new(&registrar)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("native_registrar_launch_failed:{error}"))?;
+        let mut input = child.stdin.take().ok_or("native_registrar_stdin_missing")?;
+        write!(input, "Content-Length: {}\r\n\r\n", body.len())
+            .and_then(|_| input.write_all(&body))
+            .map_err(|error| format!("native_registrar_request_failed:{error}"))?;
+        drop(input);
+        let output = child
+            .wait_with_output()
+            .map_err(|error| format!("native_registrar_wait_failed:{error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "native_registrar_exit:{site_id}:{:?}:{}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        let separator = output
+            .stdout
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .ok_or_else(|| format!("native_registrar_response_invalid:{site_id}"))?;
+        let response: Value = serde_json::from_slice(&output.stdout[separator + 4..])
+            .map_err(|error| format!("native_registrar_response_parse_failed:{site_id}:{error}"))?;
+        if let Some(error) = response.get("error") {
+            return Err(format!("native_registrar_sync_failed:{site_id}:{error}"));
+        }
+    }
+    Ok(())
+}
+
 fn verify_native_distribution(root: &Path) -> Result<Value, String> {
     let forbidden = ["node", "bun", "pnpm", "tsx", "powershell", "pwsh"];
     let source = fs::read_to_string(root.join("native-distribution/src/main.rs"))
@@ -408,6 +480,29 @@ fn verify_native_distribution(root: &Path) -> Result<Value, String> {
             "native_distribution_forbidden_subprocess:{violations:?}"
         ));
     }
+    let manifest_path = root.join(".ai/runtime/workspace-artifact-manifest.json");
+    let manifest: Value = serde_json::from_slice(
+        &fs::read(&manifest_path)
+            .map_err(|error| format!("native_manifest_read_failed:{error}"))?,
+    )
+    .map_err(|error| format!("native_manifest_parse_failed:{error}"))?;
+    let expected = manifest["manifest_fingerprint"]
+        .as_str()
+        .ok_or("native_manifest_fingerprint_required")?;
+    let mut unsigned = manifest.clone();
+    unsigned
+        .as_object_mut()
+        .ok_or("native_manifest_object_required")?
+        .remove("manifest_fingerprint");
+    let actual = sha256(
+        &serde_json::to_vec(&strip_volatile_manifest_metadata(&unsigned))
+            .map_err(|error| error.to_string())?,
+    );
+    if actual != expected {
+        return Err(format!(
+            "native_manifest_fingerprint_mismatch:{expected}:{actual}"
+        ));
+    }
     for artifact in ARTIFACTS {
         current_artifact(
             root,
@@ -418,6 +513,30 @@ fn verify_native_distribution(root: &Path) -> Result<Value, String> {
     Ok(
         json!({"schema":"narada.native_distribution.verification.v1","status":"passed","node_required":false,"bun_required":false,"pnpm_required":false,"artifact_count":ARTIFACTS.len()}),
     )
+}
+
+fn strip_volatile_manifest_metadata(value: &Value) -> Value {
+    match value {
+        Value::Array(values) => Value::Array(
+            values
+                .iter()
+                .map(strip_volatile_manifest_metadata)
+                .collect(),
+        ),
+        Value::Object(object) => Value::Object(
+            object
+                .iter()
+                .filter_map(|(key, child)| {
+                    if key == "generated_at" || key == "mtime_ms" {
+                        None
+                    } else {
+                        Some((key.clone(), strip_volatile_manifest_metadata(child)))
+                    }
+                })
+                .collect(),
+        ),
+        _ => value.clone(),
+    }
 }
 
 fn current_artifact(root: &Path, relative_root: &str, name: &str) -> Result<PathBuf, String> {

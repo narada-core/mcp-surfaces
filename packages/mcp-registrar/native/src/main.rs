@@ -246,23 +246,36 @@ fn validate_contract(contract: &Value) -> Result<(), String> {
     }
     validate_unique_records(contract["tools"].as_array(), "name", "tools")?;
     validate_unique_records(
-        contract.pointer("/read_models/registrar_surface_list/items").and_then(Value::as_array),
+        contract
+            .pointer("/read_models/registrar_surface_list/items")
+            .and_then(Value::as_array),
         "id",
         "surfaces",
     )?;
     validate_unique_records(
-        contract.pointer("/read_models/registrar_carrier_list/items").and_then(Value::as_array),
+        contract
+            .pointer("/read_models/registrar_carrier_list/items")
+            .and_then(Value::as_array),
         "carrier_id",
         "carriers",
     )?;
     Ok(())
 }
 
-fn validate_unique_records(items: Option<&Vec<Value>>, key: &str, label: &str) -> Result<(), String> {
-    let items = items.filter(|items| !items.is_empty()).ok_or_else(|| format!("{label}_missing"))?;
+fn validate_unique_records(
+    items: Option<&Vec<Value>>,
+    key: &str,
+    label: &str,
+) -> Result<(), String> {
+    let items = items
+        .filter(|items| !items.is_empty())
+        .ok_or_else(|| format!("{label}_missing"))?;
     let mut seen = std::collections::BTreeSet::new();
     for item in items {
-        let value = item.get(key).and_then(Value::as_str).filter(|value| !value.is_empty())
+        let value = item
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
             .ok_or_else(|| format!("{label}_{key}_missing"))?;
         if !seen.insert(value) {
             return Err(format!("{label}_{key}_duplicate:{value}"));
@@ -489,22 +502,21 @@ fn carrier_unbind(contract: &Value, args: &Value) -> Result<Value, MutationFailu
     let validation = template["materialization_validation"].clone();
     let mut generation = template["generation_unsigned"].clone();
     let current_sidecar_path = format!("{path}.narada-generation.json");
-    let current_generation: Value = serde_json::from_slice(
-        &fs::read(&current_sidecar_path).map_err(|error| {
+    let current_generation: Value =
+        serde_json::from_slice(&fs::read(&current_sidecar_path).map_err(|error| {
             mutation_failure(
                 "registrar_generation_sidecar_read_failed",
                 error.to_string(),
                 json!({"path":current_sidecar_path}),
             )
-        })?,
-    )
-    .map_err(|error| {
-        mutation_failure(
-            "registrar_generation_sidecar_invalid",
-            error.to_string(),
-            json!({"path":current_sidecar_path}),
-        )
-    })?;
+        })?)
+        .map_err(|error| {
+            mutation_failure(
+                "registrar_generation_sidecar_invalid",
+                error.to_string(),
+                json!({"path":current_sidecar_path}),
+            )
+        })?;
     let artifact_manifest_fingerprint = current_generation
         .get("artifact_manifest_fingerprint")
         .and_then(Value::as_str)
@@ -3964,10 +3976,11 @@ fn registry_surface(
         .map(str::to_string)
         .collect::<Vec<_>>();
     let mut launch = unwrap_launch(&raw_command, &raw_args);
-    if surface_id == "mcp-loader" && launch.invocation.as_deref() == Some("native_entrypoint") {
-        if let Some(canonical) =
-            native_artifact_entrypoint("mcp-loader-mcp", "narada-mcp-loader.exe")
-        {
+    if matches!(
+        launch.invocation.as_deref(),
+        Some("native_applet" | "native_entrypoint")
+    ) {
+        if let Some(canonical) = canonical_native_surface_entrypoint(surface_id, projection_id) {
             for flag in ["--child-command", "--entrypoint"] {
                 if let Some(index) = raw_args.iter().position(|value| value == flag) {
                     if let Some(value) = raw_args.get_mut(index + 1) {
@@ -4027,6 +4040,61 @@ fn registry_surface(
     Ok(
         json!({"surface_id":format!("{server_name}.local"),"surface_projection":surface_projection,"surface_type":catalog["kind"],"display_name":server_name,"server_name":server_name,"runtime_binding":{"runtime_kind":runtime_kind,"proxy_implementation":if launch.proxied{json!("native")}else{Value::Null},"entrypoint":launch.entrypoint,"owner_site_id":site_id,"transport":{"type":"stdio","command":transport_command,"args":transport_args}},"authority_boundary":{"posture":"registrar_generated_runtime_surface_registry","grants_tool_authority":true,"granted_tool_authority_kind":"declared_enabled_mcp_surface_tools","source":"site_mcp_fabric_and_registrar_catalog"},"client_config":{"generated_path":format!(".ai/mcp/{file}"),"generated_file":file},"tool_contract":{"exposed_tools":registered,"semantic_operations":[],"deprecated_aliases":{},"read_only_tools":read_only,"mutating_tools":mutating,"refused_tools":refused},"registered_live_tools":registered,"catalog_surface_id":descriptor["surface_id"],"evidence":{"source":"site_mcp_fabric","path":format!(".ai/mcp/{file}"),"projection_kind":"site_fabric"}}),
     )
+}
+
+fn canonical_native_surface_entrypoint(surface_id: &str, projection_id: &str) -> Option<String> {
+    if ["local-filesystem", "structured-command", "git"].contains(&surface_id) {
+        return native_proxy_entrypoint();
+    }
+    if surface_id == "mcp-loader" {
+        return native_artifact_entrypoint("mcp-loader-mcp", "narada-mcp-loader.exe");
+    }
+    if surface_id == "task-lifecycle" || surface_id == "work-lifecycle" {
+        let artifact = if surface_id == "task-lifecycle" {
+            "narada-task-lifecycle-mcp.exe"
+        } else {
+            "narada-work-lifecycle-mcp.exe"
+        };
+        return native_artifact_entrypoint("shared/mcp-lifecycle-native", artifact);
+    }
+    if surface_id == "agent-context" && projection_id == "default" {
+        return native_artifact_entrypoint("agent-context-mcp", "narada-agent-context-mcp.exe");
+    }
+    if surface_id == "mcp-registrar" {
+        return native_artifact_entrypoint("mcp-registrar", "narada-mcp-registrar.exe");
+    }
+    if [
+        "catalog-observation",
+        "operator-routing",
+        "site-inbox",
+        "site-lifecycle",
+        "site-registry",
+        "project-state",
+        "runtime-introspection",
+        "site-coherence",
+        "launcher",
+        "mailbox",
+        "graph-mail",
+        "calendar",
+        "site-loop",
+        "worker-delegation",
+        "delegated-task",
+        "sop",
+        "scheduler",
+        "surface-feedback",
+        "speech",
+        "artifacts",
+        "nars-session",
+        "quota-meter",
+        "operator-console-overlay",
+        "browser-control",
+        "cloudflare-carrier",
+    ]
+    .contains(&surface_id)
+    {
+        return native_artifact_entrypoint("shared/mcp-surfaces-native", "narada-mcp-surfaces.exe");
+    }
+    None
 }
 
 struct Launch {
@@ -4215,13 +4283,34 @@ mod tests {
         let mut contract = embedded_contract();
         let duplicate = contract["tools"][0].clone();
         contract["tools"].as_array_mut().unwrap().push(duplicate);
-        assert!(validate_contract(&contract).unwrap_err().starts_with("tools_name_duplicate:"));
+        assert!(validate_contract(&contract)
+            .unwrap_err()
+            .starts_with("tools_name_duplicate:"));
     }
 
     #[test]
     fn unsupported_native_contract_schema_is_rejected() {
         let mut contract = embedded_contract();
         contract["schema"] = json!("legacy");
-        assert_eq!(validate_contract(&contract).unwrap_err(), "unsupported_schema");
+        assert_eq!(
+            validate_contract(&contract).unwrap_err(),
+            "unsupported_schema"
+        );
+    }
+
+    #[test]
+    fn native_registry_rebinding_covers_every_distribution_artifact_class() {
+        for (surface_id, projection_id, executable) in [
+            ("local-filesystem", "default", "narada-mcp-runtime.exe"),
+            ("mcp-loader", "default", "narada-mcp-loader.exe"),
+            ("agent-context", "default", "narada-agent-context-mcp.exe"),
+            ("task-lifecycle", "stdio", "narada-task-lifecycle-mcp.exe"),
+            ("mcp-registrar", "default", "narada-mcp-registrar.exe"),
+            ("surface-feedback", "default", "narada-mcp-surfaces.exe"),
+        ] {
+            let path = canonical_native_surface_entrypoint(surface_id, projection_id)
+                .unwrap_or_else(|| panic!("missing native mapping for {surface_id}"));
+            assert!(path.ends_with(executable), "{surface_id}: {path}");
+        }
     }
 }
