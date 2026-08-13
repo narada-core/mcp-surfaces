@@ -114,9 +114,10 @@ fn materializes_every_supported_carrier_kind_without_javascript_runtime_environm
     let registrar = root.path().join("narada-mcp-materializer.exe");
     let proxy = root.path().join("narada-mcp-runtime.exe");
     let filesystem = root.path().join("filesystem.exe");
-    for path in [&registrar, &proxy, &filesystem] {
+    for path in [&registrar, &filesystem] {
         fs::write(path, format!("fixture:{}", path.display())).unwrap();
     }
+    fs::copy(env!("CARGO_BIN_EXE_narada-mcp-materializer"), &proxy).unwrap();
     let build_set_path = root.path().join("artifact-build-set.json");
     let build_set_fingerprint = write_fixture_build_set(
         &manifest_path,
@@ -248,7 +249,7 @@ fn derives_all_carriers_from_declared_site_capabilities_without_javascript() {
     fs::create_dir_all(registry_path.parent().unwrap()).unwrap();
     assert!(!workspace.join("node_modules").exists());
     assert!(!workspace.join("node_modules").exists());
-    fs::write(&proxy, b"native proxy fixture").unwrap();
+    fs::copy(env!("CARGO_BIN_EXE_narada-mcp-materializer"), &proxy).unwrap();
     fs::write(&matrix_path, b"{\"schema\":\"fixture\"}\n").unwrap();
     fs::write(
         workspace.join(".ai/runtime/workspace-artifact-manifest.json"),
@@ -511,7 +512,7 @@ fn derives_all_carriers_from_declared_site_capabilities_without_javascript() {
     let recovery_failure: Value = serde_json::from_slice(&recovery.stderr).unwrap();
     assert_eq!(
         recovery_failure["code"],
-        "materializer_fresh_process_spawn_failed"
+        "materializer_fresh_process_validation_failed"
     );
     let unchanged_codex = fs::read_to_string(home.join(".codex/config.toml")).unwrap();
     assert!(unchanged_codex.contains("model = \"operator-preserved\""));
