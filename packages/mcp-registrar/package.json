@@ -6,6 +6,7 @@
   "description": "Native Rust MCP surface registrar for binding and observing Site and carrier surface projections.",
   "scripts": {
     "build": "tsc -b",
+    "build:postcompile": "pnpm run build:native",
     "build:native": "tsx scripts/build-native.ts",
     "test:native:contract": "pnpm run build:native && node dist/test/native-contract.test.js",
     "typecheck": "tsc -b --pretty false",

@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Standalone MCP surface packages shared by Narada sites and carriers.",
   "scripts": {
-    "build": "pnpm run build:node",
+    "build": "pnpm guard:registrar-native-authority && pnpm run build:node",
     "build:node": "node --import tsx scripts/prepare-workspace-build.ts && pnpm --filter @narada-core/process-launch-posture build && pnpm --filter @narada-core/site-operating-loop build && pnpm --filter @narada-core/sqlite build && tsc -b --force && pnpm -r --filter \"./packages/**\" --if-present run build:postcompile && node --import tsx scripts/build-workspace-artifact-manifest.ts",
     "build:carrier-artifacts": "node --import tsx scripts/build-carrier-artifacts.ts",
     "materialize:carrier": "pnpm run materialize:carrier:native",

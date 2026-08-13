@@ -25,7 +25,7 @@ Review revision: `eeb464249eda123f844997481aaaf26d3b7a5880`
 | `packages/local-filesystem-mcp` | `@narada-core/local-filesystem-mcp` | Governed local filesystem inspection and mutation. | [README](../packages/local-filesystem-mcp/README.md) |
 | `packages/mailbox-mcp` | `@narada-core/mailbox-mcp` | Mailbox synchronization, admission, events, and bounded local projection reads. | [README](../packages/mailbox-mcp/README.md) |
 | `packages/mcp-loader-mcp` | `@narada-core/mcp-loader-mcp` | Policy-gated runtime attachment and proxying. | [README](../packages/mcp-loader-mcp/README.md) |
-| `packages/mcp-registrar` | `@narada-core/mcp-registrar` | Site and carrier surface binding/materialization. | [README](../packages/mcp-registrar/README.md) |
+| `packages/mcp-registrar` | `@narada-core/mcp-registrar` | Native Rust Site and carrier surface binding; checked-in native contract is authoritative. | [README](../packages/mcp-registrar/README.md) |
 | `packages/nars-session-mcp` | `@narada-core/nars-session-mcp` | Governed input and bounded readback for existing NARS sessions. | [README](../packages/nars-session-mcp/README.md) |
 | `packages/operator-console-overlay-mcp` | `@narada-core/operator-console-overlay-mcp` | Bounded MCP boundary for the Narada Operator Console overlay. | [README](../packages/operator-console-overlay-mcp/README.md) |
 | `packages/operator-routing-mcp` | `@narada-core/operator-routing-mcp` | Transcript-to-target routing and inbox fallback packaging. | [README](../packages/operator-routing-mcp/README.md) |
