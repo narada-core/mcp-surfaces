@@ -98,10 +98,11 @@ function Invoke-Materialization {
     [Parameter(Mandatory)][string]$IsolationRoot
   )
 
-  $environmentNames = @('Path', 'PNPM_HOME', 'LOCALAPPDATA', 'APPDATA', 'USERPROFILE', 'ProgramFiles')
+  $environmentNames = @('Path', 'PNPM_HOME', 'FNM_MULTISHELL_PATH', 'LOCALAPPDATA', 'APPDATA', 'USERPROFILE', 'ProgramFiles')
   $backup = Save-Environment -Names $environmentNames
   try {
     $env:Path = 'C:\Windows\System32;C:\Windows'
+    $env:FNM_MULTISHELL_PATH = $null
     if ($Mode -in @('failure', 'version-mismatch')) {
       $env:PNPM_HOME = Join-Path $IsolationRoot 'pnpm-home'
       $env:LOCALAPPDATA = Join-Path $IsolationRoot 'local-appdata'
@@ -174,8 +175,8 @@ function Test-ShortcutContract {
   Assert-Condition ([int]$contract.window_style -eq 1) 'desktop launcher must use a normal visible window style'
   $materializeScriptText = Get-Content -LiteralPath $materializePath -Raw
   Assert-Condition ($materializeScriptText -match 'Restart Codex, Kimi Code, and OpenCode') 'success notification must name every materialized carrier'
-  Assert-Condition ($materializeScriptText -match 'Write-ConsoleStatus') 'launcher must print visible status messages'
-  Assert-Condition ($materializeScriptText -match '\$spinner') 'launcher must print a live progress spinner'
+  Assert-Condition ($materializeScriptText -match 'Write-Status') 'launcher must print visible status messages'
+  Assert-Condition ($materializeScriptText -match 'Resolve-PnpmToolchain') 'launcher must resolve pnpm independently of inherited PATH'
 
   $first = Invoke-Installer -Arguments @('-RepoRoot', $repoRoot, '-DesktopPath', $TestRoot)
   Assert-Condition ($first.ExitCode -eq 0) "initial installer failed: $($first.Text)"
@@ -232,7 +233,7 @@ function Test-FailureReporting {
   Assert-Condition (Test-Path -LiteralPath $logPath -PathType Leaf) 'failure run must produce a log'
   $log = Get-Content -LiteralPath $logPath -Raw
   Assert-Condition ($log -match 'ERROR:') 'failure log must include an ERROR record'
-  Assert-Condition ($log -match 'pnpm was not found') 'failure log must identify missing pnpm'
+  Assert-Condition ($log -match 'pnpm toolchain unavailable') 'failure log must identify missing pnpm'
 
   [pscustomobject]@{
     mode = 'failure'
@@ -250,7 +251,7 @@ function Test-PnpmVersionEnforcement {
   Assert-Condition ($result.ExitCode -ne 0) 'isolated mismatched-pnpm run must fail'
   Assert-Condition (Test-Path -LiteralPath $logPath -PathType Leaf) 'version-mismatch run must produce a log'
   $log = Get-Content -LiteralPath $logPath -Raw
-  Assert-Condition ($log -match 'requires pnpm@10\.9\.0') 'version-mismatch log must identify the pinned pnpm version'
+  Assert-Condition ($log -match 'requires pnpm@10\.34\.0') 'version-mismatch log must identify the pinned pnpm version'
   Assert-Condition ($log -match '10\.33\.0') 'version-mismatch log must identify the discovered pnpm version'
 
   [pscustomobject]@{

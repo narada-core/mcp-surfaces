@@ -77,12 +77,61 @@ function Invoke-NativeMaterializer {
   }
 }
 
+function Resolve-PnpmToolchain {
+  $pnpmCandidates = @()
+  if (-not [string]::IsNullOrWhiteSpace($env:PNPM_HOME)) {
+    $pnpmCandidates += Join-Path $env:PNPM_HOME 'pnpm.cmd'
+  }
+  if (-not [string]::IsNullOrWhiteSpace($env:FNM_MULTISHELL_PATH)) {
+    $pnpmCandidates += Join-Path $env:FNM_MULTISHELL_PATH 'pnpm.cmd'
+  }
+  $pnpmCommand = Get-Command pnpm.cmd -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($pnpmCommand) { $pnpmCandidates += $pnpmCommand.Source }
+  foreach ($candidate in $pnpmCandidates | Select-Object -Unique) {
+    if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+      return [pscustomobject]@{ Executable = [System.IO.Path]::GetFullPath($candidate); ArgumentPrefix = @() }
+    }
+  }
+
+  $corepackCandidates = @()
+  if (-not [string]::IsNullOrWhiteSpace($env:FNM_MULTISHELL_PATH)) {
+    $corepackCandidates += Join-Path $env:FNM_MULTISHELL_PATH 'corepack.cmd'
+  }
+  $corepackCommand = Get-Command corepack.cmd -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($corepackCommand) { $corepackCandidates += $corepackCommand.Source }
+  if (-not [string]::IsNullOrWhiteSpace($env:APPDATA)) {
+    $fnmVersions = Join-Path $env:APPDATA 'fnm\node-versions'
+    if (Test-Path -LiteralPath $fnmVersions -PathType Container) {
+      $corepackCandidates += Get-ChildItem -LiteralPath $fnmVersions -Directory |
+        Sort-Object Name -Descending |
+        ForEach-Object { Join-Path $_.FullName 'installation\corepack.cmd' }
+    }
+  }
+  foreach ($candidate in $corepackCandidates | Select-Object -Unique) {
+    if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+      return [pscustomobject]@{ Executable = [System.IO.Path]::GetFullPath($candidate); ArgumentPrefix = @('pnpm') }
+    }
+  }
+  throw 'pnpm toolchain unavailable: install pnpm/Corepack or set PNPM_HOME/FNM_MULTISHELL_PATH.'
+}
+
 function Invoke-CarrierArtifactBuild {
   $stdoutPath = Join-Path ([System.IO.Path]::GetTempPath()) "narada-carrier-build-$PID.stdout.log"
   $stderrPath = Join-Path ([System.IO.Path]::GetTempPath()) "narada-carrier-build-$PID.stderr.log"
   try {
-    $pnpm = (Get-Command pnpm.cmd -ErrorAction Stop).Source
-    $process = Start-Process -FilePath $pnpm -ArgumentList @('run', 'build:carrier-artifacts') -WorkingDirectory $repoRoot -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -NoNewWindow -PassThru -Wait
+    $tool = Resolve-PnpmToolchain
+    $packageManager = [string](Get-Content -LiteralPath (Join-Path $repoRoot 'package.json') -Raw | ConvertFrom-Json).packageManager
+    if ($packageManager -notmatch '^pnpm@(?<version>\d+\.\d+\.\d+)$') {
+      throw "package.json must declare an exact pnpm packageManager version; found '$packageManager'."
+    }
+    $requiredVersion = $Matches.version
+    $versionArguments = @($tool.ArgumentPrefix) + @('--version')
+    $actualVersion = [string](& $tool.Executable @versionArguments | Select-Object -First 1)
+    if ($actualVersion.Trim() -ne $requiredVersion) {
+      throw "Carrier artifact preparation requires pnpm@$requiredVersion; resolved '$($tool.Executable)' reported '$($actualVersion.Trim())'."
+    }
+    $arguments = @($tool.ArgumentPrefix) + @('run', 'build:carrier-artifacts')
+    $process = Start-Process -FilePath $tool.Executable -ArgumentList $arguments -WorkingDirectory $repoRoot -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -NoNewWindow -PassThru -Wait
     foreach ($path in @($stdoutPath, $stderrPath)) {
       if (Test-Path -LiteralPath $path -PathType Leaf) {
         Get-Content -LiteralPath $path -TotalCount 1000 | Add-Content -LiteralPath $logPath -Encoding utf8
@@ -104,7 +153,7 @@ function Show-SuccessNotification {
     try {
       $notification.Icon = [System.Drawing.SystemIcons]::Information
       $notification.BalloonTipTitle = 'Narada MCP'
-      $notification.BalloonTipText = 'All carriers materialized. Restart carrier sessions to load the refreshed configuration.'
+      $notification.BalloonTipText = 'All carriers materialized. Restart Codex, Kimi Code, and OpenCode to load the refreshed configuration.'
       $notification.Visible = $true
       $notification.ShowBalloonTip(5000)
       Start-Sleep -Seconds 5
@@ -159,7 +208,7 @@ try {
     '--matrix', $matrix,
     '--installed-index', $installedIndex
   )
-  Write-Status 'All carriers materialized by the native authority. Restart carrier sessions.' ([ConsoleColor]::Green)
+  Write-Status 'All carriers materialized by the native authority. Restart Codex, Kimi Code, and OpenCode.' ([ConsoleColor]::Green)
   if (-not $NoNotification) { Show-SuccessNotification }
   exit 0
 } catch {
