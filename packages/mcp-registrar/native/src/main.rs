@@ -53,6 +53,7 @@ fn dispatch(request: &Value) -> Value {
         Ok(v) => v,
         Err(e) => return error(id, format!("mcp_registrar_native_contract_invalid:{e}")),
     };
+    extend_epistemic_catalog(&mut contract);
     if let Err(e) = validate_contract(&contract) {
         return error(id, format!("mcp_registrar_native_contract_invalid:{e}"));
     }
@@ -237,6 +238,65 @@ fn dispatch(request: &Value) -> Value {
             }
         }
         method => error(id, format!("unsupported_mcp_method:{method}")),
+    }
+}
+
+fn extend_epistemic_catalog(contract: &mut Value) {
+    let tools = [
+        ("epistemic_graph_guidance", true),
+        ("epistemic_graph_status", true),
+        ("epistemic_graph_query", true),
+        ("epistemic_graph_neighborhood", true),
+        ("epistemic_graph_proposal_submit", false),
+        ("epistemic_graph_proposal_review", false),
+        ("epistemic_graph_proposal_admit", false),
+        ("epistemic_graph_proposal_reject", false),
+        ("epistemic_graph_export", true),
+    ];
+    let descriptor_tools = tools
+        .iter()
+        .map(|(name, read_only)| {
+            json!({
+                "name":name,
+                "description":format!("Native epistemic graph operation: {name}."),
+                "input_schema":{"type":"object","additionalProperties":true},
+                "output_schema":{"type":"object","additionalProperties":true},
+                "annotations":{"title":name,"readOnlyHint":read_only,"destructiveHint":false,"idempotentHint":read_only,"openWorldHint":false},
+                "effect":{"class":if *read_only{"read"}else{"local_write"},"idempotency":if *read_only{"replayable"}else{"idempotent_with_key"},"confirmation":"policy"}
+            })
+        })
+        .collect::<Vec<_>>();
+    let projection = json!({
+        "id":"default","transport":{"kind":"stdio","command":"narada-mcp-surfaces","args":["--surface-id","epistemic-graph","--site-root","{site_root}"],"env":[]},
+        "injection_scope":"local_site","default_injection":"enabled","runtime_requirements":[],"authority_requirements":["scope.local_site"],
+        "lifecycle":{"mode":"replayable","reason":"Canonical events are immutable and the query projection is rebuildable."}
+    });
+    let descriptor = json!({
+        "schema_version":"2.0","source":"native","surface_id":"epistemic-graph","surface_version":"0.1.0",
+        "package":"@narada-core/mcp-surfaces-native","guidance_tool":"epistemic_graph_guidance","tools":descriptor_tools,
+        "projections":[projection.clone()],"metadata":{"authority":"tracked_event_ledger","truth_certification":false}
+    });
+    let descriptor_digest = sha256_text(&canonical_json(&descriptor));
+    let tool_contract_digest = sha256_text(&canonical_json(&descriptor["tools"]));
+    let names = tools.iter().map(|(name, _)| json!(name)).collect::<Vec<_>>();
+    let item = json!({
+        "id":"epistemic-graph","package":"mcp-surfaces-native","entrypoint":"{mcp_surfaces_root}/shared/mcp-surfaces-native/dist/native/narada-mcp-surfaces.exe",
+        "kind":"mcp_surface","args":["--surface-id","epistemic-graph","--site-root","{site_root}"],"tools":names,
+        "projections":[{"id":"default","injection_scope":"local_site","execution":{"adapter":"stdio","tenancy":"session_isolated","replacement":"manual"},"restart_owner":"local_site","runtime_requirements":[],"env_vars":[],"command":"narada-mcp-surfaces","entrypoint":"{mcp_surfaces_root}/shared/mcp-surfaces-native/dist/native/narada-mcp-surfaces.exe","args":["--surface-id","epistemic-graph","--site-root","{site_root}"]}],
+        "injection_scope":"local_site","restart_owner":"local_site","env_vars":[],"descriptor_source":"native","descriptor_digest":descriptor_digest,"tool_contract_digest":tool_contract_digest,"descriptor":descriptor,
+        "authority_locus":{"kind":"local_site"},"mutation_locus":{"kind":"local_site"},
+        "narada_scope":{"injection_scope":"local_site","authority_locus":{"kind":"local_site"},"mutation_locus":{"kind":"local_site"},"restart_owner":"local_site","scope_source":"registrar_surface_catalog"}
+    });
+    let count = if let Some(items) = contract.pointer_mut("/read_models/registrar_surface_list/items").and_then(Value::as_array_mut) {
+        if !items.iter().any(|candidate| candidate["id"] == "epistemic-graph") {
+            items.push(item);
+        }
+        Some(items.len())
+    } else {
+        None
+    };
+    if let (Some(count), Some(slot)) = (count, contract.pointer_mut("/read_models/registrar_surface_list/count")) {
+        *slot = json!(count);
     }
 }
 
@@ -3566,6 +3626,7 @@ fn site_launch(
         "site-lifecycle",
         "site-registry",
         "project-state",
+        "epistemic-graph",
         "runtime-introspection",
         "site-coherence",
         "launcher",
@@ -4081,6 +4142,7 @@ fn native_surface_artifact(
         "site-lifecycle",
         "site-registry",
         "project-state",
+        "epistemic-graph",
         "runtime-introspection",
         "site-coherence",
         "launcher",
@@ -4318,6 +4380,7 @@ mod tests {
             ("task-lifecycle", "stdio", "narada-task-lifecycle-mcp.exe"),
             ("mcp-registrar", "default", "narada-mcp-registrar.exe"),
             ("surface-feedback", "default", "narada-mcp-surfaces.exe"),
+            ("epistemic-graph", "default", "narada-mcp-surfaces.exe"),
         ] {
             let (_, artifact) = native_surface_artifact(surface_id, projection_id)
                 .unwrap_or_else(|| panic!("missing native mapping for {surface_id}"));

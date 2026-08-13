@@ -13,6 +13,11 @@ This repository mixes reusable substrate surfaces with Narada-specific control-p
 - `@narada-core/local-filesystem-mcp`
 - `@narada-core/structured-command-mcp`
 - `@narada-core/git-mcp`
+- `epistemic-graph` (Rust-native projection hosted by `@narada-core/mcp-surfaces-native`)
+
+`epistemic-graph` preserves attributed problems, conjectures, criticisms, tests,
+sources, and relations. It does not certify truth, embed a literature provider,
+or treat standards mappings as epistemic authority.
 
 `mcp-fabric-contracts` is generic because it defines transport-neutral document
 contracts and deterministic digests. Narada-specific discovery, authority,

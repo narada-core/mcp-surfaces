@@ -1652,6 +1652,10 @@ fn shared_surface_registry(surface_id: &str, surface_root: &str) -> Option<(Stri
             vec!["--narada-root", "{site_root}"],
         ),
         "artifacts" => (entrypoint("artifacts-mcp", "main.js"), vec![]),
+        "epistemic-graph" => (
+            entrypoint("shared/mcp-surfaces-native", "narada-mcp-surfaces.exe"),
+            vec!["--surface-id", "epistemic-graph", "--site-root", "{site_root}"],
+        ),
         "nars-session" => (entrypoint("nars-session-mcp", "main.js"), vec![]),
         "quota-meter" => (entrypoint("quota-meter-mcp", "main.js"), vec![]),
         _ => return None,
@@ -3652,6 +3656,7 @@ fn site_fabric_diagnostics(
         "site-coherence",
         "site-lifecycle",
         "artifacts",
+        "epistemic-graph",
         "nars-session",
         "quota-meter",
     ] {

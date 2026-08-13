@@ -62,6 +62,7 @@ workspace is the canonical Site root, `.narada` is the control root, and
 `.narada/site.json` is a generated local marker ignored by Git.
 
 - @narada-core/operator-console-overlay-mcp: host-level dedicated MCP surface for the Narada Operator Console overlay; canonical overlay mechanics remain owned by Narada proper.
+- `epistemic-graph`: generic Rust-native problem-situation surface hosted by `@narada-core/mcp-surfaces-native`; tracked events are authoritative and its SQLite projection is disposable.
 
 ## Getting Started
 
@@ -267,4 +268,3 @@ Do all of the following in the same change:
 - `graph-mail-mcp` owns policy-gated Microsoft Graph mail access and draft lifecycle tools; sending drafts must stay disallowed unless explicit site policy enables it.
 - `calendar-mcp` owns policy-gated Microsoft Graph calendar access and event lifecycle tools; event writes must stay disallowed unless explicit site policy enables them.
 - Task lifecycle/domain behavior belongs in dedicated MCP surface packages with explicit shared-domain dependencies.
-
