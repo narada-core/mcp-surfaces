@@ -49,7 +49,7 @@ pub fn list_tools() -> Vec<Value> {
         ),
         tool(
             "epistemic_graph_proposal_submit",
-            "Persist an immutable atomic proposal.",
+            "Persist an immutable atomic proposal of typed graph operations. Use guidance for a complete copyable example.",
             proposal_schema(),
             false,
         ),
@@ -537,6 +537,7 @@ fn validate_operations(ops: &[Value], require_evidence: bool) -> Result<(), Valu
                 required(obj, "title")?;
                 if typ == "source" {
                     required(obj, "version")?;
+                    required(obj, "locator")?;
                 }
                 declared.insert(id);
             }
@@ -724,10 +725,57 @@ fn required(args: &Map<String, Value>, key: &str) -> Result<String, Value> {
         })
 }
 fn guidance() -> Value {
-    json!({"schema":"narada.epistemic.guidance.v1","purpose":"Preserve evolving problem situations, not certify truth.","workflow":["query the current problem neighborhood","submit an atomic evidence-located proposal","review structural and provenance policy","admit the policy-valid record","record later criticism or supersession instead of rewriting history"],"entity_kinds":ENTITY_KINDS,"core_relations":CORE_RELATIONS,"admission_meaning":"policy-valid contribution; never truth certification","search_boundary":"Use external providers for discovery. Record a sweep only when it explains coverage or changes the graph.","problem_policy":"Transform apparent solutions into successor problems; record closure only as an attributed assessment."})
+    json!({
+        "schema":"narada.epistemic.guidance.v2",
+        "purpose":"Preserve evolving problem situations, not certify truth.",
+        "workflow":[
+            {"step":1,"tool":"epistemic_graph_status","why":"Read the current ledger_head for optimistic concurrency."},
+            {"step":2,"tool":"epistemic_graph_query","why":"Avoid duplicate entities and inspect the current problem neighborhood."},
+            {"step":3,"tool":"epistemic_graph_proposal_submit","why":"Persist one atomic, idempotent set of typed operations."},
+            {"step":4,"tool":"epistemic_graph_proposal_review","why":"Validate schema, references, provenance locations, invariants, and ledger head without asserting truth."},
+            {"step":5,"tool":"epistemic_graph_proposal_admit","why":"Append a policy-valid proposal to immutable canonical history."},
+            {"step":6,"tool":"epistemic_graph_neighborhood","why":"Verify the admitted problem situation and its relations."}
+        ],
+        "entity_kinds":ENTITY_KINDS,
+        "core_relations":CORE_RELATIONS,
+        "operation_kinds":["entity.declare","relation.declare","assessment.record","test_outcome.record","sweep.record"],
+        "provenance_choices":[
+            "Represent a document as a versioned source entity and connect claims with derived_from.",
+            "For an assessment or test outcome, include evidence entries with source_id, locator, and paraphrase.",
+            "Do not manufacture an assessment merely to attach provenance; conjecture plus derived_from is valid."
+        ],
+        "minimal_example":{
+            "submit":{"actor":"agent-id","authority_basis":{"kind":"operator_request","summary":"Capture one bounded source claim."},"idempotency_key":"stable-capture-key-v1","expected_ledger_head":null,"operations":[
+                {"op":"entity.declare","entity_id":"source:example-v1","kind":"source","title":"Example source","version":"1","locator":"src/ledger/example.md"},
+                {"op":"entity.declare","entity_id":"conjecture:example","kind":"conjecture","title":"Example explanatory conjecture"},
+                {"op":"relation.declare","relation_id":"rel:example-derived-from-source","relation_type":"derived_from","source_id":"conjecture:example","target_id":"source:example-v1"}
+            ]},
+            "review":{"proposal_id":"<proposal_id from submit>"},
+            "admit":{"proposal_id":"<proposal_id>","actor":"agent-id","authority_basis":{"kind":"operator_request","summary":"Admit the reviewed contribution; this does not certify truth."},"expected_ledger_head":null,"idempotency_key":"stable-admission-key-v1"}
+        },
+        "concurrency_rule":"Use status.ledger_head as expected_ledger_head. For an empty graph use null. If review reports stale, query again and submit a new proposal; do not rewrite the immutable proposal.",
+        "admission_meaning":"policy-valid contribution; never truth certification",
+        "search_boundary":"Use external providers for discovery. Record a sweep only when it explains coverage or changes the graph.",
+        "problem_policy":"Transform apparent solutions into successor problems; record closure only as an attributed assessment."
+    })
+}
+fn non_empty_string() -> Value {
+    json!({"type":"string","minLength":1})
+}
+fn evidence_schema() -> Value {
+    json!({"type":"object","properties":{"source_id":non_empty_string(),"locator":non_empty_string(),"paraphrase":non_empty_string()},"required":["source_id","locator","paraphrase"],"additionalProperties":false})
+}
+fn operation_schema() -> Value {
+    json!({"oneOf":[
+        {"title":"Declare entity","type":"object","properties":{"op":{"const":"entity.declare"},"entity_id":non_empty_string(),"kind":{"type":"string","enum":ENTITY_KINDS},"title":non_empty_string(),"version":non_empty_string(),"locator":non_empty_string()},"required":["op","entity_id","kind","title"],"allOf":[{"if":{"properties":{"kind":{"const":"source"}},"required":["kind"]},"then":{"required":["version","locator"]}}],"additionalProperties":true},
+        {"title":"Declare relation","type":"object","properties":{"op":{"const":"relation.declare"},"relation_id":non_empty_string(),"relation_type":{"type":"string","description":"One core relation or a namespaced extension such as marici:refines."},"source_id":non_empty_string(),"target_id":non_empty_string()},"required":["op","relation_id","relation_type","source_id","target_id"],"additionalProperties":true},
+        {"title":"Record assessment","type":"object","properties":{"op":{"const":"assessment.record"},"assessment_id":non_empty_string(),"subject_id":non_empty_string(),"judgment":non_empty_string(),"actor":non_empty_string(),"reason":non_empty_string(),"evidence":{"type":"array","minItems":1,"items":evidence_schema()}},"required":["op","assessment_id","subject_id","judgment","actor","reason","evidence"],"additionalProperties":true},
+        {"title":"Record test outcome","type":"object","properties":{"op":{"const":"test_outcome.record"},"outcome_id":non_empty_string(),"test_id":non_empty_string(),"actor":non_empty_string(),"outcome":non_empty_string(),"evidence":{"type":"array","minItems":1,"items":evidence_schema()}},"required":["op","outcome_id","test_id","actor","outcome","evidence"],"additionalProperties":true},
+        {"title":"Record bounded search sweep","type":"object","properties":{"op":{"const":"sweep.record"},"sweep_id":non_empty_string(),"interval_start":non_empty_string(),"interval_end":non_empty_string(),"method":non_empty_string(),"result":non_empty_string()},"required":["op","sweep_id","interval_start","interval_end","method","result"],"additionalProperties":true}
+    ]})
 }
 fn proposal_schema() -> Value {
-    json!({"type":"object","properties":{"actor":{"type":"string"},"authority_basis":{"type":"object"},"idempotency_key":{"type":"string"},"expected_ledger_head":{"type":["string","null"]},"operations":{"type":"array","minItems":1,"maxItems":200,"items":{"type":"object"}}},"required":["actor","authority_basis","idempotency_key","expected_ledger_head","operations"],"additionalProperties":false})
+    json!({"type":"object","properties":{"actor":non_empty_string(),"authority_basis":{"type":"object","description":"Why this actor may propose the contribution.","minProperties":1},"idempotency_key":non_empty_string(),"expected_ledger_head":{"type":["string","null"],"description":"Current status.ledger_head; null only for an empty graph."},"operations":{"type":"array","minItems":1,"maxItems":200,"items":operation_schema()}},"required":["actor","authority_basis","idempotency_key","expected_ledger_head","operations"],"additionalProperties":false})
 }
 fn proposal_id_schema() -> Value {
     json!({"type":"object","properties":{"proposal_id":{"type":"string"}},"required":["proposal_id"],"additionalProperties":false})
@@ -751,6 +799,54 @@ fn db_error(code: &'static str) -> impl FnOnce(rusqlite::Error) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn proposal_tool_schema_describes_every_operation_shape() {
+        let schema = proposal_schema();
+        let variants = schema
+            .pointer("/properties/operations/items/oneOf")
+            .and_then(Value::as_array)
+            .expect("operation variants");
+        assert_eq!(variants.len(), 5);
+        assert_eq!(
+            variants[0].pointer("/properties/op/const"),
+            Some(&json!("entity.declare"))
+        );
+        assert_eq!(
+            variants[1].pointer("/properties/op/const"),
+            Some(&json!("relation.declare"))
+        );
+        assert_eq!(
+            variants[2].pointer("/properties/evidence/items/required/2"),
+            Some(&json!("paraphrase"))
+        );
+    }
+
+    #[test]
+    fn guidance_contains_copyable_end_to_end_workflow() {
+        let value = guidance();
+        assert_eq!(value["schema"], "narada.epistemic.guidance.v2");
+        assert_eq!(
+            value.pointer("/minimal_example/submit/operations/0/op"),
+            Some(&json!("entity.declare"))
+        );
+        assert_eq!(
+            value.pointer("/minimal_example/submit/operations/2/op"),
+            Some(&json!("relation.declare"))
+        );
+        assert!(value["concurrency_rule"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("ledger_head"));
+    }
+
+    #[test]
+    fn source_entity_requires_a_version_and_locator() {
+        let operation = json!({"op":"entity.declare","entity_id":"source:unlocated","kind":"source","title":"Unlocated source","version":"1"});
+        let failure = validate_operations(&[operation], false).expect_err("unlocated source must refuse");
+        assert_eq!(failure["code"], "required_argument_missing");
+        assert_eq!(failure["details"]["field"], "locator");
+    }
+
     #[test]
     fn proposal_admission_rebuilds_projection_and_preserves_truth_boundary() {
         let root = std::env::temp_dir().join(format!("epistemic-test-{}", Uuid::new_v4()));
