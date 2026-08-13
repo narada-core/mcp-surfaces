@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServerState, handleRequest } from '../src/main.js';
+import { callWorkerTool } from '../src/worker-tools.js';
 
 type RpcResponse = {
   result?: Record<string, any>;
@@ -58,6 +59,17 @@ const availableInspect = await rpc('worker_cognition_defaults_inspect', {}, avai
 assert.equal(availableInspect.result?.structuredContent.provider_registry.status, 'available');
 assert.equal(availableInspect.result?.structuredContent.provider_registry.provider_count, 1);
 assert.equal(availableInspect.result?.structuredContent.effective_cognition_defaults.low.model, 'gpt-5.6-luna');
+
+// A missing effective projection must not erase the complete provider-scoped tuple.
+// Codex selects its admitted provider first, then resolves that provider's cognition tier.
+(availableState.cognitionDefaults!.effectiveDefaults as Record<string, unknown>).low = null;
+const providerScopedResolve = await callWorkerTool('worker_config_resolve', {
+  intent: { instruction: 'resolve provider tier with no effective projection' },
+  constraints: { cwd: root, authority: 'read', cognition: 'low', overrides: { runtime: 'codex' } },
+}, availableState);
+assert.equal((providerScopedResolve as any).resolved_worker_config.provider, 'codex-subscription');
+assert.equal((providerScopedResolve as any).resolved_worker_config.model, 'gpt-5.6-luna');
+assert.equal((providerScopedResolve as any).resolved_worker_config.reasoning_effort, 'max');
 
 const missingRoot = mkdtempSync(join(tmpdir(), 'worker-provider-registry-missing-'));
 mkdirSync(join(missingRoot, '.narada'), { recursive: true });
