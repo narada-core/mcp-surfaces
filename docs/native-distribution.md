@@ -33,3 +33,6 @@ pnpm test:compat
 
 Compatibility artifacts are not inputs to, and cannot block, the Cargo-native
 release path.
+
+See [pnpm boundary](pnpm-boundary.md) for the repository-wide inventory and
+the decisions governing remaining package-manager references.

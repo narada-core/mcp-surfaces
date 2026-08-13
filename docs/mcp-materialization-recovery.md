@@ -33,7 +33,7 @@ not inferred or silently rewritten during carrier publication.
 Publish the native authority after changing its source:
 
 ```powershell
-pnpm build:materializer:native
+cargo native-build
 ```
 
 This writes a content-addressed executable under
@@ -42,7 +42,7 @@ and atomically updates `current.json`. Normal materialization resolves that
 immutable executable and does not build the workspace:
 
 ```powershell
-pnpm materialize:carrier
+cargo native-materialize
 ```
 
 The equivalent direct Windows adapter is:

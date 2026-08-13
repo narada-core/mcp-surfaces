@@ -74,7 +74,7 @@ pnpm test:compat
 
 ## Build Availability
 
-`pnpm build` validates the project-reference graph without deleting existing
+`pnpm build:compat` validates the project-reference graph without deleting existing
 `dist/` trees, force-emits the current graph, runs package post-compilation,
 and publishes the workspace artifact manifest only after those steps succeed.
 An interrupted or failed build therefore leaves the last successful MCP

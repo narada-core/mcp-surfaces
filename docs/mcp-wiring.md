@@ -27,8 +27,8 @@ The registrar emits carrier-specific config, not one universal file.
 Build the workspace and materialize every carrier from one coherent generation:
 
 ```powershell
-pnpm build
-pnpm materialize:carrier -- --materialize-all
+cargo native-package
+cargo native-materialize
 ```
 
 The default `NARADA_RUNTIME_PROFILE` is `native`. The supported profiles are
@@ -37,8 +37,8 @@ runtime plan is intentional:
 
 ```powershell
 $env:NARADA_RUNTIME_PROFILE = 'bun' # or 'native' or 'node-compat'
-pnpm build
-pnpm materialize:carrier -- --materialize-all
+cargo native-package
+cargo native-materialize
 ```
 
 The registrar selects the executable, runtime proxy, entrypoint, arguments,
@@ -100,7 +100,7 @@ depending on the selected runtime profile.
 
 Set `NARADA_CODEX_ENABLED_PLUGINS` and/or
 `NARADA_CODEX_DISABLED_PLUGINS` to semicolon- or newline-separated exact
-Codex plugin IDs before running `pnpm materialize:carrier -- --materialize-all`.
+Codex plugin IDs before running `cargo native-materialize`.
 The generated policy is an explicit override map: unlisted plugins are not
 given an override, wildcard IDs are not supported, and hand-edits to the
 generated config are not preserved. These settings affect the

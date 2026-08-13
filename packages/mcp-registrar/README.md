@@ -138,7 +138,7 @@ materialization:
 ```powershell
 $env:NARADA_CODEX_ENABLED_PLUGINS = 'my-plugin@personal'
 $env:NARADA_CODEX_DISABLED_PLUGINS = 'github@openai-curated-remote'
-pnpm materialize:carrier
+cargo native-materialize
 ```
 
 The built-in `codex-andrey` carrier keeps the currently observed
@@ -175,7 +175,7 @@ manifest, or when the registrar MCP surface is one of the surfaces that failed
 to start:
 
 ```powershell
-pnpm materialize:carrier
+cargo native-materialize
 ```
 
 It atomically writes every declared carrier config and its
