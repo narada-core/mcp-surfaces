@@ -263,7 +263,7 @@ fn scoped_write_probe(cwd: &Path) -> Result<Value, Value> {
     Ok(json!({"schema":"narada.worker.runtime_probe.v1","operation":"create_read_remove","status":"passed","cwd":cwd.to_string_lossy(),"cleanup_verified":true}))
 }
 fn defaults_path(root: &Path) -> PathBuf {
-    run_root(root).join("cognition-defaults.json")
+    root.join(".narada/worker-cognition-defaults.json")
 }
 fn empty_defaults() -> Value {
     json!({"low":{"provider":null,"model":null,"reasoning_effort":null},"medium":{"provider":null,"model":null,"reasoning_effort":null},"high":{"provider":null,"model":null,"reasoning_effort":null}})
@@ -271,7 +271,7 @@ fn empty_defaults() -> Value {
 fn cognition_defaults_for(root: &Path) -> Value {
     read_json(&defaults_path(root))
         .ok()
-        .and_then(|v| v.get("defaults").cloned())
+        .and_then(|v| v.get("effective_cognition_defaults").or_else(|| v.get("defaults")).cloned())
         .unwrap_or_else(empty_defaults)
 }
 fn cognition_defaults(root: &Path) -> Value {
@@ -607,12 +607,16 @@ fn cognition_defaults_update(args: &Map<String, Value>, root: &Path) -> Result<V
     }
     let model = required_string(args, "model", "worker_model_required")?;
     let effort = required_string(args, "reasoning_effort", "worker_reasoning_effort_required")?;
-    let mut defaults = cognition_defaults_for(root);
-    defaults[cognition] = json!({"provider":provider,"model":model,"reasoning_effort":effort});
-    let record = json!({"schema":"narada.worker.cognition_defaults_store.v1","updated_at":now(),"actor":args.get("actor").cloned().unwrap_or(Value::Null),"defaults":defaults});
-    write_json_atomic(&defaults_path(root), &record)?;
+    let path = defaults_path(root);
+    let mut record = read_json(&path).unwrap_or_else(|_| json!({"schema":"narada.worker.cognition_defaults.v1","version":0,"provider_cognition_defaults":{},"effective_cognition_defaults":empty_defaults()}));
+    record["version"] = json!(record.get("version").and_then(Value::as_u64).unwrap_or(0) + 1);
+    record["updated_at"] = json!(now());
+    record["updated_by"] = args.get("actor").cloned().unwrap_or(Value::Null);
+    record["provider_cognition_defaults"][provider][cognition] = json!({"model":model,"reasoning_effort":effort});
+    record["effective_cognition_defaults"][cognition] = json!({"provider":provider,"model":model,"reasoning_effort":effort});
+    write_json_atomic(&path, &record)?;
     Ok(
-        json!({"schema":"narada.worker.cognition_defaults.v1","status":"updated","cognition":cognition,"default":record["defaults"][cognition],"defaults":record["defaults"],"source":"native_rust_authority"}),
+        json!({"schema":"narada.worker.cognition_defaults.v1","status":"updated","cognition":cognition,"default":record["effective_cognition_defaults"][cognition],"defaults":record["effective_cognition_defaults"],"source":"native_rust_authority"}),
     )
 }
 
@@ -663,7 +667,7 @@ fn admitted_plan_binding(admission: &Value) -> Result<(String, String, String, S
     let evidence_ref = admission.get("evidence_ref").and_then(Value::as_str).unwrap_or_default().to_string();
     Ok((plan_ref.to_string(), mode.to_string(), model.to_string(), evidence_ref))
 }
-fn invocation_plan_binding(root: &Path, requested_plan_ref: Option<&str>) -> Result<(String, String, String, String), Value> {
+fn invocation_plan_binding(root: &Path, requested_plan_ref: Option<&str>, cognition: Option<&str>) -> Result<(String, String, String, String, Option<String>), Value> {
     let context =
         read_json(&root.join(".narada/intelligence-launch-context.json")).map_err(|_| {
             error(
@@ -688,6 +692,7 @@ fn invocation_plan_binding(root: &Path, requested_plan_ref: Option<&str>) -> Res
         root.join(registry)
     };
     let principal = context.get("principal_id").and_then(Value::as_str).ok_or_else(|| error("worker_intelligence_principal_required", "worker_intelligence_principal_required"))?;
+    let defaults_path = root.join(".narada/worker-cognition-defaults.json");
     let request = json!({
         "schema":"narada.invokable-intelligence.preflight-request.v1",
         "intent_id":"",
@@ -696,7 +701,9 @@ fn invocation_plan_binding(root: &Path, requested_plan_ref: Option<&str>) -> Res
         "requested_plan_id":requested_plan_ref,
         "evaluated_at":now(),
         "clock_authority_ref":"execution-site-clock:worker-delegation",
-        "mode":"immediate"
+        "mode":"immediate",
+        "cognition":cognition,
+        "cognition_defaults_path":if cognition.is_some(){json!(defaults_path)}else{Value::Null}
     });
     let executable = preflight_command(root)?;
     let mut child = Command::new(executable).args(["--registry", &registry.to_string_lossy()])
@@ -713,7 +720,9 @@ fn invocation_plan_binding(root: &Path, requested_plan_ref: Option<&str>) -> Res
     if !output.status.success() || admission.get("status").and_then(Value::as_str) != Some("admitted") {
         return Err(json!({"schema":"narada.worker.error.v1","code":"worker_intelligence_preflight_refused","message":"worker_intelligence_preflight_refused","preflight":admission}));
     }
-    admitted_plan_binding(&admission)
+    let (plan_ref, mode, model, evidence_ref) = admitted_plan_binding(&admission)?;
+    let reasoning_effort = admission.pointer("/options/reasoning_effort").and_then(Value::as_str).map(str::to_string);
+    Ok((plan_ref, mode, model, evidence_ref, reasoning_effort))
 }
 fn codex_command() -> Option<PathBuf> {
     if let Some(command) = std::env::var_os("NARADA_NATIVE_CODEX_COMMAND") {
@@ -771,13 +780,17 @@ fn worker_run(
     let prompt = instruction(args)?;
     let auth = authority(args)?.to_string();
     let constraints = args.get("constraints").and_then(Value::as_object);
-    for key in ["provider", "cognition"] {
+    for key in ["provider"] {
         if constraints.and_then(|value| value.get(key)).is_some() {
             return Err(error(
                 "worker_canonical_invocation_plan_override_rejected",
                 "worker_canonical_invocation_plan_override_rejected",
             ));
         }
+    }
+    let cognition = constraints.and_then(|value| value.get("cognition")).and_then(Value::as_str).map(str::trim).filter(|value| !value.is_empty());
+    if cognition.is_some_and(|value| !matches!(value, "low" | "medium" | "high")) {
+        return Err(error("worker_cognition_invalid", "worker_cognition_invalid"));
     }
     let requested_plan_ref = constraints
         .and_then(|value| value.get("invocation_plan_ref"))
@@ -801,7 +814,7 @@ fn worker_run(
             "worker_canonical_invocation_plan_invalid",
         ));
     }
-    let (plan_ref, provider_mode, provider_model, preflight_evidence_ref) = invocation_plan_binding(root, requested_plan_ref.as_deref())?;
+    let (plan_ref, provider_mode, provider_model, preflight_evidence_ref, reasoning_effort) = invocation_plan_binding(root, requested_plan_ref.as_deref(), cognition)?;
     let cwd = constraints
         .and_then(|v| v.get("cwd"))
         .and_then(Value::as_str)
@@ -851,6 +864,7 @@ fn worker_run(
                 plan_ref,
                 provider_mode,
                 provider_model,
+                reasoning_effort,
                 allowed_roots_owned,
                 format!("Effective mode: {}. This reconciled state is injected at the provider process boundary through the permission profile, CLI sandbox, and writable-root arguments; ambient labels are advisory. CWD: {}. Writable roots: {}. Scoped create/read/remove preflight: {}. Command write effects: {}. First-class exact-byte lifecycle: one bounded shell command with explicit encoding for create/read-verify/remove/confirm-absent. On Windows assign literal path/content variables, use IO.File WriteAllBytes/ReadAllBytes, compare hex, delete, and test existence; avoid interpolated command strings. Use apply_patch for ordinary edits. Carrier MCP projection: none. On refusal return narada.worker.refusal.v1 with tool, operation, cwd, target_path, declared_capability, actual_refusal. Ergonomics ratings use narada.worker.observed_ergonomics.v1: lower a score only for observed failure, retry, human intervention, or ambiguity that changed execution; automatic contained review requires no human interaction and is not ceremony; put hypothetical improvements in non_scoring_observations.\n\nTask:\n{prompt}", capabilities["effective_mode"].as_str().unwrap_or("unknown"), capabilities["cwd"].as_str().unwrap_or("unknown"), capabilities["allowed_roots"].as_array().map(|roots| roots.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")).unwrap_or_default(), capabilities["runtime_probe"]["status"].as_str().unwrap_or("not_required"), capabilities["commands"]["write_effects"].as_bool().unwrap_or(false)),
             )
@@ -993,6 +1007,7 @@ fn complete_native_run(
     plan_ref: String,
     provider_mode: String,
     provider_model: String,
+    reasoning_effort: Option<String>,
     allowed_roots: Vec<PathBuf>,
     prompt: String,
 ) {
@@ -1032,6 +1047,9 @@ fn complete_native_run(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     command.env("NARADA_NATIVE_CODEX_MODEL", provider_model);
+    if let Some(reasoning_effort) = reasoning_effort {
+        command.env("NARADA_NATIVE_CODEX_REASONING_EFFORT", reasoning_effort);
+    }
     if let Some(codex) = codex_command() {
         command.env("NARADA_NATIVE_CODEX_COMMAND", codex);
     }
@@ -1202,12 +1220,14 @@ mod tests {
     #[ignore = "requires an explicit deployed Site root and native preflight binary"]
     fn live_native_preflight_resolves_without_caller_plan() {
         let site_root = std::env::var("NARADA_TEST_SITE_ROOT").expect("NARADA_TEST_SITE_ROOT");
-        let (plan_ref, provider_mode, model, evidence_ref) =
-            invocation_plan_binding(Path::new(&site_root), None).expect("native preflight");
-        assert!(plan_ref.starts_with("plan:"));
-        assert_eq!(provider_mode, "codex-subscription");
-        assert!(!model.is_empty());
-        assert!(evidence_ref.starts_with("preflight-evidence:"));
+        for (cognition, expected_model) in [("low", "gpt-5.6-luna"), ("medium", "gpt-5.6-terra"), ("high", "gpt-5.6-sol")] {
+            let (plan_ref, provider_mode, model, evidence_ref, reasoning_effort) = invocation_plan_binding(Path::new(&site_root), None, Some(cognition)).expect("native preflight");
+            assert!(plan_ref.starts_with("plan:cognition:"));
+            assert_eq!(provider_mode, "codex-subscription");
+            assert_eq!(model, expected_model);
+            assert!(evidence_ref.starts_with("preflight-evidence:"));
+            assert_eq!(reasoning_effort.as_deref(), Some("max"));
+        }
     }
 
     #[test]
