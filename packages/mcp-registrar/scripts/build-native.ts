@@ -3,7 +3,6 @@ import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { publishImmutableNativeArtifacts, resolveNativeArtifact } from '@narada-core/mcp-runtime-proxy/native-artifact';
-import './emit-native-tool-catalog.js';
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const nativeRoot = join(packageRoot, 'native');
@@ -17,4 +16,12 @@ if (!existsSync(source)) throw new Error(`mcp_registrar_native_artifact_missing:
 const pointer = publishImmutableNativeArtifacts({ packageRoot, artifacts: [{ name: executableName, source }] });
 const executable = resolveNativeArtifact(packageRoot, executableName);
 if (!executable) throw new Error('mcp_registrar_native_artifact_publication_missing');
+const workspaceRoot = resolve(packageRoot, '..', '..');
+const registrySync = spawnSync(process.execPath, ['--import', 'tsx', join(workspaceRoot, 'scripts', 'sync-declared-site-registries.ts')], {
+  cwd: workspaceRoot,
+  stdio: 'inherit',
+  windowsHide: true,
+});
+if (registrySync.error) throw registrySync.error;
+if (registrySync.status !== 0) throw new Error(`mcp_registrar_site_registry_sync_failed:${registrySync.status ?? 'signal'}`);
 process.stdout.write(JSON.stringify({ schema: 'narada.mcp_registrar.native_build.v1', status: 'built', executable, pointer_path: join(packageRoot, 'dist', 'native', 'current.json'), build_fingerprint: pointer.build_fingerprint, platform: process.platform, architecture: process.arch }) + '\n');

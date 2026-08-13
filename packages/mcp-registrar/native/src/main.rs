@@ -53,6 +53,9 @@ fn dispatch(request: &Value) -> Value {
         Ok(v) => v,
         Err(e) => return error(id, format!("mcp_registrar_native_contract_invalid:{e}")),
     };
+    if let Err(e) = validate_contract(&contract) {
+        return error(id, format!("mcp_registrar_native_contract_invalid:{e}"));
+    }
     if let Err(e) = rebind_native_registrar(&mut contract) {
         return error(id, format!("mcp_registrar_native_contract_invalid:{e}"));
     }
@@ -237,6 +240,37 @@ fn dispatch(request: &Value) -> Value {
     }
 }
 
+fn validate_contract(contract: &Value) -> Result<(), String> {
+    if contract["schema"] != "narada.mcp_registrar.native_tool_catalog.v1" {
+        return Err("unsupported_schema".into());
+    }
+    validate_unique_records(contract["tools"].as_array(), "name", "tools")?;
+    validate_unique_records(
+        contract.pointer("/read_models/registrar_surface_list/items").and_then(Value::as_array),
+        "id",
+        "surfaces",
+    )?;
+    validate_unique_records(
+        contract.pointer("/read_models/registrar_carrier_list/items").and_then(Value::as_array),
+        "carrier_id",
+        "carriers",
+    )?;
+    Ok(())
+}
+
+fn validate_unique_records(items: Option<&Vec<Value>>, key: &str, label: &str) -> Result<(), String> {
+    let items = items.filter(|items| !items.is_empty()).ok_or_else(|| format!("{label}_missing"))?;
+    let mut seen = std::collections::BTreeSet::new();
+    for item in items {
+        let value = item.get(key).and_then(Value::as_str).filter(|value| !value.is_empty())
+            .ok_or_else(|| format!("{label}_{key}_missing"))?;
+        if !seen.insert(value) {
+            return Err(format!("{label}_{key}_duplicate:{value}"));
+        }
+    }
+    Ok(())
+}
+
 fn carrier_record<'a>(contract: &'a Value, carrier_id: &str) -> Result<&'a Value, String> {
     contract
         .pointer("/read_models/registrar_carrier_list/items")
@@ -282,11 +316,9 @@ fn mutation_failure(code: &str, message: String, details: Value) -> MutationFail
 fn carrier_mutation_error(id: Value, failure: MutationFailure) -> Value {
     let child_data = json!({"schema":"narada.registrar.error.v1","code":failure.code,"message":failure.message,"details":failure.details});
     let child_error = json!({"code":-32000,"message":failure.message,"data":child_data});
-    let entrypoint = workspace_repo_root()
-        .map(|root| {
-            path_text(&root.join("packages/mcp-registrar/dist/src/main.js")).replace('\\', "/")
-        })
-        .unwrap_or_else(|| "packages/mcp-registrar/dist/src/main.js".into());
+    let entrypoint = env::current_exe()
+        .map(|path| path_text(&path).replace('\\', "/"))
+        .unwrap_or_else(|_| "narada-mcp-registrar".into());
     json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":failure.message,"data":{"schema":"narada.registrar.error.v1","code":"registrar_fresh_materialization_failed","message":failure.message,"details":{"entrypoint":entrypoint,"stderr_tail":"","exit_code":0,"signal":null,"child_error":child_error}}}})
 }
 fn sync_error(id: Value, message: String) -> Value {
@@ -4158,5 +4190,38 @@ fn read_message<R: BufRead>(input: &mut R) -> Result<Option<Value>, String> {
         serde_json::from_str(first.trim())
             .map(Some)
             .map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn embedded_contract() -> Value {
+        let bytes = flate2::read::GzDecoder::new(CONTRACT)
+            .bytes()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[test]
+    fn embedded_native_contract_is_valid() {
+        validate_contract(&embedded_contract()).unwrap();
+    }
+
+    #[test]
+    fn duplicate_native_contract_records_are_rejected() {
+        let mut contract = embedded_contract();
+        let duplicate = contract["tools"][0].clone();
+        contract["tools"].as_array_mut().unwrap().push(duplicate);
+        assert!(validate_contract(&contract).unwrap_err().starts_with("tools_name_duplicate:"));
+    }
+
+    #[test]
+    fn unsupported_native_contract_schema_is_rejected() {
+        let mut contract = embedded_contract();
+        contract["schema"] = json!("legacy");
+        assert_eq!(validate_contract(&contract).unwrap_err(), "unsupported_schema");
     }
 }

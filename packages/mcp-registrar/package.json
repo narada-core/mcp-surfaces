@@ -3,37 +3,13 @@
   "version": "0.1.0",
   "license": "Apache-2.0",
   "type": "module",
-  "description": "MCP surface registrar for binding/unbinding surfaces across Narada sites and carriers (opencode, Kimi, Codex).",
-  "bin": {
-    "mcp-registrar": "./dist/src/main.js"
-  },
-  "types": "./dist/src/main.d.ts",
-  "exports": {
-    ".": {
-      "types": "./dist/src/main.d.ts",
-      "default": "./dist/src/main.js"
-    },
-    "./surface-definition": {
-      "types": "./dist/src/surface-definition.d.ts",
-      "default": "./dist/src/surface-definition.js"
-    }
-  },
+  "description": "Native Rust MCP surface registrar for binding and observing Site and carrier surface projections.",
   "scripts": {
     "build": "tsc -b",
-    "build:native:catalog": "node --import tsx scripts/emit-native-tool-catalog.ts",
     "build:native": "tsx scripts/build-native.ts",
-    "test:native:contract": "pnpm build && pnpm run build:native && node dist/test/native-tool-catalog-parity.test.js && node dist/test/native-read-model-parity.test.js",
+    "test:native:contract": "pnpm run build:native && node dist/test/native-contract.test.js",
     "typecheck": "tsc -b --pretty false",
-    "test": "pnpm run test:bun",
-    "test:bun": "pnpm -w build:carrier-artifacts && pnpm run test:kimi-contract:run:bun && bun test dist/test/mcp-fabric-v2-native.test.js && bun dist/test/site-local-descriptor.test.js && bun dist/test/mcp-registrar.test.js && bun dist/test/protocol-smoke.test.js && bun test --timeout 30000 dist/test/materialization-contract-e2e.test.js && bun dist/test/site-fabric-loader-e2e.test.js && bun dist/test/site-fabric-catalog-e2e.test.js",
-    "test:node": "pnpm -w build:carrier-artifacts && pnpm run test:kimi-contract:run:node && node dist/test/mcp-fabric-v2-native.test.js && node dist/test/site-local-descriptor.test.js && node dist/test/mcp-registrar.test.js && node dist/test/protocol-smoke.test.js && node dist/test/materialization-contract-e2e.test.js && node dist/test/site-fabric-loader-e2e.test.js && node dist/test/site-fabric-catalog-e2e.test.js",
-    "test:kimi-contract:run": "pnpm run test:kimi-contract:run:bun",
-    "test:kimi-contract:run:bun": "bun dist/test/moonshot-schema.test.js && bun dist/test/kimi-carrier-contract.test.js",
-    "test:kimi-contract:run:node": "node dist/test/moonshot-schema.test.js && node dist/test/kimi-carrier-contract.test.js",
-    "test:kimi-contract": "pnpm -w build:carrier-artifacts && pnpm run test:kimi-contract:run",
-    "test:kimi-contract:node": "pnpm -w build:carrier-artifacts && pnpm run test:kimi-contract:run:node",
-    "test:kimi-live": "pnpm -w build:carrier-artifacts && node dist/test/kimi-carrier-live-e2e.test.js",
-    "test:default-lifecycle": "pnpm build && node --import tsx scripts/assert-native-lifecycle-default.ts"
+    "test": "pnpm run test:native:contract"
   },
   "naradaRuntimeArtifacts": {
     "win32": ["./dist/native/current.json", "./dist/native/versions/*"],
@@ -41,43 +17,6 @@
     "darwin": ["./dist/native/current.json", "./dist/native/versions/*"]
   },
   "dependencies": {
-    "@narada-core/sqlite": "workspace:*",
-    "@narada-core/local-filesystem-mcp": "workspace:*",
-    "@narada-core/structured-command-mcp": "workspace:*",
-    "@narada-core/git-mcp": "workspace:*",
-    "@narada-core/site-inbox-mcp": "workspace:*",
-    "@narada-core/mailbox-mcp": "workspace:*",
-    "@narada-core/graph-mail-mcp": "workspace:*",
-    "@narada-core/calendar-mcp": "workspace:*",
-    "@narada-core/task-lifecycle-mcp": "workspace:*",
-    "@narada-core/work-lifecycle-mcp": "workspace:*",
-    "@narada-core/site-loop-mcp": "workspace:*",
-    "@narada-core/site-lifecycle-mcp": "workspace:*",
-    "@narada-core/site-registry-mcp": "workspace:*",
-    "@narada-core/agent-context-mcp": "workspace:*",
-    "@narada-core/worker-delegation-mcp": "workspace:*",
-    "@narada-core/delegated-task-mcp": "workspace:*",
-    "@narada-core/sop-mcp": "workspace:*",
-    "@narada-core/scheduler-mcp": "workspace:*",
-    "@narada-core/mcp-loader-mcp": "workspace:*",
-    "@narada-core/surface-feedback-mcp": "workspace:*",
-    "@narada-core/launcher-mcp": "workspace:*",
-    "@narada-core/speech-mcp": "workspace:*",
-    "@narada-core/operator-routing-mcp": "workspace:*",
-    "@narada-core/artifacts-mcp": "workspace:*",
-    "@narada-core/nars-session-mcp": "workspace:*",
-    "@narada-core/quota-meter-mcp": "workspace:*",
-    "@narada-core/runtime-introspection-mcp": "workspace:*",
-    "@narada-core/project-state-mcp": "workspace:*",
-    "@narada-core/operator-console-overlay-mcp": "workspace:*",
-    "@narada-core/browser-control-mcp": "workspace:*",
-    "@narada-core/cloudflare-carrier-mcp": "workspace:*",
-    "@narada-core/site-coherence-mcp": "workspace:*",
-    "@narada-core/catalog-observation-mcp": "workspace:*",
-    "@narada-core/mcp-fabric-compiler": "workspace:*",
-    "@narada-core/operator-surface-runtime-contract": "workspace:*",
-    "@narada-core/mcp-fabric-contracts": "workspace:*",
-    "@narada-core/mcp-transport": "workspace:*",
     "@narada-core/mcp-runtime-proxy": "workspace:*"
   },
   "files": [
@@ -85,7 +24,6 @@
     "sops/"
   ],
   "devDependencies": {
-    "@narada-core/mcp-e2e-harness": "workspace:*",
     "@types/node": "^22.15.3",
     "typescript": "^5.8.3"
   }

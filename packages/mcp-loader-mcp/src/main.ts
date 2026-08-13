@@ -30,6 +30,17 @@ import { DEFAULT_TOOL_CALL_TIMEOUT_MS, DEFAULT_TOOL_TIMEOUT_GRACE_MS, resolveToo
 
 const MCP_SURFACES_ROOT = normalizePath(resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..'));
 const MCP_WORKSPACE_ROOT = normalizePath(resolve(MCP_SURFACES_ROOT, '..'));
+function requiredNativeSurfaceEntrypoint(packageName: string, artifactName: string): string {
+  const nativeRoot = resolve(MCP_SURFACES_ROOT, packageName, 'dist', 'native');
+  const pointerPath = resolve(nativeRoot, 'current.json');
+  if (!existsSync(pointerPath)) throw new Error(`mcp_loader_native_pointer_missing:${pointerPath}`);
+  const pointer = JSON.parse(readFileSync(pointerPath, 'utf8')) as { artifacts?: Record<string, string> };
+  const relativePath = pointer.artifacts?.[artifactName];
+  if (!relativePath) throw new Error(`mcp_loader_native_artifact_undeclared:${packageName}:${artifactName}`);
+  const entrypoint = resolve(nativeRoot, relativePath);
+  if (!existsSync(entrypoint)) throw new Error(`mcp_loader_native_artifact_missing:${entrypoint}`);
+  return normalizePath(entrypoint);
+}
 const LOADER_RUNTIME_ENTRYPOINT = normalizePath(fileURLToPath(import.meta.url));
 const LOADER_SOURCE_ENTRYPOINT = normalizePath(resolve(MCP_SURFACES_ROOT, 'mcp-loader-mcp/src/main.ts'));
 const LOADER_PROCESS_STARTED_AT_MS = Date.now();
@@ -1941,7 +1952,7 @@ const SHARED_SURFACE_REGISTRY: Record<string, { entrypoint: string; args: string
   'delegated-task': { entrypoint: `${MCP_SURFACES_ROOT}/delegated-task-mcp/dist/src/main.js`, args: ['--task-root', '{site_root}', '--allowed-root', '{site_root}'] },
   'sop': { entrypoint: `${MCP_SURFACES_ROOT}/sop-mcp/dist/src/main.js`, args: ['--sop-root', '{site_root}', '--server-name', '{site_id}-sop'] },
   'scheduler': { entrypoint: `${MCP_SURFACES_ROOT}/scheduler-mcp/dist/src/main.js`, args: ['--allowed-root', '{site_root}'] },
-  'mcp-registrar': { entrypoint: `${MCP_SURFACES_ROOT}/mcp-registrar/dist/src/main.js`, args: [] },
+  'mcp-registrar': { entrypoint: requiredNativeSurfaceEntrypoint('mcp-registrar', `narada-mcp-registrar${process.platform === 'win32' ? '.exe' : ''}`), args: [] },
   'surface-feedback': {
     entrypoint: `${MCP_SURFACES_ROOT}/surface-feedback-mcp/dist/src/main.js`,
     args: ['--feedback-root', '{site_control_root}/feedback', '--canonical-feedback-root', '{site_control_root}/feedback', '--task-lifecycle-root', '{site_root}', '--site-id', '{site_id}'],

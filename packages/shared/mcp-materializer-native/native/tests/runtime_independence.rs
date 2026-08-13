@@ -247,9 +247,7 @@ fn derives_all_carriers_from_declared_site_capabilities_without_javascript() {
     fs::create_dir_all(workspace.join(".ai/runtime")).unwrap();
     fs::create_dir_all(registry_path.parent().unwrap()).unwrap();
     assert!(!workspace.join("node_modules").exists());
-    assert!(!workspace
-        .join("packages/mcp-registrar/dist/src/main.js")
-        .exists());
+    assert!(!workspace.join("node_modules").exists());
     fs::write(&proxy, b"native proxy fixture").unwrap();
     fs::write(&matrix_path, b"{\"schema\":\"fixture\"}\n").unwrap();
     fs::write(
