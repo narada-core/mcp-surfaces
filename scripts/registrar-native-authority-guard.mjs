@@ -7,7 +7,17 @@ const denied = [
   /mcp-registrar[\\/]dist[\\/]src[\\/]main\.js/,
   /from\s+['"][^'"]*mcp-registrar(?:\/dist\/src\/main\.js)?['"]/,
 ];
-const ignored = new Set(['.git', 'node_modules', 'dist', 'target']);
+const ignored = new Set([
+  '.git',
+  '.ai',
+  '.tmp',
+  '.tmp-tests',
+  'artifacts',
+  'dist',
+  'executions',
+  'node_modules',
+  'target',
+]);
 const findings = [];
 
 function visit(directory) {
