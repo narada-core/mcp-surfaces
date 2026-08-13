@@ -118,7 +118,14 @@ fn template_catalog(args: &Map<String, Value>) -> Value {
     json!({"schema":"narada.delegated_task.template_catalog.v1","status":if id.is_some() && templates.is_empty(){"not_found"}else{"ok"},"template_id":id,"count":templates.len(),"templates":templates})
 }
 
-fn validate(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> { let objective = args.get("objective").and_then(Value::as_str).map(str::trim).filter(|v|!v.is_empty()); let mut errors = Vec::new(); if objective.is_none(){errors.push("objective_required");} if let Some(binding)=args.get("execution_binding").and_then(Value::as_object) { if let Some(workspace)=binding.get("workspace_root").and_then(Value::as_str) { if !is_within(Path::new(workspace), root) { errors.push("execution_binding_workspace_outside_site_root"); } } } let diagnostics=errors.iter().map(|code|json!({"severity":"error","code":code})).collect::<Vec<_>>(); Ok(json!({"schema":"narada.delegated_task.validate.v1","status":if errors.is_empty(){"ok"}else{"rejected"},"dry_run":true,"diagnostics":diagnostics,"valid":errors.is_empty(),"task_root":task_root(root).to_string_lossy(),"errors":errors,"objective":objective,"worker_execution":"not_run"})) }
+fn workflow_diagnostics(workflow:&Value)->Vec<Value>{
+    let steps=workflow.get("steps").and_then(Value::as_array).cloned().unwrap_or_default(); let mut diagnostics=Vec::new(); let mut ids=std::collections::HashSet::new();
+    for step in &steps { let Some(id)=step.get("id").and_then(Value::as_str) else {diagnostics.push(json!({"severity":"error","code":"step_id_required"}));continue}; if !ids.insert(id.to_string()){diagnostics.push(json!({"severity":"error","code":"duplicate_step_id","step_id":id}));} }
+    for step in &steps { let Some(id)=step.get("id").and_then(Value::as_str) else {continue}; for dependency in step.get("depends_on").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str){if !ids.contains(dependency){diagnostics.push(json!({"severity":"error","code":"unknown_dependency","step_id":id,"dependency":dependency}));}} }
+    let mut resolved=std::collections::HashSet::new(); loop { let before=resolved.len(); for step in &steps { let Some(id)=step.get("id").and_then(Value::as_str) else {continue}; if resolved.contains(id){continue} let ready=step.get("depends_on").and_then(Value::as_array).map(|items|items.iter().filter_map(Value::as_str).all(|dependency|resolved.contains(dependency))).unwrap_or(true); if ready{resolved.insert(id.to_string());} } if resolved.len()==before{break} }
+    if resolved.len()<ids.len(){diagnostics.push(json!({"severity":"error","code":"workflow_cycle"}));} diagnostics
+}
+fn validate(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> { let objective = args.get("objective").and_then(Value::as_str).map(str::trim).filter(|v|!v.is_empty()); let workflow=normalize_workflow(args.get("workflow")); let mut diagnostics=workflow_diagnostics(&workflow); if objective.is_none(){diagnostics.push(json!({"severity":"error","code":"objective_required"}));} if let Some(binding)=args.get("execution_binding").and_then(Value::as_object) { if let Some(workspace)=binding.get("workspace_root").and_then(Value::as_str) { if !is_within(Path::new(workspace), root) { diagnostics.push(json!({"severity":"error","code":"execution_binding_workspace_outside_site_root"})); } } } let errors=diagnostics.iter().filter_map(|item|item.get("code").and_then(Value::as_str)).collect::<Vec<_>>(); Ok(json!({"schema":"narada.delegated_task.validate.v1","status":if diagnostics.is_empty(){"ok"}else{"rejected"},"dry_run":true,"diagnostics":diagnostics,"valid":errors.is_empty(),"task_root":task_root(root).to_string_lossy(),"errors":errors,"objective":objective,"worker_execution":"not_run"})) }
 fn is_within(path: &Path, root: &Path) -> bool { let p=path.canonicalize().unwrap_or_else(|_|path.to_path_buf()); let r=root.canonicalize().unwrap_or_else(|_|root.to_path_buf()); p==r || p.starts_with(&r) }
 
 fn tasks_list(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> { let limit=args.get("limit").and_then(Value::as_u64).unwrap_or(20).clamp(1,MAX_ITEMS as u64) as usize; let mut tasks=Vec::new(); if let Ok(entries)=fs::read_dir(tasks_dir(root)) { for entry in entries.filter_map(Result::ok).take(MAX_ITEMS) { if !entry.path().is_dir(){continue;} let Some(id)=entry.file_name().to_str().map(ToOwned::to_owned) else {continue;}; if let Ok(task)=read_task(root,&id) { tasks.push(compact_task(&task)); } } } tasks.sort_by(|a,b| b.get("updated_at").and_then(Value::as_str).cmp(&a.get("updated_at").and_then(Value::as_str))); tasks.truncate(limit); Ok(json!({"schema":"narada.delegated_task.list.v1","status":"ok","view":args.get("view").and_then(Value::as_str).unwrap_or("active_queue"),"site_scope":args.get("site_scope").and_then(Value::as_str).unwrap_or("current_site"),"count":tasks.len(),"limit":limit,"tasks":tasks,"native_read_only":true})) }
@@ -167,7 +174,7 @@ fn stable_task_id(args:&Map<String,Value>)->String {
     format!("task_{}",uuid::Uuid::new_v4().simple())
 }
 fn task_run(args:&Map<String,Value>,root:&Path)->Result<Value,Value>{
-    let objective=objective(args)?; let id=stable_task_id(args); safe_id(&id)?;
+    let objective=objective(args)?; let admission=validate(args,root)?; if admission.get("status").and_then(Value::as_str)!=Some("ok"){return Err(json!({"schema":"narada.delegated_task.error.v1","code":"delegated_task_validation_failed","message":"delegated_task_validation_failed","diagnostics":admission["diagnostics"]}))} let id=stable_task_id(args); safe_id(&id)?;
     if task_path(root,&id)?.is_file(){ let task=read_task(root,&id)?; return Ok(json!({"schema":"narada.delegated_task.run.v1","status":"existing","request_status":"existing","execution_status":task["status"],"created":false,"task_id":id,"task_status":task["status"],"summary":task["summary"]})); }
     let created=now(); let workflow=normalize_workflow(args.get("workflow")); let step_states=initial_step_states(&workflow);
     let mut task=json!({"schema":"narada.delegated_task.task.v1","task_id":id,"status":"accepted_for_execution","objective":objective,"created_at":created,"updated_at":created,"cancelled_at":null,"idempotency_key":args.get("idempotency_key"),"constraints":args.get("constraints").cloned().unwrap_or_else(||json!({})),"workflow":workflow,"execution":args.get("execution").cloned().unwrap_or_else(||json!({"start":true})),"acceptance":args.get("acceptance").cloned().unwrap_or_else(||json!({})),"result":{"schema":"narada.delegated_task.handoff.v1","acceptance_verdict":"pending","step_states":step_states,"worker_refs":[],"residual_risks":[],"observed_incoherencies":[],"verification":[],"changed_files":[]},"summary":null});
@@ -247,5 +254,15 @@ mod tests {
         assert_eq!(task["result"]["step_states"]["research"]["status"], "pending");
         assert_eq!(task["result"]["step_states"]["synthesize"]["status"], "pending");
         fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn native_delegated_task_rejects_invalid_dags_before_write() {
+        let root = std::env::temp_dir().join(format!("narada-delegated-task-invalid-dag-{}", uuid::Uuid::new_v4()));
+        let invalid = json!({"task_id":"task_cycle","objective":"demo","execution":{"start":false},"workflow":{"steps":[{"id":"a","kind":"worker","depends_on":["b"]},{"id":"b","kind":"worker","depends_on":["a"]}]}});
+        let error = task_run(invalid.as_object().unwrap(), &root).expect_err("cycle must refuse");
+        assert_eq!(error["code"], "delegated_task_validation_failed");
+        assert!(!root.join("tasks/task_cycle/task.json").exists());
+        fs::remove_dir_all(root).ok();
     }
 }
