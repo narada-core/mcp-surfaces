@@ -1,5 +1,6 @@
 use serde_json::{json, Map, Value};
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 const SERVER_NAME: &str = "delegated-task-mcp";
@@ -48,7 +49,11 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<V
         "delegated_task_summary" => task_summary(args, root),
         "delegated_task_events" => task_events(args, root),
         "delegated_task_wait" => task_wait(args, root),
-        name if MUTATING.contains(&name) => Err(authority_boundary(name)),
+        "delegated_task_run" => task_run(args, root),
+        "delegated_task_advance" => task_advance(args, root),
+        "delegated_task_cancel" => task_cancel(args, root, false),
+        "delegated_task_parent_takeover" => task_cancel(args, root, true),
+        "delegated_task_acknowledge" => task_acknowledge(args, root),
         _ => Err(error("unknown_tool", &format!("unknown_tool:{name}"))),
     }
 }
@@ -123,8 +128,47 @@ fn task_summary(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> 
 fn task_wait(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> { let id=task_id(args)?; let task=read_task(root,&id)?; Ok(json!({"schema":"narada.delegated_task.wait.v1","status":"ok","task_id":id,"task_status":task.get("status"),"waited":false,"refresh_performed":false,"worker_execution":"authority_boundary","task":compact_task(&task),"native_read_only":true})) }
 fn task_events(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> { let id=task_id(args)?; let path=task_path(root,&id)?.with_file_name("events.jsonl"); let limit=args.get("limit").and_then(Value::as_u64).unwrap_or(50).clamp(1,100) as usize; let offset=args.get("offset").and_then(Value::as_u64).unwrap_or(0).min(10000) as usize; let mut events=Vec::new(); if let Ok(metadata)=fs::metadata(&path) { if metadata.len() > MAX_FILE_BYTES { return Err(error("delegated_task_events_too_large","delegated_task_events_too_large")); } let text=fs::read_to_string(path).map_err(|_|error("delegated_task_events_read_failed","delegated_task_events_read_failed"))?; for line in text.lines().skip(offset).take(limit) { if let Ok(value)=serde_json::from_str::<Value>(line) { events.push(value); } } } Ok(json!({"schema":"narada.delegated_task.events.v1","status":"ok","task_id":id,"offset":offset,"limit":limit,"count":events.len(),"events":events,"native_read_only":true})) }
 
+fn now() -> String { time::OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339).unwrap_or_default() }
+fn write_task(root: &Path, task: &Value) -> Result<(), Value> {
+    let id=task.get("task_id").and_then(Value::as_str).ok_or_else(||error("task_id_required","task_id_required"))?;
+    let path=task_path(root,id)?; fs::create_dir_all(path.parent().unwrap()).map_err(|_|error("delegated_task_write_failed","delegated_task_write_failed"))?;
+    let temp=path.with_extension(format!("tmp-{}",uuid::Uuid::new_v4()));
+    fs::write(&temp,serde_json::to_vec_pretty(task).map_err(|_|error("delegated_task_write_failed","delegated_task_write_failed"))?).map_err(|_|error("delegated_task_write_failed","delegated_task_write_failed"))?;
+    fs::rename(temp,path).map_err(|_|error("delegated_task_write_failed","delegated_task_write_failed"))
+}
+fn append_event(root:&Path,id:&str,kind:&str,payload:Value)->Result<Value,Value>{
+    let event=json!({"schema":"narada.delegated_task.event.v1","event_id":format!("event-{}",uuid::Uuid::new_v4().simple()),"task_id":id,"event":kind,"recorded_at":now(),"payload":payload});
+    let path=task_path(root,id)?.with_file_name("events.jsonl"); let mut file=OpenOptions::new().create(true).append(true).open(path).map_err(|_|error("delegated_task_event_write_failed","delegated_task_event_write_failed"))?;
+    writeln!(file,"{}",event).map_err(|_|error("delegated_task_event_write_failed","delegated_task_event_write_failed"))?; Ok(event)
+}
+fn objective(args:&Map<String,Value>)->Result<String,Value>{ args.get("objective").or_else(||args.get("intent").and_then(|v|v.get("objective"))).and_then(Value::as_str).map(str::trim).filter(|v|!v.is_empty()).map(str::to_string).ok_or_else(||error("delegated_task_requires_objective","delegated_task_requires_objective")) }
+fn task_run(args:&Map<String,Value>,root:&Path)->Result<Value,Value>{
+    let objective=objective(args)?; let id=args.get("task_id").and_then(Value::as_str).map(str::to_string).unwrap_or_else(||format!("task-{}",uuid::Uuid::new_v4().simple())); safe_id(&id)?;
+    if task_path(root,&id)?.is_file(){ return Err(error("delegated_task_id_conflict","delegated_task_id_conflict")); }
+    let created=now(); let step=json!({"step_id":"implement","kind":"worker","status":"pending","attempts":0,"run_ids":[],"current_run_id":null,"started_at":null,"finished_at":null,"error":null,"summary":null});
+    let mut task=json!({"schema":"narada.delegated_task.v1","task_id":id,"status":"pending","objective":objective,"created_at":created,"updated_at":created,"constraints":args.get("constraints").cloned().unwrap_or_else(||json!({})),"workflow":args.get("workflow").cloned().unwrap_or_else(||json!({"strategy":"implement","steps":[{"id":"implement","kind":"worker"}]})),"execution":args.get("execution").cloned().unwrap_or_else(||json!({"start":true})),"acceptance":args.get("acceptance").cloned().unwrap_or_else(||json!({})),"result":{"acceptance_verdict":"pending","step_states":{"implement":step},"worker_refs":[],"residual_risks":[]},"summary":null});
+    write_task(root,&task)?; append_event(root,&id,"task_created",json!({"objective":objective}))?;
+    if task.pointer("/execution/start").and_then(Value::as_bool)!=Some(false){ task=advance_value(task,root)?; }
+    Ok(json!({"schema":"narada.delegated_task.run.v1","status":"ok","created":true,"task_id":id,"task_status":task["status"],"task":compact_task(&task)}))
+}
+fn task_advance(args:&Map<String,Value>,root:&Path)->Result<Value,Value>{ let id=task_id(args)?; let task=advance_value(read_task(root,&id)?,root)?; Ok(json!({"schema":"narada.delegated_task.advance.v1","status":"ok","task_id":id,"task_status":task["status"],"task":compact_task(&task)})) }
+fn advance_value(mut task:Value,root:&Path)->Result<Value,Value>{
+    if matches!(task.get("status").and_then(Value::as_str),Some("completed"|"failed"|"cancelled")){return Ok(task)}
+    let id=task["task_id"].as_str().unwrap_or_default().to_string(); let state=task.pointer("/result/step_states/implement/status").and_then(Value::as_str).unwrap_or("pending").to_string();
+    if state=="pending"{
+        let constraints=task.get("constraints").cloned().unwrap_or_else(||json!({})); let worker_args=json!({"intent":{"instruction":task["objective"]},"constraints":constraints});
+        let run=crate::worker_delegation::call_tool("worker_run",worker_args.as_object().unwrap(),root,&[root.to_path_buf()])?; let run_id=run.get("run_id").and_then(Value::as_str).unwrap_or_default();
+        task["status"]=json!("running"); task["result"]["step_states"]["implement"]["status"]=json!("running"); task["result"]["step_states"]["implement"]["current_run_id"]=json!(run_id); task["result"]["step_states"]["implement"]["run_ids"]=json!([run_id]); task["result"]["worker_refs"]=json!([{"step_id":"implement","run_id":run_id}]); append_event(root,&id,"worker_started",json!({"run_id":run_id}))?;
+    }else if state=="running"{
+        let run_id=task.pointer("/result/step_states/implement/current_run_id").and_then(Value::as_str).unwrap_or_default().to_string(); let status=crate::worker_delegation::call_tool("worker_run_status",json!({"run_id":run_id}).as_object().unwrap(),root,&[root.to_path_buf()])?; let worker=status.pointer("/run/status").and_then(Value::as_str).unwrap_or("running").to_string();
+        if worker=="completed"{task["status"]=json!("completed");task["result"]["step_states"]["implement"]["status"]=json!("completed");task["result"]["acceptance_verdict"]=json!("passed");task["summary"]=status.pointer("/run/summary").cloned().unwrap_or(Value::Null);append_event(root,&id,"task_completed",json!({"run_id":run_id}))?;} else if matches!(worker.as_str(),"failed"|"cancelled"|"completed_with_errors"){task["status"]=json!("failed");task["result"]["step_states"]["implement"]["status"]=json!("failed");task["result"]["acceptance_verdict"]=json!("failed");append_event(root,&id,"task_failed",json!({"run_id":run_id,"worker_status":worker}))?;}
+    }
+    task["updated_at"]=json!(now()); write_task(root,&task)?; Ok(task)
+}
+fn task_cancel(args:&Map<String,Value>,root:&Path,takeover:bool)->Result<Value,Value>{let id=task_id(args)?;let mut task=read_task(root,&id)?;if matches!(task.get("status").and_then(Value::as_str),Some("completed"|"failed"|"cancelled")){return Err(error("delegated_task_terminal_status","delegated_task_terminal_status"));}task["status"]=json!("cancelled");task["updated_at"]=json!(now());let kind=if takeover{"task_parent_takeover"}else{"task_cancelled"};let detail=if takeover{json!({"parent_task_id":args.get("parent_task_id"),"reason":args.get("reason")})}else{json!({"reason":args.get("reason")})};task["result"][if takeover{"parent_takeover"}else{"cancellation"}]=detail.clone();write_task(root,&task)?;let event=append_event(root,&id,kind,detail)?;Ok(json!({"schema":if takeover{"narada.delegated_task.parent_takeover.v1"}else{"narada.delegated_task.cancel.v1"},"status":if takeover{"parent_takeover_recorded"}else{"cancelled"},"task_id":id,"task_status":"cancelled","event":event}))}
+fn task_acknowledge(args:&Map<String,Value>,root:&Path)->Result<Value,Value>{let id=task_id(args)?;let mut task=read_task(root,&id)?;if !matches!(task.get("status").and_then(Value::as_str),Some("completed"|"failed"|"cancelled")){return Err(error("delegated_task_not_terminal","delegated_task_not_terminal"));}let ack=json!({"acknowledged":true,"acknowledged_at":now(),"acknowledged_by":args.get("acknowledged_by"),"note":args.get("note")});task["result"]["lifecycle_acknowledgement"]=ack.clone();task["updated_at"]=json!(now());write_task(root,&task)?;let event=append_event(root,&id,"task_acknowledged",ack.clone())?;Ok(json!({"schema":"narada.delegated_task.acknowledge.v1","status":"acknowledged","task_id":id,"task_status":task["status"],"acknowledgement":ack,"event":event}))}
+
 fn id_schema(required: bool) -> Value { json!({"type":"object","properties":{"task_id":{"type":"string"},"refresh":{"type":"boolean","default":false}},"required":if required {json!(["task_id"])} else {json!([])},"additionalProperties":false}) }
-fn authority_boundary(name: &str) -> Value { json!({"schema":"narada.delegated_task.authority_boundary.v1","status":"unavailable","tool_name":name,"reason":"delegated_task_worker_authority_not_enabled_in_native_read_slice","remediation":"Use the configured delegated-task/worker authority for creation, execution, waiting, cancellation, acknowledgement, and takeover."}) }
 fn error(code: &str, message: &str) -> Value { json!({"schema":"narada.delegated_task.error.v1","code":code,"message":message}) }
 fn tool(name: &str, description: &str, schema: Value, read_only: bool) -> Value { json!({"name":name,"description":description,"annotations":{"title":name,"readOnlyHint":read_only,"destructiveHint":!read_only,"idempotentHint":read_only,"openWorldHint":false},"inputSchema":schema,"outputSchema":{"type":"object","additionalProperties":true}}) }
 
@@ -150,6 +194,23 @@ mod tests {
         fs::write(root.join("tasks/task_a/task.json"), vec![b'x'; MAX_FILE_BYTES as usize + 1]).expect("task");
         let error = task_status(&json!({"task_id":"task_a"}).as_object().unwrap(), &root).expect_err("oversized record must refuse");
         assert_eq!(error["code"], "delegated_task_record_too_large");
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn native_delegated_task_owns_durable_lifecycle_mutations() {
+        let root = std::env::temp_dir().join(format!("narada-delegated-task-mutate-{}", uuid::Uuid::new_v4()));
+        let created = task_run(json!({"task_id":"task_native","objective":"demo","execution":{"start":false}}).as_object().unwrap(), &root).expect("run");
+        assert_eq!(created["task_status"], "pending");
+        let cancelled = task_cancel(json!({"task_id":"task_native","reason":"fixture"}).as_object().unwrap(), &root, false).expect("cancel");
+        assert_eq!(cancelled["task_status"], "cancelled");
+        let acknowledged = task_acknowledge(json!({"task_id":"task_native","acknowledged_by":"test"}).as_object().unwrap(), &root).expect("acknowledge");
+        assert_eq!(acknowledged["status"], "acknowledged");
+        assert_eq!(task_events(json!({"task_id":"task_native"}).as_object().unwrap(), &root).expect("events")["count"], 3);
+
+        task_run(json!({"task_id":"task_takeover","objective":"demo","execution":{"start":false}}).as_object().unwrap(), &root).expect("second run");
+        let takeover = task_cancel(json!({"task_id":"task_takeover","parent_task_id":"parent"}).as_object().unwrap(), &root, true).expect("takeover");
+        assert_eq!(takeover["status"], "parent_takeover_recorded");
         fs::remove_dir_all(root).expect("cleanup");
     }
 }
