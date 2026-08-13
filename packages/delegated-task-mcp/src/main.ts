@@ -2,7 +2,7 @@
 import { buildGuidanceResult } from './guidance.js';
 import { guidanceToolDefinition } from './guidance.js';
 import { createHash, randomUUID } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
@@ -590,7 +590,22 @@ async function withTaskMutationLock<T>(state: State, id: string, operation: () =
       try {
         const heartbeatPath = existsSync(ownerPath) ? ownerPath : lockPath;
         if (Date.now() - statSync(heartbeatPath).mtimeMs > staleMs) {
-          rmSync(lockPath, { recursive: true, force: true });
+          const claimPath = `${lockPath}.reclaim`;
+          const abandonedPath = `${lockPath}.abandoned-${randomUUID()}`;
+          let claim: number | null = null;
+          let ownsClaim = false;
+          try {
+            claim = openSync(claimPath, 'wx');
+            ownsClaim = true;
+            closeSync(claim);
+            claim = null;
+            renameSync(lockPath, abandonedPath);
+            rmSync(abandonedPath, { recursive: true, force: true });
+          } catch { /* Another contender reclaimed or renewed this lease. */ }
+          finally {
+            if (claim !== null) closeSync(claim);
+            if (ownsClaim) try { unlinkSync(claimPath); } catch { /* Claim cleanup is best effort. */ }
+          }
           continue;
         }
       } catch { /* The owner may be creating or releasing the lease. */ }

@@ -5,7 +5,7 @@
   "description": "Shared Rust MCP surface executable.",
   "scripts": {
     "build:native": "node scripts/build-native.mjs",
-    "test:native": "pnpm --filter @narada-core/mcp-protocol build && pnpm --filter @narada-core/mcp-runtime-client build && pnpm --filter @narada-core/sop-mcp build && pnpm --filter @narada-core/scheduler-mcp build && pnpm run build:native && node scripts/verify-native-protocol.mjs",
+    "test:native": "pnpm --filter @narada-core/mcp-protocol build && pnpm exec tsc -b packages/shared/mcp-runtime-proxy/tsconfig.json && pnpm --filter @narada-core/mcp-runtime-client build && pnpm --filter @narada-core/sop-mcp build && pnpm --filter @narada-core/scheduler-mcp build && pnpm run build:native && node scripts/verify-native-protocol.mjs",
     "build": "pnpm run build:native"
   },
   "naradaRuntimeArtifacts": {

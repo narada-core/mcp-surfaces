@@ -295,6 +295,29 @@ fn lock_stale(path: &Path, stale_ms: u64) -> bool {
         .and_then(|modified| modified.elapsed().ok())
         .is_some_and(|elapsed| elapsed > std::time::Duration::from_millis(stale_ms))
 }
+fn reclaim_stale_lock(path: &Path) -> bool {
+    let claim = path.with_extension("lockdir.reclaim");
+    let claim_file = match OpenOptions::new().write(true).create_new(true).open(&claim) {
+        Ok(file) => file,
+        Err(_) => return false,
+    };
+    let suffix = format!(
+        "abandoned-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
+    let abandoned = path.with_extension(suffix);
+    let won = fs::rename(path, &abandoned).is_ok();
+    if won {
+        let _ = fs::remove_dir_all(abandoned);
+    }
+    drop(claim_file);
+    let _ = fs::remove_file(claim);
+    won
+}
 fn lock_task(root: &Path, id: &str) -> Result<TaskLock, Value> {
     let path = task_path(root, id)?.with_file_name("mutation.lockdir");
     fs::create_dir_all(path.parent().unwrap())
@@ -353,7 +376,7 @@ fn lock_task(root: &Path, id: &str) -> Result<TaskLock, Value> {
                 if error_value.kind() == std::io::ErrorKind::AlreadyExists
                     && lock_stale(&path, stale_ms) =>
             {
-                let _ = fs::remove_dir_all(&path);
+                let _ = reclaim_stale_lock(&path);
             }
             Err(error_value)
                 if error_value.kind() == std::io::ErrorKind::AlreadyExists
@@ -1898,6 +1921,37 @@ mod tests {
                 Some("gate" | "join" | "note")
             ));
         }
+    }
+
+    #[test]
+    fn native_delegated_task_stale_lock_has_one_reclaim_winner() {
+        let root = std::env::temp_dir().join(format!(
+            "narada-delegated-task-reclaim-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let lock = root.join("mutation.lockdir");
+        fs::create_dir_all(&lock).expect("stale lock");
+        fs::write(lock.join("owner.json"), "{}").expect("owner");
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let contenders = (0..2)
+            .map(|_| {
+                let lock = lock.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    reclaim_stale_lock(&lock)
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        let winners = contenders
+            .into_iter()
+            .map(|contender| contender.join().expect("contender"))
+            .filter(|won| *won)
+            .count();
+        assert_eq!(winners, 1);
+        assert!(!lock.exists());
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]
