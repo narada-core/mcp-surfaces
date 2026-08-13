@@ -12,7 +12,7 @@ const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const executableName = process.platform === 'win32' ? 'narada-mcp-surfaces.exe' : 'narada-mcp-surfaces';
 const executable = process.env.NARADA_NATIVE_SURFACE_EXECUTABLE
   ?? requireNativeArtifact(packageRoot, executableName);
-const paritySlice = process.env.NARADA_PARITY_SLICE ?? 'all';
+const paritySlice = process.argv[2] ?? process.env.NARADA_PARITY_SLICE ?? 'all';
 let controlPlaneReady = false;
 function resolveNaradaRoot(workspaceRoot) {
   return resolve(process.env.NARADA_ROOT ?? resolve(workspaceRoot, '..', 'narada'));
