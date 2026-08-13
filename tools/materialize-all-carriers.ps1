@@ -32,64 +32,20 @@ function Write-LogLine {
   )
 }
 
-function Resolve-Materializer {
-  $artifactRoot = Join-Path $repoRoot 'packages\shared\mcp-materializer-native\dist\native'
-  $pointerPath = Join-Path $artifactRoot 'current.json'
-  if (-not (Test-Path -LiteralPath $pointerPath -PathType Leaf)) {
-    throw "Native materializer pointer is missing: $pointerPath. Build and publish @narada-core/mcp-materializer-native first."
-  }
-  $pointer = Get-Content -LiteralPath $pointerPath -Raw | ConvertFrom-Json
-  if ($pointer.schema -ne 'narada.mcp_materializer.native_artifact_pointer.v1') {
-    throw "Native materializer pointer has an unsupported schema: $pointerPath"
-  }
-  $relative = [string]$pointer.artifacts.'narada-mcp-materializer.exe'
-  if ($relative -notmatch '^versions/[0-9a-f]{64}/narada-mcp-materializer\.exe$') {
-    throw "Native materializer pointer target is unsafe: $relative"
-  }
-  $candidate = [System.IO.Path]::GetFullPath((Join-Path $artifactRoot ($relative -replace '/', '\')))
-  $versionsRoot = [System.IO.Path]::GetFullPath((Join-Path $artifactRoot 'versions')) + [System.IO.Path]::DirectorySeparatorChar
-  if (-not $candidate.StartsWith($versionsRoot, [StringComparison]::OrdinalIgnoreCase)) {
-    throw "Native materializer pointer escapes the immutable artifact root: $candidate"
-  }
-  if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
-    throw "Native materializer artifact is missing: $candidate"
-  }
-  return $candidate
-}
-
-function Invoke-NativeMaterializer {
-  param([Parameter(Mandatory)][string]$Executable, [Parameter(Mandatory)][string[]]$Arguments)
-  $stdoutPath = Join-Path ([System.IO.Path]::GetTempPath()) "narada-materialize-$PID.stdout.log"
-  $stderrPath = Join-Path ([System.IO.Path]::GetTempPath()) "narada-materialize-$PID.stderr.log"
-  try {
-    $process = Start-Process -FilePath $Executable -ArgumentList $Arguments -WorkingDirectory $repoRoot `
-      -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -NoNewWindow -PassThru -Wait
-    foreach ($path in @($stdoutPath, $stderrPath)) {
-      if (Test-Path -LiteralPath $path -PathType Leaf) {
-        Get-Content -LiteralPath $path -TotalCount 400 | Add-Content -LiteralPath $logPath -Encoding utf8
-      }
-    }
-    if ($process.ExitCode -ne 0) {
-      throw "Native materializer failed with exit code $($process.ExitCode)."
-    }
-  } finally {
-    Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
-  }
-}
-
-function Invoke-CarrierArtifactBuild {
+function Invoke-CarrierMaterialization {
+  param([Parameter(Mandatory)][string[]]$Arguments)
   $stdoutPath = Join-Path ([System.IO.Path]::GetTempPath()) "narada-carrier-build-$PID.stdout.log"
   $stderrPath = Join-Path ([System.IO.Path]::GetTempPath()) "narada-carrier-build-$PID.stderr.log"
   try {
     $cargo = Get-Command cargo.exe -ErrorAction Stop | Select-Object -First 1
-    $process = Start-Process -FilePath $cargo.Source -ArgumentList @('native-package') -WorkingDirectory $repoRoot -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -NoNewWindow -PassThru -Wait
+    $process = Start-Process -FilePath $cargo.Source -ArgumentList (@('native-materialize', '--') + $Arguments) -WorkingDirectory $repoRoot -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -NoNewWindow -PassThru -Wait
     foreach ($path in @($stdoutPath, $stderrPath)) {
       if (Test-Path -LiteralPath $path -PathType Leaf) {
         Get-Content -LiteralPath $path -TotalCount 1000 | Add-Content -LiteralPath $logPath -Encoding utf8
       }
     }
     if ($process.ExitCode -ne 0) {
-      throw "Cargo-native carrier artifact preparation failed with exit code $($process.ExitCode)."
+      throw "Cargo-native carrier materialization failed with exit code $($process.ExitCode)."
     }
   } finally {
     Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
@@ -144,21 +100,16 @@ try {
   } catch {
     throw "Another carrier promotion operation holds the workspace lock: $operationLockPath"
   }
-  Write-Status 'Preparing and sealing the native carrier artifact graph.' ([ConsoleColor]::Cyan)
-  Invoke-CarrierArtifactBuild
-  $materializer = Resolve-Materializer
-  Write-Status 'Narada native bundle promotion starting.' ([ConsoleColor]::Cyan)
-  Write-Status "Authority: $materializer"
+  Write-Status 'Preparing, synchronizing, sealing, and materializing the native carrier graph.' ([ConsoleColor]::Cyan)
   Write-Status "Detailed output: $logPath"
-  Write-LogLine "Authority: $materializer"
-  Invoke-NativeMaterializer -Executable $materializer -Arguments @(
-    'promote-site',
+  Write-LogLine 'Authority: cargo native-materialize'
+  Invoke-CarrierMaterialization -Arguments @(
     '--contract', $contract,
-    '--workspace-root', $repoRoot,
     '--home', $carrierRoot,
     '--matrix', $matrix,
     '--installed-index', $installedIndex
   )
+  Write-LogLine 'Materialization completed successfully.'
   Write-Status 'All carriers materialized by the native authority. Restart Codex, Kimi Code, and OpenCode.' ([ConsoleColor]::Green)
   if (-not $NoNotification) { Show-SuccessNotification }
   exit 0
