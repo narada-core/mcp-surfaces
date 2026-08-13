@@ -3,6 +3,11 @@ use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::thread::JoinHandle;
 
 const SERVER_NAME: &str = "delegated-task-mcp";
 const MAX_ITEMS: usize = 200;
@@ -250,11 +255,45 @@ fn task_path(root: &Path, id: &str) -> Result<PathBuf, Value> {
     let id = safe_id(id)?;
     Ok(tasks_dir(root).join(id).join("task.json"))
 }
-struct TaskLock(PathBuf);
+struct TaskLock {
+    path: PathBuf,
+    token: String,
+    stop: Arc<AtomicBool>,
+    heartbeat: Option<JoinHandle<()>>,
+}
 impl Drop for TaskLock {
     fn drop(&mut self) {
-        let _ = fs::remove_dir(&self.0);
+        self.stop.store(true, Ordering::Release);
+        if let Some(handle) = self.heartbeat.take() {
+            handle.thread().unpark();
+            let _ = handle.join();
+        }
+        if lock_owner_matches(&self.path, &self.token) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
     }
+}
+fn lock_owner_matches(path: &Path, token: &str) -> bool {
+    fs::read_to_string(path.join("owner.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|owner| {
+            owner
+                .get("token")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .as_deref()
+        == Some(token)
+}
+fn lock_stale(path: &Path, stale_ms: u64) -> bool {
+    let heartbeat = path.join("owner.json");
+    let target = if heartbeat.exists() { &heartbeat } else { path };
+    fs::metadata(target)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| modified.elapsed().ok())
+        .is_some_and(|elapsed| elapsed > std::time::Duration::from_millis(stale_ms))
 }
 fn lock_task(root: &Path, id: &str) -> Result<TaskLock, Value> {
     let path = task_path(root, id)?.with_file_name("mutation.lockdir");
@@ -265,10 +304,57 @@ fn lock_task(root: &Path, id: &str) -> Result<TaskLock, Value> {
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(30_000)
         .clamp(100, 30_000);
+    let stale_ms = std::env::var("NARADA_DELEGATED_TASK_LOCK_STALE_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(300_000)
+        .clamp(1_000, 86_400_000);
     let started = std::time::Instant::now();
     loop {
         match fs::create_dir(&path) {
-            Ok(()) => return Ok(TaskLock(path)),
+            Ok(()) => {
+                let owner_path = path.join("owner.json");
+                let token = format!(
+                    "{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos()
+                );
+                fs::write(&owner_path, json!({"schema":"narada.delegated_task.mutation_lock.v1","token":token,"pid":std::process::id(),"heartbeat_at":now()}).to_string())
+                    .map_err(|_| error("delegated_task_lock_failed", "delegated_task_lock_failed"))?;
+                let stop = Arc::new(AtomicBool::new(false));
+                let heartbeat_stop = Arc::clone(&stop);
+                let heartbeat_path = path.clone();
+                let heartbeat_token = token.clone();
+                let heartbeat_interval =
+                    std::time::Duration::from_millis((stale_ms / 3).clamp(100, 1_000));
+                let heartbeat = std::thread::spawn(move || {
+                    while !heartbeat_stop.load(Ordering::Acquire) {
+                        std::thread::park_timeout(heartbeat_interval);
+                        if heartbeat_stop.load(Ordering::Acquire) {
+                            break;
+                        }
+                        if !lock_owner_matches(&heartbeat_path, &heartbeat_token) {
+                            break;
+                        }
+                        let _ = fs::write(&owner_path, json!({"schema":"narada.delegated_task.mutation_lock.v1","token":heartbeat_token,"pid":std::process::id(),"heartbeat_at":now()}).to_string());
+                    }
+                });
+                return Ok(TaskLock {
+                    path,
+                    token,
+                    stop,
+                    heartbeat: Some(heartbeat),
+                });
+            }
+            Err(error_value)
+                if error_value.kind() == std::io::ErrorKind::AlreadyExists
+                    && lock_stale(&path, stale_ms) =>
+            {
+                let _ = fs::remove_dir_all(&path);
+            }
             Err(error_value)
                 if error_value.kind() == std::io::ErrorKind::AlreadyExists
                     && started.elapsed() < std::time::Duration::from_millis(timeout_ms) =>

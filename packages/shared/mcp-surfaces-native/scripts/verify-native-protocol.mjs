@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,6 +13,34 @@ const executableName = process.platform === 'win32' ? 'narada-mcp-surfaces.exe' 
 const executable = process.env.NARADA_NATIVE_SURFACE_EXECUTABLE
   ?? requireNativeArtifact(packageRoot, executableName);
 const paritySlice = process.env.NARADA_PARITY_SLICE ?? 'all';
+let controlPlaneReady = false;
+function resolveNaradaRoot(workspaceRoot) {
+  return resolve(process.env.NARADA_ROOT ?? resolve(workspaceRoot, '..', 'narada'));
+}
+function ensureControlPlaneBuild(workspaceRoot) {
+  if (controlPlaneReady) return resolveNaradaRoot(workspaceRoot);
+  const naradaRoot = resolveNaradaRoot(workspaceRoot);
+  const packagePath = join(naradaRoot, 'packages', 'layers', 'control-plane', 'package.json');
+  const entrypoint = join(naradaRoot, 'packages', 'layers', 'control-plane', 'dist', 'index.js');
+  if (!existsSync(packagePath)) throw new Error(`native_parity_narada_root_missing:${naradaRoot}:set_NARADA_ROOT`);
+  const buildCommand = process.platform === 'win32' ? (process.env.ComSpec ?? 'cmd.exe') : 'pnpm';
+  const buildArgs = process.platform === 'win32'
+    ? ['/d', '/s', '/c', 'pnpm --filter @narada-core/control-plane build']
+    : ['--filter', '@narada-core/control-plane', 'build'];
+  const build = spawnSync(buildCommand, buildArgs, {
+    cwd: naradaRoot,
+    env: process.env,
+    encoding: 'utf8',
+    timeout: 120_000,
+    maxBuffer: 2 * 1024 * 1024,
+    windowsHide: true,
+  });
+  if (build.error || build.status !== 0 || !existsSync(entrypoint)) {
+    throw new Error(`native_parity_control_plane_build_failed:${build.error?.message ?? build.status}:${String(build.stderr).slice(0, 1000)}`);
+  }
+  controlPlaneReady = true;
+  return naradaRoot;
+}
 const allSurfaces = [
   'catalog-observation',
   'operator-routing',
@@ -40,7 +68,7 @@ const allSurfaces = [
   'browser-control',
   'cloudflare-carrier',
 ];
-const surfaces = paritySlice === 'delegated-task' ? ['delegated-task'] : allSurfaces;
+const surfaces = paritySlice === 'all' ? allSurfaces : allSurfaces.includes(paritySlice) ? [paritySlice] : [];
 const modernMeta = {
   _meta: {
     'io.modelcontextprotocol/protocolVersion': '2026-07-28',
@@ -412,7 +440,7 @@ function seedMailboxReconciliation(root) {
 
 function runMailboxReconciliationParity() {
   const workspaceRoot = resolve(packageRoot, '..', '..', '..');
-  const naradaRoot = resolve(workspaceRoot, '..', 'narada');
+  const naradaRoot = ensureControlPlaneBuild(workspaceRoot);
   const bunEntrypoint = join(workspaceRoot, 'packages', 'mailbox-mcp', 'src', 'main.ts');
   const bunRoot = mkdtempSync(join(tmpdir(), 'narada-mailbox-reconcile-bun-'));
   const rustRoot = mkdtempSync(join(tmpdir(), 'narada-mailbox-reconcile-rust-'));
@@ -473,7 +501,7 @@ function runMailboxReconciliationParity() {
 
 function runMailboxSyncParity() {
   const workspaceRoot = resolve(packageRoot, '..', '..', '..');
-  const naradaRoot = resolve(workspaceRoot, '..', 'narada');
+  const naradaRoot = ensureControlPlaneBuild(workspaceRoot);
   const bunEntrypoint = join(workspaceRoot, 'packages', 'mailbox-mcp', 'src', 'main.ts');
   const root = mkdtempSync(join(tmpdir(), 'narada-mailbox-sync-native-'));
   const siteRoot = join(root, 'site');
@@ -747,14 +775,29 @@ function runDelegatedTaskParity() {
     const lockTaskId = `task_${createHash('sha256').update(lockKey).digest('hex').slice(0, 16)}`;
     mkdirSync(join(lockRoot, 'tasks', lockTaskId, 'mutation.lockdir'), { recursive: true });
     const lockRequest = [{ jsonrpc: '2.0', id: 50, method: 'tools/call', params: { name: 'delegated_task_run', arguments: { objective: 'Observe the shared lock.', execution: { start: false }, idempotency_key: lockKey } } }];
-    const lockEnv = { ...process.env, NARADA_DELEGATED_TASK_LOCK_TIMEOUT_MS: '100' };
+    const lockEnv = { ...process.env, NARADA_DELEGATED_TASK_LOCK_TIMEOUT_MS: '100', NARADA_DELEGATED_TASK_LOCK_STALE_MS: '1000' };
     const lockedBun = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', [bunEntrypoint, '--task-root', lockRoot, '--site-root', lockRoot, '--allowed-root', lockRoot], lockRequest, workspaceRoot, lockEnv);
     const lockedRust = runMailbox(executable, ['--surface-id', 'delegated-task', '--site-root', lockRoot], lockRequest, workspaceRoot, lockEnv);
     const diagnosticCode = (responses) => responses.find((response) => response.id === 50)?.error?.data?.code;
     assertSame('delegated_task.shared_mutation_lock', diagnosticCode(lockedBun), diagnosticCode(lockedRust));
     if (diagnosticCode(lockedRust) !== 'delegated_task_lock_failed') throw new Error('delegated_task.shared_mutation_lock:expected_lock_failure');
 
-    return { status: 'passed', fixture: 'template_and_durable_lifecycle', compared: ['template_catalog', 'validate', 'run_without_start', 'status', 'cancel', 'acknowledge', 'events', 'list', 'cross_runtime_read', 'invalid_workflow', 'local_dag_fixed_point', 'wait', 'cross_runtime_idempotency', 'shared_mutation_lock'] };
+    const staleRoot = join(root, 'stale-lock');
+    const staleKey = 'native-stale-lock-parity-v1';
+    const staleTaskId = `task_${createHash('sha256').update(staleKey).digest('hex').slice(0, 16)}`;
+    const staleLockPath = join(staleRoot, 'tasks', staleTaskId, 'mutation.lockdir');
+    mkdirSync(staleLockPath, { recursive: true });
+    const old = new Date(Date.now() - 10_000);
+    utimesSync(staleLockPath, old, old);
+    const staleRequest = [{ jsonrpc: '2.0', id: 51, method: 'tools/call', params: { name: 'delegated_task_run', arguments: { objective: 'Recover an abandoned shared lock.', execution: { start: false }, idempotency_key: staleKey } } }];
+    const recoveredByBun = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', [bunEntrypoint, '--task-root', staleRoot, '--site-root', staleRoot, '--allowed-root', staleRoot], staleRequest, workspaceRoot, lockEnv);
+    if (mailboxStructured(recoveredByBun, 51, 'bun')?.task_id !== staleTaskId) throw new Error('delegated_task.stale_lock.bun:recovery_failed');
+    mkdirSync(staleLockPath, { recursive: true });
+    utimesSync(staleLockPath, old, old);
+    const recoveredByRust = runMailbox(executable, ['--surface-id', 'delegated-task', '--site-root', staleRoot], staleRequest, workspaceRoot, lockEnv);
+    if (mailboxStructured(recoveredByRust, 51, 'rust')?.task_id !== staleTaskId) throw new Error('delegated_task.stale_lock.rust:recovery_failed');
+
+    return { status: 'passed', fixture: 'template_and_durable_lifecycle', compared: ['template_catalog', 'validate', 'run_without_start', 'status', 'cancel', 'acknowledge', 'events', 'list', 'cross_runtime_read', 'invalid_workflow', 'local_dag_fixed_point', 'wait', 'cross_runtime_idempotency', 'shared_mutation_lock', 'stale_lock_recovery'] };
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -2144,7 +2187,7 @@ function runOperatorOverlayParity() {
   const workspaceRoot = resolve(packageRoot, '..', '..', '..');
   const bunEntrypoint = join(workspaceRoot, 'packages', 'operator-console-overlay-mcp', 'src', 'main.ts');
   if (!existsSync(bunEntrypoint)) throw new Error('operator_overlay_parity_bun_entrypoint_missing:' + bunEntrypoint);
-  const naradaRoot = resolve(workspaceRoot, '..', 'narada');
+  const naradaRoot = resolveNaradaRoot(workspaceRoot);
   const root = mkdtempSync(join(tmpdir(), 'narada-operator-overlay-native-parity-'));
   try {
     const stateRoot = join(root, 'overlay-state');
@@ -2381,7 +2424,7 @@ const mailboxParity = runSlice('mailbox', runMailboxParity);
 const mailboxOutboxMutationParity = runSlice('mailbox', runMailboxOutboxMutationParity);
 const mailboxReconciliationParity = runSlice('mailbox', runMailboxReconciliationParity);
 const mailboxSyncParity = runSlice('mailbox', runMailboxSyncParity);
-const delegatedTaskParity = runDelegatedTaskParity();
+const delegatedTaskParity = runSlice('delegated-task', runDelegatedTaskParity);
 const workerDelegationParity = runSlice('worker-delegation', runWorkerDelegationParity);
 const artifactsParity = runSlice('artifacts', runArtifactsParity);
 const sopParity = runSlice('sop', runSopParity);

@@ -2,7 +2,7 @@
 import { buildGuidanceResult } from './guidance.js';
 import { guidanceToolDefinition } from './guidance.js';
 import { createHash, randomUUID } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmdirSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
@@ -567,23 +567,46 @@ function mutationTaskId(name: string, args: JsonRecord): string | null {
 
 async function withTaskMutationLock<T>(state: State, id: string, operation: () => Promise<T>): Promise<T> {
   const lockPath = resolve(taskPaths(state, id).taskDir, 'mutation.lockdir');
+  const ownerPath = resolve(lockPath, 'owner.json');
+  const token = randomUUID();
+  const owner = () => JSON.stringify({ schema: 'narada.delegated_task.mutation_lock.v1', token, pid: process.pid, heartbeat_at: new Date().toISOString() });
+  const stillOwner = () => {
+    try { return rec(JSON.parse(readFileSync(ownerPath, 'utf8'))).token === token; }
+    catch { return false; }
+  };
   mkdirSync(dirname(lockPath), { recursive: true });
   const configuredTimeout = Number.parseInt(process.env.NARADA_DELEGATED_TASK_LOCK_TIMEOUT_MS ?? '', 10);
   const timeoutMs = Number.isFinite(configuredTimeout) ? Math.min(30_000, Math.max(100, configuredTimeout)) : 30_000;
+  const configuredStaleMs = Number.parseInt(process.env.NARADA_DELEGATED_TASK_LOCK_STALE_MS ?? '', 10);
+  const staleMs = Number.isFinite(configuredStaleMs) ? Math.min(86_400_000, Math.max(1_000, configuredStaleMs)) : 300_000;
   const deadline = Date.now() + timeoutMs;
   for (;;) {
-    try { mkdirSync(lockPath); break; }
+    try {
+      mkdirSync(lockPath);
+      writeFileSync(ownerPath, owner());
+      break;
+    }
     catch (error) {
+      try {
+        const heartbeatPath = existsSync(ownerPath) ? ownerPath : lockPath;
+        if (Date.now() - statSync(heartbeatPath).mtimeMs > staleMs) {
+          rmSync(lockPath, { recursive: true, force: true });
+          continue;
+        }
+      } catch { /* The owner may be creating or releasing the lease. */ }
       if (Date.now() >= deadline) throw diag('delegated_task_lock_failed', 'delegated_task_lock_failed', { task_id: id, lock_path: lockPath, cause: error instanceof Error ? error.message : String(error) });
       await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
     }
   }
+  const heartbeat = setInterval(() => {
+    try { if (stillOwner()) writeFileSync(ownerPath, owner()); else clearInterval(heartbeat); }
+    catch { /* Cleanup or ownership loss is handled by the operation/finalizer. */ }
+  }, Math.min(1_000, Math.max(100, Math.floor(staleMs / 3))));
+  heartbeat.unref();
   try { return await operation(); }
   finally {
-    try { rmdirSync(lockPath); }
-    catch (error) {
-      if (existsSync(lockPath)) throw error;
-    }
+    clearInterval(heartbeat);
+    if (stillOwner()) rmSync(lockPath, { recursive: true, force: true });
   }
 }
 
