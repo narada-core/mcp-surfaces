@@ -748,11 +748,19 @@ fn memory_incident_show(args: &Map<String, Value>, root: &Path) -> Result<Value,
             "runtime_introspection_memory_incident_not_found",
         ));
     }
-    let evidence=query_rows(&db,"SELECT evidence_id,created_at_ms,evidence_type,payload_json FROM evidence WHERE incident_id=?1 ORDER BY created_at_ms",params![id])?;
+    let mut evidence=query_rows(&db,"SELECT evidence_id,created_at_ms,evidence_type,payload_json FROM evidence WHERE incident_id=?1 ORDER BY created_at_ms",params![id])?;
+    for item in &mut evidence { project_evidence_payload(item)?; }
     let artifacts=query_rows(&db,"SELECT artifact_id,created_at_ms,path,kind,bytes FROM artifacts WHERE incident_id=?1 ORDER BY created_at_ms",params![id])?;
     Ok(
         json!({"schema":"narada.runtime_introspection.memory_incident.v1","incident":incident,"evidence":evidence,"artifacts":artifacts}),
     )
+}
+fn project_evidence_payload(item: &mut Value) -> Result<(), Value> {
+    let object = item.as_object_mut().ok_or_else(|| diagnostic("runtime_introspection_memory_evidence_corrupt","runtime_introspection_memory_evidence_corrupt"))?;
+    let text = object.remove("payload_json").and_then(|value|value.as_str().map(ToString::to_string)).ok_or_else(|| diagnostic("runtime_introspection_memory_evidence_corrupt","runtime_introspection_memory_evidence_corrupt"))?;
+    let payload = serde_json::from_str::<Value>(&text).map_err(|_| diagnostic("runtime_introspection_memory_evidence_corrupt","runtime_introspection_memory_evidence_corrupt"))?;
+    object.insert("payload".to_string(),payload);
+    Ok(())
 }
 fn number_field(value: &Map<String, Value>, key: &str) -> i64 {
     value
@@ -900,5 +908,13 @@ mod tests {
         args.insert("jsonl".to_string(), json!("{\"id\":\"ok\"}\nnot-json"));
         let error = analyze(&args).unwrap_err();
         assert_eq!(error["code"], "runtime_introspection_invalid_jsonl");
+    }
+
+    #[test]
+    fn incident_evidence_projects_payload_json_as_domain_payload() {
+        let mut evidence = json!({"evidence_id":"e1","payload_json":"{\"rss_bytes\":42}"});
+        project_evidence_payload(&mut evidence).unwrap();
+        assert_eq!(evidence["payload"]["rss_bytes"], 42);
+        assert!(evidence.get("payload_json").is_none());
     }
 }
