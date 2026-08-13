@@ -1089,6 +1089,9 @@ fn advance_value(mut task: Value, root: &Path) -> Result<Value, Value> {
             }
         }
     }
+    let (current_acceptance, current_checks) = acceptance_verdict(&task, root);
+    task["result"]["acceptance_verdict"] = json!(current_acceptance);
+    task["result"]["acceptance_checks"] = json!(current_checks);
     if task.get("status").and_then(Value::as_str) != Some("failed") {
         let steps = task
             .pointer("/workflow/steps")
