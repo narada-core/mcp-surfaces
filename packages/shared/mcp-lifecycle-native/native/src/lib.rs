@@ -447,6 +447,27 @@ fn read_payload_revision_payload(root: &Path, reference: &str) -> Result<Value, 
     }
     Ok(payload)
 }
+
+fn project_recurring_definition(row: Value) -> Result<Value, String> {
+    let text = row
+        .get("definition_json")
+        .and_then(Value::as_str)
+        .ok_or("recurring_definition_json_missing")?;
+    let parsed: Value = serde_json::from_str(text)
+        .map_err(|error| format!("recurring_definition_json_invalid:{error}"))?;
+    let mut projected = parsed
+        .as_object()
+        .cloned()
+        .ok_or("recurring_definition_json_must_be_object")?;
+    if let Some(columns) = row.as_object() {
+        for (key, value) in columns {
+            if key != "definition_json" {
+                projected.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    Ok(Value::Object(projected))
+}
 fn is_modern_request(params: &Value) -> bool {
     params
         .get("_meta")
@@ -1545,21 +1566,8 @@ impl LifecycleServer {
             )?;
             let definitions = rows
                 .into_iter()
-                .map(|mut row| {
-                    if let Some(text) = row.get("definition_json").and_then(Value::as_str) {
-                        if let Ok(parsed) = serde_json::from_str::<Value>(text) {
-                            if let Some(obj) = parsed.as_object() {
-                                let mut merged = obj.clone();
-                                for (key, value) in row.as_object().unwrap_or(&Map::new()).iter() {
-                                    merged.entry(key.clone()).or_insert_with(|| value.clone());
-                                }
-                                row = Value::Object(merged);
-                            }
-                        }
-                    }
-                    row
-                })
-                .collect::<Vec<_>>();
+                .map(project_recurring_definition)
+                .collect::<Result<Vec<_>, _>>()?;
             return Ok(
                 json!({"schema":"narada.task.recurring.list.v1","status":"ok","count":definitions.len(),"definitions":definitions}),
             );
@@ -1576,9 +1584,8 @@ impl LifecycleServer {
                 json!({"schema":"narada.task.recurring.runs.v1","status":"ok","recurrence_id":recurrence_id,"count":runs.len(),"runs":runs}),
             );
         }
-        Ok(
-            json!({"schema":"narada.task.recurring.v1","status":"ok","definition":row,"runs":if args.get("include_runs").and_then(Value::as_bool)==Some(true){json!(self.query_objects("select run_json from recurring_task_runs where recurrence_id=?1 order by created_at desc limit ?2",params![recurrence_id,limit])?)}else{json!([])}}),
-        )
+        let definition = project_recurring_definition(row)?;
+        Ok(json!({"schema":"narada.task.recurring.v1","status":"ok","definition":definition,"runs":if args.get("include_runs").and_then(Value::as_bool)==Some(true){json!(self.query_objects("select run_json from recurring_task_runs where recurrence_id=?1 order by created_at desc limit ?2",params![recurrence_id,limit])?)}else{json!([])}}))
     }
 
     fn task_recurring_create(&mut self, args: Value) -> Result<Value, String> {
@@ -1643,9 +1650,21 @@ impl LifecycleServer {
             .ok_or("authority_basis_required")?;
         let connection = self.connection()?;
         let definition: Value=connection.query_row("select definition_json from recurring_task_definitions where recurrence_id=?1 and status not in ('suspended','retired')",params![id],|r|{let text:String=r.get(0)?;Ok(serde_json::from_str(&text).unwrap_or_else(|_|json!({})))}).optional().map_err(db_error)?.ok_or_else(||format!("recurring_definition_not_found:{id}"))?;
-        let due_key = now();
+        let due_key = string_arg(&args, "due_key").unwrap_or_else(now);
         let payload = json!({"title":definition.get("title"),"goal":definition.get("goal"),"context":definition.get("context"),"required_work":definition.get("required_work"),"non_goals":definition.get("non_goals"),"acceptance_criteria":definition.get("acceptance_criteria").cloned().unwrap_or_else(||json!([])),"tags":definition.get("tags").cloned().unwrap_or_else(||json!([])),"preferred_role":definition.get("preferred_role"),"target_role":definition.get("target_role"),"idempotency_key":format!("recurring-run:{id}:{due_key}")});
-        let created = self.task_create(payload)?;
+        let payload_digest = digest(&json!({"recurrence_id":id,"due_key":due_key}));
+        let payload_id = format!("recurring_{}", &payload_digest[..48]);
+        let payload_result = self.payload_create(json!({
+            "payload_id": payload_id,
+            "payload": payload,
+            "created_by": actor.clone()
+        }))?;
+        let payload_ref = payload_result
+            .get("ref")
+            .and_then(Value::as_str)
+            .ok_or("recurring_payload_ref_missing")?
+            .to_string();
+        let created = self.task_create(json!({"payload_ref":payload_ref}))?;
         let task_id = created.get("task_id").cloned().unwrap_or(Value::Null);
         let task_number = created.get("task_number").cloned().unwrap_or(Value::Null);
         let run_id = format!("recurring-run-{}", Uuid::new_v4());
@@ -4363,5 +4382,76 @@ mod modern_protocol_tests {
         assert_eq!(serde_json::from_str::<Value>(&run_json).unwrap()["reason"], "due");
         connection.execute("insert into recurring_task_definitions(recurrence_id,status,definition_json,last_due_key,last_auto_triggered_at,updated_at) values('rec-2','active','{}',null,null,'2026-08-03T00:00:00Z')", []).expect("native definition insert");
         connection.execute("insert into recurring_task_events(event_id,recurrence_id,event_type,actor_agent_id,authority_basis_json,event_json,created_at) values('event-2','rec-2','created','agent','{}','{}','2026-08-03T00:00:00Z')", []).expect("native event insert");
+    }
+
+    #[test]
+    fn recurring_definition_projects_and_trigger_uses_immutable_payload() {
+        let root = std::env::temp_dir().join(format!(
+            "narada-native-recurring-trigger-{}",
+            Uuid::new_v4()
+        ));
+        let options = Options {
+            surface: Surface::Task,
+            site_root: root.clone(),
+            site_root_source: "test".to_string(),
+            prepare: false,
+            migrate_legacy: false,
+            source_database_path: None,
+        };
+        LifecycleServer::prepare_database(&options).expect("prepare task database");
+        let mut server = LifecycleServer::new(options).expect("open task server");
+        let created = server
+            .task_recurring_create(json!({
+                "title":"Daily watcher",
+                "goal":"Detect changes",
+                "context":"Stored context",
+                "required_work":"Inspect primary sources",
+                "non_goals":"Do not infer from citations",
+                "acceptance_criteria":["Evidence recorded"],
+                "tags":["watcher"],
+                "preferred_role":"resident",
+                "target_role":"resident",
+                "actor_agent_id":"test-agent",
+                "authority_basis":{"kind":"test","summary":"end-to-end recurrence test"}
+            }))
+            .expect("create recurrence");
+        let recurrence_id = created["recurrence_id"].as_str().unwrap().to_string();
+
+        let shown = server
+            .task_recurring_read(
+                "task_lifecycle_recurring_show",
+                json!({"recurrence_id":recurrence_id}),
+            )
+            .expect("show recurrence");
+        assert_eq!(shown["definition"]["title"], "Daily watcher");
+        assert_eq!(shown["definition"]["goal"], "Detect changes");
+        assert!(shown["definition"].get("definition_json").is_none());
+
+        let trigger_args = json!({
+            "recurrence_id":recurrence_id,
+            "actor_agent_id":"test-agent",
+            "authority_basis":{"kind":"test","summary":"trigger recurrence"},
+            "run_reason":"test",
+            "due_key":"2026-08-13"
+        });
+        let first = server
+            .task_recurring_trigger(trigger_args.clone())
+            .expect("trigger recurrence through immutable payload");
+        let second = server
+            .task_recurring_trigger(trigger_args)
+            .expect("idempotent replay through same immutable payload");
+        assert_eq!(first["task"]["task_id"], second["task"]["task_id"]);
+        assert_eq!(first["task"]["title"], "Daily watcher");
+        assert_eq!(second["task"]["status"], "created");
+        let payload_ref = format!(
+            "mcp_payload:recurring_{}@v1",
+            &digest(&json!({"recurrence_id":recurrence_id,"due_key":"2026-08-13"}))[..48]
+        );
+        assert_eq!(
+            read_payload_revision_payload(&root, &payload_ref).unwrap()["required_work"],
+            "Inspect primary sources"
+        );
+        drop(server);
+        fs::remove_dir_all(root).expect("remove recurring fixture");
     }
 }
