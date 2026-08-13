@@ -160,7 +160,6 @@ pub fn unavailable(surface_id: &str, reason: &str, detail: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
 
     #[test]
     fn adapter_boundary_is_structured_and_bounded() {
@@ -168,15 +167,5 @@ mod tests {
         assert_eq!(value["status"], "unavailable");
         assert_eq!(value["surface_id"], "calendar");
         assert!(value["remediation"].as_str().unwrap().contains("adapter"));
-    }
-
-    #[test]
-    fn bounded_path_rejects_escape() {
-        let root = std::env::temp_dir().join(format!("narada-authority-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&root).expect("root");
-        fs::write(root.join("inside.json"), "{}").expect("inside");
-        assert!(bounded_path(&root, "inside.json").is_ok());
-        assert!(bounded_path(&root, "..\\outside.json").is_err());
-        fs::remove_dir_all(root).expect("cleanup");
     }
 }

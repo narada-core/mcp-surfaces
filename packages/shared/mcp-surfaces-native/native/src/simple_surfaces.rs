@@ -640,7 +640,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn site_lifecycle_doctor_requires_coordinates_and_reports_resolution() {
         let doctor = list_tools("site-lifecycle")
             .into_iter()
