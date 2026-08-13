@@ -1,4 +1,3 @@
-use rusqlite::Connection;
 use serde_json::{json, Map, Value};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -635,7 +634,25 @@ fn runtime_command(root: &Path) -> Result<PathBuf, Value> {
         )
     })
 }
-fn invocation_plan_binding(root: &Path, plan_ref: &str) -> Result<(String, Option<String>), Value> {
+fn preflight_command(root: &Path) -> Result<PathBuf, Value> {
+    if let Some(path) = std::env::var_os("NARADA_INTELLIGENCE_PREFLIGHT_NATIVE")
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+    {
+        return Ok(path);
+    }
+    let src = std::env::var_os("NARADA_SRC_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.parent().unwrap_or(root).join("src"));
+    [
+        src.join("narada/packages/invokable-intelligence-runtime/native/target/release/narada-intelligence-preflight.exe"),
+        src.join("narada/packages/invokable-intelligence-runtime/native/target/release/narada-intelligence-preflight"),
+    ]
+    .into_iter()
+    .find(|path| path.is_file())
+    .ok_or_else(|| error("worker_intelligence_preflight_unavailable", "worker_intelligence_preflight_unavailable"))
+}
+fn invocation_plan_binding(root: &Path, requested_plan_ref: Option<&str>) -> Result<(String, String, Option<String>, String), Value> {
     let context =
         read_json(&root.join(".narada/intelligence-launch-context.json")).map_err(|_| {
             error(
@@ -659,40 +676,34 @@ fn invocation_plan_binding(root: &Path, plan_ref: &str) -> Result<(String, Optio
     } else {
         root.join(registry)
     };
-    let connection =
-        Connection::open_with_flags(registry, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(
-            |_| {
-                error(
-                    "worker_intelligence_registry_unavailable",
-                    "worker_intelligence_registry_unavailable",
-                )
-            },
-        )?;
-    let document: String = connection
-        .query_row(
-            "SELECT doc FROM invocation_plans WHERE id = ?1",
-            [plan_ref],
-            |row| row.get(0),
-        )
-        .map_err(|_| {
-            error(
-                "worker_canonical_invocation_plan_not_found",
-                "worker_canonical_invocation_plan_not_found",
-            )
-        })?;
-    let plan: Value = serde_json::from_str(&document).map_err(|_| {
-        error(
-            "worker_canonical_invocation_plan_invalid",
-            "worker_canonical_invocation_plan_invalid",
-        )
-    })?;
-    if plan.get("id").and_then(Value::as_str) != Some(plan_ref) {
-        return Err(error(
-            "worker_canonical_invocation_plan_mismatch",
-            "worker_canonical_invocation_plan_mismatch",
-        ));
+    let principal = context.get("principal_id").and_then(Value::as_str).ok_or_else(|| error("worker_intelligence_principal_required", "worker_intelligence_principal_required"))?;
+    let request = json!({
+        "schema":"narada.invokable-intelligence.preflight-request.v1",
+        "intent_id":"",
+        "purpose":"local-agent-runtime",
+        "principal":principal,
+        "requested_plan_id":requested_plan_ref,
+        "evaluated_at":now(),
+        "clock_authority_ref":"execution-site-clock:worker-delegation",
+        "mode":"immediate"
+    });
+    let executable = preflight_command(root)?;
+    let mut child = Command::new(executable).args(["--registry", &registry.to_string_lossy()])
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()
+        .map_err(|_| error("worker_intelligence_preflight_launch_failed", "worker_intelligence_preflight_launch_failed"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        writeln!(stdin, "{request}").map_err(|_| error("worker_intelligence_preflight_write_failed", "worker_intelligence_preflight_write_failed"))?;
     }
-    let provider = plan
+    let output = child.wait_with_output().map_err(|_| error("worker_intelligence_preflight_wait_failed", "worker_intelligence_preflight_wait_failed"))?;
+    if output.stdout.len() > MAX_FILE_BYTES {
+        return Err(error("worker_intelligence_preflight_response_too_large", "worker_intelligence_preflight_response_too_large"));
+    }
+    let admission: Value = serde_json::from_slice(&output.stdout).map_err(|_| error("worker_intelligence_preflight_response_invalid", "worker_intelligence_preflight_response_invalid"))?;
+    if !output.status.success() || admission.get("status").and_then(Value::as_str) != Some("admitted") {
+        return Err(json!({"schema":"narada.worker.error.v1","code":"worker_intelligence_preflight_refused","message":"worker_intelligence_preflight_refused","preflight":admission}));
+    }
+    let plan_ref = admission.get("plan_ref").and_then(Value::as_str).ok_or_else(|| error("worker_canonical_invocation_plan_invalid", "worker_canonical_invocation_plan_invalid"))?;
+    let provider = admission
         .pointer("/selected/inference_provider/id")
         .and_then(Value::as_str)
         .ok_or_else(|| {
@@ -710,12 +721,13 @@ fn invocation_plan_binding(root: &Path, plan_ref: &str) -> Result<(String, Optio
             ))
         }
     };
-    let model = plan
+    let model = admission
         .pointer("/selected/model/id")
         .and_then(Value::as_str)
         .and_then(|value| value.strip_prefix("model:"))
         .map(str::to_string);
-    Ok((mode.to_string(), model))
+    let evidence_ref = admission.get("evidence_ref").and_then(Value::as_str).unwrap_or_default().to_string();
+    Ok((plan_ref.to_string(), mode.to_string(), model, evidence_ref))
 }
 fn codex_command() -> Option<PathBuf> {
     if let Some(command) = std::env::var_os("NARADA_NATIVE_CODEX_COMMAND") {
@@ -781,7 +793,7 @@ fn worker_run(
             ));
         }
     }
-    let plan_ref = constraints
+    let requested_plan_ref = constraints
         .and_then(|value| value.get("invocation_plan_ref"))
         .and_then(Value::as_str)
         .map(str::trim)
@@ -792,23 +804,18 @@ fn worker_run(
                 .ok()
                 .filter(|value| !value.trim().is_empty())
         })
-        .ok_or_else(|| {
-            error(
-                "worker_canonical_invocation_plan_required",
-                "worker_canonical_invocation_plan_required",
-            )
-        })?;
-    if !plan_ref.starts_with("plan:")
+        ;
+    if requested_plan_ref.as_deref().is_some_and(|plan_ref| !plan_ref.starts_with("plan:")
         || !plan_ref[5..].chars().all(|character| {
             character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | ':' | '-')
-        })
+        }))
     {
         return Err(error(
             "worker_canonical_invocation_plan_invalid",
             "worker_canonical_invocation_plan_invalid",
         ));
     }
-    let (provider_mode, provider_model) = invocation_plan_binding(root, &plan_ref)?;
+    let (plan_ref, provider_mode, provider_model, preflight_evidence_ref) = invocation_plan_binding(root, requested_plan_ref.as_deref())?;
     let cwd = constraints
         .and_then(|v| v.get("cwd"))
         .and_then(Value::as_str)
@@ -829,7 +836,7 @@ fn worker_run(
     fs::create_dir_all(&dir)
         .map_err(|_| error("worker_run_create_failed", "worker_run_create_failed"))?;
     let started = now();
-    let request = json!({"schema":"narada.worker.request.v1","run_id":id,"origin_tool":tool_name,"intent":args.get("intent"),"constraints":args.get("constraints"),"resume_worker_session_id":resume,"capability_snapshot":capabilities.clone()});
+    let request = json!({"schema":"narada.worker.request.v1","run_id":id,"origin_tool":tool_name,"intent":args.get("intent"),"constraints":args.get("constraints"),"resume_worker_session_id":resume,"capability_snapshot":capabilities.clone(),"invocation_plan_ref":plan_ref,"preflight_evidence_ref":preflight_evidence_ref});
     write_json_atomic(&dir.join("request.json"), &request)?;
     fs::write(dir.join("worker_prompt.txt"), &prompt)
         .map_err(|_| error("worker_write_failed", "worker_write_failed"))?;
@@ -1205,6 +1212,18 @@ mod tests {
     #[test]
     fn containment_ignores_windows_path_case() {
         assert!(path_components_equal_or_child(Path::new("c:/users/andrey/narada/project"), Path::new("C:/Users/Andrey/Narada")));
+    }
+
+    #[test]
+    #[ignore = "requires an explicit deployed Site root and native preflight binary"]
+    fn live_native_preflight_resolves_without_caller_plan() {
+        let site_root = std::env::var("NARADA_TEST_SITE_ROOT").expect("NARADA_TEST_SITE_ROOT");
+        let (plan_ref, provider_mode, model, evidence_ref) =
+            invocation_plan_binding(Path::new(&site_root), None).expect("native preflight");
+        assert!(plan_ref.starts_with("plan:"));
+        assert_eq!(provider_mode, "codex-subscription");
+        assert!(model.is_some());
+        assert!(evidence_ref.starts_with("preflight-evidence:"));
     }
 
     #[test]
