@@ -438,7 +438,7 @@ fn tasks_list(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
         .and_then(Value::as_u64)
         .unwrap_or(20)
         .clamp(1, MAX_ITEMS as u64) as usize;
-    let mut tasks = Vec::new();
+    let mut records = Vec::new();
     if let Ok(entries) = fs::read_dir(tasks_dir(root)) {
         for entry in entries.filter_map(Result::ok).take(MAX_ITEMS) {
             if !entry.path().is_dir() {
@@ -448,18 +448,78 @@ fn tasks_list(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
                 continue;
             };
             if let Ok(task) = read_task(root, &id) {
-                tasks.push(compact_task(&task));
+                records.push(task);
             }
         }
     }
-    tasks.sort_by(|a, b| {
+    let view = args
+        .get("view")
+        .and_then(Value::as_str)
+        .unwrap_or("active_queue");
+    let site_scope = args
+        .get("site_scope")
+        .and_then(Value::as_str)
+        .unwrap_or("current_site");
+    let current = current_site_id(root);
+    let owner_filter = args.get("owner_site_id").and_then(Value::as_str);
+    let include_ack = args.get("include_acknowledged").and_then(Value::as_bool) == Some(true);
+    let legacy = args.contains_key("include_terminal") || args.contains_key("include_active");
+    let include_terminal = args.get("include_terminal").and_then(Value::as_bool) == Some(true);
+    let include_active = args.get("include_active").and_then(Value::as_bool) != Some(false);
+    records.retain(|task| {
+        let projected = ownership(task);
+        let owner = projected
+            .get("owner_site_id")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        if owner_filter.is_some_and(|expected| expected != owner) {
+            return false;
+        }
+        if site_scope == "current_site" && current.as_deref().is_some_and(|site| site != owner) {
+            return false;
+        }
+        if site_scope == "user_global"
+            && !matches!(
+                projected.get("visibility_scope").and_then(Value::as_str),
+                Some("user_global" | "user_global_legacy")
+            )
+        {
+            return false;
+        }
+        let terminal = matches!(
+            task.get("status").and_then(Value::as_str),
+            Some("completed" | "failed" | "cancelled")
+        );
+        let acknowledged = task
+            .pointer("/result/lifecycle_acknowledgement/acknowledged")
+            .and_then(Value::as_bool)
+            == Some(true);
+        if legacy {
+            return (if terminal {
+                include_terminal
+            } else {
+                include_active
+            }) && (include_ack || !acknowledged);
+        }
+        match view {
+            "all" => include_ack || !acknowledged,
+            "active_queue" => !terminal,
+            "operator_inbox" => terminal && !acknowledged,
+            "history" => terminal && (include_ack || !acknowledged),
+            "acknowledged_archive" => terminal && acknowledged,
+            _ => !terminal,
+        }
+    });
+    records.sort_by(|a, b| {
         b.get("updated_at")
             .and_then(Value::as_str)
             .cmp(&a.get("updated_at").and_then(Value::as_str))
     });
-    tasks.truncate(limit);
+    let total = records.len();
+    records.truncate(limit);
+    let tasks = records.iter().map(compact_task).collect::<Vec<_>>();
     Ok(
-        json!({"schema":"narada.delegated_task.list.v1","status":"ok","view":args.get("view").and_then(Value::as_str).unwrap_or("active_queue"),"site_scope":args.get("site_scope").and_then(Value::as_str).unwrap_or("current_site"),"count":tasks.len(),"limit":limit,"tasks":tasks}),
+        json!({"schema":"narada.delegated_task.list.v1","status":"ok","view":view,"site_scope":site_scope,"current_site_id":current,"owner_site_id":owner_filter,"count":tasks.len(),"total_scoped_count":total,"limit":limit,"include_active":include_active,"include_terminal":include_terminal,"include_acknowledged":include_ack,"tasks":tasks}),
     )
 }
 fn compact_task(task: &Value) -> Value {
@@ -683,7 +743,81 @@ fn stable_task_id(args: &Map<String, Value>) -> String {
     }
     format!("task_{}", uuid::Uuid::new_v4().simple())
 }
+fn canonicalize(value: &Value) -> Value {
+    match value {
+        Value::Array(items) => Value::Array(items.iter().map(canonicalize).collect()),
+        Value::Object(object) => {
+            let mut keys = object.keys().collect::<Vec<_>>();
+            keys.sort();
+            let mut out = Map::new();
+            for key in keys {
+                out.insert(key.clone(), canonicalize(&object[key]));
+            }
+            Value::Object(out)
+        }
+        _ => value.clone(),
+    }
+}
+fn sha256_json(value: &Value) -> String {
+    let digest = Sha256::digest(
+        serde_json::to_string(&canonicalize(value))
+            .unwrap_or_default()
+            .as_bytes(),
+    );
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+fn normalized_execution(value: Option<&Value>) -> Value {
+    let input = value.and_then(Value::as_object);
+    let wait = input
+        .and_then(|v| v.get("wait_for_completion"))
+        .and_then(Value::as_bool)
+        == Some(true);
+    json!({"start":input.and_then(|v|v.get("start")).and_then(Value::as_bool)!=Some(false),"wait_for_completion":wait,"timeout_ms":input.and_then(|v|v.get("timeout_ms")).and_then(Value::as_u64).unwrap_or(if wait{30000}else{0}).min(600000),"poll_ms":input.and_then(|v|v.get("poll_ms")).and_then(Value::as_u64).unwrap_or(500).clamp(50,30000),"resumable":input.and_then(|v|v.get("resumable")).and_then(Value::as_bool)!=Some(false),"exit_interview":input.and_then(|v|v.get("exit_interview")).and_then(Value::as_bool)==Some(true),"max_concurrency":input.and_then(|v|v.get("max_concurrency")).and_then(Value::as_u64).unwrap_or(10).clamp(1,32),"max_retries":input.and_then(|v|v.get("max_retries")).and_then(Value::as_u64).unwrap_or(0).min(10)})
+}
+fn request_fingerprint(args: &Map<String, Value>, root: &Path, id: &str) -> String {
+    let mut material = Map::new();
+    material.insert("objective".into(),json!({"objective":objective(args).unwrap_or_default(),"instructions":args.get("intent").and_then(|v|v.get("instructions")).cloned().unwrap_or(Value::Null),"behavior":args.get("intent").and_then(|v|v.get("behavior")).cloned().unwrap_or(Value::Null),"mode":args.get("intent").and_then(|v|v.get("mode")).cloned().unwrap_or(Value::Null)}));
+    material.insert(
+        "constraints".into(),
+        args.get("constraints")
+            .cloned()
+            .unwrap_or_else(|| json!({})),
+    );
+    for key in ["workflow", "acceptance", "result_policy"] {
+        if let Some(value) = args.get(key) {
+            material.insert(key.into(), value.clone());
+        }
+    }
+    material.insert(
+        "execution".into(),
+        normalized_execution(args.get("execution")),
+    );
+    let binding = args.get("execution_binding").and_then(Value::as_object);
+    material.insert("execution_binding".into(),json!({"workspace_root":binding.and_then(|v|v.get("workspace_root")).cloned().unwrap_or_else(||json!(root.to_string_lossy())),"executor_kind":binding.and_then(|v|v.get("executor_kind")).cloned().unwrap_or_else(||json!("delegated_task")),"executor_profile":binding.and_then(|v|v.get("executor_profile")).cloned().unwrap_or(Value::Null),"executor_id":binding.and_then(|v|v.get("executor_id")).cloned().unwrap_or(Value::Null),"repository_root":binding.and_then(|v|v.get("repository_root")).cloned().unwrap_or(Value::Null),"site_root":binding.and_then(|v|v.get("site_root")).cloned().unwrap_or_else(||json!(root.to_string_lossy())),"correlation_key":binding.and_then(|v|v.get("correlation_key")).cloned().unwrap_or_else(||json!(args.get("idempotency_key").and_then(Value::as_str).unwrap_or(id)))}));
+    material.insert("external_dependencies".into(),json!({"depends_on_task_ids":args.get("depends_on_task_ids").cloned().unwrap_or_else(||json!([])),"import_task_outputs":args.get("import_task_outputs").cloned().unwrap_or_else(||json!([])),"import_worker_refs":args.get("import_worker_refs").cloned().unwrap_or_else(||json!([])),"source_task_ref":args.get("source_task_ref").cloned().unwrap_or_else(||json!({}))}));
+    sha256_json(&Value::Object(material))
+}
 fn task_run(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let id = stable_task_id(args);
+    safe_id(&id)?;
+    let _lock = lock_task(root, &id)?;
+    if task_path(root, &id)?.is_file() {
+        let mut task = read_task(root, &id)?;
+        if args.get("objective").is_none() && args.get("intent").is_none() {
+            task = advance_value(task, root)?;
+        } else if args.get("idempotency_key").is_some() {
+            let fingerprint = request_fingerprint(args, root, &id);
+            if task.get("request_fingerprint").and_then(Value::as_str) != Some(fingerprint.as_str())
+            {
+                return Err(
+                    json!({"schema":"narada.delegated_task.error.v1","code":"delegated_task_idempotency_conflict","message":"delegated_task_idempotency_conflict","task_id":id,"existing_request_fingerprint":task.get("request_fingerprint"),"request_fingerprint":fingerprint}),
+                );
+            }
+        }
+        return Ok(
+            json!({"schema":"narada.delegated_task.run.v1","status":"existing","request_status":"existing","execution_status":task["status"],"created":false,"task_id":id,"task_status":task["status"],"summary":task["summary"]}),
+        );
+    }
     let objective = objective(args)?;
     let admission = validate(args, root)?;
     if admission.get("status").and_then(Value::as_str) != Some("ok") {
@@ -691,20 +825,12 @@ fn task_run(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
             json!({"schema":"narada.delegated_task.error.v1","code":"delegated_task_validation_failed","message":"delegated_task_validation_failed","diagnostics":admission["diagnostics"]}),
         );
     }
-    let id = stable_task_id(args);
-    safe_id(&id)?;
-    let _lock = lock_task(root, &id)?;
-    if task_path(root, &id)?.is_file() {
-        let task = read_task(root, &id)?;
-        return Ok(
-            json!({"schema":"narada.delegated_task.run.v1","status":"existing","request_status":"existing","execution_status":task["status"],"created":false,"task_id":id,"task_status":task["status"],"summary":task["summary"]}),
-        );
-    }
     let created = now();
     let workflow = normalize_workflow(args.get("workflow"));
     let step_states = initial_step_states(&workflow);
     let site = current_site_id(root);
-    let mut task = json!({"schema":"narada.delegated_task.task.v1","task_id":id,"owner_site_id":site,"owner_site_root":if site.is_some(){json!(root.to_string_lossy())}else{Value::Null},"created_by_site_id":site,"visibility_scope":if site.is_some(){"site"}else{"user_global"},"task_root_scope":"site_root","status":"accepted_for_execution","objective":objective,"created_at":created,"updated_at":created,"cancelled_at":null,"idempotency_key":args.get("idempotency_key"),"constraints":args.get("constraints").cloned().unwrap_or_else(||json!({})),"workflow":workflow,"execution":args.get("execution").cloned().unwrap_or_else(||json!({"start":true})),"acceptance":args.get("acceptance").cloned().unwrap_or_else(||json!({})),"result":{"schema":"narada.delegated_task.handoff.v1","acceptance_verdict":"pending","step_states":step_states,"worker_refs":[],"residual_risks":[],"observed_incoherencies":[],"verification":[],"changed_files":[]},"summary":null});
+    let fingerprint = request_fingerprint(args, root, &id);
+    let mut task = json!({"schema":"narada.delegated_task.task.v1","task_id":id,"owner_site_id":site,"owner_site_root":if site.is_some(){json!(root.to_string_lossy())}else{Value::Null},"created_by_site_id":site,"visibility_scope":if site.is_some(){"site"}else{"user_global"},"task_root_scope":"site_root","status":"accepted_for_execution","objective":objective,"request_fingerprint":fingerprint,"created_at":created,"updated_at":created,"cancelled_at":null,"idempotency_key":args.get("idempotency_key"),"constraints":args.get("constraints").cloned().unwrap_or_else(||json!({})),"workflow":workflow,"execution":normalized_execution(args.get("execution")),"acceptance":args.get("acceptance").cloned().unwrap_or_else(||json!({})),"result":{"schema":"narada.delegated_task.handoff.v1","acceptance_verdict":"pending","step_states":step_states,"worker_refs":[],"residual_risks":[],"observed_incoherencies":[],"verification":[],"changed_files":[]},"summary":null});
     write_task(root, &task)?;
     append_event(root, &id, "task_created", json!({"objective":objective}))?;
     if task.pointer("/execution/start").and_then(Value::as_bool) != Some(false) {
@@ -1409,7 +1535,13 @@ mod tests {
             std::env::temp_dir().join(format!("narada-delegated-task-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(root.join("tasks/task_a")).expect("root");
         fs::write(root.join("tasks/task_a/task.json"), r#"{"task_id":"task_a","status":"completed","objective":"demo","updated_at":"2026-01-01T00:00:00Z","result":{"acceptance_verdict":"accepted"}}"#).expect("task");
-        let listed = tasks_list(&json!({"limit":1}).as_object().unwrap(), &root).expect("list");
+        let listed = tasks_list(
+            &json!({"limit":1,"view":"all","site_scope":"all_sites"})
+                .as_object()
+                .unwrap(),
+            &root,
+        )
+        .expect("list");
         assert_eq!(listed["count"], 1);
         assert_eq!(
             task_status(&json!({"task_id":"task_a"}).as_object().unwrap(), &root).expect("status")
@@ -1602,5 +1734,71 @@ mod tests {
                 Some("gate" | "join" | "note")
             ));
         }
+    }
+
+    #[test]
+    fn native_delegated_task_rejects_conflicting_idempotent_replay() {
+        let root = std::env::temp_dir().join(format!(
+            "narada-delegated-task-idempotency-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let first =
+            json!({"objective":"first","execution":{"start":false},"idempotency_key":"stable"});
+        task_run(first.as_object().unwrap(), &root).expect("first");
+        let conflict =
+            json!({"objective":"different","execution":{"start":false},"idempotency_key":"stable"});
+        let error = task_run(conflict.as_object().unwrap(), &root).expect_err("conflict");
+        assert_eq!(error["code"], "delegated_task_idempotency_conflict");
+        let task_id = stable_task_id(first.as_object().unwrap());
+        task_cancel(
+            json!({"task_id":task_id}).as_object().unwrap(),
+            &root,
+            false,
+        )
+        .expect("terminal replay fixture");
+        let replay = task_run(
+            json!({"idempotency_key":"stable","execution":{"start":false}})
+                .as_object()
+                .unwrap(),
+            &root,
+        )
+        .expect("identity replay");
+        assert_eq!(replay["status"], "existing");
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn native_delegated_task_list_honors_lifecycle_views() {
+        let root = std::env::temp_dir().join(format!(
+            "narada-delegated-task-list-{}",
+            uuid::Uuid::new_v4()
+        ));
+        task_run(
+            json!({"task_id":"active","objective":"active","execution":{"start":false}})
+                .as_object()
+                .unwrap(),
+            &root,
+        )
+        .expect("active");
+        task_run(
+            json!({"task_id":"terminal","objective":"terminal","execution":{"start":false}})
+                .as_object()
+                .unwrap(),
+            &root,
+        )
+        .expect("terminal");
+        task_cancel(
+            json!({"task_id":"terminal"}).as_object().unwrap(),
+            &root,
+            false,
+        )
+        .expect("cancel");
+        let active = tasks_list(json!({"view":"active_queue"}).as_object().unwrap(), &root)
+            .expect("active list");
+        let history =
+            tasks_list(json!({"view":"history"}).as_object().unwrap(), &root).expect("history");
+        assert_eq!(active["count"], 1);
+        assert_eq!(history["count"], 1);
+        fs::remove_dir_all(root).expect("cleanup");
     }
 }
