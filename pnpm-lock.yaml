@@ -717,6 +717,8 @@ importers:
         specifier: workspace:*
         version: link:../mcp-runtime-proxy
 
+  packages/shared/mcp-materialization-contract-native: {}
+
   packages/shared/mcp-materializer-native: {}
 
   packages/shared/mcp-protocol:
