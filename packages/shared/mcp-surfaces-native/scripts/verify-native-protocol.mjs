@@ -704,7 +704,57 @@ function runDelegatedTaskParity() {
     const rustReadsBun = crossRead(executable, ['--surface-id', 'delegated-task', '--site-root', bunRoot], bunRoot);
     const bunReadsRust = crossRead(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', [bunEntrypoint, '--task-root', rustRoot, '--site-root', rustRoot, '--allowed-root', rustRoot], rustRoot);
     if (rustReadsBun?.task_status !== 'cancelled' || bunReadsRust?.task_status !== 'cancelled') throw new Error('delegated_task.lifecycle:cross_runtime_read_failed');
-    return { status: 'passed', fixture: 'template_and_durable_lifecycle', compared: ['template_catalog', 'validate', 'run_without_start', 'status', 'cancel', 'acknowledge', 'events', 'list', 'cross_runtime_read'] };
+
+    const localWorkflow = {
+      steps: [
+        { id: 'record', kind: 'note' },
+        { id: 'collect', kind: 'join', depends_on: ['record'] },
+        { id: 'authorize', kind: 'gate', depends_on: ['collect'], if: 'all(step:collect:completed,no_residual_risks)' },
+      ],
+    };
+    const semanticRequests = [
+      { jsonrpc: '2.0', id: 30, method: 'tools/call', params: { name: 'delegated_task_validate', arguments: { objective: 'Reject unsupported workflow kinds.', workflow: { steps: [{ id: 'bad', kind: 'unsupported' }] } } } },
+      { jsonrpc: '2.0', id: 33, method: 'tools/call', params: { name: 'delegated_task_validate', arguments: { objective: 'Reject unsupported workflow conditions.', workflow: { steps: [{ id: 'bad', kind: 'worker', if: 'unknown_condition' }] } } } },
+      { jsonrpc: '2.0', id: 31, method: 'tools/call', params: { name: 'delegated_task_run', arguments: { objective: 'Complete a local delegated workflow.', workflow: localWorkflow, execution: { start: true }, idempotency_key: 'native-local-workflow-parity-v1' } } },
+      { jsonrpc: '2.0', id: 32, method: 'tools/call', params: { name: 'delegated_task_wait', arguments: { task_id: `task_${createHash('sha256').update('native-local-workflow-parity-v1').digest('hex').slice(0, 16)}`, timeout_ms: 100, poll_ms: 50 } } },
+    ];
+    const semanticBunRoot = join(root, 'semantic-bun');
+    const semanticRustRoot = join(root, 'semantic-rust');
+    mkdirSync(semanticBunRoot, { recursive: true });
+    mkdirSync(semanticRustRoot, { recursive: true });
+    const semanticBun = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', [bunEntrypoint, '--task-root', semanticBunRoot, '--site-root', semanticBunRoot, '--allowed-root', semanticBunRoot], semanticRequests, workspaceRoot);
+    const semanticRust = runMailbox(executable, ['--surface-id', 'delegated-task', '--site-root', semanticRustRoot], semanticRequests, workspaceRoot);
+    const validationProjection = (value) => ({ status: value?.status, codes: (value?.diagnostics ?? []).map((item) => item.code).sort() });
+    assertSame('delegated_task.invalid_workflow', validationProjection(mailboxStructured(semanticBun, 30, 'bun')), validationProjection(mailboxStructured(semanticRust, 30, 'rust')));
+    assertSame('delegated_task.invalid_condition', validationProjection(mailboxStructured(semanticBun, 33, 'bun')), validationProjection(mailboxStructured(semanticRust, 33, 'rust')));
+    for (const [runtime, responses] of [['bun', semanticBun], ['rust', semanticRust]]) {
+      if (mailboxStructured(responses, 31, runtime)?.task_status !== 'completed') throw new Error(`delegated_task.local_workflow.${runtime}:not_completed`);
+      if (mailboxStructured(responses, 32, runtime)?.task_status !== 'completed') throw new Error(`delegated_task.wait.${runtime}:not_completed`);
+    }
+
+    const sharedRoot = join(root, 'shared-replay');
+    mkdirSync(sharedRoot, { recursive: true });
+    const sharedArguments = { objective: 'Prove cross-runtime idempotent replay.', constraints: { authority: 'read' }, workflow: { template_id: 'implement' }, execution: { start: false }, idempotency_key: 'native-cross-runtime-replay-v1' };
+    const replayRequest = [{ jsonrpc: '2.0', id: 40, method: 'tools/call', params: { name: 'delegated_task_run', arguments: sharedArguments } }];
+    const createdByBun = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', [bunEntrypoint, '--task-root', sharedRoot, '--site-root', sharedRoot, '--allowed-root', sharedRoot], replayRequest, workspaceRoot);
+    const replayedByRust = runMailbox(executable, ['--surface-id', 'delegated-task', '--site-root', sharedRoot], replayRequest, workspaceRoot);
+    const replayProjection = (value) => ({ task_id: value?.task_id, created: value?.created, task_status: value?.task_status });
+    if (replayProjection(mailboxStructured(createdByBun, 40, 'bun')).task_id !== replayProjection(mailboxStructured(replayedByRust, 40, 'rust')).task_id) throw new Error('delegated_task.cross_runtime_replay:task_id_mismatch');
+    if (mailboxStructured(replayedByRust, 40, 'rust')?.created !== false) throw new Error('delegated_task.cross_runtime_replay:rust_did_not_replay');
+
+    const lockRoot = join(root, 'shared-lock');
+    const lockKey = 'native-shared-lock-parity-v1';
+    const lockTaskId = `task_${createHash('sha256').update(lockKey).digest('hex').slice(0, 16)}`;
+    mkdirSync(join(lockRoot, 'tasks', lockTaskId, 'mutation.lockdir'), { recursive: true });
+    const lockRequest = [{ jsonrpc: '2.0', id: 50, method: 'tools/call', params: { name: 'delegated_task_run', arguments: { objective: 'Observe the shared lock.', execution: { start: false }, idempotency_key: lockKey } } }];
+    const lockEnv = { ...process.env, NARADA_DELEGATED_TASK_LOCK_TIMEOUT_MS: '100' };
+    const lockedBun = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', [bunEntrypoint, '--task-root', lockRoot, '--site-root', lockRoot, '--allowed-root', lockRoot], lockRequest, workspaceRoot, lockEnv);
+    const lockedRust = runMailbox(executable, ['--surface-id', 'delegated-task', '--site-root', lockRoot], lockRequest, workspaceRoot, lockEnv);
+    const diagnosticCode = (responses) => responses.find((response) => response.id === 50)?.error?.data?.code;
+    assertSame('delegated_task.shared_mutation_lock', diagnosticCode(lockedBun), diagnosticCode(lockedRust));
+    if (diagnosticCode(lockedRust) !== 'delegated_task_lock_failed') throw new Error('delegated_task.shared_mutation_lock:expected_lock_failure');
+
+    return { status: 'passed', fixture: 'template_and_durable_lifecycle', compared: ['template_catalog', 'validate', 'run_without_start', 'status', 'cancel', 'acknowledge', 'events', 'list', 'cross_runtime_read', 'invalid_workflow', 'local_dag_fixed_point', 'wait', 'cross_runtime_idempotency', 'shared_mutation_lock'] };
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

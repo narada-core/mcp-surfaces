@@ -2,7 +2,7 @@
 import { buildGuidanceResult } from './guidance.js';
 import { guidanceToolDefinition } from './guidance.js';
 import { createHash, randomUUID } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmdirSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
@@ -535,7 +535,7 @@ async function dispatch(method: string, params: JsonRecord, state: State) {
   if (method !== 'tools/call') throw diag('unsupported_mcp_method', `unsupported_mcp_method:${method}`);
   const name = String(params.name ?? '');
   const args = rec(params.arguments);
-  const result = name === 'delegated_task_guidance' ? buildGuidanceResult(args)
+  const invoke = async () => name === 'delegated_task_guidance' ? buildGuidanceResult(args)
     : name === 'delegated_task_policy_inspect' ? delegatedTaskPolicyInspect(state)
     : name === 'delegated_task_template_catalog' ? delegatedTaskTemplateCatalog(args)
     : name === 'delegated_task_validate' ? delegatedTaskValidate(args, state)
@@ -551,8 +551,40 @@ async function dispatch(method: string, params: JsonRecord, state: State) {
                     : name === 'delegated_task_acknowledge' ? delegatedTaskAcknowledge(args, state)
                       : name === 'delegated_task_parent_takeover' ? await delegatedTaskParentTakeover(args, state)
                         : null;
+  const mutationId = mutationTaskId(name, args);
+  const result = mutationId ? await withTaskMutationLock(state, mutationId, invoke) : await invoke();
   if (!result) throw diag('unknown_tool', `unknown_tool:${name}`, { tool_name: name });
   return { content: [{ type: 'text', text: render(result) }], structuredContent: result };
+}
+
+function mutationTaskId(name: string, args: JsonRecord): string | null {
+  const mutates = name === 'delegated_task_run' || name === 'delegated_task_advance' || name === 'delegated_task_wait' || name === 'delegated_task_cancel' || name === 'delegated_task_acknowledge' || name === 'delegated_task_parent_takeover' || ((name === 'delegated_task_status' || name === 'delegated_task_result' || name === 'delegated_task_summary') && args.refresh === true);
+  if (!mutates) return null;
+  if (typeof args.task_id === 'string' && args.task_id.trim()) return args.task_id.trim();
+  if (name === 'delegated_task_run' && typeof args.idempotency_key === 'string' && args.idempotency_key.trim()) return `task_${hash(args.idempotency_key).slice(0, 16)}`;
+  return null;
+}
+
+async function withTaskMutationLock<T>(state: State, id: string, operation: () => Promise<T>): Promise<T> {
+  const lockPath = resolve(taskPaths(state, id).taskDir, 'mutation.lockdir');
+  mkdirSync(dirname(lockPath), { recursive: true });
+  const configuredTimeout = Number.parseInt(process.env.NARADA_DELEGATED_TASK_LOCK_TIMEOUT_MS ?? '', 10);
+  const timeoutMs = Number.isFinite(configuredTimeout) ? Math.min(30_000, Math.max(100, configuredTimeout)) : 30_000;
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try { mkdirSync(lockPath); break; }
+    catch (error) {
+      if (Date.now() >= deadline) throw diag('delegated_task_lock_failed', 'delegated_task_lock_failed', { task_id: id, lock_path: lockPath, cause: error instanceof Error ? error.message : String(error) });
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
+    }
+  }
+  try { return await operation(); }
+  finally {
+    try { rmdirSync(lockPath); }
+    catch (error) {
+      if (existsSync(lockPath)) throw error;
+    }
+  }
 }
 
 async function advanceTask(task: Task, state: State, options: AdvanceOptions = {}): Promise<Task> {

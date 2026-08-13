@@ -1,4 +1,3 @@
-use fs2::FileExt;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
@@ -70,7 +69,12 @@ pub fn list_tools() -> Vec<Value> {
             false,
         ));
     }
-    tools.push(tool("delegated_task_wait", "Wait for a delegated task to advance toward terminal status; native mode only reports durable state.", id_schema(true), true));
+    tools.push(tool(
+        "delegated_task_wait",
+        "Wait for a delegated task to advance toward terminal status.",
+        id_schema(true),
+        true,
+    ));
     tools
 }
 
@@ -246,25 +250,39 @@ fn task_path(root: &Path, id: &str) -> Result<PathBuf, Value> {
     let id = safe_id(id)?;
     Ok(tasks_dir(root).join(id).join("task.json"))
 }
-struct TaskLock(std::fs::File);
+struct TaskLock(PathBuf);
 impl Drop for TaskLock {
     fn drop(&mut self) {
-        let _ = self.0.unlock();
+        let _ = fs::remove_dir(&self.0);
     }
 }
 fn lock_task(root: &Path, id: &str) -> Result<TaskLock, Value> {
-    let path = task_path(root, id)?.with_file_name("mutation.lock");
+    let path = task_path(root, id)?.with_file_name("mutation.lockdir");
     fs::create_dir_all(path.parent().unwrap())
         .map_err(|_| error("delegated_task_lock_failed", "delegated_task_lock_failed"))?;
-    let file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .open(path)
-        .map_err(|_| error("delegated_task_lock_failed", "delegated_task_lock_failed"))?;
-    file.lock_exclusive()
-        .map_err(|_| error("delegated_task_lock_failed", "delegated_task_lock_failed"))?;
-    Ok(TaskLock(file))
+    let timeout_ms = std::env::var("NARADA_DELEGATED_TASK_LOCK_TIMEOUT_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(30_000)
+        .clamp(100, 30_000);
+    let started = std::time::Instant::now();
+    loop {
+        match fs::create_dir(&path) {
+            Ok(()) => return Ok(TaskLock(path)),
+            Err(error_value)
+                if error_value.kind() == std::io::ErrorKind::AlreadyExists
+                    && started.elapsed() < std::time::Duration::from_millis(timeout_ms) =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(25))
+            }
+            Err(_) => {
+                return Err(error(
+                    "delegated_task_lock_failed",
+                    "delegated_task_lock_failed",
+                ))
+            }
+        }
+    }
 }
 fn read_task(root: &Path, id: &str) -> Result<Value, Value> {
     let path = task_path(root, id)?;
@@ -355,6 +373,18 @@ fn workflow_diagnostics(workflow: &Value) -> Vec<Value> {
         let Some(id) = step.get("id").and_then(Value::as_str) else {
             continue;
         };
+        let kind = step.get("kind").and_then(Value::as_str).unwrap_or("worker");
+        if !matches!(
+            kind,
+            "worker" | "review" | "repair" | "verify" | "research" | "gate" | "join" | "note"
+        ) {
+            diagnostics.push(json!({"severity":"error","code":"workflow_policy_violation","step_id":id,"kind":kind}));
+        }
+        if let Some(condition) = step.get("if").and_then(Value::as_str) {
+            if !valid_condition(condition) {
+                diagnostics.push(json!({"severity":"error","code":"invalid_condition","step_id":id,"condition":condition}));
+            }
+        }
         for dependency in step
             .get("depends_on")
             .and_then(Value::as_array)
@@ -878,6 +908,37 @@ fn parse_condition_call(value: &str) -> Option<(&str, Vec<&str>)> {
     args.push(body[start..].trim());
     Some((name, args))
 }
+fn valid_condition(condition: &str) -> bool {
+    let value = condition.trim();
+    if matches!(
+        value,
+        "always" | "on_success" | "on_failure" | "review_failed" | "no_residual_risks"
+    ) {
+        return true;
+    }
+    if let Some(suffix) = value.strip_prefix("acceptance:") {
+        return !suffix.trim().is_empty();
+    }
+    if let Some(suffix) = value.strip_prefix("result_has:") {
+        return !suffix.trim().is_empty();
+    }
+    let parts = value.split(':').collect::<Vec<_>>();
+    if parts.first() == Some(&"step") {
+        return parts.len() == 3
+            && !parts[1].is_empty()
+            && matches!(
+                parts[2],
+                "pending" | "running" | "completed" | "failed" | "skipped" | "blocked" | "noted"
+            );
+    }
+    if parts.first() == Some(&"kind") {
+        return parts.len() == 3 && !parts[1].is_empty() && !parts[2].is_empty();
+    }
+    parse_condition_call(value).is_some_and(|(name, args)| {
+        ((name == "all" || name == "any") && args.len() >= 2 || name == "not" && args.len() == 1)
+            && args.into_iter().all(valid_condition)
+    })
+}
 fn condition_passes(condition: Option<&str>, task: &Value) -> bool {
     let Some(value) = condition.map(str::trim).filter(|value| !value.is_empty()) else {
         return true;
@@ -1175,7 +1236,10 @@ fn ready_step_ids(task: &Value) -> Vec<String> {
                         .iter()
                         .filter_map(Value::as_str)
                         .all(|dependency| {
-                            matches!(step_status(task, dependency), Some("completed" | "skipped"))
+                            matches!(
+                                step_status(task, dependency),
+                                Some("completed" | "skipped" | "noted")
+                            )
                         })
                 })
                 .unwrap_or(true);
@@ -1266,62 +1330,91 @@ fn advance_value(mut task: Value, root: &Path) -> Result<Value, Value> {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        for step in &steps {
-            let Some(step_id) = step.get("id").and_then(Value::as_str) else {
-                continue;
-            };
-            if step_status(&task, step_id) != Some("pending") {
-                continue;
-            }
-            let blocked = step
-                .get("depends_on")
-                .and_then(Value::as_array)
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .filter(|dependency| {
-                            matches!(step_status(&task, dependency), Some("failed" | "blocked"))
-                        })
-                        .map(str::to_string)
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            if !blocked.is_empty() {
-                task["result"]["step_states"][step_id]["status"] = json!("blocked");
-                task["result"]["step_states"][step_id]["blocked_by"] = json!(blocked);
-                task["result"]["step_states"][step_id]["finished_at"] = json!(now());
-                append_event(
-                    root,
-                    &id,
-                    "step_blocked",
-                    json!({"step_id":step_id,"blocked_by":task["result"]["step_states"][step_id]["blocked_by"]}),
-                )?;
-                continue;
-            }
-            let dependencies_ready = step
-                .get("depends_on")
-                .and_then(Value::as_array)
-                .map(|items| {
-                    items.iter().filter_map(Value::as_str).all(|dependency| {
-                        matches!(
-                            step_status(&task, dependency),
-                            Some("completed" | "skipped")
-                        )
+        loop {
+            let mut local_progress = false;
+            for step in &steps {
+                let Some(step_id) = step.get("id").and_then(Value::as_str) else {
+                    continue;
+                };
+                if step_status(&task, step_id) != Some("pending") {
+                    continue;
+                }
+                let blocked = step
+                    .get("depends_on")
+                    .and_then(Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .filter(|dependency| {
+                                matches!(step_status(&task, dependency), Some("failed" | "blocked"))
+                            })
+                            .map(str::to_string)
+                            .collect::<Vec<_>>()
                     })
-                })
-                .unwrap_or(true);
-            if dependencies_ready
-                && !condition_passes(step.get("if").and_then(Value::as_str), &task)
-            {
-                task["result"]["step_states"][step_id]["status"] = json!("skipped");
-                task["result"]["step_states"][step_id]["finished_at"] = json!(now());
-                append_event(
-                    root,
-                    &id,
-                    "step_skipped",
-                    json!({"step_id":step_id,"condition":step.get("if")}),
-                )?;
+                    .unwrap_or_default();
+                if !blocked.is_empty() {
+                    task["result"]["step_states"][step_id]["status"] = json!("blocked");
+                    task["result"]["step_states"][step_id]["blocked_by"] = json!(blocked);
+                    task["result"]["step_states"][step_id]["finished_at"] = json!(now());
+                    append_event(
+                        root,
+                        &id,
+                        "step_blocked",
+                        json!({"step_id":step_id,"blocked_by":task["result"]["step_states"][step_id]["blocked_by"]}),
+                    )?;
+                    local_progress = true;
+                    continue;
+                }
+                let dependencies_ready = step
+                    .get("depends_on")
+                    .and_then(Value::as_array)
+                    .map(|items| {
+                        items.iter().filter_map(Value::as_str).all(|dependency| {
+                            matches!(
+                                step_status(&task, dependency),
+                                Some("completed" | "skipped" | "noted")
+                            )
+                        })
+                    })
+                    .unwrap_or(true);
+                if !dependencies_ready {
+                    continue;
+                }
+                if !condition_passes(step.get("if").and_then(Value::as_str), &task) {
+                    task["result"]["step_states"][step_id]["status"] = json!("skipped");
+                    task["result"]["step_states"][step_id]["finished_at"] = json!(now());
+                    append_event(
+                        root,
+                        &id,
+                        "step_skipped",
+                        json!({"step_id":step_id,"condition":step.get("if")}),
+                    )?;
+                    local_progress = true;
+                    continue;
+                }
+                let kind = step.get("kind").and_then(Value::as_str).unwrap_or("worker");
+                if matches!(kind, "gate" | "join" | "note") {
+                    task["result"]["step_states"][step_id]["status"] =
+                        json!(if kind == "note" { "noted" } else { "completed" });
+                    task["result"]["step_states"][step_id]["finished_at"] = json!(now());
+                    append_event(
+                        root,
+                        &id,
+                        if kind == "gate" {
+                            "step_gate_evaluated"
+                        } else if kind == "join" {
+                            "step_join_completed"
+                        } else {
+                            "step_recorded"
+                        },
+                        json!({"step_id":step_id,"kind":kind,"authority_gate":step.get("authority_gate"),"executed":false}),
+                    )?;
+                    local_progress = true;
+                }
+            }
+            if !local_progress {
+                break;
             }
         }
         let ready = ready_step_ids(&task);
@@ -1339,21 +1432,6 @@ fn advance_value(mut task: Value, root: &Path) -> Result<Value, Value> {
             };
             let kind = step.get("kind").and_then(Value::as_str).unwrap_or("worker");
             if matches!(kind, "gate" | "join" | "note") {
-                task["result"]["step_states"][&step_id]["status"] =
-                    json!(if kind == "note" { "noted" } else { "completed" });
-                task["result"]["step_states"][&step_id]["finished_at"] = json!(now());
-                append_event(
-                    root,
-                    &id,
-                    if kind == "gate" {
-                        "step_gate_evaluated"
-                    } else if kind == "join" {
-                        "step_join_completed"
-                    } else {
-                        "step_recorded"
-                    },
-                    json!({"step_id":step_id,"kind":kind,"authority_gate":step.get("authority_gate"),"executed":false}),
-                )?;
                 continue;
             }
             if active >= concurrency {
