@@ -1821,6 +1821,8 @@ impl LifecycleServer {
             "findings":row.get("findings_json").and_then(Value::as_str).and_then(|text|serde_json::from_str::<Value>(text).ok()).unwrap_or_else(||json!([]))
         })).collect::<Vec<_>>();        let routing=connection.query_row("select preferred_role,target_role,preferred_agent_id,updated_at from narada_andrey_task_role_preferences where task_id=?1",params![&task_id],|r|Ok(json!({"preferred_role":r.get::<_,Option<String>>(0)?,"target_role":r.get::<_,Option<String>>(1)?,"preferred_agent_id":r.get::<_,Option<String>>(2)?,"updated_at":r.get::<_,String>(3)?}))).optional().map_err(db_error)?.unwrap_or(Value::Null);
         let dependency_satisfaction = self.task_dependency_satisfaction(&task_id)?;
+        let result_contract = connection.query_row("select schema_id,schema_digest,schema_json,created_at from task_result_contracts where task_id=?1",params![&task_id],|r|{let schema:String=r.get(2)?;Ok(json!({"schema_id":r.get::<_,String>(0)?,"schema_digest":r.get::<_,String>(1)?,"schema":serde_json::from_str::<Value>(&schema).unwrap_or(Value::Null),"created_at":r.get::<_,String>(3)?}))}).optional().map_err(db_error)?.unwrap_or(Value::Null);
+        let structured_result = connection.query_row("select result_id,report_id,schema_id,schema_digest,result_json,evidence_refs_json,validation_json,admitted_at from task_structured_results where task_id=?1",params![&task_id],|r|{let result:String=r.get(4)?;let evidence:String=r.get(5)?;let validation:String=r.get(6)?;Ok(json!({"result_id":r.get::<_,String>(0)?,"report_id":r.get::<_,String>(1)?,"schema_id":r.get::<_,String>(2)?,"schema_digest":r.get::<_,String>(3)?,"result":serde_json::from_str::<Value>(&result).unwrap_or(Value::Null),"evidence_refs":serde_json::from_str::<Value>(&evidence).unwrap_or_else(|_|json!([])),"validation":serde_json::from_str::<Value>(&validation).unwrap_or(Value::Null),"admitted_at":r.get::<_,String>(7)?}))}).optional().map_err(db_error)?.unwrap_or(Value::Null);
         let outcome_contract = connection
             .query_row(
                 "select contract_id,outcome_type,allowed_outcomes_json,satisfying_outcomes_json,blocking_outcomes_json,required_fields_json,capability_requirement,created_by,created_at from task_outcome_contracts where task_id=?1 order by created_at desc limit 1",
@@ -1861,7 +1863,7 @@ impl LifecycleServer {
             |r| Ok(json!({"status":"bound","binding":serde_json::from_str::<Value>(&r.get::<_,String>(0)?).unwrap_or_else(|_|json!(null)),"created_at":r.get::<_,String>(1)?,"updated_at":r.get::<_,String>(2)?})),
         ).optional().map_err(db_error)?.unwrap_or_else(|| json!({"status":"unbound","binding":null}));
         Ok(
-            json!({"status":"ok","task_number":number,"task_id":task_id,"task_ref":format!("task #{number}"),"task_reference":{"schema":"narada.task.reference.v1","task_ref":format!("task #{number}"),"task_id":lifecycle.get("task_id"),"task_number":number,"number_authority":"task_lifecycle","task_file_name":format!("{task_id}.md")},"lifecycle":lifecycle,"closure_authority":{"status":closure_status,"has_closure_evidence":lifecycle.get("closed_at").is_some_and(|v|!v.is_null()),"closed_at":lifecycle.get("closed_at"),"closed_by":lifecycle.get("closed_by"),"closure_mode":lifecycle.get("closure_mode")},"spec":spec,"tag_updates":tag_updates,"tag_projection":{"status":"coherent"},"routing":routing,"active_assignment":assignment,"assignment_intents":[],"observations":observations,"execution_binding":execution_binding,"current_execution_evidence":reports.first().cloned(),"legacy_review_rows":legacy_review_rows,"review_authority":{"primary_authority":"task_dependencies.task_outcomes","legacy_review_rows_authority":"compatibility_projection_only","legacy_review_row_count":legacy_review_rows.len(),"dependency_review_count":dependencies.iter().filter(|dependency|dependency.get("kind").and_then(Value::as_str)==Some("review")).count(),"compatibility_note":if legacy_review_rows.is_empty(){"No legacy review rows are present; review authority, if any, is dependency/outcome native."}else{"Legacy review rows are retained for historical readback only. Parent closure and review dependency satisfaction must use task dependency outcomes."}},"dependencies_blocking_this_task":dependencies.iter().filter(|d|d.get("required_status").and_then(Value::as_str)!=Some("closed")).cloned().collect::<Vec<_>>(),"dependency_satisfaction":dependency_satisfaction,"dependency_context":dependencies,"outcome_contract":outcome_contract,"latest_task_outcome":latest_task_outcome,"executability_posture":{"status":"unknown"},"body":body}),
+            json!({"status":"ok","task_number":number,"task_id":task_id,"task_ref":format!("task #{number}"),"task_reference":{"schema":"narada.task.reference.v1","task_ref":format!("task #{number}"),"task_id":lifecycle.get("task_id"),"task_number":number,"number_authority":"task_lifecycle","task_file_name":format!("{task_id}.md")},"result_contract":result_contract,"structured_result":structured_result,"lifecycle":lifecycle,"closure_authority":{"status":closure_status,"has_closure_evidence":lifecycle.get("closed_at").is_some_and(|v|!v.is_null()),"closed_at":lifecycle.get("closed_at"),"closed_by":lifecycle.get("closed_by"),"closure_mode":lifecycle.get("closure_mode")},"spec":spec,"tag_updates":tag_updates,"tag_projection":{"status":"coherent"},"routing":routing,"active_assignment":assignment,"assignment_intents":[],"observations":observations,"execution_binding":execution_binding,"current_execution_evidence":reports.first().cloned(),"legacy_review_rows":legacy_review_rows,"review_authority":{"primary_authority":"task_dependencies.task_outcomes","legacy_review_rows_authority":"compatibility_projection_only","legacy_review_row_count":legacy_review_rows.len(),"dependency_review_count":dependencies.iter().filter(|dependency|dependency.get("kind").and_then(Value::as_str)==Some("review")).count(),"compatibility_note":if legacy_review_rows.is_empty(){"No legacy review rows are present; review authority, if any, is dependency/outcome native."}else{"Legacy review rows are retained for historical readback only. Parent closure and review dependency satisfaction must use task dependency outcomes."}},"dependencies_blocking_this_task":dependencies.iter().filter(|d|d.get("required_status").and_then(Value::as_str)!=Some("closed")).cloned().collect::<Vec<_>>(),"dependency_satisfaction":dependency_satisfaction,"dependency_context":dependencies,"outcome_contract":outcome_contract,"latest_task_outcome":latest_task_outcome,"executability_posture":{"status":"unknown"},"body":body}),
         )
     }
     fn task_create(&mut self, args: Value) -> Result<Value, String> {
@@ -1900,6 +1902,16 @@ impl LifecycleServer {
                 .or_else(|| string_arg(&payload, "target_role"));
             tx.execute("insert into task_lifecycle(task_id,task_number,status,governed_by,closed_at,closed_by,closure_mode,relative_priority,priority_reason,reopened_at,reopened_by,continuation_packet_json,updated_at) values(?1,?2,'opened',?3,null,null,null,0,null,null,null,null,?4)",params![&task_id,number,governed_by,timestamp]).map_err(db_error)?;
             tx.execute("insert into task_specs(task_id,task_number,title,chapter_markdown,goal_markdown,context_markdown,required_work_markdown,non_goals_markdown,acceptance_criteria_json,dependencies_json,tags_json,updated_at) values(?1,?2,?3,null,?4,?5,?6,?7,?8,'[]',?9,?10)",params![&task_id,number,&title,&goal,string_arg(&payload,"context"),required_work,non_goals,criteria.to_string(),tags.to_string(),timestamp]).map_err(db_error)?;
+            if let Some(contract) = payload.get("result_contract") {
+                let schema = contract.get("schema").ok_or("task_result_contract_schema_required")?;
+                if !schema.is_object() { return Err("task_result_contract_schema_object_required".to_string()); }
+                let schema_id = contract.get("schema_id").and_then(Value::as_str).filter(|value| !value.trim().is_empty()).ok_or("task_result_contract_schema_id_required")?;
+                let schema_digest = digest(schema);
+                if contract.get("schema_digest").and_then(Value::as_str).is_some_and(|value| value != schema_digest) {
+                    return Err("task_result_contract_digest_mismatch".to_string());
+                }
+                tx.execute("insert into task_result_contracts(task_id,schema_id,schema_digest,schema_json,created_at) values(?1,?2,?3,?4,?5)", params![&task_id,schema_id,&schema_digest,schema.to_string(),&timestamp]).map_err(db_error)?;
+            }
             let execution_binding = normalize_execution_binding(&site_root, payload.get("execution_binding"), &idem)?;
             validate_execution_binding_scope(&execution_binding, &site_root)?;
             let binding_json = execution_binding.to_string();
@@ -2176,7 +2188,7 @@ impl LifecycleServer {
         {
             return Err("task_lifecycle_finish_evidence_required".to_string());
         }
-        let (task_id, status, assignment_id) = {
+        let (task_id, status, assignment_id, result_contract) = {
             let connection = self.connection()?;
             let task = connection
                 .query_row(
@@ -2188,7 +2200,8 @@ impl LifecycleServer {
                 .map_err(db_error)?
                 .ok_or_else(|| format!("task_not_found: {number}"))?;
             let assignment=connection.query_row("select assignment_id from task_assignments where task_id=?1 and agent_id=?2 and released_at is null order by claimed_at desc limit 1",params![&task.0,&agent],|r|r.get::<_,String>(0)).optional().map_err(db_error)?;
-            (task.0, task.1, assignment)
+            let contract=connection.query_row("select schema_id,schema_digest,schema_json from task_result_contracts where task_id=?1",params![&task.0],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?))).optional().map_err(db_error)?;
+            (task.0, task.1, assignment, contract)
         };
         if !matches!(
             status.as_str(),
@@ -2199,12 +2212,25 @@ impl LifecycleServer {
         if assignment_id.is_none() {
             return Err("task_lifecycle_finish_claim_required".to_string());
         }
+        let structured_result = args.get("result").cloned();
+        let delegated_schema_digest = string_arg(&args, "result_schema_digest");
+        let result_validation = if let Some((schema_id, schema_digest, schema_json)) = result_contract.as_ref() {
+            if delegated_schema_digest.as_deref().is_some_and(|value| value != schema_digest) {
+                return Err(format!("task_result_schema_digest_mismatch:expected={schema_digest}:observed={}", delegated_schema_digest.unwrap_or_default()));
+            }
+            let value = structured_result.as_ref().ok_or("task_result_required:/result")?;
+            let schema: Value = serde_json::from_str(schema_json).map_err(|error| format!("task_result_contract_invalid:{error}"))?;
+            let mut errors = Vec::new();
+            validate_result_schema(&schema, value, "/result", &mut errors);
+            if !errors.is_empty() { return Err(format!("task_result_validation_failed:{}", Value::Array(errors))); }
+            Some(json!({"status":"valid","schema_id":schema_id,"schema_digest":schema_digest,"errors":[]}))
+        } else { None };
         let report_id = format!("report-{}", Uuid::new_v4());
         let timestamp = now();
         let operation_key = string_arg(&args, "idempotency_key")
             .unwrap_or_else(|| format!("task-finish:{number}:{agent}:{}", digest(&args)));
         let outcome = string_arg(&args, "outcome");
-        let report_json = json!({"report_id":report_id,"task_number":number,"task_id":task_id,"agent_id":agent,"summary":summary,"changed_files":changed_files,"verification":verification,"outcome":outcome.clone().map(Value::String).unwrap_or(Value::Null),"findings":args.get("findings"),"evidence_refs":args.get("evidence_refs")});
+        let report_json = json!({"report_id":report_id,"task_number":number,"task_id":task_id,"agent_id":agent,"summary":summary,"changed_files":changed_files,"verification":verification,"outcome":outcome.clone().map(Value::String).unwrap_or(Value::Null),"findings":args.get("findings"),"evidence_refs":args.get("evidence_refs"),"result":structured_result.clone(),"result_validation":result_validation.clone()});
         let connection = self.connection_mut()?;
         if let Some(stored) = connection
             .query_row(
@@ -2220,6 +2246,9 @@ impl LifecycleServer {
         let tx = connection.transaction().map_err(db_error)?;
         tx.execute("insert into task_reports(report_id,task_id,agent_id,agent_identity_ref_json,summary,changed_files_json,verification_json,directive_id,submitted_at) values(?1,?2,?3,?4,?5,?6,?7,?8,?9)",params![&report_id,&task_id,&agent,json!({"agent_id":agent}).to_string(),&summary,changed_files.to_string(),verification.to_string(),string_arg(&args,"directive_id"),timestamp]).map_err(db_error)?;
         tx.execute("insert into task_report_records(report_id,task_id,assignment_id,agent_id,agent_identity_ref_json,reported_at,report_json) values(?1,?2,?3,?4,?5,?6,?7)",params![&report_id,&task_id,assignment_id, &agent,json!({"agent_id":agent}).to_string(),timestamp,report_json.to_string()]).map_err(db_error)?;
+        if let (Some((schema_id, schema_digest, _)), Some(value), Some(validation)) = (result_contract.as_ref(), structured_result.as_ref(), result_validation.as_ref()) {
+            tx.execute("insert into task_structured_results(result_id,task_id,report_id,schema_id,schema_digest,result_json,evidence_refs_json,validation_json,admitted_at) values(?1,?2,?3,?4,?5,?6,?7,?8,?9)",params![format!("result-{}",Uuid::new_v4()),&task_id,&report_id,schema_id,schema_digest,value.to_string(),args.get("evidence_refs").cloned().unwrap_or_else(||json!([])).to_string(),validation.to_string(),&timestamp]).map_err(db_error)?;
+        }
         let existing_contract: Option<(String,String,String,String,String,String,Option<String>,String,String)> = tx.query_row("select contract_id,outcome_type,allowed_outcomes_json,satisfying_outcomes_json,blocking_outcomes_json,required_fields_json,capability_requirement,created_by,created_at from task_outcome_contracts where task_id=?1 order by created_at desc limit 1", params![&task_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?))).optional().map_err(db_error)?;
         let (contract_id, contract_json, allowed_outcomes, created_contract) = if let Some(row) = existing_contract {
             let allowed = serde_json::from_str::<Value>(&row.2).ok().and_then(|value| value.as_array().cloned()).unwrap_or_default().into_iter().filter_map(|value| value.as_str().map(ToString::to_string)).collect::<Vec<_>>();
@@ -3406,7 +3435,128 @@ fn ensure_native_auxiliary_schema(c: &Connection) -> Result<(), String> {
         create index if not exists idx_recurring_task_runs_recurrence
             on recurring_task_runs(recurrence_id, created_at desc);",
     )
-    .map_err(db_error)
+    .map_err(db_error)?;
+    migrate_legacy_recurring_schema(c)
+}
+
+fn migrate_legacy_recurring_schema(c: &Connection) -> Result<(), String> {
+    let migration_required = !has_column(c, "recurring_task_definitions", "definition_json")?
+        || has_column(c, "recurring_task_events", "state_after")?
+        || has_column(c, "recurring_task_runs", "run_reason")?;
+    if !migration_required {
+        return Ok(());
+    }
+    let foreign_keys_enabled: i64 = c
+        .pragma_query_value(None, "foreign_keys", |row| row.get(0))
+        .map_err(db_error)?;
+    c.execute_batch("pragma foreign_keys=off; begin immediate;")
+        .map_err(db_error)?;
+    let result = migrate_legacy_recurring_schema_in_transaction(c).and_then(|_| {
+        let violation = c
+            .query_row("pragma foreign_key_check", [], |_| Ok(()))
+            .optional()
+            .map_err(db_error)?;
+        if violation.is_some() {
+            Err("recurring_schema_migration_foreign_key_violation".to_string())
+        } else {
+            Ok(())
+        }
+    });
+    if result.is_ok() {
+        c.execute_batch("commit;").map_err(db_error)?;
+    } else {
+        let _ = c.execute_batch("rollback;");
+    }
+    if foreign_keys_enabled != 0 {
+        c.pragma_update(None, "foreign_keys", true).map_err(db_error)?;
+    }
+    result
+}
+
+fn migrate_legacy_recurring_schema_in_transaction(c: &Connection) -> Result<(), String> {
+    if !has_column(c, "recurring_task_definitions", "definition_json")? {
+        let mut statement = c.prepare("select recurrence_id,title,status,trigger_mode,trigger_description,target_role,preferred_role,goal_markdown,context_markdown,required_work_markdown,non_goals_markdown,acceptance_criteria_json,evidence_requirements_json,created_by,created_at,updated_at,schedule_kind,schedule_interval,schedule_timezone,last_due_key,last_auto_triggered_at from recurring_task_definitions").map_err(db_error)?;
+        let rows = statement.query_map([], |row| {
+            let array = |index| -> rusqlite::Result<Value> {
+                let text: String = row.get(index)?;
+                Ok(serde_json::from_str(&text).unwrap_or_else(|_| json!([])))
+            };
+            Ok((
+                row.get::<_, String>(0)?,
+                json!({
+                    "recurrence_id": row.get::<_, String>(0)?,
+                    "title": row.get::<_, String>(1)?,
+                    "status": row.get::<_, String>(2)?,
+                    "trigger_mode": row.get::<_, String>(3)?,
+                    "trigger_description": row.get::<_, Option<String>>(4)?,
+                    "target_role": row.get::<_, Option<String>>(5)?,
+                    "preferred_role": row.get::<_, Option<String>>(6)?,
+                    "goal": row.get::<_, Option<String>>(7)?,
+                    "context": row.get::<_, Option<String>>(8)?,
+                    "required_work": row.get::<_, Option<String>>(9)?,
+                    "non_goals": row.get::<_, Option<String>>(10)?,
+                    "acceptance_criteria": array(11)?,
+                    "evidence_requirements": array(12)?,
+                    "created_by": row.get::<_, String>(13)?,
+                    "created_at": row.get::<_, String>(14)?,
+                    "updated_at": row.get::<_, String>(15)?,
+                    "schedule_kind": row.get::<_, Option<String>>(16)?,
+                    "schedule_interval": row.get::<_, Option<i64>>(17)?,
+                    "schedule_timezone": row.get::<_, Option<String>>(18)?,
+                    "last_due_key": row.get::<_, Option<String>>(19)?,
+                    "last_auto_triggered_at": row.get::<_, Option<String>>(20)?
+                }),
+            ))
+        }).map_err(db_error)?.collect::<Result<Vec<_>, _>>().map_err(db_error)?;
+        drop(statement);
+        c.execute_batch(
+            "create table recurring_task_definitions_native(
+                recurrence_id text primary key,
+                status text not null,
+                definition_json text not null,
+                last_due_key text,
+                last_auto_triggered_at text,
+                updated_at text not null
+             );",
+        )
+        .map_err(db_error)?;
+        for (id, definition) in rows {
+            c.execute(
+                "insert into recurring_task_definitions_native(recurrence_id,status,definition_json,last_due_key,last_auto_triggered_at,updated_at)
+                 values(?1,?2,?3,?4,?5,?6)",
+                params![
+                    id,
+                    definition["status"].as_str().unwrap_or("active"),
+                    definition.to_string(),
+                    definition["last_due_key"].as_str(),
+                    definition["last_auto_triggered_at"].as_str(),
+                    definition["updated_at"].as_str().unwrap_or("")
+                ],
+            )
+            .map_err(db_error)?;
+        }
+        c.execute_batch(
+            "drop table recurring_task_definitions;
+             alter table recurring_task_definitions_native rename to recurring_task_definitions;
+             create index if not exists idx_recurring_task_definitions_status
+                on recurring_task_definitions(status);",
+        )
+        .map_err(db_error)?;
+    }
+    if has_column(c, "recurring_task_events", "state_after")? {
+        c.execute_batch("create table recurring_task_events_native(event_id text primary key,recurrence_id text not null,event_type text not null,actor_agent_id text not null,authority_basis_json text not null,event_json text not null,created_at text not null);
+            insert into recurring_task_events_native(event_id,recurrence_id,event_type,actor_agent_id,authority_basis_json,event_json,created_at) select event_id,recurrence_id,event_type,actor_agent_id,authority_basis_json,event_json,created_at from recurring_task_events;
+            drop table recurring_task_events;
+            alter table recurring_task_events_native rename to recurring_task_events;").map_err(db_error)?;
+    }
+    if has_column(c, "recurring_task_runs", "run_reason")? {
+        c.execute_batch("create table recurring_task_runs_native(run_id text primary key,recurrence_id text not null,task_id text,task_number integer,due_key text,trigger_mode text not null,reason text not null,created_at text not null,run_json text not null);
+            insert into recurring_task_runs_native(run_id,recurrence_id,task_id,task_number,due_key,trigger_mode,reason,created_at,run_json) select run_id,recurrence_id,task_id,task_number,null,trigger_mode,run_reason,created_at,json_object('run_id',run_id,'recurrence_id',recurrence_id,'task_id',task_id,'task_number',task_number,'trigger_mode',trigger_mode,'reason',run_reason,'actor_agent_id',actor_agent_id,'authority_basis',json(authority_basis_json),'created_at',created_at) from recurring_task_runs;
+            drop table recurring_task_runs;
+            alter table recurring_task_runs_native rename to recurring_task_runs;
+            create index if not exists idx_recurring_task_runs_recurrence on recurring_task_runs(recurrence_id,created_at desc);").map_err(db_error)?;
+    }
+    Ok(())
 }
 fn ensure_downstream_dependency_contracts(c: &Connection) -> Result<(), String> {
     let mut statement = c
@@ -3527,6 +3677,33 @@ fn write_json_file(path: &Path, value: &Value, label: &str) -> Result<(), String
 }
 fn digest(value: &Value) -> String {
     native_canonical_digest(value)
+}
+
+fn validate_result_schema(schema: &Value, value: &Value, path: &str, errors: &mut Vec<Value>) {
+    if let Some(expected) = schema.get("type").and_then(Value::as_str) {
+        let valid = match expected {
+            "object" => value.is_object(), "array" => value.is_array(), "string" => value.is_string(),
+            "integer" => value.as_i64().is_some() || value.as_u64().is_some(), "number" => value.is_number(),
+            "boolean" => value.is_boolean(), "null" => value.is_null(), _ => true,
+        };
+        if !valid { errors.push(json!({"path":path,"keyword":"type","expected":expected})); return; }
+    }
+    if let Some(allowed) = schema.get("enum").and_then(Value::as_array) {
+        if !allowed.iter().any(|candidate| candidate == value) { errors.push(json!({"path":path,"keyword":"enum","allowed":allowed})); }
+    }
+    if let Some(object) = value.as_object() {
+        if let Some(required) = schema.get("required").and_then(Value::as_array) {
+            for field in required.iter().filter_map(Value::as_str) {
+                if !object.contains_key(field) { errors.push(json!({"path":format!("{path}/{field}"),"keyword":"required"})); }
+            }
+        }
+        if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+            for (field, child_schema) in properties { if let Some(child) = object.get(field) { validate_result_schema(child_schema, child, &format!("{path}/{field}"), errors); } }
+        }
+    }
+    if let (Some(items), Some(array)) = (schema.get("items"), value.as_array()) {
+        for (index, child) in array.iter().enumerate() { validate_result_schema(items, child, &format!("{path}/{index}"), errors); }
+    }
 }
 fn required_string(args: &Value, key: &str) -> Result<String, String> {
     string_arg(args, key).ok_or_else(|| format!("{key}_required"))
@@ -4152,5 +4329,39 @@ mod modern_protocol_tests {
         let projected = fs::read_to_string(&path).expect("read task projection");
         assert!(projected.lines().any(|line| line == "status: closed"));
         fs::remove_dir_all(root).expect("remove task projection fixture");
+    }
+
+    #[test]
+    fn legacy_recurring_schema_migrates_without_losing_history() {
+        let connection = Connection::open_in_memory().expect("open database");
+        connection.execute_batch("create table recurring_task_definitions(recurrence_id text primary key,title text not null,status text not null,trigger_mode text not null,trigger_description text,target_role text,preferred_role text,goal_markdown text,context_markdown text,required_work_markdown text,non_goals_markdown text,acceptance_criteria_json text not null,evidence_requirements_json text not null,created_by text not null,created_at text not null,updated_at text not null,suspended_at text,retired_at text,schedule_kind text,schedule_interval integer,schedule_timezone text,last_due_key text,last_auto_triggered_at text);
+            create table recurring_task_events(event_id text primary key,recurrence_id text not null,event_type text not null,state_after text not null,actor_agent_id text not null,authority_basis_json text not null,event_json text not null,created_at text not null);
+            create table recurring_task_runs(run_id text primary key,recurrence_id text not null,task_id text not null,task_number integer not null,trigger_mode text not null,run_reason text not null,actor_agent_id text not null,authority_basis_json text not null,created_at text not null);
+            insert into recurring_task_definitions values('rec-1','Daily watcher','active','schedule','daily','resident','resident','Watch','Context','Sweep','None','[\"verified\"]','[\"primary\"]','agent','2026-08-01T00:00:00Z','2026-08-02T00:00:00Z',null,null,'daily',1,'America/Chicago','2026-08-02','2026-08-02T00:00:00Z');
+            insert into recurring_task_events values('event-1','rec-1','created','active','agent','{}','{}','2026-08-01T00:00:00Z');
+            insert into recurring_task_runs values('run-1','rec-1','task-1',1,'schedule','due','agent','{}','2026-08-02T00:00:00Z');").expect("legacy schema");
+
+        ensure_native_auxiliary_schema(&connection).expect("migrate legacy recurrence");
+        ensure_native_auxiliary_schema(&connection).expect("migration is idempotent");
+
+        let definition: String = connection
+            .query_row(
+                "select definition_json from recurring_task_definitions where recurrence_id='rec-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("definition");
+        let definition: Value = serde_json::from_str(&definition).expect("definition json");
+        assert_eq!(definition["title"], "Daily watcher");
+        assert_eq!(definition["acceptance_criteria"][0], "verified");
+        assert_eq!(definition["schedule_timezone"], "America/Chicago");
+        assert!(!has_column(&connection, "recurring_task_events", "state_after").unwrap());
+        assert!(has_column(&connection, "recurring_task_runs", "run_json").unwrap());
+        let run_json: String = connection
+            .query_row("select run_json from recurring_task_runs where run_id='run-1'", [], |row| row.get(0))
+            .expect("run history");
+        assert_eq!(serde_json::from_str::<Value>(&run_json).unwrap()["reason"], "due");
+        connection.execute("insert into recurring_task_definitions(recurrence_id,status,definition_json,last_due_key,last_auto_triggered_at,updated_at) values('rec-2','active','{}',null,null,'2026-08-03T00:00:00Z')", []).expect("native definition insert");
+        connection.execute("insert into recurring_task_events(event_id,recurrence_id,event_type,actor_agent_id,authority_basis_json,event_json,created_at) values('event-2','rec-2','created','agent','{}','{}','2026-08-03T00:00:00Z')", []).expect("native event insert");
     }
 }

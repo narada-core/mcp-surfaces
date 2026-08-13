@@ -954,6 +954,14 @@
           },
           "description": "Optional evidence references supporting the structured outcome."
         },
+        "result": {
+          "type": "object",
+          "description": "Structured result required when the task has a result_contract."
+        },
+        "result_schema_digest": {
+          "type": "string",
+          "description": "Optional delegated output schema digest; must match the task result contract."
+        },
         "reviewer": {
           "type": "string",
           "description": "Optional admitted reviewer agent id or unique reviewer role alias for the generated review-contract dependency routing."
@@ -1063,6 +1071,14 @@
             "description": "Evidence reference."
           },
           "description": "Optional evidence references supporting the structured outcome."
+        },
+        "result": {
+          "type": "object",
+          "description": "Structured result required when the task has a result_contract."
+        },
+        "result_schema_digest": {
+          "type": "string",
+          "description": "Optional delegated output schema digest; must match the task result contract."
         },
         "reviewer": {
           "type": "string",

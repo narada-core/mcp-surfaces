@@ -20,6 +20,31 @@
       create index if not exists idx_task_lifecycle_status
         on task_lifecycle(status);
 
+      create table if not exists task_result_contracts (
+        task_id text primary key,
+        schema_id text not null,
+        schema_digest text not null,
+        schema_json text not null,
+        created_at text not null,
+        foreign key (task_id) references task_lifecycle(task_id)
+      );
+
+      create table if not exists task_structured_results (
+        result_id text primary key,
+        task_id text not null,
+        report_id text not null,
+        schema_id text not null,
+        schema_digest text not null,
+        result_json text not null,
+        evidence_refs_json text not null,
+        validation_json text not null,
+        admitted_at text not null,
+        foreign key (task_id) references task_lifecycle(task_id)
+      );
+
+      create unique index if not exists idx_task_structured_results_task
+        on task_structured_results(task_id);
+
       create table if not exists task_assignments (
         assignment_id text primary key,
         task_id text not null,
@@ -657,4 +682,3 @@
       );
 
       commit;
-    
