@@ -12,7 +12,8 @@ const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const executableName = process.platform === 'win32' ? 'narada-mcp-surfaces.exe' : 'narada-mcp-surfaces';
 const executable = process.env.NARADA_NATIVE_SURFACE_EXECUTABLE
   ?? requireNativeArtifact(packageRoot, executableName);
-const surfaces = [
+const paritySlice = process.env.NARADA_PARITY_SLICE ?? 'all';
+const allSurfaces = [
   'catalog-observation',
   'operator-routing',
   'site-inbox',
@@ -39,6 +40,7 @@ const surfaces = [
   'browser-control',
   'cloudflare-carrier',
 ];
+const surfaces = paritySlice === 'delegated-task' ? ['delegated-task'] : allSurfaces;
 const modernMeta = {
   _meta: {
     'io.modelcontextprotocol/protocolVersion': '2026-07-28',
@@ -654,7 +656,11 @@ function runDelegatedTaskParity() {
   const bunEntrypoint = join(workspaceRoot, 'packages', 'delegated-task-mcp', 'src', 'main.ts');
   if (!existsSync(bunEntrypoint)) throw new Error('delegated_task_parity_bun_entrypoint_missing:' + bunEntrypoint);
   const root = mkdtempSync(join(tmpdir(), 'narada-delegated-task-native-parity-'));
+  const bunRoot = join(root, 'bun');
+  const rustRoot = join(root, 'rust');
   try {
+    mkdirSync(bunRoot, { recursive: true });
+    mkdirSync(rustRoot, { recursive: true });
     const requests = [
       { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'delegated_task_template_catalog', arguments: {} } },
       { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'delegated_task_template_catalog', arguments: { template_id: 'commit_push_guarded' } } },
@@ -665,7 +671,40 @@ function runDelegatedTaskParity() {
     for (const request of requests) {
       assertSame(`delegated_task.template_catalog.${request.id}`, mailboxStructured(bun, request.id, 'bun'), mailboxStructured(rust, request.id, 'rust'));
     }
-    return { status: 'passed', fixture: 'full_template_catalog', compared: ['all', 'commit_push_guarded', 'unknown'] };
+    const idempotencyKey = 'native-delegated-task-lifecycle-parity-v1';
+    const taskId = `task_${createHash('sha256').update(idempotencyKey).digest('hex').slice(0, 16)}`;
+    const lifecycleRequests = [
+      { jsonrpc: '2.0', id: 10, method: 'tools/call', params: { name: 'delegated_task_validate', arguments: { objective: 'Verify native delegated task lifecycle parity.', workflow: { template_id: 'implement' }, execution: { start: false } } } },
+      { jsonrpc: '2.0', id: 11, method: 'tools/call', params: { name: 'delegated_task_run', arguments: { objective: 'Verify native delegated task lifecycle parity.', workflow: { template_id: 'implement' }, execution: { start: false }, idempotency_key: idempotencyKey } } },
+      { jsonrpc: '2.0', id: 12, method: 'tools/call', params: { name: 'delegated_task_status', arguments: { task_id: taskId } } },
+      { jsonrpc: '2.0', id: 13, method: 'tools/call', params: { name: 'delegated_task_cancel', arguments: { task_id: taskId, reason: 'parity fixture' } } },
+      { jsonrpc: '2.0', id: 14, method: 'tools/call', params: { name: 'delegated_task_acknowledge', arguments: { task_id: taskId, acknowledged_by: 'native-parity' } } },
+      { jsonrpc: '2.0', id: 15, method: 'tools/call', params: { name: 'delegated_task_events', arguments: { task_id: taskId, limit: 50 } } },
+      { jsonrpc: '2.0', id: 16, method: 'tools/call', params: { name: 'delegated_tasks_list', arguments: { limit: 10, include_terminal: true, include_acknowledged: true } } },
+    ];
+    const runLifecycle = (command, args, runtimeRoot) => runMailbox(command, args, lifecycleRequests, workspaceRoot);
+    const bunLifecycle = runLifecycle(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', [bunEntrypoint, '--task-root', bunRoot, '--site-root', bunRoot, '--allowed-root', bunRoot], bunRoot);
+    const rustLifecycle = runLifecycle(executable, ['--surface-id', 'delegated-task', '--site-root', rustRoot], rustRoot);
+    const expected = new Map([[10, ['narada.delegated_task.validate.v1', 'ok']], [11, ['narada.delegated_task.run.v1', 'accepted_for_execution']], [12, ['narada.delegated_task.status.v1', 'ok']], [13, ['narada.delegated_task.cancel.v1', 'cancelled']], [14, ['narada.delegated_task.acknowledge.v1', 'acknowledged']], [15, ['narada.delegated_task.events.v1', 'ok']], [16, ['narada.delegated_task.list.v1', 'ok']]]);
+    for (const [id, [schema, status]] of expected) {
+      for (const [runtime, responses] of [['bun', bunLifecycle], ['rust', rustLifecycle]]) {
+        const result = mailboxStructured(responses, id, runtime);
+        if (result?.schema !== schema || result?.status !== status) throw new Error(`delegated_task.lifecycle.${runtime}.${id}:expected=${schema}/${status}:actual=${JSON.stringify(result).slice(0, 1000)}`);
+      }
+    }
+    for (const [runtime, responses] of [['bun', bunLifecycle], ['rust', rustLifecycle]]) {
+      if (mailboxStructured(responses, 11, runtime)?.task_id !== taskId) throw new Error(`delegated_task.lifecycle.${runtime}:idempotent_task_id_mismatch`);
+      if (mailboxStructured(responses, 12, runtime)?.task_status !== 'accepted_for_execution') throw new Error(`delegated_task.lifecycle.${runtime}:pre_cancel_status_mismatch`);
+      if (mailboxStructured(responses, 13, runtime)?.task_status !== 'cancelled') throw new Error(`delegated_task.lifecycle.${runtime}:cancel_status_mismatch`);
+      const events = mailboxStructured(responses, 15, runtime)?.events ?? [];
+      for (const kind of ['task_created', 'task_cancelled', 'task_acknowledged']) if (!events.some((event) => event.event_kind === kind)) throw new Error(`delegated_task.lifecycle.${runtime}:event_missing:${kind}`);
+      if (!(mailboxStructured(responses, 16, runtime)?.tasks ?? []).some((task) => task.task_id === taskId)) throw new Error(`delegated_task.lifecycle.${runtime}:list_projection_missing`);
+    }
+    const crossRead = (command, args, runtimeRoot) => mailboxStructured(runMailbox(command, args, [{ jsonrpc: '2.0', id: 20, method: 'tools/call', params: { name: 'delegated_task_status', arguments: { task_id: taskId } } }], workspaceRoot), 20, 'cross');
+    const rustReadsBun = crossRead(executable, ['--surface-id', 'delegated-task', '--site-root', bunRoot], bunRoot);
+    const bunReadsRust = crossRead(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', [bunEntrypoint, '--task-root', rustRoot, '--site-root', rustRoot, '--allowed-root', rustRoot], rustRoot);
+    if (rustReadsBun?.task_status !== 'cancelled' || bunReadsRust?.task_status !== 'cancelled') throw new Error('delegated_task.lifecycle:cross_runtime_read_failed');
+    return { status: 'passed', fixture: 'template_and_durable_lifecycle', compared: ['template_catalog', 'validate', 'run_without_start', 'status', 'cancel', 'acknowledge', 'events', 'list', 'cross_runtime_read'] };
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -2287,36 +2326,37 @@ function runSchedulerParity() {
   }
 }
 
-const mailboxParity = runMailboxParity();
-const mailboxOutboxMutationParity = runMailboxOutboxMutationParity();
-const mailboxReconciliationParity = runMailboxReconciliationParity();
-const mailboxSyncParity = runMailboxSyncParity();
+const runSlice = (slice, callback) => paritySlice === 'all' || paritySlice === slice ? callback() : { status: 'skipped' };
+const mailboxParity = runSlice('mailbox', runMailboxParity);
+const mailboxOutboxMutationParity = runSlice('mailbox', runMailboxOutboxMutationParity);
+const mailboxReconciliationParity = runSlice('mailbox', runMailboxReconciliationParity);
+const mailboxSyncParity = runSlice('mailbox', runMailboxSyncParity);
 const delegatedTaskParity = runDelegatedTaskParity();
-const workerDelegationParity = runWorkerDelegationParity();
-const artifactsParity = runArtifactsParity();
-const sopParity = runSopParity();
-const sopActionParity = runSopActionParity();
-const sopRunListParity = runSopRunListParity();
-const sopRunEventsParity = runSopRunEventsParity();
-const sopRunStatusParity = runSopRunStatusParity();
-const sopHandoffParity = runSopHandoffParity();
-const sopRunCoverageParity = runSopRunCoverageParity();
-const sopOutboxParity = runSopOutboxParity();
-const sopDurabilityMutationParity = runSopDurabilityMutationParity();
-const sopEngineParity = runSopEngineParity({ executable, workspaceRoot: resolve(packageRoot, '..', '..', '..') });
-const surfaceFeedbackParity = runSurfaceFeedbackParity();
-const siteLoopParity = runSiteLoopParity();
-const calendarParity = runCalendarParity();
-const calendarAuthorityBridge = runCalendarAuthorityBridge();
-const calendarNativeGraphParity = runCalendarNativeGraphParity();
-const graphMailNativeGraphParity = runGraphMailNativeGraphParity();
-const cloudflareParity = runCloudflareParity();
-const graphMailParity = runGraphMailParity();
-const operatorOverlayParity = runOperatorOverlayParity();
-const browserControlParity = runBrowserControlParity();
-const quotaMeterParity = runQuotaMeterParity();
-const narsSessionParity = runNarsSessionParity();
-const schedulerParity = runSchedulerParity();
+const workerDelegationParity = runSlice('worker-delegation', runWorkerDelegationParity);
+const artifactsParity = runSlice('artifacts', runArtifactsParity);
+const sopParity = runSlice('sop', runSopParity);
+const sopActionParity = runSlice('sop', runSopActionParity);
+const sopRunListParity = runSlice('sop', runSopRunListParity);
+const sopRunEventsParity = runSlice('sop', runSopRunEventsParity);
+const sopRunStatusParity = runSlice('sop', runSopRunStatusParity);
+const sopHandoffParity = runSlice('sop', runSopHandoffParity);
+const sopRunCoverageParity = runSlice('sop', runSopRunCoverageParity);
+const sopOutboxParity = runSlice('sop', runSopOutboxParity);
+const sopDurabilityMutationParity = runSlice('sop', runSopDurabilityMutationParity);
+const sopEngineParity = runSlice('sop', () => runSopEngineParity({ executable, workspaceRoot: resolve(packageRoot, '..', '..', '..') }));
+const surfaceFeedbackParity = runSlice('surface-feedback', runSurfaceFeedbackParity);
+const siteLoopParity = runSlice('site-loop', runSiteLoopParity);
+const calendarParity = runSlice('calendar', runCalendarParity);
+const calendarAuthorityBridge = runSlice('calendar', runCalendarAuthorityBridge);
+const calendarNativeGraphParity = runSlice('calendar', runCalendarNativeGraphParity);
+const graphMailNativeGraphParity = runSlice('graph-mail', runGraphMailNativeGraphParity);
+const cloudflareParity = runSlice('cloudflare-carrier', runCloudflareParity);
+const graphMailParity = runSlice('graph-mail', runGraphMailParity);
+const operatorOverlayParity = runSlice('operator-console-overlay', runOperatorOverlayParity);
+const browserControlParity = runSlice('browser-control', runBrowserControlParity);
+const quotaMeterParity = runSlice('quota-meter', runQuotaMeterParity);
+const narsSessionParity = runSlice('nars-session', runNarsSessionParity);
+const schedulerParity = runSlice('scheduler', runSchedulerParity);
 process.stdout.write(JSON.stringify({
   schema: 'narada.mcp_surfaces_native.protocol_parity.v1',
   status: 'passed',

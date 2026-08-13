@@ -1,4 +1,5 @@
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -117,7 +118,7 @@ fn template_catalog(args: &Map<String, Value>) -> Value {
     json!({"schema":"narada.delegated_task.template_catalog.v1","status":if id.is_some() && templates.is_empty(){"not_found"}else{"ok"},"template_id":id,"count":templates.len(),"templates":templates})
 }
 
-fn validate(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> { let objective = args.get("objective").and_then(Value::as_str).map(str::trim).filter(|v|!v.is_empty()); let mut errors = Vec::new(); if objective.is_none(){errors.push("objective_required");} if let Some(binding)=args.get("execution_binding").and_then(Value::as_object) { if let Some(workspace)=binding.get("workspace_root").and_then(Value::as_str) { if !is_within(Path::new(workspace), root) { errors.push("execution_binding_workspace_outside_site_root"); } } } Ok(json!({"schema":"narada.delegated_task.validate.v1","status":if errors.is_empty(){"ok"}else{"invalid"},"valid":errors.is_empty(),"task_root":task_root(root).to_string_lossy(),"errors":errors,"objective":objective,"worker_execution":"not_run"})) }
+fn validate(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> { let objective = args.get("objective").and_then(Value::as_str).map(str::trim).filter(|v|!v.is_empty()); let mut errors = Vec::new(); if objective.is_none(){errors.push("objective_required");} if let Some(binding)=args.get("execution_binding").and_then(Value::as_object) { if let Some(workspace)=binding.get("workspace_root").and_then(Value::as_str) { if !is_within(Path::new(workspace), root) { errors.push("execution_binding_workspace_outside_site_root"); } } } let diagnostics=errors.iter().map(|code|json!({"severity":"error","code":code})).collect::<Vec<_>>(); Ok(json!({"schema":"narada.delegated_task.validate.v1","status":if errors.is_empty(){"ok"}else{"rejected"},"dry_run":true,"diagnostics":diagnostics,"valid":errors.is_empty(),"task_root":task_root(root).to_string_lossy(),"errors":errors,"objective":objective,"worker_execution":"not_run"})) }
 fn is_within(path: &Path, root: &Path) -> bool { let p=path.canonicalize().unwrap_or_else(|_|path.to_path_buf()); let r=root.canonicalize().unwrap_or_else(|_|root.to_path_buf()); p==r || p.starts_with(&r) }
 
 fn tasks_list(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> { let limit=args.get("limit").and_then(Value::as_u64).unwrap_or(20).clamp(1,MAX_ITEMS as u64) as usize; let mut tasks=Vec::new(); if let Ok(entries)=fs::read_dir(tasks_dir(root)) { for entry in entries.filter_map(Result::ok).take(MAX_ITEMS) { if !entry.path().is_dir(){continue;} let Some(id)=entry.file_name().to_str().map(ToOwned::to_owned) else {continue;}; if let Ok(task)=read_task(root,&id) { tasks.push(compact_task(&task)); } } } tasks.sort_by(|a,b| b.get("updated_at").and_then(Value::as_str).cmp(&a.get("updated_at").and_then(Value::as_str))); tasks.truncate(limit); Ok(json!({"schema":"narada.delegated_task.list.v1","status":"ok","view":args.get("view").and_then(Value::as_str).unwrap_or("active_queue"),"site_scope":args.get("site_scope").and_then(Value::as_str).unwrap_or("current_site"),"count":tasks.len(),"limit":limit,"tasks":tasks,"native_read_only":true})) }
@@ -137,19 +138,24 @@ fn write_task(root: &Path, task: &Value) -> Result<(), Value> {
     fs::rename(temp,path).map_err(|_|error("delegated_task_write_failed","delegated_task_write_failed"))
 }
 fn append_event(root:&Path,id:&str,kind:&str,payload:Value)->Result<Value,Value>{
-    let event=json!({"schema":"narada.delegated_task.event.v1","event_id":format!("event-{}",uuid::Uuid::new_v4().simple()),"task_id":id,"event":kind,"recorded_at":now(),"payload":payload});
+    let event=json!({"schema":"narada.delegated_task.event.v1","event_id":format!("evt_{}",uuid::Uuid::new_v4().simple()),"task_id":id,"event_kind":kind,"recorded_at":now(),"details":payload});
     let path=task_path(root,id)?.with_file_name("events.jsonl"); let mut file=OpenOptions::new().create(true).append(true).open(path).map_err(|_|error("delegated_task_event_write_failed","delegated_task_event_write_failed"))?;
     writeln!(file,"{}",event).map_err(|_|error("delegated_task_event_write_failed","delegated_task_event_write_failed"))?; Ok(event)
 }
 fn objective(args:&Map<String,Value>)->Result<String,Value>{ args.get("objective").or_else(||args.get("intent").and_then(|v|v.get("objective"))).and_then(Value::as_str).map(str::trim).filter(|v|!v.is_empty()).map(str::to_string).ok_or_else(||error("delegated_task_requires_objective","delegated_task_requires_objective")) }
+fn stable_task_id(args:&Map<String,Value>)->String {
+    if let Some(id)=args.get("task_id").and_then(Value::as_str){return id.to_string()}
+    if let Some(key)=args.get("idempotency_key").and_then(Value::as_str){let digest=Sha256::digest(key.as_bytes());let prefix=digest[..8].iter().map(|byte|format!("{byte:02x}")).collect::<String>();return format!("task_{prefix}")}
+    format!("task_{}",uuid::Uuid::new_v4().simple())
+}
 fn task_run(args:&Map<String,Value>,root:&Path)->Result<Value,Value>{
-    let objective=objective(args)?; let id=args.get("task_id").and_then(Value::as_str).map(str::to_string).unwrap_or_else(||format!("task-{}",uuid::Uuid::new_v4().simple())); safe_id(&id)?;
-    if task_path(root,&id)?.is_file(){ return Err(error("delegated_task_id_conflict","delegated_task_id_conflict")); }
+    let objective=objective(args)?; let id=stable_task_id(args); safe_id(&id)?;
+    if task_path(root,&id)?.is_file(){ let task=read_task(root,&id)?; return Ok(json!({"schema":"narada.delegated_task.run.v1","status":"existing","request_status":"existing","execution_status":task["status"],"created":false,"task_id":id,"task_status":task["status"],"summary":task["summary"]})); }
     let created=now(); let step=json!({"step_id":"implement","kind":"worker","status":"pending","attempts":0,"run_ids":[],"current_run_id":null,"started_at":null,"finished_at":null,"error":null,"summary":null});
-    let mut task=json!({"schema":"narada.delegated_task.v1","task_id":id,"status":"pending","objective":objective,"created_at":created,"updated_at":created,"constraints":args.get("constraints").cloned().unwrap_or_else(||json!({})),"workflow":args.get("workflow").cloned().unwrap_or_else(||json!({"strategy":"implement","steps":[{"id":"implement","kind":"worker"}]})),"execution":args.get("execution").cloned().unwrap_or_else(||json!({"start":true})),"acceptance":args.get("acceptance").cloned().unwrap_or_else(||json!({})),"result":{"acceptance_verdict":"pending","step_states":{"implement":step},"worker_refs":[],"residual_risks":[]},"summary":null});
+    let mut task=json!({"schema":"narada.delegated_task.task.v1","task_id":id,"status":"accepted_for_execution","objective":objective,"created_at":created,"updated_at":created,"cancelled_at":null,"idempotency_key":args.get("idempotency_key"),"constraints":args.get("constraints").cloned().unwrap_or_else(||json!({})),"workflow":args.get("workflow").cloned().unwrap_or_else(||json!({"strategy":"implement","steps":[{"id":"implement","kind":"worker"}]})),"execution":args.get("execution").cloned().unwrap_or_else(||json!({"start":true})),"acceptance":args.get("acceptance").cloned().unwrap_or_else(||json!({})),"result":{"schema":"narada.delegated_task.handoff.v1","acceptance_verdict":"pending","step_states":{"implement":step},"worker_refs":[],"residual_risks":[],"observed_incoherencies":[],"verification":[],"changed_files":[]},"summary":null});
     write_task(root,&task)?; append_event(root,&id,"task_created",json!({"objective":objective}))?;
     if task.pointer("/execution/start").and_then(Value::as_bool)!=Some(false){ task=advance_value(task,root)?; }
-    Ok(json!({"schema":"narada.delegated_task.run.v1","status":"ok","created":true,"task_id":id,"task_status":task["status"],"task":compact_task(&task)}))
+    Ok(json!({"schema":"narada.delegated_task.run.v1","status":"accepted_for_execution","request_status":"accepted_for_execution","execution_status":task["status"],"created":true,"task_id":id,"task_status":task["status"],"summary":task["summary"]}))
 }
 fn task_advance(args:&Map<String,Value>,root:&Path)->Result<Value,Value>{ let id=task_id(args)?; let task=advance_value(read_task(root,&id)?,root)?; Ok(json!({"schema":"narada.delegated_task.advance.v1","status":"ok","task_id":id,"task_status":task["status"],"task":compact_task(&task)})) }
 fn advance_value(mut task:Value,root:&Path)->Result<Value,Value>{
@@ -201,7 +207,7 @@ mod tests {
     fn native_delegated_task_owns_durable_lifecycle_mutations() {
         let root = std::env::temp_dir().join(format!("narada-delegated-task-mutate-{}", uuid::Uuid::new_v4()));
         let created = task_run(json!({"task_id":"task_native","objective":"demo","execution":{"start":false}}).as_object().unwrap(), &root).expect("run");
-        assert_eq!(created["task_status"], "pending");
+        assert_eq!(created["task_status"], "accepted_for_execution");
         let cancelled = task_cancel(json!({"task_id":"task_native","reason":"fixture"}).as_object().unwrap(), &root, false).expect("cancel");
         assert_eq!(cancelled["task_status"], "cancelled");
         let acknowledged = task_acknowledge(json!({"task_id":"task_native","acknowledged_by":"test"}).as_object().unwrap(), &root).expect("acknowledge");
