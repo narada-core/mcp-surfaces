@@ -45,8 +45,12 @@ const DEFAULT_BLOCKED_COMMANDS: &[&str] = &[
     "openconsole",
     "openconsole.exe",
 ];
-const TERMINAL_INTEGRATION_ENVIRONMENT: &[&str] =
-    &["WT_SESSION", "WT_PROFILE_ID", "TERM_PROGRAM", "TERM_PROGRAM_VERSION"];
+const TERMINAL_INTEGRATION_ENVIRONMENT: &[&str] = &[
+    "WT_SESSION",
+    "WT_PROFILE_ID",
+    "TERM_PROGRAM",
+    "TERM_PROGRAM_VERSION",
+];
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const TRANSIENT_EXTENSIONS: &[&str] = &[".ps1", ".psm1", ".js", ".mjs", ".cjs", ".ts"];
@@ -1431,6 +1435,9 @@ fn resolve_command_for_spawn(
     else {
         return (PathBuf::from(command), args.to_vec());
     };
+    if let Some(resolved) = resolve_corepack_pnpm(command, path, args) {
+        return resolved;
+    }
     for directory in env::split_paths(path) {
         for extension in [".exe", ".com", ".ps1", ".cmd", ".bat", ""] {
             let candidate = directory.join(format!("{command}{extension}"));
@@ -1470,6 +1477,26 @@ fn resolve_command_for_spawn(
         }
     }
     (PathBuf::from(command), args.to_vec())
+}
+
+fn resolve_corepack_pnpm(
+    command: &str,
+    path: &str,
+    args: &[String],
+) -> Option<(PathBuf, Vec<String>)> {
+    if !command.eq_ignore_ascii_case("pnpm") {
+        return None;
+    }
+    for directory in env::split_paths(path) {
+        let node = directory.join("node.exe");
+        let entrypoint = directory.join("node_modules/corepack/dist/pnpm.js");
+        if node.is_file() && entrypoint.is_file() {
+            let mut direct_args = vec![entrypoint.to_string_lossy().to_string()];
+            direct_args.extend_from_slice(args);
+            return Some((node, direct_args));
+        }
+    }
+    None
 }
 
 fn resolve_noninteractive_powershell(
@@ -1607,4 +1634,38 @@ fn now_rfc3339() -> String {
     OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pnpm_corepack_shim_resolves_without_shell_or_terminal() {
+        let root = env::temp_dir().join(format!(
+            "narada-structured-command-resolver-{}",
+            std::process::id()
+        ));
+        let entrypoint = root.join("node_modules/corepack/dist/pnpm.js");
+        fs::create_dir_all(entrypoint.parent().unwrap()).unwrap();
+        fs::write(root.join("node.exe"), b"fixture").unwrap();
+        fs::write(&entrypoint, b"fixture").unwrap();
+        let path = env::join_paths([&root])
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let requested = vec!["exec".to_string(), "cargo".to_string()];
+
+        let (executable, arguments) =
+            resolve_corepack_pnpm("pnpm", &path, &requested).expect("direct Corepack launch");
+
+        assert_eq!(executable, root.join("node.exe"));
+        assert_eq!(arguments[0], entrypoint.to_string_lossy());
+        assert_eq!(&arguments[1..], requested);
+        assert!(!executable
+            .to_string_lossy()
+            .to_ascii_lowercase()
+            .contains("wt.exe"));
+        fs::remove_dir_all(root).unwrap();
+    }
 }
