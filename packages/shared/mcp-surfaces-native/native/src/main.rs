@@ -10,6 +10,7 @@ use uuid::Uuid;
 mod authority;
 mod calendar;
 mod delegated_task;
+mod epistemic_graph;
 mod graph_authority;
 mod graph_mail_authority;
 mod host_contracts;
@@ -676,6 +677,7 @@ fn list_tools(surface_id: &str) -> Vec<Value> {
         "delegated-task" => delegated_task::list_tools(),
         "worker-delegation" => worker_delegation::list_tools(),
         "artifacts" | "nars-session" | "quota-meter" => local_admin::list_tools(surface_id),
+        "epistemic-graph" => epistemic_graph::list_tools(),
         "mailbox" => mailbox::list_tools(),
         "scheduler" => scheduler::list_tools(),
         "browser-control" | "operator-console-overlay" | "cloudflare-carrier" | "speech" | "graph-mail" => host_contracts::list_tools(surface_id),
@@ -781,6 +783,7 @@ fn call_tool(
             local_admin::call_tool(surface_id, name, &args, &options.site_root)
         }
         ("mailbox", name) => mailbox::call_tool(name, &args, &options.site_root),
+        ("epistemic-graph", name) => epistemic_graph::call_tool(name, &args, &options.site_root),
         ("graph-mail", name)
             if graph_mail_authority::enabled() && graph_mail_authority::supports(name) =>
         {
