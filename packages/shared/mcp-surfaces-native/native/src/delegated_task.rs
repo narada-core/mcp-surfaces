@@ -468,7 +468,14 @@ fn compact_task(task: &Value) -> Value {
 }
 fn task_status(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     let id = task_id(args)?;
-    let task = read_task(root, &id)?;
+    let task = if args.get("refresh").and_then(Value::as_bool) == Some(true) {
+        let _lock = lock_task(root, &id)?;
+        let current = read_task(root, &id)?;
+        assert_mutation_scope(&current, args, root)?;
+        advance_value(current, root)?
+    } else {
+        read_task(root, &id)?
+    };
     let obj = task.as_object().cloned().unwrap_or_default();
     Ok(
         json!({"schema":"narada.delegated_task.status.v1","status":"ok","task_id":id,"task_status":obj.get("status"),"objective":obj.get("objective"),"ownership":ownership(&task),"execution_binding":obj.get("execution_binding"),"request_fingerprint":obj.get("request_fingerprint"),"created_at":obj.get("created_at"),"updated_at":obj.get("updated_at"),"result":obj.get("result")}),
@@ -495,9 +502,37 @@ fn task_summary(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> 
 }
 fn task_wait(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     let id = task_id(args)?;
-    let task = read_task(root, &id)?;
+    let timeout = args
+        .get("timeout_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or(30000)
+        .min(600000);
+    let poll = args
+        .get("poll_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or(500)
+        .clamp(50, 30000);
+    let started = std::time::Instant::now();
+    let task = loop {
+        let current = {
+            let _lock = lock_task(root, &id)?;
+            let current = read_task(root, &id)?;
+            assert_mutation_scope(&current, args, root)?;
+            advance_value(current, root)?
+        };
+        if matches!(
+            current.get("status").and_then(Value::as_str),
+            Some("completed" | "failed" | "cancelled")
+        ) || started.elapsed().as_millis() as u64 >= timeout
+        {
+            break current;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(
+            poll.min(timeout.saturating_sub(started.elapsed().as_millis() as u64)),
+        ))
+    };
     Ok(
-        json!({"schema":"narada.delegated_task.wait.v1","status":"ok","task_id":id,"task_status":task.get("status"),"waited":false,"refresh_performed":false,"worker_execution":"native_worker_authority","task":compact_task(&task)}),
+        json!({"schema":"narada.delegated_task.wait.v1","status":if matches!(task.get("status").and_then(Value::as_str),Some("completed"|"failed"|"cancelled")){"finished"}else{"timeout"},"elapsed_ms":started.elapsed().as_millis() as u64,"timeout_ms":timeout,"poll_ms":poll,"task_id":id,"task_status":task.get("status"),"refresh_performed":true,"worker_execution":"native_worker_authority","task":compact_task(&task)}),
     )
 }
 fn task_events(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
@@ -804,6 +839,13 @@ fn max_retries(task: &Value) -> u64 {
         .unwrap_or(0)
         .min(10)
 }
+fn max_concurrency(task: &Value) -> usize {
+    task.pointer("/constraints/max_concurrency")
+        .or_else(|| task.pointer("/execution/max_concurrency"))
+        .and_then(Value::as_u64)
+        .unwrap_or(10)
+        .clamp(1, 32) as usize
+}
 fn acceptance_verdict(task: &Value, root: &Path) -> (&'static str, Vec<Value>) {
     let mut checks = Vec::new();
     let result = task.get("result").cloned().unwrap_or_else(|| json!({}));
@@ -1105,6 +1147,32 @@ fn advance_value(mut task: Value, root: &Path) -> Result<Value, Value> {
             if step_status(&task, step_id) != Some("pending") {
                 continue;
             }
+            let blocked = step
+                .get("depends_on")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .filter(|dependency| {
+                            matches!(step_status(&task, dependency), Some("failed" | "blocked"))
+                        })
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if !blocked.is_empty() {
+                task["result"]["step_states"][step_id]["status"] = json!("blocked");
+                task["result"]["step_states"][step_id]["blocked_by"] = json!(blocked);
+                task["result"]["step_states"][step_id]["finished_at"] = json!(now());
+                append_event(
+                    root,
+                    &id,
+                    "step_blocked",
+                    json!({"step_id":step_id,"blocked_by":task["result"]["step_states"][step_id]["blocked_by"]}),
+                )?;
+                continue;
+            }
             let dependencies_ready = step
                 .get("depends_on")
                 .and_then(Value::as_array)
@@ -1131,6 +1199,11 @@ fn advance_value(mut task: Value, root: &Path) -> Result<Value, Value> {
             }
         }
         let ready = ready_step_ids(&task);
+        let mut active = step_ids
+            .iter()
+            .filter(|step_id| step_status(&task, step_id) == Some("running"))
+            .count();
+        let concurrency = max_concurrency(&task);
         for step_id in ready {
             let Some(step) = steps
                 .iter()
@@ -1139,15 +1212,25 @@ fn advance_value(mut task: Value, root: &Path) -> Result<Value, Value> {
                 continue;
             };
             let kind = step.get("kind").and_then(Value::as_str).unwrap_or("worker");
-            if kind == "gate" {
-                task["result"]["step_states"][&step_id]["status"] = json!("completed");
+            if matches!(kind, "gate" | "join" | "note") {
+                task["result"]["step_states"][&step_id]["status"] =
+                    json!(if kind == "note" { "noted" } else { "completed" });
                 task["result"]["step_states"][&step_id]["finished_at"] = json!(now());
                 append_event(
                     root,
                     &id,
-                    "step_gate_evaluated",
-                    json!({"step_id":step_id,"authority_gate":step.get("authority_gate"),"executed":false}),
+                    if kind == "gate" {
+                        "step_gate_evaluated"
+                    } else if kind == "join" {
+                        "step_join_completed"
+                    } else {
+                        "step_recorded"
+                    },
+                    json!({"step_id":step_id,"kind":kind,"authority_gate":step.get("authority_gate"),"executed":false}),
                 )?;
+                continue;
+            }
+            if active >= concurrency {
                 continue;
             }
             let instruction = step
@@ -1196,11 +1279,15 @@ fn advance_value(mut task: Value, root: &Path) -> Result<Value, Value> {
                 "worker_started",
                 json!({"step_id":step_id,"run_id":run_id,"attempt":attempts}),
             )?;
+            active += 1;
         }
         if !step_ids.is_empty()
-            && step_ids
-                .iter()
-                .all(|step_id| matches!(step_status(&task, step_id), Some("completed" | "skipped")))
+            && step_ids.iter().all(|step_id| {
+                matches!(
+                    step_status(&task, step_id),
+                    Some("completed" | "skipped" | "noted")
+                )
+            })
         {
             let (verdict, checks) = acceptance_verdict(&task, root);
             task["result"]["acceptance_verdict"] = json!(verdict);
@@ -1219,6 +1306,21 @@ fn advance_value(mut task: Value, root: &Path) -> Result<Value, Value> {
                     "task_failed"
                 },
                 json!({"acceptance_verdict":verdict}),
+            )?;
+        } else if step_ids
+            .iter()
+            .any(|step_id| matches!(step_status(&task, step_id), Some("failed" | "blocked")))
+            && !step_ids
+                .iter()
+                .any(|step_id| matches!(step_status(&task, step_id), Some("pending" | "running")))
+        {
+            task["status"] = json!("failed");
+            task["result"]["acceptance_verdict"] = json!("failed");
+            append_event(
+                root,
+                &id,
+                "task_failed",
+                json!({"reason":"blocked_or_failed_steps"}),
             )?;
         }
     }
@@ -1468,5 +1570,37 @@ mod tests {
         )
         .expect("override");
         assert_eq!(allowed["owner_site_id"], "site-other");
+    }
+
+    #[test]
+    fn native_delegated_task_bounds_concurrency_and_waits_on_terminal_state() {
+        let root = std::env::temp_dir().join(format!(
+            "narada-delegated-task-wait-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let task = json!({"schema":"narada.delegated_task.task.v1","task_id":"task_terminal","owner_site_id":root.file_name().and_then(|v|v.to_str()),"visibility_scope":"site","status":"completed","objective":"done","constraints":{"max_concurrency":99},"result":{}});
+        write_task(&root, &task).expect("task");
+        assert_eq!(max_concurrency(&task), 32);
+        let waited = task_wait(
+            json!({"task_id":"task_terminal","timeout_ms":0})
+                .as_object()
+                .unwrap(),
+            &root,
+        )
+        .expect("wait");
+        assert_eq!(waited["status"], "finished");
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn native_delegated_task_keeps_local_steps_out_of_worker_schedule() {
+        let task = json!({"workflow":{"steps":[{"id":"gate","kind":"gate"},{"id":"join","kind":"join"},{"id":"note","kind":"note"}]},"result":{"step_states":{"gate":{"status":"pending"},"join":{"status":"pending"},"note":{"status":"pending"}}}});
+        assert_eq!(ready_step_ids(&task), vec!["gate", "join", "note"]);
+        for step in task["workflow"]["steps"].as_array().unwrap() {
+            assert!(matches!(
+                step["kind"].as_str(),
+                Some("gate" | "join" | "note")
+            ));
+        }
     }
 }
