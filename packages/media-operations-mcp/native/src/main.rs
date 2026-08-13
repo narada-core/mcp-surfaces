@@ -66,10 +66,17 @@ impl Api {
             &format!("/v1/jobs/{job}/artifacts/{artifact}/url"),
             None,
         )?;
-        let url = signed["url"].as_str().ok_or("missing signed URL")?;
-        let bytes = self
-            .http
-            .get(url)
+        let raw_url = signed["url"].as_str().ok_or("missing signed URL")?;
+        let url = if raw_url.starts_with('/') {
+            format!("{}{}", self.base, raw_url)
+        } else {
+            raw_url.into()
+        };
+        let mut request = self.http.get(url);
+        if raw_url.starts_with('/') {
+            request = request.bearer_auth(&self.token);
+        }
+        let bytes = request
             .send()
             .map_err(err)?
             .error_for_status()
