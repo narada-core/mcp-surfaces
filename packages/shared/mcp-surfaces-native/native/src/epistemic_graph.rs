@@ -164,6 +164,7 @@ fn proposal_review(root: &Path, args: &Map<String, Value>) -> Result<Value, Valu
         )
     })?;
     validate_operations(operations, true)?;
+    validate_references(root, operations)?;
     let expected = proposal.get("expected_ledger_head").and_then(Value::as_str);
     let current = ledger_head(root)?;
     let head_matches = expected == current.as_deref();
@@ -327,6 +328,7 @@ fn export(root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
 
 fn rebuild_projection(root: &Path) -> Result<(), Value> {
     prepare(root)?;
+    verify_ledger(root)?;
     let path = projection_path(root);
     let temporary = path.with_extension("sqlite.next");
     let _ = fs::remove_file(&temporary);
@@ -382,6 +384,131 @@ fn rebuild_projection(root: &Path) -> Result<(), Value> {
     drop(db);
     let _ = fs::remove_file(&path);
     fs::rename(&temporary, &path).map_err(io_error("projection_replace_failed"))?;
+    Ok(())
+}
+
+fn verify_ledger(root: &Path) -> Result<(), Value> {
+    let mut expected_previous: Option<String> = None;
+    let mut expected_sequence = 1_u64;
+    for path in ledger_files(root)? {
+        let event = read_json(&path)?;
+        if event.get("sequence").and_then(Value::as_u64) != Some(expected_sequence) {
+            return Err(error(
+                "ledger_sequence_invalid",
+                "ledger sequence is not contiguous",
+                json!({"path":path.to_string_lossy(),"expected_sequence":expected_sequence,"actual_sequence":event.get("sequence")}),
+            ));
+        }
+        if event.get("previous_hash").and_then(Value::as_str) != expected_previous.as_deref() {
+            return Err(error(
+                "ledger_chain_invalid",
+                "ledger previous_hash does not match",
+                json!({"path":path.to_string_lossy(),"expected_previous":expected_previous,"actual_previous":event.get("previous_hash")}),
+            ));
+        }
+        let actual = event
+            .get("event_hash")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                error(
+                    "ledger_hash_missing",
+                    "ledger event_hash is missing",
+                    json!({"path":path.to_string_lossy()}),
+                )
+            })?;
+        let mut unhashed = event.clone();
+        unhashed.as_object_mut().unwrap().remove("event_hash");
+        let computed = digest_value(&unhashed)?;
+        if actual != computed {
+            return Err(error(
+                "ledger_hash_invalid",
+                "ledger event_hash does not match content",
+                json!({"path":path.to_string_lossy(),"expected_hash":computed,"actual_hash":actual}),
+            ));
+        }
+        expected_previous = Some(actual.to_string());
+        expected_sequence += 1;
+    }
+    Ok(())
+}
+
+fn validate_references(root: &Path, operations: &[Value]) -> Result<(), Value> {
+    let mut known = std::collections::HashSet::new();
+    if projection_path(root).exists() {
+        let db =
+            Connection::open(projection_path(root)).map_err(db_error("projection_open_failed"))?;
+        let mut statement = db
+            .prepare("select entity_id from entities")
+            .map_err(db_error("projection_reference_prepare_failed"))?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(db_error("projection_reference_query_failed"))?;
+        for row in rows {
+            known.insert(row.map_err(db_error("projection_reference_row_failed"))?);
+        }
+    }
+    for operation in operations {
+        if operation["op"] == "entity.declare" {
+            known.insert(
+                operation["entity_id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+            );
+        }
+    }
+    let require_known = |field: &str, operation: &Value| -> Result<(), Value> {
+        let id = operation
+            .get(field)
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if known.contains(id) {
+            Ok(())
+        } else {
+            Err(error(
+                "dangling_reference",
+                "operation references an unknown entity",
+                json!({"field":field,"entity_id":id,"operation":operation}),
+            ))
+        }
+    };
+    for operation in operations {
+        match operation["op"].as_str().unwrap_or_default() {
+            "relation.declare" => {
+                require_known("source_id", operation)?;
+                require_known("target_id", operation)?;
+            }
+            "assessment.record" => {
+                require_known("subject_id", operation)?;
+            }
+            "test_outcome.record" => {
+                require_known("test_id", operation)?;
+            }
+            _ => {}
+        }
+        for evidence in operation
+            .get("evidence")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            require_known("source_id", evidence)?;
+            for field in ["locator", "paraphrase"] {
+                if evidence
+                    .get(field)
+                    .and_then(Value::as_str)
+                    .filter(|v| !v.trim().is_empty())
+                    .is_none()
+                {
+                    return Err(error(
+                        "evidence_location_incomplete",
+                        "evidence requires locator and paraphrase",
+                        json!({"field":field,"evidence":evidence}),
+                    ));
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -643,6 +770,41 @@ mod tests {
         assert_eq!(event["certifies_truth"], false);
         let result = query(&root, &Map::new()).unwrap();
         assert_eq!(result["returned"], 1);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn projection_refuses_a_tampered_authority_event() {
+        let root = std::env::temp_dir().join(format!("epistemic-test-{}", Uuid::new_v4()));
+        let proposal = proposal_submit(
+            &root,
+            &Map::from_iter([
+                ("actor".into(), json!("nima")),
+                ("authority_basis".into(), json!({"kind":"test"})),
+                ("idempotency_key".into(), json!("p1")),
+                ("expected_ledger_head".into(), Value::Null),
+                ("operations".into(), json!([{"op":"entity.declare","entity_id":"problem-1","kind":"problem","title":"What explains X?"}])),
+            ]),
+        )
+        .unwrap();
+        let id = proposal["proposal_id"].as_str().unwrap();
+        proposal_admit(
+            &root,
+            &Map::from_iter([
+                ("proposal_id".into(), json!(id)),
+                ("actor".into(), json!("nima")),
+                ("authority_basis".into(), json!({"kind":"test"})),
+                ("expected_ledger_head".into(), Value::Null),
+                ("idempotency_key".into(), json!("a1")),
+            ]),
+        )
+        .unwrap();
+        let path = ledger_files(&root).unwrap().remove(0);
+        let mut event = read_json(&path).unwrap();
+        event["actor"] = json!("tampered");
+        fs::write(&path, serde_json::to_vec_pretty(&event).unwrap()).unwrap();
+        let failure = rebuild_projection(&root).unwrap_err();
+        assert_eq!(failure["code"], "ledger_hash_invalid");
         let _ = fs::remove_dir_all(root);
     }
 }
