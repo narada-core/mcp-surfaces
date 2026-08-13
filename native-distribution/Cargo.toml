@@ -1,0 +1,16 @@
+[package]
+name = "narada-native-dist"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "narada-native-dist"
+path = "src/main.rs"
+
+[dependencies]
+narada-mcp-materialization-contract = { path = "../packages/shared/mcp-materialization-contract-native/native" }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+time = { version = "0.3", features = ["formatting"] }
+

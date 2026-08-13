@@ -14,10 +14,3 @@ narada-mcp-fabric-contracts = { path = "../../shared/mcp-fabric-contracts/native
 sha2 = "0.10"
 serde_json = { version = "1", features = ["preserve_order"] }
 time = { version = "0.3", features = ["formatting", "macros", "parsing"] }
-
-[profile.release]
-codegen-units = 1
-lto = true
-opt-level = "z"
-panic = "abort"
-strip = true

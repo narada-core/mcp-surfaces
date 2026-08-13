@@ -53,10 +53,23 @@ Standalone MCP surface packages shared by Narada sites and carriers.
 
 ## Verify
 
+The native distribution is Cargo-owned and has no Node/Bun dependency:
+
+```powershell
+cargo native-build
+cargo native-test
+cargo native-package
+cargo native-materialize
+```
+
+See [Native distribution](docs/native-distribution.md) for its authority
+boundary. JavaScript/TypeScript implementations are separately built
+compatibility artifacts:
+
 ```powershell
 pnpm install
-pnpm build
-pnpm test
+pnpm build:compat
+pnpm test:compat
 ```
 
 ## Build Availability

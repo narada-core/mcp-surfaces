@@ -77,68 +77,19 @@ function Invoke-NativeMaterializer {
   }
 }
 
-function Resolve-PnpmToolchain {
-  $pnpmCandidates = @()
-  if (-not [string]::IsNullOrWhiteSpace($env:PNPM_HOME)) {
-    $pnpmCandidates += Join-Path $env:PNPM_HOME 'pnpm.cmd'
-  }
-  if (-not [string]::IsNullOrWhiteSpace($env:FNM_MULTISHELL_PATH)) {
-    $pnpmCandidates += Join-Path $env:FNM_MULTISHELL_PATH 'pnpm.cmd'
-  }
-  $pnpmCommand = Get-Command pnpm.cmd -ErrorAction SilentlyContinue | Select-Object -First 1
-  if ($pnpmCommand) { $pnpmCandidates += $pnpmCommand.Source }
-  foreach ($candidate in $pnpmCandidates | Select-Object -Unique) {
-    if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-      return [pscustomobject]@{ Executable = [System.IO.Path]::GetFullPath($candidate); ArgumentPrefix = @() }
-    }
-  }
-
-  $corepackCandidates = @()
-  if (-not [string]::IsNullOrWhiteSpace($env:FNM_MULTISHELL_PATH)) {
-    $corepackCandidates += Join-Path $env:FNM_MULTISHELL_PATH 'corepack.cmd'
-  }
-  $corepackCommand = Get-Command corepack.cmd -ErrorAction SilentlyContinue | Select-Object -First 1
-  if ($corepackCommand) { $corepackCandidates += $corepackCommand.Source }
-  if (-not [string]::IsNullOrWhiteSpace($env:APPDATA)) {
-    $fnmVersions = Join-Path $env:APPDATA 'fnm\node-versions'
-    if (Test-Path -LiteralPath $fnmVersions -PathType Container) {
-      $corepackCandidates += Get-ChildItem -LiteralPath $fnmVersions -Directory |
-        Sort-Object Name -Descending |
-        ForEach-Object { Join-Path $_.FullName 'installation\corepack.cmd' }
-    }
-  }
-  foreach ($candidate in $corepackCandidates | Select-Object -Unique) {
-    if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-      return [pscustomobject]@{ Executable = [System.IO.Path]::GetFullPath($candidate); ArgumentPrefix = @('pnpm') }
-    }
-  }
-  throw 'pnpm toolchain unavailable: install pnpm/Corepack or set PNPM_HOME/FNM_MULTISHELL_PATH.'
-}
-
 function Invoke-CarrierArtifactBuild {
   $stdoutPath = Join-Path ([System.IO.Path]::GetTempPath()) "narada-carrier-build-$PID.stdout.log"
   $stderrPath = Join-Path ([System.IO.Path]::GetTempPath()) "narada-carrier-build-$PID.stderr.log"
   try {
-    $tool = Resolve-PnpmToolchain
-    $packageManager = [string](Get-Content -LiteralPath (Join-Path $repoRoot 'package.json') -Raw | ConvertFrom-Json).packageManager
-    if ($packageManager -notmatch '^pnpm@(?<version>\d+\.\d+\.\d+)$') {
-      throw "package.json must declare an exact pnpm packageManager version; found '$packageManager'."
-    }
-    $requiredVersion = $Matches.version
-    $versionArguments = @($tool.ArgumentPrefix) + @('--version')
-    $actualVersion = [string](& $tool.Executable @versionArguments | Select-Object -First 1)
-    if ($actualVersion.Trim() -ne $requiredVersion) {
-      throw "Carrier artifact preparation requires pnpm@$requiredVersion; resolved '$($tool.Executable)' reported '$($actualVersion.Trim())'."
-    }
-    $arguments = @($tool.ArgumentPrefix) + @('run', 'build:carrier-artifacts')
-    $process = Start-Process -FilePath $tool.Executable -ArgumentList $arguments -WorkingDirectory $repoRoot -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -NoNewWindow -PassThru -Wait
+    $cargo = Get-Command cargo.exe -ErrorAction Stop | Select-Object -First 1
+    $process = Start-Process -FilePath $cargo.Source -ArgumentList @('native-package') -WorkingDirectory $repoRoot -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -NoNewWindow -PassThru -Wait
     foreach ($path in @($stdoutPath, $stderrPath)) {
       if (Test-Path -LiteralPath $path -PathType Leaf) {
         Get-Content -LiteralPath $path -TotalCount 1000 | Add-Content -LiteralPath $logPath -Encoding utf8
       }
     }
     if ($process.ExitCode -ne 0) {
-      throw "Carrier artifact preparation failed with exit code $($process.ExitCode)."
+      throw "Cargo-native carrier artifact preparation failed with exit code $($process.ExitCode)."
     }
   } finally {
     Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue

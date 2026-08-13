@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = [
+  "native-distribution",
+  "packages/agent-context-mcp/native",
+  "packages/mcp-loader-mcp/native",
+  "packages/mcp-registrar/native",
+  "packages/shared/mcp-fabric-contracts/native",
+  "packages/shared/mcp-lifecycle-native/native",
+  "packages/shared/mcp-materialization-contract-native/native",
+  "packages/shared/mcp-materializer-native/native",
+  "packages/shared/mcp-runtime-proxy/native",
+  "packages/shared/mcp-surfaces-native/native",
+]
+exclude = [
+  "packages/shared/mcp-e2e-harness/native",
+  "packages/shared/mcp-runtime-proxy/native/boa-fixture",
+]
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "z"
+panic = "abort"
+strip = true
+

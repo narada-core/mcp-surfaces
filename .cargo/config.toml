@@ -1,0 +1,7 @@
+[alias]
+native-build = "run --locked --package narada-native-dist -- build"
+native-test = "run --locked --package narada-native-dist -- test"
+native-package = "run --locked --package narada-native-dist -- package"
+native-materialize = "run --locked --package narada-native-dist -- materialize"
+native-release = "run --locked --package narada-native-dist -- release"
+native-verify = "run --locked --package narada-native-dist -- verify"
