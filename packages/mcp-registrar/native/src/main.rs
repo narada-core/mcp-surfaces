@@ -407,7 +407,7 @@ fn carrier_bind(contract: &Value, args: &Value) -> Result<Value, MutationFailure
             format!(
                 "registrar_carrier_config_owned_by_native_materializer:{carrier_id}:{surface_id}"
             ),
-            json!({"carrier_id":carrier_id,"surface_id":surface_id,"server_keys":keys,"remediation":"Edit the external native carrier contract or the owning Site registry, then run pnpm materialize:carrier."}),
+            json!({"carrier_id":carrier_id,"surface_id":surface_id,"server_keys":keys,"remediation":"Edit the external native carrier contract or the owning Site registry, then run cargo native-materialize."}),
         ));
     }
     Err(mutation_failure(
@@ -428,7 +428,7 @@ fn carrier_unbind(contract: &Value, args: &Value) -> Result<Value, MutationFailu
         return Err(mutation_failure(
             "registrar_carrier_unbind_refused_aggregate_surface",
             format!("registrar_carrier_unbind_refused_aggregate_surface:{surface_id}"),
-            json!({"carrier_id":carrier_id,"surface_id":surface_id,"server_keys":keys,"remediation":"This surface is produced by the external native carrier contract. Remove it from that contract or the owning Site registry, then run pnpm materialize:carrier."}),
+            json!({"carrier_id":carrier_id,"surface_id":surface_id,"server_keys":keys,"remediation":"This surface is produced by the external native carrier contract. Remove it from that contract or the owning Site registry, then run cargo native-materialize."}),
         ));
     }
     let kind = carrier["kind"].as_str().unwrap_or("");
@@ -3000,7 +3000,7 @@ fn add_runtime_preflight(
                 format!("Workspace artifact manifest does not exist: {manifest_text}"),
                 merge_value(
                     detail.clone(),
-                    json!({"artifact_manifest_path":manifest_text,"remediation":"Run pnpm build from mcp-surfaces before launching carrier MCPs."}),
+                    json!({"artifact_manifest_path":manifest_text,"remediation":"Run cargo native-package from mcp-surfaces before launching carrier MCPs."}),
                 ),
             );
         }
@@ -3024,7 +3024,7 @@ fn add_runtime_preflight(
                 format!("Runtime proxy does not exist: {proxy}"),
                 merge_value(
                     detail.clone(),
-                    json!({"runtime_proxy_entrypoint":proxy,"runtime_proxy_implementation":"native","remediation":"Run pnpm --filter @narada-core/mcp-runtime-proxy build before launching carrier MCPs."}),
+                    json!({"runtime_proxy_entrypoint":proxy,"runtime_proxy_implementation":"native","remediation":"Run cargo native-package from mcp-surfaces before launching carrier MCPs."}),
                 ),
             );
         }
@@ -3053,7 +3053,7 @@ fn add_runtime_preflight(
                     detail.clone(),
                     merge_value(
                         finding_detail,
-                        json!({"remediation":format!("Run pnpm --filter {dependency} build before launching carrier MCPs.")}),
+                        json!({"remediation":format!("Run cargo native-package from mcp-surfaces before launching carrier MCPs; missing native dependency: {dependency}.")}),
                     ),
                 ),
             );
@@ -4043,25 +4043,36 @@ fn registry_surface(
 }
 
 fn canonical_native_surface_entrypoint(surface_id: &str, projection_id: &str) -> Option<String> {
+    let (package, artifact) = native_surface_artifact(surface_id, projection_id)?;
+    native_artifact_entrypoint(package, artifact)
+}
+
+fn native_surface_artifact(
+    surface_id: &str,
+    projection_id: &str,
+) -> Option<(&'static str, &'static str)> {
     if ["local-filesystem", "structured-command", "git"].contains(&surface_id) {
-        return native_proxy_entrypoint();
+        return Some(("shared/mcp-runtime-proxy", "narada-mcp-runtime.exe"));
     }
-    if surface_id == "mcp-loader" {
-        return native_artifact_entrypoint("mcp-loader-mcp", "narada-mcp-loader.exe");
-    }
-    if surface_id == "task-lifecycle" || surface_id == "work-lifecycle" {
-        let artifact = if surface_id == "task-lifecycle" {
-            "narada-task-lifecycle-mcp.exe"
-        } else {
-            "narada-work-lifecycle-mcp.exe"
-        };
-        return native_artifact_entrypoint("shared/mcp-lifecycle-native", artifact);
-    }
-    if surface_id == "agent-context" && projection_id == "default" {
-        return native_artifact_entrypoint("agent-context-mcp", "narada-agent-context-mcp.exe");
-    }
-    if surface_id == "mcp-registrar" {
-        return native_artifact_entrypoint("mcp-registrar", "narada-mcp-registrar.exe");
+    match surface_id {
+        "mcp-loader" => return Some(("mcp-loader-mcp", "narada-mcp-loader.exe")),
+        "task-lifecycle" => {
+            return Some((
+                "shared/mcp-lifecycle-native",
+                "narada-task-lifecycle-mcp.exe",
+            ))
+        }
+        "work-lifecycle" => {
+            return Some((
+                "shared/mcp-lifecycle-native",
+                "narada-work-lifecycle-mcp.exe",
+            ))
+        }
+        "agent-context" if projection_id == "default" => {
+            return Some(("agent-context-mcp", "narada-agent-context-mcp.exe"))
+        }
+        "mcp-registrar" => return Some(("mcp-registrar", "narada-mcp-registrar.exe")),
+        _ => {}
     }
     if [
         "catalog-observation",
@@ -4092,7 +4103,7 @@ fn canonical_native_surface_entrypoint(surface_id: &str, projection_id: &str) ->
     ]
     .contains(&surface_id)
     {
-        return native_artifact_entrypoint("shared/mcp-surfaces-native", "narada-mcp-surfaces.exe");
+        return Some(("shared/mcp-surfaces-native", "narada-mcp-surfaces.exe"));
     }
     None
 }
@@ -4308,9 +4319,9 @@ mod tests {
             ("mcp-registrar", "default", "narada-mcp-registrar.exe"),
             ("surface-feedback", "default", "narada-mcp-surfaces.exe"),
         ] {
-            let path = canonical_native_surface_entrypoint(surface_id, projection_id)
+            let (_, artifact) = native_surface_artifact(surface_id, projection_id)
                 .unwrap_or_else(|| panic!("missing native mapping for {surface_id}"));
-            assert!(path.ends_with(executable), "{surface_id}: {path}");
+            assert_eq!(artifact, executable, "{surface_id}");
         }
     }
 }

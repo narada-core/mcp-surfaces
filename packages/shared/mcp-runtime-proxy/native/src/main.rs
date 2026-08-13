@@ -2259,7 +2259,7 @@ fn preflight_materialization(
 
 fn preflight_refusal(options: &Options, mut refusal: Refusal) -> Result<(), String> {
     let mut details = refusal.details.as_object().cloned().unwrap_or_default();
-    details.insert("remediation".to_string(), Value::String("Run pnpm build, materialize all carriers with the current registrar, and restart the carrier session.".to_string()));
+    details.insert("remediation".to_string(), Value::String("Run cargo native-release from mcp-surfaces, then restart the carrier session.".to_string()));
     details.insert("recovery".to_string(), recovery(options, &refusal));
     refusal.details = Value::Object(details);
     eprintln!(
@@ -2360,7 +2360,7 @@ fn recovery(options: &Options, refusal: &Refusal) -> Value {
         "deduplication": { "scope": "carrier_materialization", "key": group_id, "guidance": "Report one build/materialization action for this group; bootstrap surfaces sharing this id describe the same carrier failure." },
         "cause": { "code": refusal.code, "reason": refusal.reason, "details": refusal.details },
         "steps": [
-            { "order": 1, "action": "build_workspace", "command": { "executable": "pnpm", "args": ["build"], "cwd": workspace_root, "display": "pnpm build" } },
+            { "order": 1, "action": "build_workspace", "command": { "executable": "cargo", "args": ["native-package"], "cwd": workspace_root, "display": "cargo native-package" } },
             { "order": 2, "action": "materialize_all_carriers", "required": true, "owner": "narada-mcp-materializer", "available": !command.is_null(), "command": command, "unavailable_reason": if options.registrar_entrypoint.is_none() { Value::String("The carrier launch does not identify the native materializer entrypoint.".to_string()) } else { Value::Null } },
             { "order": 3, "action": "restart_carrier", "required": true, "automatic": false, "instruction": carrier_restart(options.carrier_kind.as_deref()) }
         ],

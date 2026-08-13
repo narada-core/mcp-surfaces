@@ -116,7 +116,7 @@ function selectAction(
       expected_descriptor_digest: null,
       outcome_tool: 'registrar_operation_outcome_show',
       recovery_tool: null,
-      recovery_guidance: 'Run pnpm materialize:carrier from the mcp-surfaces workspace; the native materializer rewrites the declared carrier set transactionally, then restart affected carriers.',
+      recovery_guidance: 'Run cargo native-materialize from the mcp-surfaces workspace; the native materializer rewrites the declared carrier set transactionally, then restart affected carriers.',
     });
   }
 

@@ -164,6 +164,11 @@ const defaultPnpmFilteredDeploy = decideStructuredCommandExecution({ command: 'p
 assert.equal(defaultPnpmFilteredDeploy.status, 'refused');
 assert.ok(defaultPnpmFilteredDeploy.reasons.some((reason) => String(reason).startsWith('command_not_allowed:')));
 
+const wrappedCargo = decideStructuredCommandExecution({ command: 'pnpm', args: ['exec', 'cargo', 'check'], workingDirectory: root }, stateWithDefaultCommands.policy);
+assert.equal(wrappedCargo.status, 'refused');
+assert.ok(wrappedCargo.reasons.includes('package_manager_wrapper_for_native_tool:pnpm cargo'));
+assert.ok(wrappedCargo.remediation_hints.includes('Invoke cargo directly; pnpm is not part of the native Rust toolchain.'));
+
 const defaultCargoFmt = decideStructuredCommandExecution({ command: 'cargo', args: ['fmt', '--check'], workingDirectory: root }, stateWithDefaultCommands.policy);
 assert.equal(defaultCargoFmt.status, 'allowed');
 assert.deepEqual(defaultCargoFmt.reasons, []);

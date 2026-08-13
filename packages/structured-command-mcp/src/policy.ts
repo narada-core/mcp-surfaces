@@ -137,6 +137,9 @@ export function decideStructuredCommandExecution({ command, args = [], workingDi
 
   if (!normalizedCommand) reasons.push('command_required');
   if (policy.blockedCommands.has(normalizedCommand.toLowerCase())) reasons.push(`blocked_command:${normalizedCommand}`);
+  if (normalizedCommand.toLowerCase() === 'pnpm' && String(argv[1] ?? '').toLowerCase() === 'exec' && ['cargo', 'cargo.exe'].includes(String(argv[2] ?? '').toLowerCase())) {
+    reasons.push('package_manager_wrapper_for_native_tool:pnpm cargo');
+  }
   if (!isInsideAnyRoot(cwd, policy.allowedRoots)) reasons.push(`working_directory_outside_allowed_roots:${cwd}`);
   reasons.push(...wrapperExecutionReasons(argv, cwd, policy));
   if (!isCommandAllowed(argv, policy)) reasons.push(`command_not_allowed:${argv.join(' ')}`);
@@ -187,6 +190,10 @@ function buildRemediationHints(argv: any, reasons: any) {
 
   if (reasons.some((reason: any) => String(reason).startsWith('blocked_command:'))) {
     hints.push('Use an explicit argv-based allowed command or a narrower MCP surface; blocked shell interpreters remain disallowed.');
+  }
+
+  if (reasons.some((reason: any) => String(reason).startsWith('package_manager_wrapper_for_native_tool:'))) {
+    hints.push('Invoke cargo directly; pnpm is not part of the native Rust toolchain.');
   }
 
   if (reasons.some((reason: any) => String(reason).startsWith('wrapper_execution_disallowed:') || String(reason).startsWith('transient_wrapper_path_disallowed:'))) {

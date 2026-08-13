@@ -1091,6 +1091,9 @@ fn decide(state: &State, command: &str, args: &[String], cwd: &Path) -> Value {
     {
         reasons.push(format!("blocked_command:{command}"));
     }
+    if wraps_cargo_with_pnpm(command, args) {
+        reasons.push("package_manager_wrapper_for_native_tool:pnpm cargo".to_string());
+    }
     if !inside_any_root(cwd, &state.allowed_roots) {
         reasons.push(format!(
             "working_directory_outside_allowed_roots:{}",
@@ -1148,6 +1151,8 @@ fn decide(state: &State, command: &str, args: &[String], cwd: &Path) -> Value {
                 "Run from an allowed root or request a policy update."
             } else if reason.starts_with("command_not_allowed:") {
                 "Inspect policy and use an allowlisted command or prefix."
+            } else if reason.starts_with("package_manager_wrapper_for_native_tool:") {
+                "Invoke cargo directly; pnpm is not part of the native Rust toolchain."
             } else {
                 "Use the owning MCP surface or a canonical repository entrypoint."
             }
@@ -1155,6 +1160,16 @@ fn decide(state: &State, command: &str, args: &[String], cwd: &Path) -> Value {
         .map(String::from)
         .collect::<Vec<_>>();
     json!({"schema": "narada.structured_command.execution_decision.v0", "status": status, "reasons": reasons, "remediation_hints": remediation_hints, "mcp_fallbacks": [], "command": command, "args": args, "working_directory": cwd.to_string_lossy(), "shell_interpolation": false})
+}
+
+fn wraps_cargo_with_pnpm(command: &str, args: &[String]) -> bool {
+    command.eq_ignore_ascii_case("pnpm")
+        && args
+            .first()
+            .is_some_and(|value| value.eq_ignore_ascii_case("exec"))
+        && args.get(1).is_some_and(|value| {
+            value.eq_ignore_ascii_case("cargo") || value.eq_ignore_ascii_case("cargo.exe")
+        })
 }
 
 fn is_command_allowed(
@@ -1667,5 +1682,14 @@ mod tests {
             .to_ascii_lowercase()
             .contains("wt.exe"));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pnpm_must_not_wrap_cargo() {
+        assert!(wraps_cargo_with_pnpm(
+            "pnpm",
+            &["exec".to_string(), "cargo".to_string(), "check".to_string()]
+        ));
+        assert!(!wraps_cargo_with_pnpm("cargo", &["check".to_string()]));
     }
 }
