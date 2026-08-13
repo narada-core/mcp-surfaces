@@ -1669,17 +1669,7 @@ impl LifecycleServer {
         let payload = json!({"title":definition.get("title"),"goal":definition.get("goal"),"context":definition.get("context"),"required_work":definition.get("required_work"),"non_goals":definition.get("non_goals"),"acceptance_criteria":definition.get("acceptance_criteria").cloned().unwrap_or_else(||json!([])),"tags":definition.get("tags").cloned().unwrap_or_else(||json!([])),"preferred_role":definition.get("preferred_role"),"target_role":definition.get("target_role"),"idempotency_key":format!("recurring-run:{id}:{due_key}")});
         let payload_digest = digest(&json!({"recurrence_id":id,"due_key":due_key}));
         let payload_id = format!("recurring_{}", &payload_digest[..48]);
-        let payload_result = self.payload_create(json!({
-            "payload_id": payload_id,
-            "payload": payload,
-            "created_by": actor.clone()
-        }))?;
-        let payload_ref = payload_result
-            .get("ref")
-            .and_then(Value::as_str)
-            .ok_or("recurring_payload_ref_missing")?
-            .to_string();
-        let created = self.task_create(json!({"payload_ref":payload_ref}))?;
+        let created = self.task_create_from_internal_payload(payload,payload_id,actor.clone())?;
         let task_id = created.get("task_id").cloned().unwrap_or(Value::Null);
         let task_number = created.get("task_number").cloned().unwrap_or(Value::Null);
         let run_id = format!("recurring-run-{}", Uuid::new_v4());
@@ -1923,6 +1913,11 @@ impl LifecycleServer {
         Ok(
             json!({"status":"ok","task_number":number,"task_id":task_id,"task_ref":format!("task #{number}"),"task_reference":{"schema":"narada.task.reference.v1","task_ref":format!("task #{number}"),"task_id":lifecycle.get("task_id"),"task_number":number,"number_authority":"task_lifecycle","task_file_name":format!("{task_id}.md")},"result_contract":result_contract,"structured_result":structured_result,"lifecycle":lifecycle,"closure_authority":{"status":closure_status,"has_closure_evidence":lifecycle.get("closed_at").is_some_and(|v|!v.is_null()),"closed_at":lifecycle.get("closed_at"),"closed_by":lifecycle.get("closed_by"),"closure_mode":lifecycle.get("closure_mode")},"spec":spec,"tag_updates":tag_updates,"tag_projection":{"status":"coherent"},"routing":routing,"active_assignment":assignment,"assignment_intents":[],"observations":observations,"execution_binding":execution_binding,"current_execution_evidence":reports.first().cloned(),"legacy_review_rows":legacy_review_rows,"review_authority":{"primary_authority":"task_dependencies.task_outcomes","legacy_review_rows_authority":"compatibility_projection_only","legacy_review_row_count":legacy_review_rows.len(),"dependency_review_count":dependencies.iter().filter(|dependency|dependency.get("kind").and_then(Value::as_str)==Some("review")).count(),"compatibility_note":if legacy_review_rows.is_empty(){"No legacy review rows are present; review authority, if any, is dependency/outcome native."}else{"Legacy review rows are retained for historical readback only. Parent closure and review dependency satisfaction must use task dependency outcomes."}},"dependencies_blocking_this_task":dependencies.iter().filter(|d|d.get("required_status").and_then(Value::as_str)!=Some("closed")).cloned().collect::<Vec<_>>(),"dependency_satisfaction":dependency_satisfaction,"dependency_context":dependencies,"outcome_contract":outcome_contract,"latest_task_outcome":latest_task_outcome,"executability_posture":{"status":"unknown"},"body":body}),
         )
+    }
+    fn task_create_from_internal_payload(&mut self, payload: Value, payload_id: String, created_by: String) -> Result<Value,String> {
+        let payload_result = self.payload_create(json!({"payload_id":payload_id,"payload":payload,"created_by":created_by}))?;
+        let payload_ref = payload_result.get("ref").and_then(Value::as_str).ok_or("internal_task_payload_ref_missing")?;
+        self.task_create(json!({"payload_ref":payload_ref}))
     }
     fn task_create(&mut self, args: Value) -> Result<Value, String> {
         enforce_task_create_payload_contract(&args)?;
@@ -4555,5 +4550,14 @@ mod modern_protocol_tests {
         assert!(second["skipped"].as_array().unwrap().is_empty());
         drop(server);
         fs::remove_dir_all(root).expect("remove recurring due fixture");
+    }
+
+    #[test]
+    fn internal_task_creation_is_confined_to_the_payload_adapter() {
+        let source = include_str!("lib.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap();
+        assert_eq!(production.matches("self.task_create(").count(), 2);
+        assert!(production.contains("self.task_create(json!({\"payload_ref\":payload_ref}))"));
+        assert!(production.contains("\"task_lifecycle_create\" => self.task_create(args)"));
     }
 }
