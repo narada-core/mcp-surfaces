@@ -3271,15 +3271,28 @@ fn site_bind(contract: &Value, args: &Value) -> Result<Value, String> {
         runtime_kind,
         &server_key,
     )?;
+    let config_path = config_dir.join(&file_name);
+    let rendered = serde_json::to_string_pretty(&config).map_err(|error| error.to_string())? + "\n";
+    let binding_changed = fs::read_to_string(&config_path).ok().as_deref() != Some(rendered.as_str());
     fs::write(
-        config_dir.join(&file_name),
-        serde_json::to_string_pretty(&config).map_err(|error| error.to_string())? + "\n",
+        &config_path,
+        rendered,
     )
     .map_err(|error| error.to_string())?;
     let registry_result = write_site_registry(contract, &site)?;
-    Ok(
-        json!({"status":"bound","site_id":site_id,"surface_id":surface_id,"projection_id":projection["id"],"file":file_name,"server_key":server_key,"registry":registry_result}),
-    )
+    Ok(json!({
+        "status":"bound","site_id":site_id,"surface_id":surface_id,"projection_id":projection["id"],"file":file_name,"server_key":server_key,"registry":registry_result,
+        "activation":{
+            "status":if binding_changed {"carrier_rematerialization_required"} else {"binding_unchanged_verify_carrier_admission"},
+            "reason":if binding_changed {"The Site binding changed, while already materialized carrier admission envelopes are immutable snapshots."} else {"The Site binding is unchanged. A current carrier may use it only if its admission envelope already contains this binding."},
+            "site_binding_ready":true,"binding_changed":binding_changed,"carrier_rematerialization_required":binding_changed,"carrier_restart_required":binding_changed,
+            "next_steps":[
+                {"order":1,"action":"rematerialize_carriers","owner":"narada-mcp-materializer","instruction":"Run the authoritative all-carrier materialization or recover-generation command."},
+                {"order":2,"action":"restart_carrier","owner":"carrier","instruction":"Restart the carrier after successful materialization."},
+                {"order":3,"action":"open_surface","owner":"mcp-loader","instruction":"Open the binding by server_key after restart."}
+            ]
+        }
+    }))
 }
 
 fn site_unbind(contract: &Value, args: &Value) -> Result<Value, String> {
