@@ -176,7 +176,17 @@ fn run_root(root: &Path) -> PathBuf {
 fn is_within(path: &Path, root: &Path) -> bool {
     let p = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let r = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    p == r || p.starts_with(&r)
+    path_components_equal_or_child(&p, &r)
+}
+#[cfg(windows)]
+fn path_components_equal_or_child(path: &Path, root: &Path) -> bool {
+    let path = path.components().map(|component| component.as_os_str().to_string_lossy().to_lowercase()).collect::<Vec<_>>();
+    let root = root.components().map(|component| component.as_os_str().to_string_lossy().to_lowercase()).collect::<Vec<_>>();
+    path.len() >= root.len() && path.iter().zip(root.iter()).all(|(left, right)| left == right)
+}
+#[cfg(not(windows))]
+fn path_components_equal_or_child(path: &Path, root: &Path) -> bool {
+    path == root || path.starts_with(root)
 }
 fn safe_run_id(value: &str) -> Result<&str, Value> {
     if value.len() < 5
@@ -1184,6 +1194,18 @@ fn tool(name: &str, description: &str, schema: Value, read_only: bool) -> Value 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn containment_is_path_component_aware() {
+        assert!(path_components_equal_or_child(Path::new("C:/Users/Andrey/Narada/project"), Path::new("C:/Users/Andrey/Narada")));
+        assert!(!path_components_equal_or_child(Path::new("C:/Users/Andrey/Narada-other"), Path::new("C:/Users/Andrey/Narada")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn containment_ignores_windows_path_case() {
+        assert!(path_components_equal_or_child(Path::new("c:/users/andrey/narada/project"), Path::new("C:/Users/Andrey/Narada")));
+    }
 
     #[test]
     fn capability_snapshot_reports_effective_write_posture() {
