@@ -77,6 +77,7 @@
     "test:launcher": "pnpm --filter @narada-core/launcher-mcp test",
     "test:launcher:e2e:host": "pnpm --filter @narada-core/launcher-mcp test:e2e:host",
     "test:mcp-loader": "pnpm --filter @narada-core/mcp-loader-mcp test",
+    "test:media-operations": "pnpm --filter @narada-core/media-operations-mcp test",
     "test:runtime-introspection": "pnpm --filter @narada-core/runtime-introspection-mcp test",
     "test:nars-session": "pnpm --filter @narada-core/nars-session-mcp test",
     "test:speech": "pnpm --filter @narada-core/speech-mcp test",

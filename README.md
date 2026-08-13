@@ -27,6 +27,7 @@ Standalone MCP surface packages shared by Narada sites and carriers.
 - `@narada-core/mcp-registrar`: MCP surface registrar for binding/unbinding surfaces across Narada sites and carriers. See `packages/mcp-registrar/README.md`.
 - `@narada-core/surface-feedback-mcp`: cross-site MCP surface feedback intake and routing. See `packages/surface-feedback-mcp/README.md`.
 - `@narada-core/speech-mcp`: host-level speech surface for TTS, bounded capture, and transcription. See `packages/speech-mcp/README.md`.
+- `@narada-core/media-operations-mcp`: Rust CLI and MCP surface for remote YouTube and X media operations. See `packages/media-operations-mcp/README.md`.
 - `@narada-core/nars-session-mcp`: governed input and bounded readback for existing NARS sessions. See `docs/nars-session-mcp-target.md`.
 - `@narada-core/quota-meter-mcp`: host-level quota-meter glide status and desktop overlay lifecycle management. See `packages/quota-meter-mcp/README.md`.
 - `@narada-core/operator-console-overlay-mcp`: host-level dedicated MCP surface for the Narada Operator Console Windows overlay. See `packages/operator-console-overlay-mcp/README.md`.

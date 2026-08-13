@@ -122,6 +122,9 @@
       "path": "./packages/mcp-loader-mcp"
     },
     {
+      "path": "./packages/media-operations-mcp"
+    },
+    {
       "path": "./packages/speech-mcp"
     },
     {

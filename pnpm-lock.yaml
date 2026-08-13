@@ -408,6 +408,16 @@ importers:
         specifier: ^5.8.3
         version: 5.9.3
 
+  packages/media-operations-mcp:
+    dependencies:
+      '@narada-core/mcp-fabric-contracts':
+        specifier: workspace:*
+        version: link:../shared/mcp-fabric-contracts
+    devDependencies:
+      typescript:
+        specifier: ^5.8.3
+        version: 5.9.3
+
   packages/nars-session-mcp:
     dependencies:
       '@narada-core/mcp-e2e-harness':

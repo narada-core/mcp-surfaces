@@ -44,6 +44,7 @@ Current packages:
 - `@narada-core/mcp-loader-mcp`: policy-gated runtime MCP surface loader and proxy.
 - `@narada-core/runtime-introspection-mcp`: Narada-owned runtime trace and session composition analysis MCP surface.
 - `@narada-core/speech-mcp`: host-level speech MCP surface for TTS, bounded capture, transcription, prompt-response, and listen sessions.
+- `@narada-core/media-operations-mcp`: Rust CLI and MCP surface for remote YouTube and X downloads, clips, transcripts, thumbnails, and job control.
 - `@narada-core/cloudflare-carrier-mcp`: Cloudflare-carrier live operations MCP surface wrapping product-read, session status, and continuity health.
 - `@narada-core/site-coherence-mcp`: Site-level continuity coherence readback MCP surface for detecting posture mismatches between local and Cloudflare embodiments.
 - `@narada-core/site-lifecycle-mcp`: governed MCP surface aligned with `narada sites ...` CLI commands for Site creation planning, lifecycle inspection, relations, and gated configuration mutations.

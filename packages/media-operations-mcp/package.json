@@ -1,0 +1,16 @@
+{
+  "name": "@narada-core/media-operations-mcp",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "type": "module",
+  "description": "Native CLI and MCP client for the Narada media operations service.",
+  "exports": { "./surface-definition": { "types": "./dist/src/surface-definition.d.ts", "default": "./dist/src/surface-definition.js" } },
+  "scripts": {
+    "build": "tsc -b && cargo build --manifest-path native/Cargo.toml --release",
+    "typecheck": "tsc -b --pretty false",
+    "test": "cargo test --manifest-path native/Cargo.toml"
+  },
+  "dependencies": { "@narada-core/mcp-fabric-contracts": "workspace:*" },
+  "devDependencies": { "typescript": "^5.8.3" },
+  "files": ["dist/", "native/", "README.md"]
+}
