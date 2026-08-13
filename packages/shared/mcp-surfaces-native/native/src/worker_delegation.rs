@@ -652,7 +652,18 @@ fn preflight_command(root: &Path) -> Result<PathBuf, Value> {
     .find(|path| path.is_file())
     .ok_or_else(|| error("worker_intelligence_preflight_unavailable", "worker_intelligence_preflight_unavailable"))
 }
-fn invocation_plan_binding(root: &Path, requested_plan_ref: Option<&str>) -> Result<(String, String, Option<String>, String), Value> {
+fn admitted_plan_binding(admission: &Value) -> Result<(String, String, String, String), Value> {
+    let plan_ref = admission.get("plan_ref").and_then(Value::as_str).ok_or_else(|| error("worker_canonical_invocation_plan_invalid", "worker_canonical_invocation_plan_invalid"))?;
+    let provider = admission.pointer("/selected/inference_provider/id").and_then(Value::as_str).ok_or_else(|| error("worker_canonical_invocation_provider_missing", "worker_canonical_invocation_provider_missing"))?;
+    let mode = match provider {
+        "inference-provider:codex-subscription" => "codex-subscription",
+        _ => return Err(error("worker_native_provider_unsupported", "worker_native_provider_unsupported")),
+    };
+    let model = admission.pointer("/selected/model/id").and_then(Value::as_str).and_then(|value| value.strip_prefix("model:")).map(str::trim).filter(|value| !value.is_empty()).ok_or_else(|| error("worker_canonical_invocation_model_missing", "worker_canonical_invocation_model_missing"))?;
+    let evidence_ref = admission.get("evidence_ref").and_then(Value::as_str).unwrap_or_default().to_string();
+    Ok((plan_ref.to_string(), mode.to_string(), model.to_string(), evidence_ref))
+}
+fn invocation_plan_binding(root: &Path, requested_plan_ref: Option<&str>) -> Result<(String, String, String, String), Value> {
     let context =
         read_json(&root.join(".narada/intelligence-launch-context.json")).map_err(|_| {
             error(
@@ -702,32 +713,7 @@ fn invocation_plan_binding(root: &Path, requested_plan_ref: Option<&str>) -> Res
     if !output.status.success() || admission.get("status").and_then(Value::as_str) != Some("admitted") {
         return Err(json!({"schema":"narada.worker.error.v1","code":"worker_intelligence_preflight_refused","message":"worker_intelligence_preflight_refused","preflight":admission}));
     }
-    let plan_ref = admission.get("plan_ref").and_then(Value::as_str).ok_or_else(|| error("worker_canonical_invocation_plan_invalid", "worker_canonical_invocation_plan_invalid"))?;
-    let provider = admission
-        .pointer("/selected/inference_provider/id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            error(
-                "worker_canonical_invocation_provider_missing",
-                "worker_canonical_invocation_provider_missing",
-            )
-        })?;
-    let mode = match provider {
-        "inference-provider:codex-subscription" => "codex-subscription",
-        _ => {
-            return Err(error(
-                "worker_native_provider_unsupported",
-                "worker_native_provider_unsupported",
-            ))
-        }
-    };
-    let model = admission
-        .pointer("/selected/model/id")
-        .and_then(Value::as_str)
-        .and_then(|value| value.strip_prefix("model:"))
-        .map(str::to_string);
-    let evidence_ref = admission.get("evidence_ref").and_then(Value::as_str).unwrap_or_default().to_string();
-    Ok((plan_ref.to_string(), mode.to_string(), model, evidence_ref))
+    admitted_plan_binding(&admission)
 }
 fn codex_command() -> Option<PathBuf> {
     if let Some(command) = std::env::var_os("NARADA_NATIVE_CODEX_COMMAND") {
@@ -1006,7 +992,7 @@ fn complete_native_run(
     authority: String,
     plan_ref: String,
     provider_mode: String,
-    provider_model: Option<String>,
+    provider_model: String,
     allowed_roots: Vec<PathBuf>,
     prompt: String,
 ) {
@@ -1045,9 +1031,7 @@ fn complete_native_run(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    if let Some(model) = provider_model {
-        command.env("NARADA_NATIVE_CODEX_MODEL", model);
-    }
+    command.env("NARADA_NATIVE_CODEX_MODEL", provider_model);
     if let Some(codex) = codex_command() {
         command.env("NARADA_NATIVE_CODEX_COMMAND", codex);
     }
@@ -1222,8 +1206,15 @@ mod tests {
             invocation_plan_binding(Path::new(&site_root), None).expect("native preflight");
         assert!(plan_ref.starts_with("plan:"));
         assert_eq!(provider_mode, "codex-subscription");
-        assert!(model.is_some());
+        assert!(!model.is_empty());
         assert!(evidence_ref.starts_with("preflight-evidence:"));
+    }
+
+    #[test]
+    fn native_worker_refuses_admitted_plan_without_model() {
+        let admission = json!({"status":"admitted","plan_ref":"plan:test","selected":{"inference_provider":{"id":"inference-provider:codex-subscription"},"model":null},"evidence_ref":"preflight-evidence:test"});
+        let refusal = admitted_plan_binding(&admission).expect_err("missing model must refuse");
+        assert_eq!(refusal["code"], "worker_canonical_invocation_model_missing");
     }
 
     #[test]
