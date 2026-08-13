@@ -2110,7 +2110,7 @@
       "title": "task_lifecycle_recurring_run_due",
       "readOnlyHint": false,
       "destructiveHint": false,
-      "idempotentHint": false,
+      "idempotentHint": true,
       "openWorldHint": false
     }
   },

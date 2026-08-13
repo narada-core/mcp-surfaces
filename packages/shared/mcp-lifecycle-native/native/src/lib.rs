@@ -468,6 +468,18 @@ fn project_recurring_definition(row: Value) -> Result<Value, String> {
     }
     Ok(Value::Object(projected))
 }
+fn project_recurring_run(row: Value) -> Result<Value, String> {
+    let text = row
+        .get("run_json")
+        .and_then(Value::as_str)
+        .ok_or("recurring_run_json_missing")?;
+    let run = serde_json::from_str::<Value>(text)
+        .map_err(|error| format!("recurring_run_json_invalid:{error}"))?;
+    if !run.is_object() {
+        return Err("recurring_run_json_must_be_object".to_string());
+    }
+    Ok(run)
+}
 fn is_modern_request(params: &Value) -> bool {
     params
         .get("_meta")
@@ -1579,13 +1591,16 @@ impl LifecycleServer {
             |r| Ok(json!({"recurrence_id":r.get::<_,String>(0)?,"status":r.get::<_,String>(1)?,"definition_json":r.get::<_,String>(2)?,"last_due_key":r.get::<_,Option<String>>(3)?,"last_auto_triggered_at":r.get::<_,Option<String>>(4)?,"updated_at":r.get::<_,String>(5)?})),
         ).optional().map_err(db_error)?.ok_or_else(||format!("recurring_definition_not_found:{recurrence_id}"))?;
         if name == "task_lifecycle_recurring_runs" {
-            let runs = self.query_objects("select run_json from recurring_task_runs where recurrence_id=?1 order by created_at desc limit ?2",params![recurrence_id,limit])?.into_iter().filter_map(|r|r.get("run_json").and_then(Value::as_str).and_then(|v|serde_json::from_str::<Value>(v).ok())).collect::<Vec<_>>();
+            let runs = self.query_objects("select run_json from recurring_task_runs where recurrence_id=?1 order by created_at desc limit ?2",params![recurrence_id,limit])?.into_iter().map(project_recurring_run).collect::<Result<Vec<_>,_>>()?;
             return Ok(
                 json!({"schema":"narada.task.recurring.runs.v1","status":"ok","recurrence_id":recurrence_id,"count":runs.len(),"runs":runs}),
             );
         }
         let definition = project_recurring_definition(row)?;
-        Ok(json!({"schema":"narada.task.recurring.v1","status":"ok","definition":definition,"runs":if args.get("include_runs").and_then(Value::as_bool)==Some(true){json!(self.query_objects("select run_json from recurring_task_runs where recurrence_id=?1 order by created_at desc limit ?2",params![recurrence_id,limit])?)}else{json!([])}}))
+        let runs = if args.get("include_runs").and_then(Value::as_bool)==Some(true) {
+            self.query_objects("select run_json from recurring_task_runs where recurrence_id=?1 order by created_at desc limit ?2",params![recurrence_id,limit])?.into_iter().map(project_recurring_run).collect::<Result<Vec<_>,_>>()?
+        } else { Vec::new() };
+        Ok(json!({"schema":"narada.task.recurring.v1","status":"ok","definition":definition,"runs":runs}))
     }
 
     fn task_recurring_create(&mut self, args: Value) -> Result<Value, String> {
@@ -1668,11 +1683,33 @@ impl LifecycleServer {
         let task_id = created.get("task_id").cloned().unwrap_or(Value::Null);
         let task_number = created.get("task_number").cloned().unwrap_or(Value::Null);
         let run_id = format!("recurring-run-{}", Uuid::new_v4());
-        let run = json!({"run_id":run_id,"recurrence_id":id,"task_id":task_id,"task_number":task_number,"due_key":due_key,"trigger_mode":args.get("trigger_mode").cloned().unwrap_or_else(||json!("manual")),"reason":args.get("run_reason").cloned().unwrap_or_else(||json!("manual trigger")),"created_at":now()});
+        let timestamp = now();
+        let run = json!({"run_id":run_id,"recurrence_id":id,"task_id":task_id,"task_number":task_number,"due_key":due_key,"trigger_mode":args.get("trigger_mode").cloned().unwrap_or_else(||json!("manual")),"reason":args.get("run_reason").cloned().unwrap_or_else(||json!("manual trigger")),"created_at":timestamp});
         let connection = self.connection_mut()?;
-        connection.execute("insert into recurring_task_runs(run_id,recurrence_id,task_id,task_number,due_key,trigger_mode,reason,created_at,run_json) values(?1,?2,?3,?4,?5,?6,?7,?8,?9)",params![run_id,id,task_id.as_str(),task_number.as_i64(),due_key,run.get("trigger_mode").and_then(Value::as_str).unwrap_or("manual"),run.get("reason").and_then(Value::as_str).unwrap_or("manual"),now(),run.to_string()]).map_err(db_error)?;
-        connection.execute("update recurring_task_definitions set last_due_key=?1,last_auto_triggered_at=?2,updated_at=?2 where recurrence_id=?3",params![due_key,now(),id]).map_err(db_error)?;
-        connection.execute("insert into recurring_task_events(event_id,recurrence_id,event_type,actor_agent_id,authority_basis_json,event_json,created_at) values(?1,?2,'triggered',?3,?4,?5,?6)",params![format!("recurring-event-{}",Uuid::new_v4()),id,actor,authority.to_string(),run.to_string(),now()]).map_err(db_error)?;
+        let transaction = connection.transaction().map_err(db_error)?;
+        if let Some(existing) = transaction.query_row(
+            "select run_json from recurring_task_runs where recurrence_id=?1 and due_key=?2 order by created_at limit 1",
+            params![id,due_key],
+            |row| row.get::<_,String>(0),
+        ).optional().map_err(db_error)? {
+            transaction.rollback().map_err(db_error)?;
+            let existing = serde_json::from_str::<Value>(&existing).map_err(|error|format!("recurring_run_json_invalid:{error}"))?;
+            return Ok(json!({"schema":"narada.task.recurring.trigger.v1","status":"already_triggered","recurrence_id":id,"run":existing,"task":created}));
+        }
+        let claimed = transaction.execute(
+            "insert or ignore into recurring_task_run_claims(recurrence_id,due_key,run_id,claimed_at) values(?1,?2,?3,?4)",
+            params![id,due_key,run_id,timestamp],
+        ).map_err(db_error)?;
+        if claimed == 0 {
+            transaction.rollback().map_err(db_error)?;
+            return Err(format!("recurring_run_claim_conflict:{id}:{due_key}"));
+        }
+        transaction.execute("insert into recurring_task_runs(run_id,recurrence_id,task_id,task_number,due_key,trigger_mode,reason,created_at,run_json) values(?1,?2,?3,?4,?5,?6,?7,?8,?9)",params![run_id,id,task_id.as_str(),task_number.as_i64(),due_key,run.get("trigger_mode").and_then(Value::as_str).unwrap_or("manual"),run.get("reason").and_then(Value::as_str).unwrap_or("manual"),timestamp,run.to_string()]).map_err(db_error)?;
+        if run.get("trigger_mode").and_then(Value::as_str)==Some("schedule") {
+            transaction.execute("update recurring_task_definitions set last_due_key=?1,last_auto_triggered_at=?2,updated_at=?2 where recurrence_id=?3",params![due_key,timestamp,id]).map_err(db_error)?;
+        }
+        transaction.execute("insert into recurring_task_events(event_id,recurrence_id,event_type,actor_agent_id,authority_basis_json,event_json,created_at) values(?1,?2,'triggered',?3,?4,?5,?6)",params![format!("recurring-event-{}",Uuid::new_v4()),id,actor,authority.to_string(),run.to_string(),timestamp]).map_err(db_error)?;
+        transaction.commit().map_err(db_error)?;
         Ok(
             json!({"schema":"narada.task.recurring.trigger.v1","status":"triggered","recurrence_id":id,"run":run,"task":created}),
         )
@@ -1689,15 +1726,17 @@ impl LifecycleServer {
             .and_then(Value::as_i64)
             .unwrap_or(20)
             .clamp(1, 100);
-        let ids=self.query_objects("select recurrence_id from recurring_task_definitions where status='active' order by updated_at limit ?1",params![limit])?.into_iter().filter_map(|r|r.get("recurrence_id").and_then(Value::as_str).map(ToString::to_string)).collect::<Vec<_>>();
+        let current_time = string_arg(&args,"current_time").unwrap_or_else(now);
+        let due_key = utc_daily_due_key(&current_time)?;
+        let definitions=self.query_objects("select recurrence_id,definition_json,last_due_key from recurring_task_definitions where status='active' and json_extract(definition_json,'$.trigger_mode')='schedule' and json_extract(definition_json,'$.schedule_kind')='daily' and coalesce(last_due_key,'')<>?1 order by updated_at limit ?2",params![due_key,limit])?;
         let mut runs = Vec::new();
-        for id in ids {
-            let result=self.task_recurring_trigger(json!({"recurrence_id":id,"actor_agent_id":actor,"authority_basis":authority,"run_reason":"due"}))?;
+        let skipped: Vec<Value> = Vec::new();
+        for definition in definitions {
+            let id = definition.get("recurrence_id").and_then(Value::as_str).unwrap_or_default().to_string();
+            let result=self.task_recurring_trigger(json!({"recurrence_id":id,"actor_agent_id":actor,"authority_basis":authority,"run_reason":format!("Scheduled daily run for {due_key}"),"trigger_mode":"schedule","due_key":due_key}))?;
             runs.push(result);
         }
-        Ok(
-            json!({"schema":"narada.task.recurring.run_due.v1","status":"completed","count":runs.len(),"runs":runs}),
-        )
+        Ok(json!({"schema":"narada.task.recurring.run_due.v1","status":"completed","current_time":current_time,"due_key":due_key,"count":runs.len(),"runs":runs,"skipped":skipped}))
     }
 
     fn task_chapter_show(&self, args: Value) -> Result<Value, String> {
@@ -3452,7 +3491,14 @@ fn ensure_native_auxiliary_schema(c: &Connection) -> Result<(), String> {
         create index if not exists idx_recurring_task_definitions_status
             on recurring_task_definitions(status);
         create index if not exists idx_recurring_task_runs_recurrence
-            on recurring_task_runs(recurrence_id, created_at desc);",
+            on recurring_task_runs(recurrence_id, created_at desc);
+        create table if not exists recurring_task_run_claims (
+            recurrence_id text not null,
+            due_key text not null,
+            run_id text not null,
+            claimed_at text not null,
+            primary key(recurrence_id, due_key)
+        );",
     )
     .map_err(db_error)?;
     migrate_legacy_recurring_schema(c)
@@ -3682,6 +3728,12 @@ fn now() -> String {
     OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
+}
+fn utc_daily_due_key(value: &str) -> Result<String, String> {
+    let instant = OffsetDateTime::parse(value, &Rfc3339)
+        .map_err(|error| format!("recurring_current_time_invalid:{error}"))?;
+    let date = instant.to_offset(time::UtcOffset::UTC).date();
+    Ok(format!("{:04}-{:02}-{:02}", date.year(), u8::from(date.month()), date.day()))
 }
 fn read_json_file(path: &Path) -> Option<Value> {
     let text = fs::read_to_string(path).ok()?;
@@ -4442,7 +4494,24 @@ mod modern_protocol_tests {
             .expect("idempotent replay through same immutable payload");
         assert_eq!(first["task"]["task_id"], second["task"]["task_id"]);
         assert_eq!(first["task"]["title"], "Daily watcher");
+        assert_eq!(second["status"], "already_triggered");
         assert_eq!(second["task"]["status"], "created");
+        let run_count: i64 = server
+            .connection()
+            .unwrap()
+            .query_row(
+                "select count(*) from recurring_task_runs where recurrence_id=?1 and due_key='2026-08-13'",
+                params![recurrence_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(run_count, 1);
+        let shown_with_runs = server.task_recurring_read(
+            "task_lifecycle_recurring_show",
+            json!({"recurrence_id":recurrence_id,"include_runs":true}),
+        ).unwrap();
+        assert_eq!(shown_with_runs["runs"][0]["due_key"], "2026-08-13");
+        assert!(shown_with_runs["runs"][0].get("run_json").is_none());
         let payload_ref = format!(
             "mcp_payload:recurring_{}@v1",
             &digest(&json!({"recurrence_id":recurrence_id,"due_key":"2026-08-13"}))[..48]
@@ -4453,5 +4522,38 @@ mod modern_protocol_tests {
         );
         drop(server);
         fs::remove_dir_all(root).expect("remove recurring fixture");
+    }
+
+    #[test]
+    fn recurring_run_due_uses_one_utc_daily_key_and_skips_manual_definitions() {
+        let root = std::env::temp_dir().join(format!(
+            "narada-native-recurring-due-{}",
+            Uuid::new_v4()
+        ));
+        let options = Options {
+            surface: Surface::Task,
+            site_root: root.clone(),
+            site_root_source: "test".to_string(),
+            prepare: false,
+            migrate_legacy: false,
+            source_database_path: None,
+        };
+        LifecycleServer::prepare_database(&options).expect("prepare task database");
+        let mut server = LifecycleServer::new(options).expect("open task server");
+        let authority = json!({"kind":"test","summary":"daily recurrence test"});
+        let manual = server.task_recurring_create(json!({"title":"Manual","actor_agent_id":"test-agent","authority_basis":authority})).unwrap();
+        let scheduled = server.task_recurring_create(json!({"title":"Scheduled","actor_agent_id":"test-agent","authority_basis":authority,"trigger_mode":"schedule","schedule_kind":"daily","schedule_timezone":"UTC"})).unwrap();
+        let args = json!({"actor_agent_id":"test-agent","authority_basis":authority,"current_time":"2026-08-13T23:59:59-05:00"});
+        let first = server.task_recurring_run_due(args.clone()).unwrap();
+        let second = server.task_recurring_run_due(args).unwrap();
+        assert_eq!(first["due_key"], "2026-08-14");
+        assert_eq!(first["count"], 1);
+        assert_eq!(first["runs"][0]["recurrence_id"], scheduled["recurrence_id"]);
+        assert_eq!(second["count"], 0);
+        let manual_run_count: i64 = server.connection().unwrap().query_row("select count(*) from recurring_task_runs where recurrence_id=?1",params![manual["recurrence_id"].as_str()],|row|row.get(0)).unwrap();
+        assert_eq!(manual_run_count,0);
+        assert!(second["skipped"].as_array().unwrap().is_empty());
+        drop(server);
+        fs::remove_dir_all(root).expect("remove recurring due fixture");
     }
 }
