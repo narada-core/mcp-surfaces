@@ -1721,6 +1721,63 @@ function runOperatorRoutingParity() {
   }
 }
 
+function runSiteInboxParity() {
+  const root = mkdtempSync(join(tmpdir(), 'narada-site-inbox-native-'));
+  try {
+    const outputDir = join(root, '.ai', 'tmp', 'mcp-outputs', 'workspace');
+    mkdirSync(outputDir, { recursive: true });
+    writeFileSync(join(outputDir, 'fixture.json'), JSON.stringify({ schema: 'narada.mcp_output_ref.v1', tool_name: 'fixture', truncated: false, full_output: { text: 'abcdefghij' } }), 'utf8');
+    const submitIncident = { kind: 'incident', title: 'Incident', principal: 'agent:test', severity: 80, idempotency_key: 'incident-1' };
+    const requests = [
+      { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} },
+      { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'inbox_guidance', arguments: {} } },
+      { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'inbox_doctor', arguments: {} } },
+      { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'inbox_list', arguments: { limit: 10 } } },
+      { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'inbox_submit', arguments: submitIncident } },
+      { jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'inbox_submit', arguments: submitIncident } },
+      { jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'inbox_submit', arguments: { ...submitIncident, title: 'Conflict' } } },
+      { jsonrpc: '2.0', id: 8, method: 'tools/call', params: { name: 'inbox_next', arguments: {} } },
+      { jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'capa_queue', arguments: { limit: 10 } } },
+      { jsonrpc: '2.0', id: 10, method: 'tools/call', params: { name: 'inbox_output_show', arguments: { ref: 'mcp_output:fixture', offset: 0, limit: 5 } } },
+    ];
+    let responses = runMailbox(executable, ['--surface-id', 'site-inbox', '--site-root', root], requests, root);
+    const tools = responses.find((response) => response.id === 1)?.result?.tools ?? [];
+    if (tools.length !== 12 || tools.some((tool) => tool.inputSchema?.additionalProperties !== false)) throw new Error('site_inbox.native_tool_contract_invalid');
+    if (mailboxStructured(responses, 3, 'rust').storage_mode !== 'native_sqlite') throw new Error('site_inbox.native_doctor_storage_invalid');
+    if (mailboxStructured(responses, 4, 'rust').count !== 0) throw new Error('site_inbox.native_empty_list_invalid');
+    const incidentId = mailboxStructured(responses, 5, 'rust').envelope_id;
+    if (!incidentId || mailboxStructured(responses, 6, 'rust').idempotency_replay !== true) throw new Error('site_inbox.native_submit_retry_invalid');
+    if (!responses.find((response) => response.id === 7)?.error) throw new Error('site_inbox.native_submit_conflict_not_refused');
+    if (mailboxStructured(responses, 8, 'rust').envelope?.envelope_id !== incidentId || mailboxStructured(responses, 9, 'rust').count !== 1) throw new Error('site_inbox.native_triage_invalid');
+    if (mailboxStructured(responses, 10, 'rust').output_text.length !== 5 || mailboxStructured(responses, 10, 'rust').next_offset !== 5) throw new Error('site_inbox.native_output_paging_invalid');
+    const followup = [
+      { jsonrpc: '2.0', id: 11, method: 'tools/call', params: { name: 'inbox_show', arguments: { envelope_id: incidentId } } },
+      { jsonrpc: '2.0', id: 12, method: 'tools/call', params: { name: 'inbox_promote_capa', arguments: { envelope_id: incidentId, principal: 'agent:test', reason: 'review' } } },
+      { jsonrpc: '2.0', id: 13, method: 'tools/call', params: { name: 'inbox_submit', arguments: { kind: 'question', title: 'Question', principal: 'agent:test', idempotency_key: 'question-1' } } },
+    ];
+    responses = runMailbox(executable, ['--surface-id', 'site-inbox', '--site-root', root], followup, root);
+    const questionId = mailboxStructured(responses, 13, 'rust').envelope_id;
+    const finalRequests = [
+      { jsonrpc: '2.0', id: 14, method: 'tools/call', params: { name: 'inbox_dismiss', arguments: { envelope_id: questionId, principal: 'agent:test', reason: 'answered' } } },
+      { jsonrpc: '2.0', id: 15, method: 'tools/call', params: { name: 'inbox_submit', arguments: { kind: 'observation', title: 'Observation', principal: 'agent:test', idempotency_key: 'observation-1' } } },
+    ];
+    responses = runMailbox(executable, ['--surface-id', 'site-inbox', '--site-root', root], finalRequests, root);
+    const observationId = mailboxStructured(responses, 15, 'rust').envelope_id;
+    const dispositionRequests = [
+      { jsonrpc: '2.0', id: 16, method: 'tools/call', params: { name: 'inbox_acknowledge', arguments: { envelope_id: observationId, principal: 'agent:test' } } },
+      { jsonrpc: '2.0', id: 17, method: 'tools/call', params: { name: 'inbox_acknowledge', arguments: { envelope_id: observationId, principal: 'agent:test' } } },
+      { jsonrpc: '2.0', id: 18, method: 'tools/call', params: { name: 'inbox_audit', arguments: { limit: 50 } } },
+      { jsonrpc: '2.0', id: 19, method: 'tools/call', params: { name: 'inbox_next', arguments: {} } },
+    ];
+    responses = runMailbox(executable, ['--surface-id', 'site-inbox', '--site-root', root], dispositionRequests, root);
+    if (mailboxStructured(responses, 17, 'rust').idempotency_replay !== true) throw new Error('site_inbox.native_disposition_retry_invalid');
+    if (mailboxStructured(responses, 18, 'rust').count !== 9 || mailboxStructured(responses, 19, 'rust').status !== 'empty') throw new Error('site_inbox.native_audit_or_empty_invalid');
+    return { status: 'passed', verified: ['all_12_tools', 'closed_bounded_schemas', 'empty', 'submit_retry_conflict', 'show_next_capa', 'ack_dismiss_promote', 'audit', 'output_paging', 'persistence_across_processes'] };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 function runCalendarParity() {
   const workspaceRoot = resolve(packageRoot, '..', '..', '..');
   const bunEntrypoint = join(workspaceRoot, 'packages', 'calendar-mcp', 'src', 'main.ts');
@@ -2509,6 +2566,7 @@ const sopEngineParity = runSlice('sop', () => runSopEngineParity({ executable, w
 const surfaceFeedbackParity = runSlice('surface-feedback', runSurfaceFeedbackParity);
 const siteLoopParity = runSlice('site-loop', runSiteLoopParity);
 const operatorRoutingParity = runSlice('operator-routing', runOperatorRoutingParity);
+const siteInboxParity = runSlice('site-inbox', runSiteInboxParity);
 const calendarParity = runSlice('calendar', runCalendarParity);
 const calendarAuthorityBridge = runSlice('calendar', runCalendarAuthorityBridge);
 const calendarNativeGraphParity = runSlice('calendar', runCalendarNativeGraphParity);
@@ -2547,6 +2605,7 @@ process.stdout.write(JSON.stringify({
   surface_feedback_parity: surfaceFeedbackParity,
   site_loop_parity: siteLoopParity,
   operator_routing_parity: operatorRoutingParity,
+  site_inbox_parity: siteInboxParity,
   calendar_parity: calendarParity,
   calendar_authority_bridge: calendarAuthorityBridge,
   calendar_native_graph_parity: calendarNativeGraphParity,

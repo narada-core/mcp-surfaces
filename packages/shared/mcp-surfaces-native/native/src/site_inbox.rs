@@ -61,7 +61,7 @@ pub fn list_tools() -> Vec<Value> {
             "inbox_show",
             "Show one site-local inbox envelope by envelope_id.",
             schema(
-                json!({"properties":{"envelope_id":{"type":"string"}}}),
+                json!({"properties":{"envelope_id":{"type":"string","minLength":5,"maxLength":512}}}),
                 &["envelope_id"],
             ),
             true,
@@ -71,11 +71,12 @@ pub fn list_tools() -> Vec<Value> {
             "Submit one site-local inbox envelope and admit it to the local inbox log.",
             schema(
                 json!({"properties":{
-                    "kind":{"type":"string","enum":KINDS},"title":{"type":"string"},"summary":{"type":"string","default":Value::Null},
-                    "principal":{"type":"string"},"target_role":{"type":"string","enum":ROLES},
+                    "kind":{"type":"string","enum":KINDS},"title":{"type":"string","minLength":1,"maxLength":1024},"summary":{"type":"string","maxLength":8192},
+                    "principal":{"type":"string","minLength":1,"maxLength":512},"target_role":{"type":"string","enum":ROLES},
                     "severity":{"type":"integer","minimum":0,"maximum":100},
                     "authority_level":{"type":"string","enum":["agent_reported","operator_confirmed","operator_directed"],"default":"agent_reported"},
-                    "payload":{"type":"object","default":{}}
+                    "payload":{"type":"object","maxProperties":256,"default":{}},
+                    "idempotency_key":{"type":"string","minLength":1,"maxLength":512,"description":"Stable retry key; identical replay returns the original envelope and conflicting reuse is refused."}
                 }}),
                 &["kind", "title", "principal"],
             ),
@@ -85,7 +86,7 @@ pub fn list_tools() -> Vec<Value> {
             "inbox_acknowledge",
             "Acknowledge an envelope.",
             schema(
-                json!({"properties":{"envelope_id":{"type":"string"},"principal":{"type":"string"},"reason":{"type":"string"}}}),
+                json!({"properties":{"envelope_id":{"type":"string","minLength":5,"maxLength":512},"principal":{"type":"string","minLength":1,"maxLength":512},"reason":{"type":"string","maxLength":4096}}}),
                 &["envelope_id", "principal"],
             ),
             false,
@@ -94,7 +95,7 @@ pub fn list_tools() -> Vec<Value> {
             "inbox_dismiss",
             "Dismiss an envelope.",
             schema(
-                json!({"properties":{"envelope_id":{"type":"string"},"principal":{"type":"string"},"reason":{"type":"string"}}}),
+                json!({"properties":{"envelope_id":{"type":"string","minLength":5,"maxLength":512},"principal":{"type":"string","minLength":1,"maxLength":512},"reason":{"type":"string","minLength":1,"maxLength":4096}}}),
                 &["envelope_id", "principal", "reason"],
             ),
             false,
@@ -103,7 +104,7 @@ pub fn list_tools() -> Vec<Value> {
             "inbox_promote_capa",
             "Promote an envelope to CAPA review status.",
             schema(
-                json!({"properties":{"envelope_id":{"type":"string"},"principal":{"type":"string"},"reason":{"type":"string"}}}),
+                json!({"properties":{"envelope_id":{"type":"string","minLength":5,"maxLength":512},"principal":{"type":"string","minLength":1,"maxLength":512},"reason":{"type":"string","maxLength":4096}}}),
                 &["envelope_id", "principal"],
             ),
             false,
@@ -112,7 +113,7 @@ pub fn list_tools() -> Vec<Value> {
             "inbox_audit",
             "Read recent admission log entries.",
             schema(
-                json!({"properties":{"limit":{"type":"integer","minimum":1,"maximum":200,"default":50},"envelope_id":{"type":"string"}}}),
+                json!({"properties":{"limit":{"type":"integer","minimum":1,"maximum":200,"default":50},"envelope_id":{"type":"string","minLength":5,"maxLength":512}}}),
                 &[],
             ),
             true,
@@ -139,7 +140,7 @@ pub fn list_tools() -> Vec<Value> {
             "inbox_output_show",
             "Read a materialized Inbox MCP output ref with offset/limit paging.",
             schema(
-                json!({"properties":{"ref":{"type":"string"},"output_ref":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":0}}}),
+                json!({"properties":{"ref":{"type":"string","minLength":12,"maxLength":91},"output_ref":{"type":"string","minLength":12,"maxLength":91},"offset":{"type":"integer","minimum":0,"maximum":10000000},"limit":{"type":"integer","minimum":1,"maximum":10000,"default":4000}}}),
                 &[],
             ),
             true,
@@ -219,7 +220,7 @@ fn guidance_tool() -> Value {
         "inbox_guidance",
         "Show model-facing operating guidance for site-inbox MCP workflows.",
         schema(
-            json!({"properties":{"workflow":{"type":"string"},"tool":{"type":"string"}}}),
+            json!({"properties":{"workflow":{"type":"string","maxLength":256},"tool":{"type":"string","maxLength":256}}}),
             &[],
         ),
         true,
@@ -282,6 +283,24 @@ fn submit(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
             ));
         }
     }
+    let submission_fingerprint = submission_fingerprint(args);
+    let idempotency_key = optional_string(args, "idempotency_key");
+    let envelope_id = idempotency_key.as_ref().map(|key| {
+        let digest = hash(&json!(key));
+        format!("env_submit_{}", &digest[7..47])
+    });
+    if let Some(id) = envelope_id.as_deref() {
+        refresh(root)?;
+        if let Some(row) = read_row(root, id)? {
+            let path = row.get("file_path").and_then(Value::as_str).ok_or_else(|| error("inbox_idempotency_record_invalid", "existing idempotent envelope has no file path"))?;
+            if fs::metadata(path).map_err(|e| error("inbox_idempotency_record_invalid", &e.to_string()))?.len() > MAX_ENVELOPE_BYTES { return Err(error("inbox_idempotency_record_invalid", "existing idempotent envelope exceeds size bound")); }
+            let existing: Value = serde_json::from_str(&fs::read_to_string(path).map_err(|e| error("inbox_idempotency_record_invalid", &e.to_string()))?).map_err(|e| error("inbox_idempotency_record_invalid", &e.to_string()))?;
+            if existing.get("submission_fingerprint").and_then(Value::as_str) != Some(submission_fingerprint.as_str()) {
+                return Err(error("inbox_idempotency_key_conflict", "idempotency_key already names a different inbox submission"));
+            }
+            return Ok(json!({"status":"replayed","idempotency_replay":true,"site_root":root.to_string_lossy(),"envelope_id":id,"envelope_path":path}));
+        }
+    }
     let mut payload = args
         .get("payload")
         .and_then(Value::as_object)
@@ -298,12 +317,14 @@ fn submit(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
         "principal": principal
     });
     let source = json!({"kind":"inbox_mcp_submit","principal":principal});
-    let envelope = json!({
+    let mut envelope = json!({
         "kind":kind, "title":title, "summary":args.get("summary").cloned().unwrap_or(Value::Null),
         "status":"received", "target_role":args.get("target_role").cloned().unwrap_or(Value::Null),
         "severity":args.get("severity").cloned().unwrap_or(Value::Null),
+        "submission_fingerprint":submission_fingerprint,
         "authority":authority, "source":source, "payload":payload
     });
+    if let Some(id) = envelope_id { envelope["envelope_id"] = json!(id); }
     let (id, path, event) = admit(root, envelope)?;
     refresh(root)?;
     Ok(json!({
@@ -312,15 +333,24 @@ fn submit(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     }))
 }
 
+fn submission_fingerprint(args: &Map<String, Value>) -> String {
+    let ordered = args.iter().filter(|(key, _)| key.as_str() != "idempotency_key")
+        .map(|(key, value)|(key.clone(), value.clone())).collect::<std::collections::BTreeMap<_,_>>();
+    hash(&serde_json::to_value(ordered).unwrap_or(Value::Null))
+}
+
 fn disposition(args: &Map<String, Value>, root: &Path, status: &str) -> Result<Value, Value> {
     let id = required(args, "envelope_id")?;
     let principal = required(args, "principal")?;
-    if read_row(root, &id)?.is_none() {
+    let Some(existing) = read_row(root, &id)? else {
         return Ok(json!({"status":"not_found","envelope_id":id}));
-    }
+    };
     let reason = optional_string(args, "reason");
     if status == "dismissed" && reason.is_none() {
         return Err(error("reason_required", "reason_required"));
+    }
+    if existing.get("status").and_then(Value::as_str) == Some(status) {
+        return Ok(json!({"status":status,"envelope_id":id,"idempotency_replay":true,"reason":reason}));
     }
     let event = append(
         root,
@@ -374,7 +404,7 @@ fn doctor(root: &Path) -> Result<Value, Value> {
     Ok(json!({
         "status":"ok","site_root":root.to_string_lossy(),
         "db_path":root.join(".ai/state/inbox-index.sqlite").to_string_lossy(),
-        "storage_mode":"node_sqlite","indexed_count":indexed,"invalid_count":invalid,
+        "storage_mode":"native_sqlite","indexed_count":indexed,"invalid_count":invalid,
         "counts":counts,"server_name":SERVER_NAME
     }))
 }
@@ -414,7 +444,7 @@ fn list(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
             .unwrap_or(true)
     });
     Ok(json!({
-        "status":"ok","site_root":root.to_string_lossy(),"storage_mode":"node_sqlite",
+        "status":"ok","site_root":root.to_string_lossy(),"storage_mode":"native_sqlite",
         "filters":{"status":status,"kind":kind,"target_role":role,"action":action},
         "count":rows.len(),"envelopes":rows.iter().take(limit).map(summary).collect::<Vec<_>>()
     }))
@@ -898,6 +928,7 @@ fn admit(root: &Path, envelope: Value) -> Result<(String, String, Value), Value>
     let path = directory.join(name);
     let text = serde_json::to_string_pretty(&Value::Object(object.clone()))
         .map_err(|e| error("inbox_envelope_encode_failed", &e.to_string()))?;
+    if text.len() as u64 > MAX_ENVELOPE_BYTES { return Err(error("inbox_envelope_too_large", "serialized inbox envelope exceeds 512000 bytes")); }
     fs::write(&path, text).map_err(|e| error("inbox_envelope_write_failed", &e.to_string()))?;
     let authority = object.get("authority").and_then(Value::as_object);
     let source = object.get("source").and_then(Value::as_object);
@@ -1065,7 +1096,7 @@ mod tests {
             std::env::temp_dir().join(format!("narada-site-inbox-native-{}", Uuid::new_v4()));
         fs::create_dir_all(&root).expect("root");
         let args: Map<String, Value> = serde_json::from_value(json!({
-            "kind":"incident","title":"Native inbox test","principal":"native-test","payload":{"summary":"test"}
+            "kind":"incident","title":"Native inbox test","principal":"native-test","payload":{"summary":"test"},"idempotency_key":"native-test-submit"
         })).expect("args");
         let submitted = submit(&args, &root).expect("submit");
         let id = submitted
@@ -1073,6 +1104,12 @@ mod tests {
             .and_then(Value::as_str)
             .expect("id")
             .to_string();
+        let replayed = submit(&args, &root).expect("submit replay");
+        assert_eq!(replayed["status"], "replayed");
+        assert_eq!(replayed["envelope_id"], id);
+        let mut conflict_args = args.clone();
+        conflict_args.insert("title".into(), json!("Different title"));
+        assert_eq!(submit(&conflict_args, &root).expect_err("conflict")["code"], "inbox_idempotency_key_conflict");
         let next_value = next(&Map::new(), &root).expect("next");
         assert_eq!(next_value["status"], "ok");
         assert_eq!(next_value["envelope"]["envelope_id"], id);
@@ -1081,11 +1118,13 @@ mod tests {
                 .expect("ack args");
         let acked = disposition(&ack_args, &root, "acknowledged").expect("ack");
         assert_eq!(acked["status"], "acknowledged");
+        assert_eq!(disposition(&ack_args, &root, "acknowledged").expect("ack replay")["idempotency_replay"], true);
         let show_args: Map<String, Value> =
             serde_json::from_value(json!({"envelope_id":id})).expect("show args");
         let shown = show(&show_args, &root).expect("show");
         assert_eq!(shown["envelope"]["status"], "acknowledged");
         assert_eq!(shown["envelope"]["payload"]["title"], "Native inbox test");
+        assert_eq!(doctor(&root).expect("doctor")["storage_mode"], "native_sqlite");
         fs::remove_dir_all(&root).expect("cleanup");
     }
 
