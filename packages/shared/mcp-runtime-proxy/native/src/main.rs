@@ -2852,71 +2852,6 @@ fn resolve_child_command(child_command: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-#[cfg(test)]
-mod native_child_runtime_tests {
-    use super::{
-        registrar_carrier_compatibility_notification, registrar_carrier_compatibility_response,
-        resolve_child_command,
-    };
-    use serde_json::json;
-
-    #[test]
-    fn refuses_javascript_interpreters_as_native_proxy_children() {
-        for command in ["node", "node.exe", "bun", "bun.exe"] {
-            let error = resolve_child_command(command).expect_err("interpreter must be refused");
-            assert_eq!(
-                error,
-                format!("native_proxy_interpreter_child_refused:{command}")
-            );
-        }
-    }
-
-    #[test]
-    fn registrar_compatibility_synthesizes_only_the_naked_initialize_pair() {
-        let initialize = json!({
-            "jsonrpc": "2.0",
-            "id": 7,
-            "method": "initialize",
-            "params": {}
-        });
-        let response = registrar_carrier_compatibility_response(Some("mcp-registrar"), &initialize)
-            .expect("naked initialize must be synthesized at the carrier edge");
-        assert_eq!(response["result"]["protocolVersion"], "2026-07-28");
-        assert_eq!(response["result"]["resultType"], "complete");
-        assert!(registrar_carrier_compatibility_notification(
-            Some("mcp-registrar"),
-            &json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })
-        ));
-    }
-
-    #[test]
-    fn registrar_compatibility_does_not_mask_modern_initialize_or_other_surfaces() {
-        let modern = json!({
-            "jsonrpc": "2.0",
-            "id": 8,
-            "method": "initialize",
-            "params": {
-                "_meta": {
-                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
-                    "io.modelcontextprotocol/clientInfo": { "name": "test", "version": "1" },
-                    "io.modelcontextprotocol/clientCapabilities": {}
-                }
-            }
-        });
-        assert!(registrar_carrier_compatibility_response(Some("mcp-registrar"), &modern).is_none());
-        assert!(registrar_carrier_compatibility_response(
-            Some("git"),
-            &json!({
-                "jsonrpc": "2.0",
-                "id": 9,
-                "method": "initialize",
-                "params": {}
-            })
-        )
-        .is_none());
-    }
-}
-
 /// The strict native registrar speaks the no-handshake 2026 protocol.  Naked
 /// Codex still emits the transport-era initialize pair before its ordinary
 /// requests.  Keep that compatibility at the carrier edge only: the registrar
@@ -3202,4 +3137,69 @@ fn parent_pid() -> u32 {
 #[cfg(not(windows))]
 fn parent_pid() -> u32 {
     0
+}
+
+#[cfg(test)]
+mod native_child_runtime_tests {
+    use super::{
+        registrar_carrier_compatibility_notification, registrar_carrier_compatibility_response,
+        resolve_child_command,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn refuses_javascript_interpreters_as_native_proxy_children() {
+        for command in ["node", "node.exe", "bun", "bun.exe"] {
+            let error = resolve_child_command(command).expect_err("interpreter must be refused");
+            assert_eq!(
+                error,
+                format!("native_proxy_interpreter_child_refused:{command}")
+            );
+        }
+    }
+
+    #[test]
+    fn registrar_compatibility_synthesizes_only_the_naked_initialize_pair() {
+        let initialize = json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "initialize",
+            "params": {}
+        });
+        let response = registrar_carrier_compatibility_response(Some("mcp-registrar"), &initialize)
+            .expect("naked initialize must be synthesized at the carrier edge");
+        assert_eq!(response["result"]["protocolVersion"], "2026-07-28");
+        assert_eq!(response["result"]["resultType"], "complete");
+        assert!(registrar_carrier_compatibility_notification(
+            Some("mcp-registrar"),
+            &json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })
+        ));
+    }
+
+    #[test]
+    fn registrar_compatibility_does_not_mask_modern_initialize_or_other_surfaces() {
+        let modern = json!({
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "initialize",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientInfo": { "name": "test", "version": "1" },
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                }
+            }
+        });
+        assert!(registrar_carrier_compatibility_response(Some("mcp-registrar"), &modern).is_none());
+        assert!(registrar_carrier_compatibility_response(
+            Some("git"),
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 9,
+                "method": "initialize",
+                "params": {}
+            })
+        )
+        .is_none());
+    }
 }
