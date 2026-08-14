@@ -24,6 +24,10 @@ fn run(root: &Path, state: &Path, script: &Path, url: &str, requests: &[Value]) 
         .env("QUOTA_METER_STATE_ROOT", state)
         .env("QUOTA_METER_OVERLAY_SCRIPT", script)
         .env("QUOTA_METER_POWERSHELL", "pwsh")
+        .env("USERPROFILE", root)
+        .env("HOME", root)
+        .env("KIMI_CODE_HOME", root.join("kimi-home"))
+        .env("KIMI_CODE_CREDENTIALS", root.join("missing-kimi-credentials.json"))
         .env("KIMI_CODE_API_KEY", "test-token")
         .env("KIMI_USAGE_URL", url)
         .env("QUOTA_METER_CODEX_COMMAND", "definitely-not-a-command")
@@ -218,6 +222,6 @@ if($Action -eq 'stop'){if(Test-Path -LiteralPath $PidPath){$target=[int](Get-Con
     assert_eq!(requests.len(), 2);
     assert!(requests.iter().all(|request| request
         .to_ascii_lowercase()
-        .contains("authorization: bearer test-token")), "captured requests: {requests:?}");
+        .contains("authorization: bearer test-token")));
     fs::remove_dir_all(root).unwrap();
 }

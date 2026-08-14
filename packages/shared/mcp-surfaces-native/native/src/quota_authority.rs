@@ -368,6 +368,11 @@ fn fetch_kimi(timeout_ms: u64) -> Value {
 }
 
 fn kimi_credential() -> Option<(String, &'static str)> {
+    if let Ok(value) = env::var("KIMI_CODE_API_KEY").or_else(|_| env::var("KIMI_API_KEY")) {
+        if !value.trim().is_empty() {
+            return Some((value, "api_key"));
+        }
+    }
     let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).ok()?;
     let kimi_home = env::var("KIMI_CODE_HOME")
         .ok()
@@ -408,11 +413,6 @@ fn kimi_credential() -> Option<(String, &'static str)> {
             continue;
         }
         return Some((token.into(), "native_oauth"));
-    }
-    if let Ok(value) = env::var("KIMI_CODE_API_KEY").or_else(|_| env::var("KIMI_API_KEY")) {
-        if !value.trim().is_empty() {
-            return Some((value, "api_key"));
-        }
     }
     None
 }
