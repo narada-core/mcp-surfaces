@@ -7,7 +7,20 @@ use sha2::Sha256;
 use std::env;
 
 pub fn read(context: &Context, projection: &str, args: &Value) -> Result<Value, String> {
-    let evidence = evidence(context, args)?;
+    let evidence = match evidence(context, args) {
+        Ok(evidence) => evidence,
+        Err(reason)
+            if matches!(
+                reason.as_str(),
+                "agent_context_exact_admission_receipt_required"
+                    | "agent_context_exact_orientation_manifest_id_required"
+                    | "agent_context_exact_orientation_delivery_receipt_required"
+            ) =>
+        {
+            return Ok(orientation_unavailable(&reason));
+        }
+        Err(reason) => return Err(reason),
+    };
     let packet = entry_packet(context, &evidence)?;
     if projection == "admin" {
         return admin_read(context, args, &evidence, packet);
@@ -50,6 +63,37 @@ pub fn read(context: &Context, projection: &str, args: &Value) -> Result<Value, 
         return occupant_material(&result, &packet, &evidence.delivery);
     }
     occupant_entry(&packet, &evidence.delivery)
+}
+
+fn orientation_unavailable(reason: &str) -> Value {
+    json!({
+        "schema":"narada.agent_context.orientation_unavailable.v1",
+        "status":"blocked",
+        "ordinary_work_gate":"not_established",
+        "reason_code":reason,
+        "source_mutation":false,
+        "missing_carrier_entry_evidence":true,
+        "retry_safe":true,
+        "recovery":{
+            "owner":"carrier_session_launcher",
+            "action":"start_an_admitted_carrier_session",
+            "instruction":"Start the carrier through Narada's admitted-session launcher, then call agent_orientation_read({}) again. Static MCP materialization cannot synthesize session admission or orientation-delivery evidence."
+        }
+    })
+}
+
+#[cfg(test)]
+mod ergonomics_tests {
+    use super::*;
+
+    #[test]
+    fn missing_carrier_entry_evidence_is_a_bounded_recoverable_result() {
+        let result = orientation_unavailable("agent_context_exact_admission_receipt_required");
+        assert_eq!(result["status"], "blocked");
+        assert_eq!(result["ordinary_work_gate"], "not_established");
+        assert_eq!(result["recovery"]["owner"], "carrier_session_launcher");
+        assert_eq!(result["retry_safe"], true);
+    }
 }
 
 struct Evidence {

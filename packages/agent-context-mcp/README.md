@@ -38,9 +38,9 @@ ordinary-work gate.
 
 ## Runtime
 
-This is a Bun-first surface. Registrar-generated carrier bindings launch it with
-`bun`; Node remains a supported compatibility runtime through the shared SQLite
-adapter.
+This is a native Rust surface. Registrar-generated carrier bindings launch an
+immutable `narada-agent-context-mcp` artifact through the native runtime proxy;
+Node and Bun are not runtime dependencies.
 
 The server uses a site root and these environment variables when present:
 
@@ -60,20 +60,27 @@ Receipt and manifest identifiers may also be supplied explicitly to the
 corresponding tools. Explicit and inherited values must agree.
 
 ```powershell
-pnpm --filter @narada-core/agent-context-mcp build
-bun packages/agent-context-mcp/dist/src/main.js --site-root <src-root>/site --site-id narada.example
+cargo run --locked --manifest-path packages/agent-context-mcp/native/Cargo.toml -- --site-root <src-root>/site --site-id narada.example --tool-projection occupant
 ```
+
+Use `cargo native-release` at workspace scope to test, promote, and materialize
+the immutable carrier artifact graph.
 
 ## Normal occupant tools
 
 - `agent_orientation_read({})`: return one thin inline occupant brief, the
-  canonical `manifest_ref`, progress, and an exact `next_call`.
+  canonical `manifest_ref`, progress, and an exact `next_call`. When the carrier
+  was not launched through an admitted Narada session, return a bounded
+  `orientation_unavailable` result naming the carrier-session launcher as the
+  recovery owner; absence of hidden entry evidence is not a transport failure.
 - `agent_orientation_read({ continuation })`: replay the opaque continuation
   returned by `next_call`. It delivers one bounded page or performs the final
   acknowledgement. The caller never supplies step ids, offsets, hashes,
   timestamps, receipts, or completion evidence.
-- `mcp_output_show`: shared carrier transport readback for outputs from other
-  projected surfaces. The orientation operation itself never emits an output
+- `mcp_output_show({ ref, offset?, limit? })`: shared carrier transport readback
+  for outputs from other projected surfaces. `output_ref` is an alias for
+  `ref`; one is required, offset defaults to 0, and limit defaults to 10000 with
+  a maximum of 20000. The orientation operation itself never emits an output
   reference.
 
 The default projection exposes exactly one domain operation,
