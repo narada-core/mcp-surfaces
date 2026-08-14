@@ -31,9 +31,7 @@ const ALLOWED_DOWNLOADED_ATTACHMENT_TYPES: &[&str] = &[
     "image/jpeg",
 ];
 
-/// Direct, bounded Microsoft Graph authority for the provider-facing part of
-/// graph-mail. Operations remain opt-in until the complete provider contract
-/// for this surface has been ported and parity-tested.
+/// Direct, bounded Microsoft Graph authority for graph-mail.
 pub fn enabled() -> bool {
     matches!(
         std::env::var("NARADA_NATIVE_GRAPH_MAIL_AUTHORITY")
@@ -150,7 +148,35 @@ impl Policy {
         } else {
             json!({})
         };
-        let object = object.as_object().cloned().unwrap_or_default();
+        let object = object
+            .as_object()
+            .cloned()
+            .ok_or_else(|| unavailable("graph_mail_config_invalid", "policy must be a JSON object"))?;
+        let attachment_roots = object
+            .get("allowed_attachment_roots")
+            .or_else(|| object.get("allowedAttachmentRoots"))
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if attachment_roots.len() > 32
+            || attachment_roots.iter().any(|value| {
+                value
+                    .as_str()
+                    .is_none_or(|value| value.trim().is_empty() || value.len() > 4096)
+            })
+        {
+            return Err(unavailable(
+                "graph_mail_attachment_roots_invalid",
+                "allowed_attachment_roots permits at most 32 non-empty paths of at most 4096 bytes",
+            ));
+        }
+        let allowed_scopes = string_array(&object, "device_code_allowed_scopes", "deviceCodeAllowedScopes");
+        if allowed_scopes.len() > 16 || allowed_scopes.iter().any(|value| value.len() > 4096) {
+            return Err(unavailable(
+                "graph_mail_device_code_scopes_invalid",
+                "device-code policy permits at most 16 scope sets of at most 4096 bytes",
+            ));
+        }
         let organization_approval_token = object
             .get("mailbox_organization_approval_token")
             .or_else(|| object.get("mailboxOrganizationApprovalToken"))
@@ -173,23 +199,15 @@ impl Policy {
                 .and_then(Value::as_str)
                 .filter(|value| !value.trim().is_empty())
                 .map(ToOwned::to_owned),
-            allowed_attachment_roots: object
-                .get("allowed_attachment_roots")
-                .or_else(|| object.get("allowedAttachmentRoots"))
-                .and_then(Value::as_array)
-                .map(|values| {
-                    values
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .filter(|value| !value.trim().is_empty())
-                        .map(|value| root.join(value))
-                        .collect()
-                })
-                .unwrap_or_default(),
+            allowed_attachment_roots: attachment_roots
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|value| root.join(value))
+                .collect(),
             allow_device_code_auth: bool_value(&object, "allow_device_code_auth", "allowDeviceCodeAuth"),
             device_code_tenant_id: optional_config_string(&object, "device_code_tenant_id", "deviceCodeTenantId"),
             device_code_client_id: optional_config_string(&object, "device_code_client_id", "deviceCodeClientId"),
-            device_code_allowed_scopes: string_array(&object, "device_code_allowed_scopes", "deviceCodeAllowedScopes"),
+            device_code_allowed_scopes: allowed_scopes,
             organization_approval_token,
         })
     }
@@ -2905,7 +2923,7 @@ fn encode_component(value: &str) -> String {
 
 fn hex_lower(bytes: &[u8]) -> String { bytes.iter().map(|byte| format!("{byte:02x}")).collect() }
 fn invalid(key: &str) -> Value { json!({"schema":"narada.graph_mail_mcp.error.v1","status":"invalid","reason":format!("{key}_required")}) }
-fn boundary(name: &str, reason: &str) -> Value { json!({"schema":"narada.graph_mail_mcp.authority_boundary.v1","status":"unavailable","tool_name":name,"reason":reason,"remediation":"Use the configured Rust Graph Mail authority or keep the Bun authority selected."}) }
+fn boundary(name: &str, reason: &str) -> Value { json!({"schema":"narada.graph_mail_mcp.authority_boundary.v1","status":"unavailable","tool_name":name,"reason":reason,"remediation":"Use a supported tool through the configured native Graph Mail authority."}) }
 fn unavailable(reason: &str, detail: &str) -> Value { json!({"schema":"narada.graph_mail_mcp.authority_error.v1","status":"unavailable","reason":reason,"detail":detail}) }
 
 #[cfg(test)]

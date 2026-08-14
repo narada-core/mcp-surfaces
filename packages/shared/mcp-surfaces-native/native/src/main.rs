@@ -1,4 +1,5 @@
 use serde_json::{json, Map, Value};
+use jsonschema::validator_for;
 use sha2::{Digest, Sha256};
 use std::env;
 use std::fs::{create_dir_all, OpenOptions};
@@ -922,51 +923,22 @@ fn call_tool(
 }
 
 fn validate_input_schema(schema: &Value, value: &Value, path: &str) -> Result<(), Value> {
-    let refuse = |keyword: &str| {
+    let validator = validator_for(schema).map_err(|error| {
         diagnostic(
-            "input_schema_validation_failed",
-            &format!("input_schema_validation_failed:{path}:{keyword}"),
-            json!({"path":path,"keyword":keyword}),
+            "input_schema_invalid",
+            "input_schema_invalid",
+            json!({"path":path,"message":error.to_string()}),
         )
-    };
-    if let Some(expected) = schema.get("type").and_then(Value::as_str) {
-        let valid = match expected {
-            "object" => value.is_object(), "array" => value.is_array(), "string" => value.is_string(),
-            "integer" => value.as_i64().is_some() || value.as_u64().is_some(), "number" => value.is_number(),
-            "boolean" => value.is_boolean(), "null" => value.is_null(), _ => true,
-        };
-        if !valid { return Err(refuse("type")); }
+    })?;
+    let error = validator.iter_errors(value).next();
+    match error {
+        None => Ok(()),
+        Some(error) => Err(diagnostic(
+            "input_schema_validation_failed",
+            &format!("input_schema_validation_failed:{path}"),
+            json!({"path":path,"message":error.to_string()}),
+        )),
     }
-    if let Some(text) = value.as_str() {
-        let length = text.chars().count() as u64;
-        if schema.get("minLength").and_then(Value::as_u64).is_some_and(|minimum| length < minimum) { return Err(refuse("minLength")); }
-        if schema.get("maxLength").and_then(Value::as_u64).is_some_and(|maximum| length > maximum) { return Err(refuse("maxLength")); }
-    }
-    if let Some(array) = value.as_array() {
-        if schema.get("maxItems").and_then(Value::as_u64).is_some_and(|maximum| array.len() as u64 > maximum) { return Err(refuse("maxItems")); }
-        if let Some(items) = schema.get("items") {
-            for (index, child) in array.iter().enumerate() { validate_input_schema(items, child, &format!("{path}/{index}"))?; }
-        }
-    }
-    if let Some(object) = value.as_object() {
-        if let Some(required) = schema.get("required").and_then(Value::as_array) {
-            for field in required.iter().filter_map(Value::as_str) {
-                if !object.contains_key(field) { return Err(refuse(&format!("required:{field}"))); }
-            }
-        }
-        let properties = schema.get("properties").and_then(Value::as_object);
-        if schema.get("additionalProperties").and_then(Value::as_bool) == Some(false) {
-            if let Some(field) = object.keys().find(|field| properties.is_none_or(|known| !known.contains_key(*field))) {
-                return Err(refuse(&format!("additionalProperties:{field}")));
-            }
-        }
-        if let Some(properties) = properties {
-            for (field, child_schema) in properties {
-                if let Some(child) = object.get(field) { validate_input_schema(child_schema, child, &format!("{path}/{field}"))?; }
-            }
-        }
-    }
-    Ok(())
 }
 
 fn catalog_guidance(_args: &Map<String, Value>) -> Result<Value, Value> {
@@ -1621,6 +1593,57 @@ mod tests {
     }
 
     #[test]
+    fn graph_mail_catalog_exposes_the_arguments_its_native_authority_requires() {
+        let tools = list_tools("graph-mail");
+        assert_eq!(tools.len(), 34);
+        let by_name = |name: &str| {
+            tools
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .unwrap_or_else(|| panic!("missing {name}"))
+        };
+        let query = by_name("graph_mail_query");
+        assert!(query["inputSchema"]["properties"]["mailbox_id"].is_object());
+        assert_eq!(query["inputSchema"]["properties"]["limit"]["maximum"], 100);
+        let show = by_name("graph_mail_message_show");
+        assert_eq!(show["inputSchema"]["required"], json!(["message_id"]));
+        let upload = by_name("graph_mail_attachment_upload_chunk");
+        assert_eq!(upload["inputSchema"]["required"].as_array().map(Vec::len), Some(5));
+        let discard = by_name("graph_mail_ticket_draft_discard");
+        assert_eq!(discard["inputSchema"]["properties"]["confirm_discard"]["const"], true);
+        assert_eq!(discard["annotations"]["destructiveHint"], true);
+        assert!(tools.iter().all(|tool| {
+            tool["description"].as_str().is_some_and(|description| {
+                !description.contains("external authority remains explicit")
+            })
+        }));
+    }
+
+    #[test]
+    fn native_input_validation_enforces_declared_const_enum_pattern_and_numeric_bounds() {
+        let schema = json!({
+            "type":"object",
+            "properties":{
+                "confirm":{"type":"boolean","const":true},
+                "mode":{"type":"string","enum":["safe"]},
+                "digest":{"type":"string","pattern":"^[a-f0-9]{64}$"},
+                "limit":{"type":"integer","minimum":1,"maximum":5}
+            },
+            "required":["confirm","mode","digest","limit"],
+            "additionalProperties":false
+        });
+        assert!(validate_input_schema(&schema, &json!({"confirm":true,"mode":"safe","digest":"a".repeat(64),"limit":5}), "arguments").is_ok());
+        for invalid in [
+            json!({"confirm":false,"mode":"safe","digest":"a".repeat(64),"limit":5}),
+            json!({"confirm":true,"mode":"unsafe","digest":"a".repeat(64),"limit":5}),
+            json!({"confirm":true,"mode":"safe","digest":"wrong","limit":5}),
+            json!({"confirm":true,"mode":"safe","digest":"a".repeat(64),"limit":6}),
+        ] {
+            assert!(validate_input_schema(&schema, &invalid, "arguments").is_err(), "accepted {invalid}");
+        }
+    }
+
+    #[test]
     fn catalog_observation_requires_an_explicit_iso_instant() {
         let response = handle_request(
             &json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"catalog_observation_observe","arguments":{"provider_id":"inference-provider:test","observed_at":"not-an-instant"}}}),
@@ -1674,9 +1697,12 @@ mod tests {
         .expect("response");
         assert_eq!(
             response["error"]["data"]["code"],
-            "catalog_observation_access_mode_invalid"
+            "input_schema_validation_failed"
         );
-        assert_eq!(response["error"]["data"]["details"]["field"], "access_mode");
+        assert_eq!(response["error"]["data"]["details"]["path"], "/arguments");
+        assert!(response["error"]["data"]["details"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("ambient") && message.contains("public")));
     }
 
     #[test]

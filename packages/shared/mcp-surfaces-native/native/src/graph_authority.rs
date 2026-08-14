@@ -28,15 +28,15 @@ enum GraphAuth {
     Missing,
 }
 
-/// Native provider authority for the calendar surface.  It is activated only
-/// when the caller explicitly sets `NARADA_NATIVE_GRAPH_AUTHORITY=1`; the
-/// runtime matrix therefore keeps Bun in charge until parity is admitted.
+/// Native Microsoft Graph provider authority shared by the calendar and mail
+/// surfaces. Activation remains explicit at the surface entrypoint.
 pub struct CalendarGraphAdapter {
     base_url: String,
     allowed_mailboxes: Vec<String>,
     allow_event_writes: bool,
     write_approval_token: Option<String>,
     auth: GraphAuth,
+    request_timeout: Duration,
 }
 
 impl GraphAuth {
@@ -79,7 +79,10 @@ impl CalendarGraphAdapter {
         } else {
             json!({})
         };
-        let object = config.as_object().cloned().unwrap_or_default();
+        let object = config
+            .as_object()
+            .cloned()
+            .ok_or_else(|| unavailable("graph_config_invalid", "policy must be a JSON object"))?;
         let base_url = object
             .get("graph_base_url")
             .and_then(Value::as_str)
@@ -88,7 +91,7 @@ impl CalendarGraphAdapter {
             .trim_end_matches('/')
             .to_string();
         validate_base_url(&base_url)?;
-        let allowed_mailboxes = object
+        let allowed_mailboxes: Vec<String> = object
             .get("allowed_mailboxes")
             .or_else(|| object.get("allowedMailboxes"))
             .and_then(Value::as_array)
@@ -101,6 +104,27 @@ impl CalendarGraphAdapter {
                     .collect()
             })
             .unwrap_or_default();
+        if allowed_mailboxes.len() > 32
+            || allowed_mailboxes
+                .iter()
+                .any(|value| value.len() > 320)
+        {
+            return Err(unavailable(
+                "graph_allowed_mailboxes_invalid",
+                "allowed_mailboxes permits at most 32 values of at most 320 bytes",
+            ));
+        }
+        let request_timeout_ms = object
+            .get("request_timeout_ms")
+            .or_else(|| object.get("requestTimeoutMs"))
+            .and_then(Value::as_u64)
+            .unwrap_or(30_000);
+        if !(100..=60_000).contains(&request_timeout_ms) {
+            return Err(unavailable(
+                "graph_request_timeout_invalid",
+                "request_timeout_ms must be between 100 and 60000",
+            ));
+        }
         let allow_event_writes = object
             .get("allow_event_writes")
             .and_then(Value::as_bool)
@@ -127,6 +151,7 @@ impl CalendarGraphAdapter {
             allow_event_writes,
             write_approval_token,
             auth,
+            request_timeout: Duration::from_millis(request_timeout_ms),
         })
     }
 
@@ -176,7 +201,7 @@ impl CalendarGraphAdapter {
         }
         let url = self.build_url(mailbox_id, suffix, query)?;
         let agent = ureq::AgentBuilder::new()
-            .timeout(Duration::from_secs(30))
+            .timeout(self.request_timeout)
             .build();
         let request = agent
             .request(&method, &url)
@@ -231,7 +256,7 @@ impl CalendarGraphAdapter {
             ));
         }
         let agent = ureq::AgentBuilder::new()
-            .timeout(Duration::from_secs(30))
+            .timeout(self.request_timeout)
             .build();
         let mut request = agent
             .request("PUT", upload_url)
@@ -809,6 +834,7 @@ mod tests {
             allow_event_writes: false,
             write_approval_token: None,
             auth: GraphAuth::AccessToken("test".to_string()),
+            request_timeout: Duration::from_secs(30),
         };
         let mut query = Map::new();
         query.insert("$top".to_string(), json!(20));
@@ -833,6 +859,7 @@ mod tests {
             allow_event_writes: false,
             write_approval_token: None,
             auth: GraphAuth::AccessToken("test".to_string()),
+            request_timeout: Duration::from_secs(30),
         };
         assert!(adapter.build_url(None, "calendars", &Map::new()).is_err());
     }
@@ -845,6 +872,7 @@ mod tests {
             allow_event_writes: true,
             write_approval_token: Some("approve".to_string()),
             auth: GraphAuth::AccessToken("test".to_string()),
+            request_timeout: Duration::from_secs(30),
         };
         let mut args = Map::new();
         assert_eq!(adapter.write_allowed(&args), Err("confirm_write_required"));
