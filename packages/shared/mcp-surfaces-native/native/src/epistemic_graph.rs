@@ -37,8 +37,8 @@ pub fn list_tools() -> Vec<Value> {
         ),
         tool(
             "epistemic_graph_query",
-            "List bounded graph entities or relations.",
-            json!({"type":"object","properties":{"kind":{"type":"string"},"text":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":100},"offset":{"type":"integer","minimum":0}},"additionalProperties":false}),
+            "List bounded entities, or set record_kind to read assessments, test outcomes, or sweeps.",
+            json!({"type":"object","properties":{"kind":{"type":"string","description":"Entity kind filter."},"record_kind":{"type":"string","enum":["assessment.record","test_outcome.record","sweep.record"],"description":"When present, query durable non-entity records instead of entities."},"text":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":100},"offset":{"type":"integer","minimum":0}},"additionalProperties":false}),
             true,
         ),
         tool(
@@ -240,8 +240,11 @@ fn status(root: &Path) -> Result<Value, Value> {
     let relations: i64 = db
         .query_row("select count(*) from relations", [], |r| r.get(0))
         .map_err(db_error("projection_count_failed"))?;
+    let records: i64 = db
+        .query_row("select count(*) from records", [], |r| r.get(0))
+        .map_err(db_error("projection_count_failed"))?;
     Ok(
-        json!({"schema":"narada.epistemic.status.v1","status":"ok","implementation":"rust-native","canonical_store":ledger(root).to_string_lossy(),"projection":projection_path(root).to_string_lossy(),"ledger_head":ledger_head(root)?,"event_count":ledger_files(root)?.len(),"entity_count":entities,"relation_count":relations,"projection_rebuildable":true,"truth_certification":false}),
+        json!({"schema":"narada.epistemic.status.v1","status":"ok","implementation":"rust-native","canonical_store":ledger(root).to_string_lossy(),"projection":projection_path(root).to_string_lossy(),"ledger_head":ledger_head(root)?,"event_count":ledger_files(root)?.len(),"entity_count":entities,"relation_count":relations,"record_count":records,"projection_rebuildable":true,"truth_certification":false}),
     )
 }
 
@@ -257,13 +260,19 @@ fn query(root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
     let kind = args.get("kind").and_then(Value::as_str).unwrap_or("");
     let text = args.get("text").and_then(Value::as_str).unwrap_or("");
     let like = format!("%{text}%");
+    if let Some(record_kind) = args.get("record_kind").and_then(Value::as_str) {
+        let mut stmt = db.prepare("select record_id,record_kind,payload_json,event_id from records where record_kind=?1 and (?2='' or payload_json like ?3) order by record_id limit ?4 offset ?5").map_err(db_error("projection_record_query_prepare_failed"))?;
+        let rows = stmt.query_map(params![record_kind,text,like,limit,offset], |row| Ok(json!({"record_id":row.get::<_,String>(0)?,"record_kind":row.get::<_,String>(1)?,"payload":serde_json::from_str::<Value>(&row.get::<_,String>(2)?).unwrap_or(Value::Null),"event_id":row.get::<_,String>(3)?}))).map_err(db_error("projection_record_query_failed"))?;
+        let items = rows.collect::<Result<Vec<_>, _>>().map_err(db_error("projection_record_query_row_failed"))?;
+        return Ok(json!({"schema":"narada.epistemic.query.v1","status":"ok","result_kind":"records","record_kind":record_kind,"items":items,"offset":offset,"limit":limit,"returned":items.len(),"bounded":true}));
+    }
     let mut stmt = db.prepare("select entity_id,kind,payload_json,event_id from entities where (?1='' or kind=?1) and (?2='' or payload_json like ?3) order by entity_id limit ?4 offset ?5").map_err(db_error("projection_query_prepare_failed"))?;
     let rows = stmt.query_map(params![kind,text,like,limit,offset], |row| Ok(json!({"entity_id":row.get::<_,String>(0)?,"kind":row.get::<_,String>(1)?,"payload":serde_json::from_str::<Value>(&row.get::<_,String>(2)?).unwrap_or(Value::Null),"event_id":row.get::<_,String>(3)?}))).map_err(db_error("projection_query_failed"))?;
     let items = rows
         .collect::<Result<Vec<_>, _>>()
         .map_err(db_error("projection_query_row_failed"))?;
     Ok(
-        json!({"schema":"narada.epistemic.query.v1","status":"ok","items":items,"offset":offset,"limit":limit,"returned":items.len(),"bounded":true}),
+        json!({"schema":"narada.epistemic.query.v1","status":"ok","result_kind":"entities","items":items,"offset":offset,"limit":limit,"returned":items.len(),"bounded":true}),
     )
 }
 
@@ -296,8 +305,10 @@ fn neighborhood(root: &Path, args: &Map<String, Value>) -> Result<Value, Value> 
     let relations = rows
         .collect::<Result<Vec<_>, _>>()
         .map_err(db_error("projection_relation_row_failed"))?;
+    let mut record_stmt = db.prepare("select record_id,record_kind,payload_json,event_id from records where json_extract(payload_json,'$.subject_id')=?1 or json_extract(payload_json,'$.test_id')=?1 order by record_id limit ?2").map_err(db_error("projection_neighborhood_record_prepare_failed"))?;
+    let records = record_stmt.query_map(params![id,limit], |r| Ok(json!({"record_id":r.get::<_,String>(0)?,"record_kind":r.get::<_,String>(1)?,"payload":serde_json::from_str::<Value>(&r.get::<_,String>(2)?).unwrap_or(Value::Null),"event_id":r.get::<_,String>(3)?}))).map_err(db_error("projection_neighborhood_record_query_failed"))?.collect::<Result<Vec<_>, _>>().map_err(db_error("projection_neighborhood_record_row_failed"))?;
     Ok(
-        json!({"schema":"narada.epistemic.neighborhood.v1","status":"ok","entity":serde_json::from_str::<Value>(&entity).unwrap_or(Value::Null),"relations":relations,"limit":limit,"bounded":true}),
+        json!({"schema":"narada.epistemic.neighborhood.v1","status":"ok","entity":serde_json::from_str::<Value>(&entity).unwrap_or(Value::Null),"relations":relations,"records":records,"limit":limit,"bounded":true}),
     )
 }
 
@@ -316,13 +327,15 @@ fn export(root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
         .map_err(db_error("projection_export_failed"))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(db_error("projection_export_row_failed"))?;
+    let mut record_stmt = db.prepare("select payload_json from records order by record_id limit 1000").map_err(db_error("projection_export_record_prepare_failed"))?;
+    let records = record_stmt.query_map([], |r| Ok(serde_json::from_str::<Value>(&r.get::<_,String>(0)?).unwrap_or(Value::Null))).map_err(db_error("projection_export_record_failed"))?.collect::<Result<Vec<_>, _>>().map_err(db_error("projection_export_record_row_failed"))?;
     let context = if format == "jsonld" {
         json!({"prov":"http://www.w3.org/ns/prov#","cito":"http://purl.org/spar/cito/","fabio":"http://purl.org/spar/fabio/","narada":"https://narada.local/epistemic/"})
     } else {
         Value::Null
     };
     Ok(
-        json!({"schema":"narada.epistemic.export.v1","format":format,"ledger_head":ledger_head(root)?,"@context":context,"entities":entities,"relations":relations,"bounded":true}),
+        json!({"schema":"narada.epistemic.export.v1","format":format,"ledger_head":ledger_head(root)?,"@context":context,"entities":entities,"relations":relations,"records":records,"bounded":true}),
     )
 }
 
@@ -333,7 +346,7 @@ fn rebuild_projection(root: &Path) -> Result<(), Value> {
     let temporary = path.with_extension("sqlite.next");
     let _ = fs::remove_file(&temporary);
     let mut db = Connection::open(&temporary).map_err(db_error("projection_create_failed"))?;
-    db.execute_batch("pragma journal_mode=delete; create table entities(entity_id text primary key,kind text not null,payload_json text not null,event_id text not null); create table relations(relation_id text primary key,relation_type text not null,source_id text not null,target_id text not null,payload_json text not null,event_id text not null); create table assessments(assessment_id text primary key,payload_json text not null,event_id text not null);").map_err(db_error("projection_schema_failed"))?;
+    db.execute_batch("pragma journal_mode=delete; create table entities(entity_id text primary key,kind text not null,payload_json text not null,event_id text not null); create table relations(relation_id text primary key,relation_type text not null,source_id text not null,target_id text not null,payload_json text not null,event_id text not null); create table records(record_id text primary key,record_kind text not null,payload_json text not null,event_id text not null);").map_err(db_error("projection_schema_failed"))?;
     let tx = db
         .transaction()
         .map_err(db_error("projection_transaction_failed"))?;
@@ -371,8 +384,8 @@ fn rebuild_projection(root: &Path) -> Result<(), Value> {
                         .and_then(Value::as_str)
                         .unwrap();
                     tx.execute(
-                        "insert or replace into assessments values(?1,?2,?3)",
-                        params![id, op.to_string(), event_id],
+                        "insert or replace into records values(?1,?2,?3,?4)",
+                        params![id, op_kind, op.to_string(), event_id],
                     )
                     .map_err(db_error("projection_assessment_write_failed"))?;
                 }
@@ -845,6 +858,24 @@ mod tests {
         let failure = validate_operations(&[operation], false).expect_err("unlocated source must refuse");
         assert_eq!(failure["code"], "required_argument_missing");
         assert_eq!(failure["details"]["field"], "locator");
+    }
+
+    #[test]
+    fn admitted_assessments_are_queryable_in_neighborhood_status_and_export() {
+        let root = std::env::temp_dir().join(format!("epistemic-record-test-{}", Uuid::new_v4()));
+        let operations = json!([
+            {"op":"entity.declare","entity_id":"source:record-test","kind":"source","title":"Record test source","version":"1","locator":"ledger/test.md"},
+            {"op":"entity.declare","entity_id":"test:record-test","kind":"test","title":"Record test"},
+            {"op":"assessment.record","assessment_id":"assessment:record-test","subject_id":"test:record-test","judgment":"conditional","actor":"tester","reason":"Some gates remain open.","evidence":[{"source_id":"source:record-test","locator":"Current status","paraphrase":"The source reports a conditional result."}]}
+        ]);
+        let proposal = proposal_submit(&root, &Map::from_iter([("actor".into(),json!("tester")),("authority_basis".into(),json!({"kind":"test"})),("idempotency_key".into(),json!("record-p1")),("expected_ledger_head".into(),Value::Null),("operations".into(),operations)])).expect("proposal");
+        proposal_admit(&root, &Map::from_iter([("proposal_id".into(),proposal["proposal_id"].clone()),("actor".into(),json!("tester")),("authority_basis".into(),json!({"kind":"test"})),("expected_ledger_head".into(),Value::Null),("idempotency_key".into(),json!("record-a1"))])).expect("admit");
+        let records = query(&root, &Map::from_iter([("record_kind".into(),json!("assessment.record"))])).expect("record query");
+        assert_eq!(records["returned"], 1);
+        assert_eq!(status(&root).expect("status")["record_count"], 1);
+        assert_eq!(neighborhood(&root, &Map::from_iter([("entity_id".into(),json!("test:record-test"))])).expect("neighborhood")["records"].as_array().map(Vec::len), Some(1));
+        assert_eq!(export(&root, &Map::new()).expect("export")["records"].as_array().map(Vec::len), Some(1));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
