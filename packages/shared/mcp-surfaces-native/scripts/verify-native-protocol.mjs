@@ -2658,33 +2658,34 @@ function runNarsSessionParity() {
 
 function runSchedulerParity() {
   const workspaceRoot = resolve(packageRoot, '..', '..', '..');
-  const bunEntrypoint = join(workspaceRoot, 'packages', 'scheduler-mcp', 'dist', 'src', 'main.js');
-  if (!existsSync(bunEntrypoint)) throw new Error('scheduler_parity_bun_entrypoint_missing:' + bunEntrypoint);
-  const bunRoot = mkdtempSync(join(tmpdir(), 'narada-scheduler-bun-parity-'));
-  const rustRoot = mkdtempSync(join(tmpdir(), 'narada-scheduler-rust-parity-'));
+  const rustRoot = mkdtempSync(join(tmpdir(), 'narada-scheduler-native-proof-'));
   try {
-    const bunArgs = [bunEntrypoint, '--allowed-root', bunRoot];
     const rustArgs = ['--surface-id', 'scheduler', '--site-root', rustRoot];
+    const defaultSupervisor = join(process.env.USERPROFILE ?? '', 'src', 'narada', 'packages', 'process-launch-posture', 'native', 'target', 'release', 'narada-process-supervisor.exe');
+    const supervisor = process.env.NARADA_PROCESS_SUPERVISOR_PATH ?? defaultSupervisor;
+    if (!existsSync(supervisor)) throw new Error('scheduler.native_process_supervisor_missing:' + supervisor);
+    const schedulerEnv = { ...process.env, NARADA_PROCESS_SUPERVISOR_PATH: supervisor };
     const listRequest = [{ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }];
-    const bunTools = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', bunArgs, listRequest, workspaceRoot)[0]?.result?.tools ?? [];
-    const rustTools = runMailbox(executable, rustArgs, listRequest, workspaceRoot)[0]?.result?.tools ?? [];
-    assertSame('scheduler.tool_names', bunTools.map((tool) => tool.name).sort(), rustTools.map((tool) => tool.name).sort());
-    for (const toolName of ['scheduler_task_create', 'scheduler_task_update_action', 'scheduler_binding_upsert', 'scheduler_event_admit', 'scheduler_activation_claim']) {
-      const bunTool = bunTools.find((tool) => tool.name === toolName);
-      const rustTool = rustTools.find((tool) => tool.name === toolName);
-      assertSame('scheduler.required.' + toolName, [...(bunTool?.inputSchema?.required ?? [])].sort(), [...(rustTool?.inputSchema?.required ?? [])].sort());
+    const rustTools = runMailbox(executable, rustArgs, listRequest, workspaceRoot, schedulerEnv)[0]?.result?.tools ?? [];
+    if (rustTools.length < 20) throw new Error('scheduler.native_tool_catalog_incomplete:' + rustTools.length);
+    const assertBounded = (schema, path) => {
+      if (schema?.type === 'string' && !Array.isArray(schema.enum) && !Number.isInteger(schema.maxLength)) throw new Error('scheduler.unbounded_string:' + path);
+      if (schema?.type === 'array' && !Number.isInteger(schema.maxItems)) throw new Error('scheduler.unbounded_array:' + path);
+      for (const [name, child] of Object.entries(schema?.properties ?? {})) assertBounded(child, path + '/' + name);
+      if (schema?.items) assertBounded(schema.items, path + '/*');
+    };
+    for (const tool of rustTools) {
+      if (tool.inputSchema?.title !== tool.name + '.input' || tool.inputSchema?.additionalProperties !== false) throw new Error('scheduler.native_schema_not_named_closed:' + tool.name);
+      assertBounded(tool.inputSchema, tool.name);
     }
 
     const statusRequest = [{ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'scheduler_runtime_status', arguments: {} } }];
-    const bunStatus = mailboxStructured(runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', bunArgs, statusRequest, workspaceRoot), 1, 'bun');
-    const rustStatus = mailboxStructured(runMailbox(executable, rustArgs, statusRequest, workspaceRoot), 1, 'rust');
-    if (bunStatus.status !== 'fresh') throw new Error('scheduler_parity_bun_runtime_not_fresh:' + bunStatus.status);
-    if (rustStatus.status !== 'fresh' || rustStatus.implementation !== 'rust-native') throw new Error('scheduler_parity_rust_runtime_not_fresh:' + JSON.stringify(rustStatus).slice(0, 500));
+    const rustStatus = mailboxStructured(runMailbox(executable, rustArgs, statusRequest, workspaceRoot, schedulerEnv), 1, 'rust');
+    if (rustStatus.status !== 'fresh' || rustStatus.implementation !== 'rust-native' || rustStatus.native_task_scheduler !== true || rustStatus.native_activation_store !== true) throw new Error('scheduler.native_runtime_not_fresh:' + JSON.stringify(rustStatus).slice(0, 500));
 
     const taskListRequest = [{ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'scheduler_task_list', arguments: { limit: 5 } } }];
-    const bunTaskList = mailboxStructured(runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', bunArgs, taskListRequest, workspaceRoot), 1, 'bun');
-    const rustTaskList = mailboxStructured(runMailbox(executable, rustArgs, taskListRequest, workspaceRoot), 1, 'rust');
-    assertSame('scheduler.task_list.names', bunTaskList.items?.map((task) => task.task_name), rustTaskList.items?.map((task) => task.task_name));
+    const rustTaskList = mailboxStructured(runMailbox(executable, rustArgs, taskListRequest, workspaceRoot, schedulerEnv), 1, 'rust');
+    if (!Array.isArray(rustTaskList.items) || rustTaskList.items.length > 5) throw new Error('scheduler.native_task_list_not_bounded');
 
     const dryRunArguments = {
       task_name: '\\Narada\\NativeParityDryRun',
@@ -2694,12 +2695,9 @@ function runSchedulerParity() {
       multiple_instances: 'ignore_new',
       dry_run: true,
     };
-    const dryRun = (implementationId) => [{ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'scheduler_task_update_action', arguments: { ...dryRunArguments, implementation_id: implementationId } } }];
-    const bunPlan = mailboxStructured(runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', bunArgs, dryRun(bunStatus.implementation_id), workspaceRoot), 1, 'bun');
-    const rustPlan = mailboxStructured(runMailbox(executable, rustArgs, dryRun(rustStatus.implementation_id), workspaceRoot), 1, 'rust');
-    for (const field of ['status', 'execute', 'arguments', 'mutation_method', 'console_window_policy', 'preserves_triggers', 'preserves_enabled_state', 'working_dir_would_apply', 'execution_time_limit_seconds', 'multiple_instances']) {
-      assertSame('scheduler.dry_run.' + field, bunPlan[field], rustPlan[field]);
-    }
+    const dryRun = [{ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'scheduler_task_update_action', arguments: { ...dryRunArguments, implementation_id: rustStatus.implementation_id } } }];
+    const rustPlan = mailboxStructured(runMailbox(executable, rustArgs, dryRun, workspaceRoot, schedulerEnv), 1, 'rust');
+    if (rustPlan.status !== 'planned' || rustPlan.console_window_policy !== 'native_create_no_window' || rustPlan.schtasks_preview_not_used_for_mutation !== true || rustPlan.preserves_triggers !== true) throw new Error('scheduler.native_dry_run_invalid:' + JSON.stringify(rustPlan).slice(0, 500));
 
     const activationRequests = (implementationId) => [{
       jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'scheduler_activation_prepare', arguments: { implementation_id: implementationId } },
@@ -2716,22 +2714,61 @@ function runSchedulerParity() {
     }, {
       jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'scheduler_activation_claim', arguments: { consumer_id: 'native-parity-dispatcher', lease_ms: 30000, implementation_id: implementationId } },
     }];
-    const bunActivation = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', bunArgs, activationRequests(bunStatus.implementation_id), workspaceRoot);
-    const rustActivation = runMailbox(executable, rustArgs, activationRequests(rustStatus.implementation_id), workspaceRoot);
-    assertSame('scheduler.activation.prepare', mailboxStructured(bunActivation, 1, 'bun').status, mailboxStructured(rustActivation, 1, 'rust').status);
-    const bunBinding = mailboxStructured(bunActivation, 2, 'bun').binding;
+    const rustActivation = runMailbox(executable, rustArgs, activationRequests(rustStatus.implementation_id), workspaceRoot, schedulerEnv);
+    if (mailboxStructured(rustActivation, 1, 'rust').status !== 'prepared') throw new Error('scheduler.native_activation_prepare_invalid');
     const rustBinding = mailboxStructured(rustActivation, 2, 'rust').binding;
-    for (const field of ['binding_id', 'trigger_kind', 'source_topic', 'target_sop_id', 'target_template_version', 'concurrency', 'status', 'revision']) assertSame('scheduler.binding.' + field, bunBinding?.[field], rustBinding?.[field]);
-    const bunAdmission = mailboxStructured(bunActivation, 3, 'bun');
+    if (rustBinding?.binding_id !== 'native-parity-binding' || rustBinding?.status !== 'active' || rustBinding?.revision !== 1) throw new Error('scheduler.native_binding_upsert_invalid');
     const rustAdmission = mailboxStructured(rustActivation, 3, 'rust');
-    assertSame('scheduler.event.status', bunAdmission.status, rustAdmission.status);
-    assertSame('scheduler.event.activation_count', bunAdmission.activation_count, rustAdmission.activation_count);
-    const bunClaim = mailboxStructured(bunActivation, 4, 'bun').activation;
+    if (rustAdmission.status !== 'admitted' || rustAdmission.activation_count !== 1) throw new Error('scheduler.native_event_admit_invalid');
     const rustClaim = mailboxStructured(rustActivation, 4, 'rust').activation;
-    for (const field of ['activation_id', 'binding_id', 'source_event_id', 'occurrence_key', 'target_sop_id', 'target_template_version', 'partition_key', 'status', 'attempt_count']) assertSame('scheduler.claim.' + field, bunClaim?.[field], rustClaim?.[field]);
-    return { status: 'passed', compared: ['tool_contract', 'runtime_status', 'task_list', 'task_update_action_dry_run', 'activation_prepare', 'binding_upsert', 'event_admit', 'activation_claim'] };
+    if (rustClaim?.binding_id !== 'native-parity-binding' || rustClaim?.source_event_id !== 'native-parity-event' || rustClaim?.status !== 'leased') throw new Error('scheduler.native_activation_claim_invalid');
+
+    const callScheduler = (id, name, args = {}) => {
+      const responses = runMailbox(executable, rustArgs, [{ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } }], workspaceRoot, schedulerEnv);
+      return mailboxStructured(responses, id, 'rust');
+    };
+    const admittedSop = callScheduler(10, 'scheduler_activation_admit_sop', {
+      activation_id: rustClaim.activation_id, consumer_id: 'native-parity-dispatcher', lease_token: rustClaim.lease_token,
+      sop_run_id: 'native-parity-run', receipt_id: 'native-parity-admit', receipt: { status: 'accepted' }, implementation_id: rustStatus.implementation_id,
+    });
+    if (admittedSop.activation?.status !== 'admitted') throw new Error('scheduler.native_activation_admit_sop_invalid');
+    const resolved = callScheduler(11, 'scheduler_activation_resolve', {
+      sop_run_id: 'native-parity-run', outcome: 'ok', receipt_id: 'native-parity-terminal', receipt: { status: 'terminal' }, implementation_id: rustStatus.implementation_id,
+    });
+    if (resolved.activation?.status !== 'terminal' || resolved.activation?.terminal_outcome !== 'ok') throw new Error('scheduler.native_activation_resolve_invalid');
+    if (callScheduler(12, 'scheduler_event_show', { event_id: 'native-parity-event' }).event?.event_id !== 'native-parity-event') throw new Error('scheduler.native_event_show_invalid');
+    const activationPage = callScheduler(13, 'scheduler_activation_list', { binding_id: 'native-parity-binding', limit: 1, offset: 0 });
+    if (activationPage.returned !== 1 || activationPage.bounded !== true) throw new Error('scheduler.native_activation_list_invalid');
+    if (callScheduler(14, 'scheduler_binding_show', { binding_id: 'native-parity-binding' }).binding?.revision !== 1) throw new Error('scheduler.native_binding_show_invalid');
+    if (callScheduler(15, 'scheduler_binding_list', { limit: 1, offset: 0 }).returned !== 1) throw new Error('scheduler.native_binding_list_invalid');
+    const paused = callScheduler(16, 'scheduler_binding_pause', { binding_id: 'native-parity-binding', expected_revision: 1, implementation_id: rustStatus.implementation_id });
+    const resumed = callScheduler(17, 'scheduler_binding_resume', { binding_id: 'native-parity-binding', expected_revision: 2, implementation_id: rustStatus.implementation_id });
+    if (paused.binding?.status !== 'paused' || resumed.binding?.status !== 'active') throw new Error('scheduler.native_binding_pause_resume_invalid');
+
+    const secondEvent = callScheduler(18, 'scheduler_event_admit', {
+      event_id: 'native-parity-event-2', topic: 'sop.run.terminal.v1', partition_key: 'fixture-2', aggregate_id: 'fixture-run-2', aggregate_revision: 1,
+      schema_version: 1, causation_id: 'native-parity-cause-2', idempotency_key: 'native-parity-key-2', payload: { sop_id: 'fixture-sop', outcome: 'ok' },
+      occurred_at: '2026-01-01T00:00:01.000Z', implementation_id: rustStatus.implementation_id,
+    });
+    if (secondEvent.activation_count !== 1) throw new Error('scheduler.native_second_event_invalid');
+    const secondClaim = callScheduler(19, 'scheduler_activation_claim', { consumer_id: 'native-parity-dispatcher', lease_ms: 30000, implementation_id: rustStatus.implementation_id }).activation;
+    const failed = callScheduler(20, 'scheduler_activation_fail', {
+      activation_id: secondClaim.activation_id, consumer_id: 'native-parity-dispatcher', lease_token: secondClaim.lease_token,
+      retryable: false, error: 'native proof failure', implementation_id: rustStatus.implementation_id,
+    });
+    if (failed.activation?.status !== 'blocked') throw new Error('scheduler.native_activation_fail_invalid');
+    const unblocked = callScheduler(21, 'scheduler_activation_unblock', { activation_id: secondClaim.activation_id, implementation_id: rustStatus.implementation_id });
+    if (unblocked.activation?.status !== 'pending') throw new Error('scheduler.native_activation_unblock_invalid');
+    const retired = callScheduler(22, 'scheduler_binding_retire', { binding_id: 'native-parity-binding', expected_revision: 3, implementation_id: rustStatus.implementation_id });
+    if (retired.binding?.status !== 'retired') throw new Error('scheduler.native_binding_retire_invalid');
+
+    const invalidRequests = rustTools.map((tool, index) => ({ jsonrpc: '2.0', id: 1000 + index, method: 'tools/call', params: { name: tool.name, arguments: { __unexpected_contract_probe__: true } } }));
+    const invalidResponses = runMailbox(executable, rustArgs, invalidRequests, workspaceRoot, schedulerEnv);
+    for (const [index, tool] of rustTools.entries()) {
+      if (!invalidResponses.find((response) => response.id === 1000 + index)?.error) throw new Error('scheduler.invalid_input_not_refused:' + tool.name);
+    }
+    return { status: 'passed', implementation: 'rust-native', verified: ['all_tool_schemas_named_closed_bounded', 'all_tools_invalid_input', 'runtime_status', 'bounded_task_list', 'task_update_action_dry_run', 'activation_prepare', 'binding_upsert_show_list_pause_resume_retire', 'event_admit_show', 'activation_list_claim_admit_resolve_fail_unblock'] };
   } finally {
-    rmSync(bunRoot, { recursive: true, force: true });
     rmSync(rustRoot, { recursive: true, force: true });
   }
 }

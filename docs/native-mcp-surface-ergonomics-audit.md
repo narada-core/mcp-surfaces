@@ -52,7 +52,7 @@ Builds during review are permitted. Carrier materialization and restart are defe
 | quota-meter | queued | pending | pending | pending | pending |
 | mailbox | queued | pending | pending | pending | pending |
 | graph-mail | queued | pending | pending | pending | pending |
-| scheduler | queued | pending | pending | pending | pending |
+| scheduler | in progress | Replaced the obsolete Bun-built parity oracle with native behavioral proof. The Rust scheduler and native no-window supervisor report fresh; the verifier now proves every public tool rejects invalid input and exercises the entire durable activation authority (prepare, binding create/read/page/pause/resume/retire, event admit/show, activation page/claim/admit/resolve/fail/unblock). Windows task reads and native action dry-run are covered; a reversible host-task lifecycle drill remains before completion. | full shared-native Rust 128/128 (one deployment-only ignored); real native stdio covers all schemas/invalid inputs plus the complete activation lifecycle and bounded task reads/action planning | current thematic commit | pending |
 | speech | queued | pending | pending | pending | pending |
 | browser-control | queued | pending | pending | pending | pending |
 | operator-console-overlay | queued | pending | pending | pending | pending |
