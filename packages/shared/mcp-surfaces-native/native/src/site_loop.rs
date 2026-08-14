@@ -112,6 +112,7 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<V
         "site_loop_output_show" => output_show(args, root),
         "site_loop_proof_run" => proof_run(args, root),
         "site_loop_recovery_drill" => recovery_drill(args, root),
+        "site_loop_run_once" => run_once(args, root),
         "site_test_run" => test_run(args, root),
         "site_loop_attention_ack" => attention_ack(args, root),
         "site_loop_control_set" => control_set(args, root),
@@ -147,7 +148,7 @@ fn mutation_schema(name: &str) -> Value {
         "site_loop_recovery_drill" => json!({"type":"object","properties":{"id":{"type":"string","minLength":1,"maxLength":256},"reason":{"type":"string","minLength":1,"maxLength":4096},"title":{"type":"string","maxLength":1024},"summary":{"type":"string","maxLength":8192},"timeout_ms":{"type":"integer","minimum":1,"maximum":120000},"poll_ms":{"type":"integer","minimum":10,"maximum":10000}},"required":["reason"],"additionalProperties":false}),
         "site_loop_attention_ack" => json!({"type":"object","properties":{"attention_id":{"type":"string","minLength":1,"maxLength":512},"reason":{"type":"string","minLength":1,"maxLength":4096},"acknowledged_by":{"type":"string","minLength":1,"maxLength":256}},"required":["attention_id","reason"],"additionalProperties":false}),
         "site_loop_control_set" => json!({"type":"object","properties":{"enabled":{"type":"boolean"},"paused":{"type":"boolean"},"reason":{"type":"string","minLength":1,"maxLength":4096},"changed_by":{"type":"string","minLength":1,"maxLength":256}},"required":["reason"],"additionalProperties":false}),
-        "site_loop_run_once" => json!({"type":"object","properties":{"dry_run":{"type":"boolean"},"wait_for_completion":{"type":"boolean"},"timeout_ms":{"type":"integer","minimum":1,"maximum":10000},"test_authority":{"type":"boolean"},"limit":{"type":"integer","minimum":1,"maximum":500},"drain":{"type":"boolean"},"ensureResident":{"type":"boolean"},"requireLiveCarrier":{"type":"boolean"}},"additionalProperties":false}),
+        "site_loop_run_once" => json!({"type":"object","properties":{"dry_run":{"type":"boolean"},"wait_for_completion":{"type":"boolean"},"timeout_ms":{"type":"integer","minimum":1,"maximum":10000},"test_authority":{"type":"boolean"},"limit":{"type":"integer","minimum":1,"maximum":500},"drain":{"type":"boolean"},"ensure_resident":{"type":"boolean"},"require_live_carrier":{"type":"boolean"}},"additionalProperties":false}),
         _ => json!({"type":"object","properties":{},"additionalProperties":false}),
     }
 }
@@ -421,6 +422,93 @@ fn recovery_drill(args: &Map<String, Value>, root: &Path) -> Result<Value, Value
     let proof = process_proof_request(root, request, remaining)?;
     let passed = proof.get("status").and_then(Value::as_str)==Some("passed") && replacement.get("carrier_session_id") != previous.get("carrier_session_id");
     Ok(json!({"schema":"narada.site_loop.resident_recovery_drill.v1","status":if passed{"passed"}else{"failed"},"production_proof":passed,"old_carrier_replaced":replacement.get("carrier_session_id")!=previous.get("carrier_session_id"),"previous":previous,"retirement":retirement,"launch":launch,"replacement":replacement,"proof":proof}))
+}
+
+fn run_once(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let config = load_config(root)?.ok_or_else(|| error("site_loop_config_missing", "site-loop config is required"))?;
+    let loop_id = config.get("loop_id").and_then(Value::as_str).unwrap_or("site.loop");
+    let limit = bounded_limit(args, 25);
+    if args.get("dry_run").and_then(Value::as_bool).unwrap_or(false) {
+        let resident = resident_status(root, &config)?;
+        let queued_proof = proof_requests(root)?.into_iter().find(|value| matches!(value.get("status").and_then(Value::as_str),Some("queued"|"running")));
+        return Ok(json!({"schema":"narada.site_loop.run.v2","status":"ok","dry_run":true,"loop_id":loop_id,"host_effect":false,"bounded":true,"limit":limit,"plan":["read_control","reconcile_resident","dispatch_admitted_directives","process_one_proof_request","reconcile_outcomes","persist_run"],"resident":resident,"queued_proof":queued_proof}));
+    }
+    if args.get("test_authority").and_then(Value::as_bool) != Some(true) { return Err(error("site_loop_run_once_mutating_mcp_not_supported", "production mutation belongs to the native scheduler/supervisor; MCP run_once requires test_authority=true")); }
+    if args.get("wait_for_completion").and_then(Value::as_bool) != Some(true) { return Err(error("site_loop_run_once_test_authority_wait_required", "test-authority execution requires wait_for_completion=true")); }
+    let timeout_ms = args.get("timeout_ms").and_then(Value::as_u64).filter(|value| *value>0&&*value<=10_000).ok_or_else(|| error("site_loop_run_once_test_authority_timeout_invalid", "timeout_ms must be between 1 and 10000"))?;
+    if config.pointer("/test_authority/enabled").and_then(Value::as_bool) != Some(true) { return Err(error("site_loop_test_authority_not_enabled", "site-loop config does not enable test authority")); }
+    execute_loop_once(root, &config, limit, timeout_ms, true)
+}
+
+fn execute_loop_once(root: &Path, config: &Value, limit: u64, timeout_ms: u64, test_authority: bool) -> Result<Value, Value> {
+    let loop_id = config.get("loop_id").and_then(Value::as_str).unwrap_or("site.loop");
+    let run_id = format!("site-loop-run-{}", uuid::Uuid::new_v4().simple());
+    let started_at = now_iso();
+    let connection = Connection::open(db_path(root)).map_err(|cause| error("site_loop_store_open_failed", &cause.to_string()))?;
+    connection.busy_timeout(Duration::from_secs(2)).map_err(|cause| error("site_loop_store_config_failed", &cause.to_string()))?;
+    ensure_native_loop_tables(&connection)?;
+    let control = control_summary(&connection, loop_id)?;
+    if control.get("paused").and_then(Value::as_bool)==Some(true) || control.get("enabled").and_then(Value::as_bool)==Some(false) {
+        return Ok(json!({"schema":"narada.site_loop.run.v2","status":"skipped","reason":"loop_control_disabled_or_paused","run_id":run_id,"loop_id":loop_id,"control":control,"test_authority":test_authority}));
+    }
+    connection.execute("INSERT INTO site_loop_runs(run_id,loop_id,status,dry_run,started_at,finished_at,summary_json,error_json,evidence_ref,evidence_sha256,evidence_bytes) VALUES (?1,?2,'running',0,?3,NULL,'{}',NULL,NULL,NULL,NULL)",params![run_id,loop_id,started_at]).map_err(|cause| error("site_loop_run_begin_failed", &cause.to_string()))?;
+    drop(connection);
+    let deadline = Instant::now()+Duration::from_millis(timeout_ms.max(1));
+    let resident = ensure_resident(root, config)?;
+    let dispatch = dispatch_pending_directives(root, config, limit)?;
+    let queued = proof_requests(root)?.into_iter().find(|value| value.get("status").and_then(Value::as_str)==Some("queued"));
+    let proof = if let Some(request) = queued {
+        let remaining = deadline.saturating_duration_since(Instant::now()).as_millis().max(1).min(timeout_ms as u128) as u64;
+        process_proof_request(root, request, remaining)?
+    } else { json!({"status":"idle","reason":"no_queued_proof_request"}) };
+    let reconciliation = reconcile_directive_outcomes(root, config, limit)?;
+    let status = if proof.get("status").and_then(Value::as_str)==Some("failed") { "attention" } else { "ok" };
+    let summary = json!({"resident":resident,"directive_dispatch":dispatch,"proof":proof,"directive_reconciliation":reconciliation,"bounded":true,"limit":limit,"test_authority":test_authority});
+    let connection = Connection::open(db_path(root)).map_err(|cause| error("site_loop_store_open_failed", &cause.to_string()))?;
+    connection.execute("UPDATE site_loop_runs SET status=?1,finished_at=?2,summary_json=?3 WHERE run_id=?4",params![status,now_iso(),serde_json::to_string(&summary).unwrap_or_else(|_|"{}".into()),run_id]).map_err(|cause| error("site_loop_run_finish_failed", &cause.to_string()))?;
+    Ok(json!({"schema":"narada.site_loop.run.v2","status":status,"run_id":run_id,"loop_id":loop_id,"dry_run":false,"summary":summary}))
+}
+
+fn ensure_native_loop_tables(connection: &Connection) -> Result<(), Value> {
+    connection.execute_batch("CREATE TABLE IF NOT EXISTS site_loop_runs(run_id TEXT PRIMARY KEY,loop_id TEXT NOT NULL,status TEXT NOT NULL,dry_run INTEGER NOT NULL,started_at TEXT NOT NULL,finished_at TEXT,summary_json TEXT,error_json TEXT,evidence_ref TEXT,evidence_sha256 TEXT,evidence_bytes INTEGER); CREATE TABLE IF NOT EXISTS site_loop_control(loop_id TEXT PRIMARY KEY,enabled INTEGER NOT NULL DEFAULT 1,paused INTEGER NOT NULL DEFAULT 0,mode TEXT NOT NULL DEFAULT 'running',reason TEXT,updated_at TEXT NOT NULL);").map_err(|cause| error("site_loop_schema_prepare_failed", &cause.to_string()))
+}
+
+fn dispatch_pending_directives(root: &Path, config: &Value, limit: u64) -> Result<Value, Value> {
+    let resident = resident_status(root, config)?;
+    if resident.get("live").and_then(Value::as_bool)!=Some(true) { return Ok(json!({"status":"skipped","reason":"resident_not_live","count":0})); }
+    let session_id = resident.get("carrier_session_id").and_then(Value::as_str).unwrap_or("");
+    let session_dir = PathBuf::from(resident.get("session_dir").and_then(Value::as_str).unwrap_or(""));
+    let agent = config.pointer("/resident/agent_id").and_then(Value::as_str).unwrap_or("site.resident");
+    let role = config.pointer("/resident/role").and_then(Value::as_str).unwrap_or("resident");
+    let mut connection = Connection::open(db_path(root)).map_err(|cause| error("site_loop_store_open_failed", &cause.to_string()))?;
+    if !table_exists(&connection,"directive_records") { return Ok(json!({"status":"ok","count":0,"reason":"directive_store_absent"})); }
+    let transaction = connection.transaction().map_err(|cause| error("directive_dispatch_transaction_failed", &cause.to_string()))?;
+    let rows = {
+        let mut statement = transaction.prepare("SELECT directive_id,directive_json FROM directive_records WHERE admission_status='admitted' AND delivery_status IN ('pending','failed') AND ((target_kind='agent' AND target_id=?1) OR (target_kind='role' AND target_id=?2)) ORDER BY priority DESC,sequence ASC,created_at ASC,directive_id ASC LIMIT ?3").map_err(|cause| error("directive_dispatch_query_failed", &cause.to_string()))?;
+        let values = statement.query_map(params![agent,role,limit], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?))).map_err(|cause| error("directive_dispatch_query_failed", &cause.to_string()))?.collect::<Result<Vec<_>,_>>().map_err(|cause| error("directive_dispatch_query_failed", &cause.to_string()))?;
+        values
+    };
+    let mut dispatched=Vec::new();
+    for (directive_id,text) in rows {
+        let mut directive:Value=serde_json::from_str(&text).map_err(|cause|error("directive_record_invalid_json",&cause.to_string()))?;
+        let content=directive.pointer("/content/text").and_then(Value::as_str).unwrap_or("Resident directive");
+        let frame=json!({"id":directive_id,"method":"session.submit","params":{"content":content,"source":"system_directive","source_kind":"site_loop","source_id":directive.pointer("/source/id"),"transport":"native_control_jsonl","delivery_mode":"immediate","directive_id":directive_id,"idempotency_key":format!("resident-directive:{directive_id}")}});
+        append_control_frame(&session_dir.join("control.jsonl"),&frame)?;
+        directive["delivery"]=json!({"status":"leased","transport":"native_control_jsonl","carrier_session_id":session_id,"leased_at":now_iso()});
+        transaction.execute("UPDATE directive_records SET delivery_status='leased',directive_json=?1,updated_at=?2 WHERE directive_id=?3",params![serde_json::to_string(&directive).unwrap_or(text),now_iso(),directive_id]).map_err(|cause|error("directive_dispatch_update_failed",&cause.to_string()))?;
+        dispatched.push(json!({"directive_id":directive_id,"carrier_session_id":session_id,"transport":"native_control_jsonl"}));
+    }
+    transaction.commit().map_err(|cause|error("directive_dispatch_commit_failed",&cause.to_string()))?;
+    Ok(json!({"status":"ok","count":dispatched.len(),"dispatched":dispatched}))
+}
+
+fn reconcile_directive_outcomes(root:&Path,config:&Value,limit:u64)->Result<Value,Value>{
+    let resident=resident_status(root,config)?; let Some(session_dir)=resident.get("session_dir").and_then(Value::as_str).map(PathBuf::from) else{return Ok(json!({"status":"skipped","reason":"resident_session_absent","count":0}))};
+    let mut connection=Connection::open(db_path(root)).map_err(|cause|error("site_loop_store_open_failed",&cause.to_string()))?; if !table_exists(&connection,"directive_records"){return Ok(json!({"status":"ok","count":0,"reason":"directive_store_absent"}))}
+    let rows={let mut statement=connection.prepare("SELECT directive_id FROM directive_records WHERE delivery_status='leased' ORDER BY updated_at ASC LIMIT ?1").map_err(|cause|error("directive_reconcile_query_failed",&cause.to_string()))?; let values=statement.query_map([limit],|row|row.get::<_,String>(0)).map_err(|cause|error("directive_reconcile_query_failed",&cause.to_string()))?.collect::<Result<Vec<_>,_>>().map_err(|cause|error("directive_reconcile_query_failed",&cause.to_string()))?; values};
+    let transaction=connection.transaction().map_err(|cause|error("directive_reconcile_transaction_failed",&cause.to_string()))?; let mut outcomes=Vec::new();
+    for id in rows { if let Some(event)=proof_terminal_event(&session_dir.join("events.jsonl"),&id)? { let reported=proof_task_report(root,&id)?.is_some(); let status=if reported{"reported"}else{"delivered"}; transaction.execute("UPDATE directive_records SET delivery_status=?1,updated_at=?2 WHERE directive_id=?3",params![status,now_iso(),id]).map_err(|cause|error("directive_reconcile_update_failed",&cause.to_string()))?; outcomes.push(json!({"directive_id":id,"status":status,"terminal_event":event})); } }
+    transaction.commit().map_err(|cause|error("directive_reconcile_commit_failed",&cause.to_string()))?; Ok(json!({"status":"ok","count":outcomes.len(),"outcomes":outcomes}))
 }
 
 fn open_db(root: &Path) -> Result<Option<Connection>, Value> {
@@ -937,7 +1025,8 @@ mod tests {
         fs::create_dir_all(root.join(".narada/capabilities")).expect("root");
         fs::write(config_path(&root), r#"{"schema":"narada.site_loop.config.v2","loop_id":"site.loop","site_id":"test","display_name":"Test","resident":{},"scheduler":{},"policy":{},"persistence":{}}"#).expect("config");
         assert_eq!(config_validate(&root).expect("validation")["valid"], true);
-        assert_eq!(call_tool("site_loop_run_once", &Map::new(), &root).expect_err("boundary")["status"], "unavailable");
+        assert_eq!(call_tool("site_loop_run_once", &Map::new(), &root).expect_err("boundary")["code"], "site_loop_run_once_mutating_mcp_not_supported");
+        assert_eq!(call_tool("site_loop_run_once", &json_map(json!({"dry_run":true})), &root).expect("dry run")["dry_run"], true);
         let started = call_tool("site_loop_proof_run", &json_map(json!({"proof_kind":"resident_production","ensure_resident":false})), &root).expect("proof request");
         assert_eq!(started["status"], "started");
         assert_eq!(started["request_status"], "queued");
@@ -968,7 +1057,18 @@ mod tests {
         let completed = process_proof_request(&root, request, 1000).expect("completed proof");
         assert_eq!(completed["status"], "passed");
         assert_eq!(proof_status(&root).expect("completed status")["latest_request"]["status"], "passed");
+        let connection = Connection::open(db_path(&root)).expect("directive db");
+        connection.execute_batch("CREATE TABLE directive_records(directive_id TEXT PRIMARY KEY,admission_status TEXT,target_kind TEXT,target_id TEXT,delivery_status TEXT,priority INTEGER,sequence INTEGER,created_at TEXT,updated_at TEXT,directive_json TEXT);").expect("directive schema");
+        let directive = json!({"directive_id":"directive-native-test","source":{"id":"fixture"},"content":{"text":"Complete the fixture task."}});
+        connection.execute("INSERT INTO directive_records VALUES ('directive-native-test','admitted','agent','site.resident','pending',100,0,?1,?1,?2)",params![now_iso(),directive.to_string()]).expect("directive");
+        drop(connection);
         let test_config = load_config(&root).expect("config read").expect("config");
+        assert_eq!(dispatch_pending_directives(&root,&test_config,10).expect("dispatch")["count"],1);
+        fs::OpenOptions::new().append(true).open(session.join("events.jsonl")).expect("events append").write_all(format!("{}\n",json!({"event":"session_control_response","request_id":"directive-native-test","terminal_state":"completed"})).as_bytes()).expect("event append");
+        let connection = Connection::open(db_path(&root)).expect("report db");
+        connection.execute("INSERT INTO task_reports VALUES ('report-directive','task-directive','site.resident','directive complete','directive-native-test',?1)",[now_iso()]).expect("directive report");
+        drop(connection);
+        assert_eq!(reconcile_directive_outcomes(&root,&test_config,10).expect("reconcile")["outcomes"][0]["status"],"reported");
         assert_eq!(retire_resident(&root, &test_config, session_id, "native recovery test").expect("retire")["status"], "retired");
         assert_eq!(unified_status(&root).expect("retired unified")["resident"]["live"], false);
         fs::remove_dir_all(root).expect("cleanup");
