@@ -1821,6 +1821,70 @@ function runSiteLifecycleAuthorityParity() {
   }
 }
 
+function runSiteRegistryParity() {
+  const root = mkdtempSync(join(tmpdir(), 'narada-site-registry-native-'));
+  const userSiteRoot = join(root, 'Narada');
+  const sitesBase = join(root, 'sites');
+  const discoveredRoot = join(sitesBase, 'discovered-site');
+  try {
+    mkdirSync(join(userSiteRoot, 'config', 'launch'), { recursive: true });
+    mkdirSync(discoveredRoot, { recursive: true });
+    writeFileSync(join(discoveredRoot, 'config.json'), JSON.stringify({ aim: { name: 'Discovered' }, substrate: 'fixture' }), 'utf8');
+    writeFileSync(join(userSiteRoot, 'config', 'launch', 'agents.psd1'), `@{\n  Site = "launch-site"\n  SiteRoot = "${discoveredRoot}"\n}\n`, 'utf8');
+    const registryPath = join(userSiteRoot, 'registry.db');
+    const db = new DatabaseSync(registryPath);
+    db.exec(`
+      CREATE TABLE site_registry(site_id TEXT PRIMARY KEY,variant TEXT NOT NULL,site_root TEXT NOT NULL,substrate TEXT NOT NULL,aim_json TEXT,control_endpoint TEXT,last_seen_at TEXT,created_at TEXT NOT NULL,lifecycle_status TEXT NOT NULL,observation_status TEXT NOT NULL,sources_json TEXT NOT NULL,aliases_json TEXT NOT NULL,revision INTEGER NOT NULL,updated_at TEXT NOT NULL,retired_at TEXT,retire_reason TEXT);
+      CREATE TABLE registry_management_audit(event_id TEXT PRIMARY KEY,site_id TEXT NOT NULL,operation TEXT NOT NULL,actor TEXT NOT NULL,reason TEXT,occurred_at TEXT NOT NULL,before_json TEXT,after_json TEXT,status TEXT NOT NULL);
+    `);
+    const insert = db.prepare('INSERT INTO site_registry VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
+    insert.run('site-a', 'native', join(root, 'site-a'), 'windows', JSON.stringify({ name: 'A' }), null, '2026-08-14T00:00:00Z', '2026-01-01T00:00:00Z', 'active', 'present', JSON.stringify([{ kind: 'manual', ref: 'fixture', observedAt: '2026-01-01T00:00:00Z' }]), JSON.stringify([{ value: 'alias-a', source: 'test' }]), 2, '2026-08-14T00:00:00Z', null, null);
+    insert.run('site-b', 'native', join(root, 'site-b'), 'windows', null, null, null, '2026-01-02T00:00:00Z', 'retired', 'unverified', '[]', '[]', 1, '2026-08-14T00:00:00Z', '2026-08-14T00:00:00Z', 'fixture');
+    db.prepare('INSERT INTO registry_management_audit VALUES(?,?,?,?,?,?,?,?,?)').run('audit-a', 'site-a', 'edit', 'operator', 'fixture', '2026-08-14T00:00:00Z', null, null, 'applied');
+    db.close();
+    const before = createHash('sha256').update(readFileSync(registryPath)).digest('hex');
+    const requests = [
+      { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} },
+      { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'site_registry_guidance', arguments: {} } },
+      { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'site_registry_doctor', arguments: {} } },
+      { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'site_registry_command_map', arguments: {} } },
+      { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'site_registry_list', arguments: { limit: 1, offset: 0 } } },
+      { jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'site_registry_list', arguments: { limit: 1, offset: 1 } } },
+      { jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'site_registry_show', arguments: { reference: 'alias-a' } } },
+      { jsonrpc: '2.0', id: 8, method: 'tools/call', params: { name: 'site_registry_show', arguments: { reference: 'missing' } } },
+      { jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'site_registry_discover_plan', arguments: { source: 'all', actor: 'fixture' } } },
+      { jsonrpc: '2.0', id: 10, method: 'tools/call', params: { name: 'site_registry_list', arguments: { limit: 501 } } },
+      { jsonrpc: '2.0', id: 11, method: 'tools/call', params: { name: 'site_registry_show', arguments: {} } },
+    ];
+    const env = { ...process.env, NARADA_USER_SITE_ROOT: userSiteRoot, NARADA_NATIVE_SITES_BASE_DIR: sitesBase };
+    const responses = runMailbox(executable, ['--surface-id', 'site-registry', '--site-root', root], requests, root, env);
+    const tools = responses.find((response) => response.id === 1)?.result?.tools ?? [];
+    if (tools.length !== 6 || tools.some((tool) => tool.inputSchema?.additionalProperties !== false)) throw new Error('site_registry.native_tool_contract_invalid');
+    for (const name of ['site_registry_list', 'site_registry_show', 'site_registry_discover_plan']) {
+      const tool = tools.find((candidate) => candidate.name === name);
+      if (!tool || Object.values(tool.inputSchema?.properties ?? {}).some((property) => property?.type === 'string' && property?.maxLength == null && !Array.isArray(property?.enum))) throw new Error('site_registry.native_bounded_schema_invalid:' + name);
+    }
+    const doctor = mailboxStructured(responses, 3, 'rust');
+    if (doctor.status !== 'ok' || doctor.runtime_dependency !== 'none' || doctor.record_count !== 2) throw new Error('site_registry.native_doctor_invalid');
+    if (mailboxStructured(responses, 4, 'rust').count !== 3) throw new Error('site_registry.native_command_map_invalid');
+    const first = mailboxStructured(responses, 5, 'rust');
+    const second = mailboxStructured(responses, 6, 'rust');
+    if (first.count !== 2 || first.returned !== 1 || first.has_more !== true || first.next_offset !== 1 || second.sites?.[0]?.site_id !== 'site-b') throw new Error('site_registry.native_paging_invalid');
+    const shown = mailboxStructured(responses, 7, 'rust');
+    if (shown.site_id !== 'site-a' || shown.management_audit?.length !== 1 || shown.site?.aim_json !== JSON.stringify({ name: 'A' })) throw new Error('site_registry.native_alias_show_invalid');
+    const missing = mailboxStructured(responses, 8, 'rust');
+    if (missing.status !== 'refused' || missing.refusals?.[0] !== 'site_not_found') throw new Error('site_registry.native_missing_refusal_invalid');
+    const discovery = mailboxStructured(responses, 9, 'rust');
+    if (discovery.status !== 'planned' || discovery.mutation_performed !== false || discovery.entries?.length !== 1 || discovery.entries?.[0]?.after?.sources?.length !== 2) throw new Error('site_registry.native_discovery_plan_invalid');
+    if (!responses.find((response) => response.id === 10)?.error || !responses.find((response) => response.id === 11)?.error) throw new Error('site_registry.native_invalid_arguments_not_refused');
+    const after = createHash('sha256').update(readFileSync(registryPath)).digest('hex');
+    if (before !== after) throw new Error('site_registry.native_read_only_contract_violated');
+    return { status: 'passed', verified: ['all_6_tools', 'closed_bounded_schemas', 'doctor', 'paging', 'alias_and_audit_show', 'not_found', 'merged_discovery_plan', 'invalid_arguments', 'read_only_persistence'] };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 function runCalendarParity() {
   const workspaceRoot = resolve(packageRoot, '..', '..', '..');
   const bunEntrypoint = join(workspaceRoot, 'packages', 'calendar-mcp', 'src', 'main.ts');
@@ -2611,6 +2675,7 @@ const siteLoopParity = runSlice('site-loop', runSiteLoopParity);
 const operatorRoutingParity = runSlice('operator-routing', runOperatorRoutingParity);
 const siteInboxParity = runSlice('site-inbox', runSiteInboxParity);
 const siteLifecycleAuthorityParity = runSlice('site-lifecycle', runSiteLifecycleAuthorityParity);
+const siteRegistryParity = runSlice('site-registry', runSiteRegistryParity);
 const calendarParity = runSlice('calendar', runCalendarParity);
 const calendarAuthorityBridge = runSlice('calendar', runCalendarAuthorityBridge);
 const calendarNativeGraphParity = runSlice('calendar', runCalendarNativeGraphParity);
@@ -2651,6 +2716,7 @@ process.stdout.write(JSON.stringify({
   operator_routing_parity: operatorRoutingParity,
   site_inbox_parity: siteInboxParity,
   site_lifecycle_authority_parity: siteLifecycleAuthorityParity,
+  site_registry_parity: siteRegistryParity,
   calendar_parity: calendarParity,
   calendar_authority_bridge: calendarAuthorityBridge,
   calendar_native_graph_parity: calendarNativeGraphParity,

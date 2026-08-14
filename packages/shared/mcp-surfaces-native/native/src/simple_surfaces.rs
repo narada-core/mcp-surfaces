@@ -1,6 +1,7 @@
 use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 use crate::operator_surface_authority;
+use crate::site_registry_authority;
 
 const SITE_LIFECYCLE_COMMANDS: &[(&str, &str, bool, bool, bool)] = &[
     (
@@ -160,10 +161,11 @@ pub fn list_tools(surface_id: &str) -> Vec<Value> {
                 ),
             ];
             tools.extend(SITE_REGISTRY_COMMANDS.iter().map(|(name, _)| {
-                tool(
+                tool_with_schema(
                     name,
                     "Read or plan one canonical site registry operation.",
                     true,
+                    registry_input_schema(name),
                 )
             }));
             tools
@@ -319,44 +321,33 @@ fn call_site_registry(name: &str, args: &Map<String, Value>, root: &Path) -> Res
         return Ok(guidance_result("site-registry", args));
     }
     if name == "site_registry_doctor" {
-        return Ok(json!({
-            "schema":"narada.site_registry.doctor.v1","status":"ok","server_name":"site-registry-mcp",
-            "implementation":"rust-native","narada_root":root.to_string_lossy(),
-            "command_count":SITE_REGISTRY_COMMANDS.len(),"coverage":registry_command_map(),
-            "cli_module_exists":false,"cli_module_path":null
-        }));
+        let mut result = site_registry_authority::doctor();
+        result["narada_root"] = Value::String(root.to_string_lossy().to_string());
+        result["command_count"] = Value::from(SITE_REGISTRY_COMMANDS.len());
+        result["coverage"] = Value::Array(registry_command_map());
+        return Ok(result);
     }
     if name == "site_registry_command_map" {
         return Ok(
             json!({"status":"ok","implementation":"rust-native","commands":registry_command_map(),"count":SITE_REGISTRY_COMMANDS.len()}),
         );
     }
-    let (_, cli) = SITE_REGISTRY_COMMANDS
+    SITE_REGISTRY_COMMANDS
         .iter()
         .find(|(tool, _)| *tool == name)
         .ok_or_else(|| diagnostic("unknown_tool", &format!("unknown_tool:{name}")))?;
-    if name == "site_registry_show" {
-        let reference = require_string(args, "reference")?;
-        return Ok(json!({
-            "status":"ok","tool":name,"cli_command":cli,"read_only":true,
-            "mutation_performed":false,"implementation":"rust-native",
-            "options":{"reference":reference},"result":{"kind":"show","reference":reference,"record":null}
-        }));
-    }
-    let mut options = args.clone();
-    if name == "site_registry_discover_plan" {
-        options.insert("dryRun".to_string(), Value::Bool(true));
-        options.remove("apply");
-    }
-    let result = if name == "site_registry_list" {
-        json!({"kind":"list","records":[]})
-    } else {
-        json!({"kind":"discover_plan","records":[]})
+    site_registry_authority::call(name, args)
+}
+
+fn registry_input_schema(name: &str) -> Value {
+    let properties = match name {
+        "site_registry_list" => json!({"limit":{"type":"integer","minimum":1,"maximum":500,"default":100},"offset":{"type":"integer","minimum":0,"maximum":10000,"default":0}}),
+        "site_registry_show" => json!({"reference":{"type":"string","minLength":1,"maxLength":512}}),
+        "site_registry_discover_plan" => json!({"source":{"type":"string","enum":["filesystem","launch_registry","all"],"default":"all"},"root":{"type":"string","minLength":1,"maxLength":4096},"actor":{"type":"string","minLength":1,"maxLength":512}}),
+        _ => json!({}),
     };
-    Ok(json!({
-        "status":"ok","tool":name,"cli_command":cli,"read_only":true,
-        "mutation_performed":false,"implementation":"rust-native","options":options,"result":result
-    }))
+    let required = if name == "site_registry_show" { json!(["reference"]) } else { json!([]) };
+    json!({"type":"object","properties":properties,"required":required,"additionalProperties":false})
 }
 
 fn call_project_state(name: &str, args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
