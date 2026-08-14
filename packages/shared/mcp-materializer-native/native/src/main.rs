@@ -2275,17 +2275,10 @@ fn validate_input(input: &MaterializationInput) -> Result<(), Failure> {
 }
 
 fn validate_protocol_route(carrier: &CarrierInput, server: &ServerInput) -> Result<(), Failure> {
-    let carrier_protocol = match carrier.carrier_kind {
-        CarrierKind::Kimi => "2026-07-28",
-        CarrierKind::Codex | CarrierKind::Opencode => "2024-11-05",
-    };
-    let proxy_accepted_client_protocols = ["2024-11-05", "2026-07-28"];
+    let carrier_protocol = "2026-07-28";
+    let proxy_accepted_client_protocols = ["2026-07-28"];
     let proxy_emitted_server_protocol = carrier_protocol;
-    let server_accepted_protocols: &[&str] = if server.name == "mcp-registrar" {
-        &["2026-07-28"]
-    } else {
-        &["2024-11-05", "2025-03-26", "2026-07-28"]
-    };
+    let server_accepted_protocols: &[&str] = &["2026-07-28"];
     let translation_adapter: Option<&str> = None;
     let valid = proxy_accepted_client_protocols.contains(&carrier_protocol)
         && server_accepted_protocols.contains(&proxy_emitted_server_protocol);
