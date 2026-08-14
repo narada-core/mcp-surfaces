@@ -1629,33 +1629,15 @@ fn validate_launch_descriptor(server: &ServerInput) -> Result<(), Failure> {
         .map_err(|error| {
             Failure::new("materializer_fresh_process_spawn_failed", error.to_string())
         })?;
-    let modern_only = server.name == "mcp-registrar";
     let modern_meta = json!({
         "io.modelcontextprotocol/protocolVersion":"2026-07-28",
         "io.modelcontextprotocol/clientInfo":{"name":"narada-mcp-materializer","version":"0.1.0"},
         "io.modelcontextprotocol/clientCapabilities":{}
     });
-    let requests = if modern_only {
-        vec![
-            json!({"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":modern_meta.clone()}}),
-            json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{"_meta":modern_meta}}),
-        ]
-    } else {
-        vec![
-            json!({
-                "jsonrpc":"2.0",
-                "id":1,
-                "method":"initialize",
-                "params":{
-                    "protocolVersion":"2025-03-26",
-                    "capabilities":{},
-                    "clientInfo":{"name":"narada-mcp-materializer","version":"0.1.0"}
-                }
-            }),
-            json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}}),
-            json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}),
-        ]
-    };
+    let requests = vec![
+        json!({"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":modern_meta.clone()}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{"_meta":modern_meta}}),
+    ];
     {
         let stdin = child.stdin.as_mut().ok_or_else(|| {
             Failure::new(
@@ -1721,12 +1703,18 @@ fn validate_launch_descriptor(server: &ServerInput) -> Result<(), Failure> {
                     continue;
                 };
                 if response.get("id").and_then(Value::as_i64) == Some(1) {
-                    initialized = if modern_only {
-                        response.pointer("/result/resultType").and_then(Value::as_str) == Some("complete")
-                            && response.pointer("/result/supportedVersions").and_then(Value::as_array).is_some_and(|versions| versions.iter().any(|version| version.as_str() == Some("2026-07-28")))
-                    } else {
-                        response.get("result").is_some()
-                    };
+                    initialized = response
+                        .pointer("/result/resultType")
+                        .and_then(Value::as_str)
+                        == Some("complete")
+                        && response
+                            .pointer("/result/supportedVersions")
+                            .and_then(Value::as_array)
+                            .is_some_and(|versions| {
+                                versions
+                                    .iter()
+                                    .any(|version| version.as_str() == Some("2026-07-28"))
+                            });
                 }
                 if response.get("id").and_then(Value::as_i64) == Some(2)
                     && response
@@ -1759,7 +1747,7 @@ fn validate_launch_descriptor(server: &ServerInput) -> Result<(), Failure> {
         )
         .with_details(json!({
             "protocol_discovery_succeeded":initialized,
-            "protocol_mode":if modern_only{"2026-07-28"}else{"legacy_initialize"},
+            "protocol_mode":"2026-07-28",
             "tools_list_succeeded":tools_listed,
             "timeout_seconds":timeout.as_secs(),
         })));
