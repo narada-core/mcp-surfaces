@@ -1,4 +1,4 @@
-use serde_json::json;
+use serde_json::{json, Map, Value};
 use std::env;
 use std::fs;
 use std::io::{Read, Write};
@@ -113,12 +113,8 @@ fn serve(stream: &mut TcpStream, port: u16) -> Result<(), String> {
         .to_string();
     let mut parts = first.split_whitespace();
     let method = parts.next().unwrap_or_default();
-    let path = parts
-        .next()
-        .unwrap_or_default()
-        .split('?')
-        .next()
-        .unwrap_or_default();
+    let target = parts.next().unwrap_or_default();
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
     if !matches!(method, "GET" | "HEAD") {
         return response(
             stream,
@@ -135,6 +131,15 @@ fn serve(stream: &mut TcpStream, port: u16) -> Result<(), String> {
             "schema":"narada.operator_console_runtime.routes.v1","status":"partial_native_port","routes":KNOWN_ROUTES
         }).to_string()),
         "/" | "/console" => ("text/html; charset=utf-8", "<!doctype html><html><head><meta charset=\"utf-8\"><title>Narada Operator Console</title></head><body><main><h1>Narada Operator Console</h1><p>Native Rust runtime is ready. Route authority migration is in progress.</p></main></body></html>".to_string()),
+        "/console/registry/api/sites" => {
+            return serve_registry_list(stream, method, query);
+        }
+        _ if path.starts_with("/console/registry/api/sites/") => {
+            return serve_registry_show(stream, method, path);
+        }
+        "/console/registry/api/discover-plan" => {
+            return serve_registry_discover_plan(stream, method, query);
+        }
         _ if KNOWN_ROUTES.iter().any(|known| *known == path) => {
             let body = json!({"schema":"narada.operator_console_runtime.route_result.v1","status":"unavailable","code":"native_route_not_yet_ported","route":path,"migration":"rust_authority_port_in_progress"}).to_string();
             return response(stream, 501, "application/json", &body);
@@ -147,6 +152,163 @@ fn serve(stream: &mut TcpStream, port: u16) -> Result<(), String> {
         content_type,
         if method == "HEAD" { "" } else { &body },
     )
+}
+
+fn serve_registry_list(stream: &mut TcpStream, method: &str, query: &str) -> Result<(), String> {
+    if method != "GET" && method != "HEAD" {
+        return response(
+            stream,
+            405,
+            "application/json",
+            "{\"error\":\"method_not_allowed\"}",
+        );
+    }
+    let args = query_args(query, &["limit", "offset"])?;
+    let body = native_registry_call("site_registry_list", &args)?;
+    respond_native_result(stream, method, body)
+}
+
+fn serve_registry_show(stream: &mut TcpStream, method: &str, path: &str) -> Result<(), String> {
+    if method != "GET" && method != "HEAD" {
+        return response(
+            stream,
+            405,
+            "application/json",
+            "{\"error\":\"method_not_allowed\"}",
+        );
+    }
+    let reference = path
+        .strip_prefix("/console/registry/api/sites/")
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "registry_site_reference_missing".to_string())?;
+    let reference = percent_decode(reference)?;
+    if reference.len() > 512 || reference.is_empty() || reference.contains('/') {
+        return response(
+            stream,
+            400,
+            "application/json",
+            "{\"error\":\"registry_site_reference_invalid\"}",
+        );
+    }
+    let mut args = Map::new();
+    args.insert("reference".to_string(), Value::String(reference));
+    let body = native_registry_call("site_registry_show", &args)?;
+    respond_native_result(stream, method, body)
+}
+
+fn serve_registry_discover_plan(
+    stream: &mut TcpStream,
+    method: &str,
+    query: &str,
+) -> Result<(), String> {
+    if method != "GET" && method != "HEAD" {
+        return response(
+            stream,
+            405,
+            "application/json",
+            "{\"error\":\"method_not_allowed\"}",
+        );
+    }
+    let args = query_args(query, &["source", "root", "actor"])?;
+    let body = native_registry_call("site_registry_discover_plan", &args)?;
+    respond_native_result(stream, method, body)
+}
+
+fn native_registry_call(name: &str, args: &Map<String, Value>) -> Result<String, String> {
+    let value = crate::site_registry_authority::call(name, args).map_err(|error| {
+        serde_json::to_string(&error)
+            .unwrap_or_else(|_| "{\"error\":\"registry_authority_failed\"}".to_string())
+    })?;
+    serde_json::to_string(&value).map_err(|cause| format!("registry_result_encode_failed:{cause}"))
+}
+
+fn respond_native_result(stream: &mut TcpStream, method: &str, body: String) -> Result<(), String> {
+    let status = serde_json::from_str::<Value>(&body).ok().and_then(|value| {
+        value
+            .get("status")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    });
+    let code = match status.as_deref() {
+        Some("success") | Some("planned") | Some("unchanged") | Some("advisory") => 200,
+        Some("refused") => {
+            if body.contains("site_not_found") {
+                404
+            } else {
+                400
+            }
+        }
+        _ => 503,
+    };
+    response(
+        stream,
+        code,
+        "application/json",
+        if method == "HEAD" { "" } else { &body },
+    )
+}
+
+fn query_args(query: &str, allowed: &[&str]) -> Result<Map<String, Value>, String> {
+    let mut args = Map::new();
+    for pair in query.split('&').filter(|pair| !pair.is_empty()).take(16) {
+        let (raw_key, raw_value) = pair.split_once('=').unwrap_or((pair, ""));
+        let key = percent_decode(raw_key)?;
+        if !allowed.iter().any(|allowed_key| *allowed_key == key) {
+            return Err(format!("registry_query_parameter_invalid:{key}"));
+        }
+        let value = percent_decode(raw_value)?;
+        if value.len() > 4096 {
+            return Err("registry_query_value_too_large".to_string());
+        }
+        match key.as_str() {
+            "limit" | "offset" => {
+                let number = value
+                    .parse::<i64>()
+                    .map_err(|_| format!("registry_query_integer_invalid:{key}"))?;
+                args.insert(key, Value::from(number));
+            }
+            _ => {
+                args.insert(key, Value::String(value));
+            }
+        }
+    }
+    Ok(args)
+}
+
+fn percent_decode(value: &str) -> Result<String, String> {
+    let bytes = value.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            if index + 2 >= bytes.len() {
+                return Err("request_percent_encoding_invalid".to_string());
+            }
+            let high = hex_digit(bytes[index + 1])
+                .ok_or_else(|| "request_percent_encoding_invalid".to_string())?;
+            let low = hex_digit(bytes[index + 2])
+                .ok_or_else(|| "request_percent_encoding_invalid".to_string())?;
+            output.push((high << 4) | low);
+            index += 3;
+        } else {
+            output.push(if bytes[index] == b'+' {
+                b' '
+            } else {
+                bytes[index]
+            });
+            index += 1;
+        }
+    }
+    String::from_utf8(output).map_err(|_| "request_encoding_invalid".to_string())
+}
+
+fn hex_digit(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn response(
