@@ -699,6 +699,12 @@
           "type": "number",
           "description": "Maximum results; defaults to 50."
         },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "Zero-based offset into the filtered newest-first task sequence."
+        },
         "payload_ref": {
           "type": "string",
           "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
@@ -1605,6 +1611,14 @@
           },
           "description": "Optional evidence references supporting the structured outcome."
         },
+        "result": {
+          "type": "object",
+          "description": "Structured result required when the task has a result_contract."
+        },
+        "result_schema_digest": {
+          "type": "string",
+          "description": "Optional delegated output schema digest; must match the task result contract."
+        },
         "reviewer": {
           "type": "string",
           "description": "Optional admitted reviewer agent id or unique reviewer role alias for the generated review-contract dependency routing."
@@ -1719,6 +1733,14 @@
             "description": "Evidence reference."
           },
           "description": "Optional evidence references supporting the structured outcome."
+        },
+        "result": {
+          "type": "object",
+          "description": "Structured result required when the task has a result_contract."
+        },
+        "result_schema_digest": {
+          "type": "string",
+          "description": "Optional delegated output schema digest; must match the task result contract."
         },
         "reviewer": {
           "type": "string",
@@ -2860,6 +2882,17 @@
           "type": "number",
           "description": "Maximum definitions to return. Defaults to 50."
         },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "Zero-based offset into the filtered newest-first recurrence sequence."
+        },
+        "compact": {
+          "type": "boolean",
+          "default": true,
+          "description": "Return recurrence identity, schedule, and status fields only. Set false for complete stored task definitions."
+        },
         "payload_ref": {
           "type": "string",
           "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
@@ -3243,6 +3276,12 @@
         "tool": {
           "type": "string",
           "description": "Optional lifecycle tool name for tool-specific guidance, such as task_lifecycle_submit_work or task_lifecycle_report_blocked."
+        },
+        "detail": {
+          "type": "string",
+          "enum": ["compact", "full"],
+          "default": "compact",
+          "description": "Compact returns the selected workflow and essential operating guidance. Full returns every decision table, example, recovery rule, and boundary."
         }
       },
       "additionalProperties": false

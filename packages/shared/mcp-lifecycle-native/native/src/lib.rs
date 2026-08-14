@@ -945,9 +945,6 @@ impl LifecycleServer {
     }
 
     fn tool_result(&self, tool_name: &str, payload: Value, is_error: bool) -> Result<Value, String> {
-        if self.options.surface == Surface::Work {
-            return Ok(tool_result(payload, is_error));
-        }
         let compact = serde_json::to_string(&payload).map_err(|e| format!("tool_result_serialize_failed:{e}"))?;
         let inline_limit = 4_000usize;
         let semantic_materialization = (tool_name == "task_lifecycle_finish" && payload.get("review_required").and_then(Value::as_bool) == Some(true)) || (tool_name == "task_lifecycle_close" && payload.get("error").and_then(Value::as_str) == Some("task_close_dependencies_unsatisfied")) || (tool_name == "task_lifecycle_show" && payload.get("lifecycle").and_then(|value| value.get("status")).and_then(Value::as_str) == Some("awaiting_dependencies"));
@@ -1217,7 +1214,8 @@ impl LifecycleServer {
             "task_lifecycle_unclaim" => self.task_unclaim(args),
             "task_lifecycle_prove_criteria" => self.task_prove_criteria(args),
             "task_lifecycle_admit_evidence" => self.task_admit_evidence(args),
-            "task_lifecycle_finish" | "task_lifecycle_submit_work" => self.task_finish(args),
+            "task_lifecycle_finish" => self.task_finish(args),
+            "task_lifecycle_submit_work" => self.task_submit_work(args),
             "task_lifecycle_close"
             | "task_lifecycle_closeout"
             | "task_lifecycle_disposition_closeout" => self.task_closeout(args),
@@ -1606,22 +1604,35 @@ impl LifecycleServer {
         let kind = required_string(&args, "kind")?;
         let summary = required_string(&args, "summary")?;
         let connection = self.connection_mut()?;
-        let exists: Option<String> = connection
+        let required_task_id: Option<String> = connection
             .query_row(
-                "select dependency_id from task_dependencies where dependency_id=?1",
+                "select required_task_id from task_dependencies where dependency_id=?1",
                 params![dependency_id],
                 |r| r.get(0),
             )
             .optional()
             .map_err(db_error)?;
-        if exists.is_none() {
+        let Some(required_task_id) = required_task_id else {
             return Err(format!("dependency_not_found:{dependency_id}"));
-        }
+        };
+        let required_outcome_id = if let Some(outcome_id) = string_arg(&args, "required_outcome_id") {
+            outcome_id
+        } else {
+            connection
+                .query_row(
+                    "select outcome_id from task_outcomes where task_id=?1 order by admitted_at desc,rowid desc limit 1",
+                    params![required_task_id],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(db_error)?
+                .ok_or_else(|| format!("dependency_required_outcome_not_found:{dependency_id}"))?
+        };
         let id = format!("disposition-{}", Uuid::new_v4());
         let status = string_arg(&args, "status").unwrap_or_else(|| "recorded".to_string());
         connection.execute(
             "insert into task_dependency_dispositions(disposition_id,dependency_id,required_outcome_id,kind,status,target_task_id,routed_obligation_id,authority_basis_json,summary,created_by,created_at) values(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
-            params![id,dependency_id,string_arg(&args,"required_outcome_id"),kind,status,string_arg(&args,"target_task_id"),string_arg(&args,"routed_obligation_id"),args.get("authority_basis").cloned().unwrap_or_else(||json!(null)).to_string(),summary,agent,now()],
+            params![id,dependency_id,required_outcome_id,kind,status,string_arg(&args,"target_task_id"),string_arg(&args,"routed_obligation_id"),args.get("authority_basis").cloned().unwrap_or_else(||json!(null)).to_string(),summary,agent,now()],
         ).map_err(db_error)?;
         connection
             .execute(
@@ -2459,6 +2470,112 @@ impl LifecycleServer {
             )?;
         }
         Ok(result)
+    }
+    fn task_submit_work(&mut self, args: Value) -> Result<Value, String> {
+        let number = required_i64(&args, "task_number")?;
+        let agent = required_string(&args, "agent_id")?;
+        let resume = args.get("resume_existing_work").and_then(Value::as_bool) == Some(true);
+        let execution_notes = string_arg(&args, "execution_notes");
+        let verification = string_arg(&args, "verification");
+        if resume && (execution_notes.is_some() || verification.is_some()) {
+            return Err("task_lifecycle_submit_work_resume_existing_work_conflicts_with_replacement_notes".to_string());
+        }
+        let mut summary = string_arg(&args, "summary");
+        if !resume {
+            if summary.as_deref().is_none_or(|value| value.trim().is_empty()) {
+                return Err("task_lifecycle_submit_work_summary_required".to_string());
+            }
+            for (field, value) in [("execution_notes", execution_notes.as_deref()), ("verification", verification.as_deref())] {
+                if value.is_none_or(|text| text.trim().chars().count() < 20) {
+                    return Err(format!("task_lifecycle_submit_work_{field}_not_substantive"));
+                }
+            }
+        }
+        if args.get("changed_files").is_some()
+            && args.get("no_files_changed").and_then(Value::as_bool) == Some(true)
+        {
+            return Err("changed_files_conflicts_with_no_files_changed".to_string());
+        }
+        let (task_id, lifecycle_status) = self.connection()?.query_row(
+            "select task_id,status from task_lifecycle where task_number=?1",
+            params![number],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        ).optional().map_err(db_error)?.ok_or_else(|| format!("task_not_found: {number}"))?;
+        let rostered: bool = self.connection()?.query_row(
+            "select count(*) from agent_roster where agent_id=?1 and status not in ('retired','revoked')",
+            params![&agent],
+            |row| row.get::<_, i64>(0),
+        ).map_err(db_error)? > 0;
+        if !rostered {
+            return Ok(json!({
+                "schema":"narada.task.submit_work.v1","status":"blocked",
+                "blocked_at":"task_lifecycle_submit_work.roster_preflight",
+                "task_number":number,"agent_id":agent,
+                "error":"submit_work_agent_not_in_roster",
+                "remediation":"Admit the agent into the task lifecycle roster before submit_work."
+            }));
+        }
+        let mut primitive_results = Vec::new();
+        let mut payload_source = Value::Null;
+        if args.get("auto_materialize_payload").and_then(Value::as_bool) == Some(true) {
+            let payload_id = format!("submit-work-{number}-{}", Uuid::new_v4());
+            let payload = json!({
+                "summary":summary,"execution_notes":execution_notes,"verification":verification,
+                "changed_files":args.get("changed_files"),"no_files_changed":args.get("no_files_changed"),
+                "recovery_truthfulness":args.get("recovery_truthfulness"),"self_certification":args.get("self_certification")
+            });
+            let created = self.payload_create(json!({"payload_id":payload_id,"payload":payload,"created_by":agent}))?;
+            payload_source = json!({"kind":"auto_materialized_payload","ref":created.get("ref")});
+        }
+        if resume {
+            let previous = self.query_one(
+                "select report_id,summary,changed_files_json from task_reports where task_id=?1 and agent_id=?2 order by submitted_at desc,rowid desc limit 1",
+                params![&task_id,&agent],
+            )?.ok_or("task_lifecycle_submit_work_resume_existing_work_report_not_found")?;
+            if summary.is_none() { summary = previous.get("summary").and_then(Value::as_str).map(ToString::to_string); }
+            primitive_results.push(json!({"tool":"task_lifecycle_submit_work.reuse_existing_task_notes","result":{"status":"reused","report_id":previous.get("report_id")},"is_error":false}));
+        }
+        let should_claim = args.get("claim").and_then(Value::as_bool).unwrap_or(lifecycle_status == "opened");
+        if should_claim {
+            let mut claim_args = json!({"task_number":number,"agent_id":agent});
+            if let Some(basis) = args.get("authority_basis") { claim_args["authority_basis"] = basis.clone(); }
+            let result = self.task_claim(claim_args)?;
+            primitive_results.push(json!({"tool":"task_lifecycle_claim","result":result,"is_error":false}));
+        }
+        if !resume {
+            replace_task_markdown_section(&self.options.site_root, number, "Execution Notes", execution_notes.as_deref().unwrap_or_default())?;
+            replace_task_markdown_section(&self.options.site_root, number, "Verification", verification.as_deref().unwrap_or_default())?;
+            primitive_results.push(json!({"tool":"task_lifecycle_submit_work.write_task_notes","result":{"status":"written","task_number":number,"sections":["Execution Notes","Verification"]},"is_error":false}));
+        }
+        let should_prove = args.get("prove_criteria").and_then(Value::as_bool).unwrap_or(!resume);
+        if should_prove {
+            let result = self.task_prove_criteria(json!({"task_number":number,"agent_id":agent}))?;
+            primitive_results.push(json!({"tool":"task_lifecycle_prove_criteria","result":result,"is_error":false}));
+        }
+        let should_admit = args.get("admit_evidence").and_then(Value::as_bool).unwrap_or(!resume);
+        if should_admit {
+            let mut admit_args = json!({"task_number":number,"agent_id":agent});
+            if let Some(packet) = args.get("self_certification") { admit_args["self_certification"] = packet.clone(); }
+            let result = self.task_admit_evidence(admit_args)?;
+            primitive_results.push(json!({"tool":"task_lifecycle_admit_evidence","result":result,"is_error":false}));
+        }
+        let mut final_status = lifecycle_status;
+        if args.get("finish").and_then(Value::as_bool) != Some(false) {
+            let mut finish_args = json!({"task_number":number,"agent_id":agent,"summary":summary.ok_or("task_lifecycle_submit_work_summary_required")?});
+            for field in ["reviewer","changed_files","no_files_changed","authority_basis","recovery_truthfulness","self_certification"] {
+                if let Some(value) = args.get(field) { finish_args[field] = value.clone(); }
+            }
+            let result = self.task_finish(finish_args)?;
+            final_status = result.get("new_status").and_then(Value::as_str).unwrap_or("in_review").to_string();
+            primitive_results.push(json!({"tool":"task_lifecycle_finish","result":result,"is_error":false}));
+        }
+        Ok(json!({
+            "schema":"narada.task.submit_work.v1","status":"submitted","task_number":number,
+            "agent_id":agent,"final_lifecycle_status":final_status,
+            "closure_status":if final_status == "closed" {"closed"} else {"submitted_for_review_not_closed"},
+            "submitted_for_review_not_closed":final_status != "closed",
+            "primitive_results":primitive_results,"blocked_at":Value::Null,"payload_source":payload_source
+        }))
     }
     fn task_dependency_satisfaction(&self, parent_task_id: &str) -> Result<Value, String> {
         let evaluated_at = now();
@@ -4198,13 +4315,27 @@ fn append_task_body(root: &Path, number: i64, summary: &str) -> Result<(), Strin
     }
     Ok(())
 }
-fn tool_result(payload: Value, is_error: bool) -> Value {
-    let text = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
-    let mut result = json!({"content":[{"type":"text","text":text}],"structuredContent":payload});
-    if is_error {
-        result["isError"] = json!(true)
+fn replace_task_markdown_section(root: &Path, number: i64, heading: &str, body: &str) -> Result<(), String> {
+    let dir = root.join(".ai/do-not-open/tasks");
+    for entry in fs::read_dir(&dir).map_err(|error| format!("task_file_directory_read_failed:{error}"))?.flatten().take(200) {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("md") { continue; }
+        let original = fs::read_to_string(&path).map_err(|error| format!("task_file_read_failed:{error}"))?;
+        if !original.lines().any(|line| line.trim() == format!("number: {number}")) { continue; }
+        let marker = format!("## {heading}");
+        let Some(start) = original.find(&marker) else { return Err(format!("task_lifecycle_submit_work_section_missing:{heading}")); };
+        let content_start = start + marker.len();
+        let remainder = &original[content_start..];
+        let next_heading = remainder.find("\n## ").map(|offset| content_start + offset).unwrap_or(original.len());
+        let replacement = format!("{marker}\n\n{}\n", body.trim());
+        let mut updated = String::with_capacity(original.len() + replacement.len());
+        updated.push_str(&original[..start]);
+        updated.push_str(&replacement);
+        if next_heading < original.len() { updated.push_str(&original[next_heading..]); }
+        fs::write(&path, updated).map_err(|error| format!("task_file_write_failed:{error}"))?;
+        return Ok(());
     }
-    result
+    Err(format!("task_file_not_found:{number}"))
 }
 fn normalized_path_string(path: &Path) -> String {
     let absolute = if path.is_absolute() {
