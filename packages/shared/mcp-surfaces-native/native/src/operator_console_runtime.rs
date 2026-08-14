@@ -7,6 +7,38 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
+const KNOWN_ROUTES: &[&str] = &[
+    "/",
+    "/health",
+    "/routes",
+    "/console",
+    "/console/surfaces",
+    "/console/agents",
+    "/console/agents/api/overview",
+    "/console/agents/api/admission-options",
+    "/console/agents/api/admission",
+    "/console/agents/api/stop",
+    "/console/agents/api/delete",
+    "/console/agents/api/launch",
+    "/console/agents/api/pending",
+    "/console/agents/api/session-route",
+    "/console/sessions",
+    "/console/sessions/api/sessions",
+    "/console/registry",
+    "/console/registry/add",
+    "/console/registry/manage",
+    "/console/registry/api/sites",
+    "/console/registry/api/operations/plan",
+    "/console/registry/api/operations/apply",
+    "/console/registry/api/discover-plan",
+    "/console/launch",
+    "/console/onboarding",
+    "/console/onboarding/api/status",
+    "/console/onboarding/api/start",
+    "/console/fleet",
+    "/console/fleet/api/hosts",
+    "/console/fleet/api/observations",
+];
 
 pub fn is_host_mode(args: &[String]) -> bool {
     args.first().map(String::as_str) == Some("--operator-console-runtime-host")
@@ -100,9 +132,13 @@ fn serve(stream: &mut TcpStream, port: u16) -> Result<(), String> {
             "schema":"narada.operator_console_runtime.health.v1","status":"ready","runtime":"rust","pid":std::process::id(),"port":port
         }).to_string()),
         "/routes" => ("application/json", json!({
-            "schema":"narada.operator_console_runtime.routes.v1","status":"partial_native_port","routes":["/","/health","/routes","/console"]
+            "schema":"narada.operator_console_runtime.routes.v1","status":"partial_native_port","routes":KNOWN_ROUTES
         }).to_string()),
         "/" | "/console" => ("text/html; charset=utf-8", "<!doctype html><html><head><meta charset=\"utf-8\"><title>Narada Operator Console</title></head><body><main><h1>Narada Operator Console</h1><p>Native Rust runtime is ready. Route authority migration is in progress.</p></main></body></html>".to_string()),
+        _ if KNOWN_ROUTES.iter().any(|known| *known == path) => {
+            let body = json!({"schema":"narada.operator_console_runtime.route_result.v1","status":"unavailable","code":"native_route_not_yet_ported","route":path,"migration":"rust_authority_port_in_progress"}).to_string();
+            return response(stream, 501, "application/json", &body);
+        }
         _ => return response(stream, 404, "application/json", "{\"error\":\"route_not_found\"}"),
     };
     response(
