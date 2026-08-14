@@ -5,9 +5,12 @@ use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::fs::OpenOptions;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
@@ -15,6 +18,12 @@ const PROTOCOL_VERSION: &str = "2024-11-05";
 const READ_TIMEOUT_MS: u64 = 5_000;
 const WRITE_TIMEOUT_MS: u64 = 10_000;
 const SEARCH_TIMEOUT_MS: u64 = 60_000;
+const MAX_READ_LINE_BYTES: usize = 1024 * 1024;
+const MAX_READ_WINDOW_BYTES: usize = 4 * 1024 * 1024;
+const MAX_SEARCH_CAPTURE_ENTRIES: usize = 10_000;
+const MAX_SEARCH_CAPTURE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_SEARCH_LINE_BYTES: usize = 256 * 1024;
+const MAX_TEXT_MUTATION_BYTES: u64 = 8 * 1024 * 1024;
 const DEFAULT_GLOB_IGNORES: &[&str] = &[
     "**/.git/**",
     "**/node_modules/**",
@@ -67,8 +76,9 @@ pub(crate) struct State {
     root_entries: Vec<Value>,
     output_root: PathBuf,
     audit_log_dir: Option<PathBuf>,
-    cache: HashMap<String, (String, Vec<String>)>,
-    snapshots: HashMap<String, Vec<String>>,
+    cache: HashMap<String, (String, Vec<String>, bool)>,
+    snapshots: HashMap<String, (Vec<String>, bool)>,
+    snapshot_order: Vec<String>,
 }
 
 pub(crate) fn site_allowed_roots_config_path(output_root: &Path) -> PathBuf {
@@ -288,6 +298,7 @@ fn parse_state(args: &[String]) -> Result<State, String> {
         audit_log_dir: audit_log_dir.map(|value| absolute(PathBuf::from(value))),
         cache: HashMap::new(),
         snapshots: HashMap::new(),
+        snapshot_order: Vec::new(),
     })
 }
 
@@ -430,9 +441,7 @@ fn handle_request(state: &mut State, request: &Value) -> Option<Value> {
         .get("method")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if request.get("id").is_none() {
-        return None;
-    }
+    request.get("id")?;
     let id = request.get("id").cloned().unwrap_or(Value::Null);
     let result = match method {
         "initialize" => Ok(initialize(request, &state.mode)),
@@ -448,9 +457,10 @@ fn handle_request(state: &mut State, request: &Value) -> Option<Value> {
             json!({"prompts": [{"name": "local_filesystem_tool_usage", "title": "Local Filesystem Tool Usage", "description": format!("Guidance for using local-filesystem-{} tools safely.", state.mode), "arguments": []}]}),
         ),
         "prompts/get" => prompt_get(state, request.get("params").unwrap_or(&Value::Null)),
-        "completion/complete" => {
-            Ok(json!({"completion": {"values": [], "total": 0, "hasMore": false}}))
-        }
+        "completion/complete" => Ok(completion(
+            state,
+            request.get("params").unwrap_or(&Value::Null),
+        )),
         "logging/setLevel" => Ok(json!({})),
         _ => Err(FsError::new(
             "unsupported_mcp_method",
@@ -466,9 +476,9 @@ fn handle_request(state: &mut State, request: &Value) -> Option<Value> {
     })
 }
 
-fn initialize(request: &Value, mode: &str) -> Value {
+fn initialize(_request: &Value, mode: &str) -> Value {
     json!({
-        "protocolVersion": request.get("params").and_then(|value| value.get("protocolVersion")).cloned().unwrap_or(json!(PROTOCOL_VERSION)),
+        "protocolVersion": PROTOCOL_VERSION,
         "capabilities": {"tools": {}, "resources": {}, "prompts": {}, "completions": {}, "logging": {}},
         "serverInfo": {"name": format!("local-filesystem-{mode}-native"), "version": "0.1.0"}
     })
@@ -491,6 +501,22 @@ fn prompt_get(state: &State, params: &Value) -> Result<Value, FsError> {
     )
 }
 
+fn completion(state: &State, params: &Value) -> Value {
+    let prefix = params
+        .pointer("/argument/value")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let values: Vec<String> = state
+        .allowed_roots
+        .iter()
+        .map(|path| normalize_path(path))
+        .filter(|value| value.to_ascii_lowercase().starts_with(&prefix))
+        .take(100)
+        .collect();
+    json!({"completion":{"total":values.len(),"hasMore":false,"values":values}})
+}
+
 fn call_tool(state: &mut State, params: &Value) -> Result<Value, FsError> {
     let name = params.get("name").and_then(Value::as_str).ok_or_else(|| {
         FsError::new(
@@ -499,7 +525,15 @@ fn call_tool(state: &mut State, params: &Value) -> Result<Value, FsError> {
             json!({}),
         )
     })?;
-    let args = params.get("arguments").unwrap_or(&Value::Null);
+    let raw_args = params.get("arguments").unwrap_or(&Value::Null);
+    validate_tool_arguments(&state.mode, name, raw_args)?;
+    let (resolved_args, payload_source) = if name == "fs_write_file" {
+        resolve_write_payload(state, raw_args)?
+    } else {
+        (raw_args.clone(), None)
+    };
+    let args = &resolved_args;
+    validate_tool_arguments(&state.mode, name, args)?;
     if is_write_tool(name) && state.mode != "write" {
         return Err(FsError::new(
             format!("tool_not_available_in_{}_mode", state.mode),
@@ -507,7 +541,7 @@ fn call_tool(state: &mut State, params: &Value) -> Result<Value, FsError> {
             json!({"tool_name": name, "mode": state.mode}),
         ));
     }
-    let value = match name {
+    let mut value = match name {
         "fs_guidance" => guidance(state, args),
         "fs_read_file" => read_file(state, args, false),
         "fs_read_file_range" => read_file(state, args, true),
@@ -521,6 +555,7 @@ fn call_tool(state: &mut State, params: &Value) -> Result<Value, FsError> {
         "fs_write_file" => write_file(state, args),
         "fs_str_replace_file" => str_replace_file(state, args),
         "fs_replace_range" => replace_range(state, args),
+        "fs_apply_patch" => apply_patch_tool(state, args),
         "fs_move_path" => move_path(state, args, false),
         "fs_create_directory" => create_directory(state, args),
         "fs_rename_directory" => move_path(state, args, true),
@@ -531,7 +566,146 @@ fn call_tool(state: &mut State, params: &Value) -> Result<Value, FsError> {
             json!({"tool_name": name, "mode": state.mode}),
         )),
     }?;
+    if let (Some(source), Some(object)) = (payload_source, value.as_object_mut()) {
+        object.insert("payload_source".into(), source);
+    }
     Ok(tool_result(value))
+}
+
+fn resolve_write_payload(state: &State, args: &Value) -> Result<(Value, Option<Value>), FsError> {
+    let object = args.as_object().ok_or_else(|| {
+        FsError::new(
+            "tool_arguments_must_be_object",
+            "tool_arguments_must_be_object",
+            json!({}),
+        )
+    })?;
+    let path = object
+        .get("payload_path")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    let reference = object
+        .get("payload_ref")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    if path.is_some() && reference.is_some() {
+        return Err(FsError::new(
+            "payload_transport_must_choose_one_of_payload_path_or_payload_ref",
+            "payload_transport_must_choose_one_of_payload_path_or_payload_ref",
+            json!({}),
+        ));
+    }
+    let Some((candidate, source_kind)) = (if let Some(value) = path {
+        Some((state.output_root.join(value), "file"))
+    } else if let Some(value) = reference {
+        let Some(rest) = value.strip_prefix("mcp_payload:") else {
+            return Err(FsError::new(
+                "payload_ref_invalid",
+                "payload_ref_invalid",
+                json!({"payload_ref":value}),
+            ));
+        };
+        let Some((id, revision)) = rest.split_once("@v") else {
+            return Err(FsError::new(
+                "payload_ref_invalid",
+                "payload_ref_invalid",
+                json!({"payload_ref":value}),
+            ));
+        };
+        if id.len() < 3
+            || id.len() > 64
+            || !id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+            || revision
+                .parse::<u64>()
+                .ok()
+                .filter(|value| *value > 0)
+                .is_none()
+        {
+            return Err(FsError::new(
+                "payload_ref_invalid",
+                "payload_ref_invalid",
+                json!({"payload_ref":value}),
+            ));
+        }
+        Some((
+            state
+                .output_root
+                .join(".ai/tmp/mcp-payloads/workspace")
+                .join(id)
+                .join(format!("v{revision}.json")),
+            "ref",
+        ))
+    } else {
+        None
+    }) else {
+        return Ok((args.clone(), None));
+    };
+    let allowed = canonicalize_with_missing(&state.output_root.join(".ai/tmp/mcp-payloads"));
+    let resolved = canonicalize_with_missing(&candidate);
+    if !within(&allowed, &resolved) {
+        return Err(FsError::new(
+            "payload_path_outside_allowed_staging",
+            "payload_path_outside_allowed_staging",
+            json!({"path":candidate}),
+        ));
+    }
+    let metadata = fs::metadata(&resolved).map_err(|_| {
+        FsError::new(
+            "payload_path_not_found",
+            "payload_path_not_found",
+            json!({"path":candidate}),
+        )
+    })?;
+    if !metadata.is_file() {
+        return Err(FsError::new(
+            "payload_path_not_file",
+            "payload_path_not_file",
+            json!({"path":candidate}),
+        ));
+    }
+    if metadata.len() > 5 * 1024 * 1024 {
+        return Err(FsError::new(
+            "payload_path_too_large",
+            "payload_path_too_large",
+            json!({"size":metadata.len(),"max_bytes":5*1024*1024}),
+        ));
+    }
+    let bytes = fs::read(&resolved).map_err(|e| {
+        FsError::new(
+            "payload_path_read_failed",
+            format!("payload_path_read_failed: {e}"),
+            json!({"path":candidate}),
+        )
+    })?;
+    let record: Value = serde_json::from_slice(&bytes).map_err(|e| {
+        FsError::new(
+            "payload_path_invalid_json",
+            format!("payload_path_invalid_json: {e}"),
+            json!({"path":candidate}),
+        )
+    })?;
+    let payload = if source_kind == "ref" {
+        record.get("payload").cloned().ok_or_else(|| {
+            FsError::new(
+                "payload_ref_payload_missing",
+                "payload_ref_payload_missing",
+                json!({"path":candidate}),
+            )
+        })?
+    } else {
+        record
+    };
+    if !payload.is_object() {
+        return Err(FsError::new(
+            "payload_path_json_must_be_object",
+            "payload_path_json_must_be_object",
+            json!({"path":candidate}),
+        ));
+    }
+    let source = json!({"kind":source_kind,"path":relative_path(&state.output_root,&resolved),"byte_size":metadata.len(),"max_bytes":5*1024*1024,"sha256":sha256_bytes(&bytes),"transient_not_authority":true});
+    Ok((payload, Some(source)))
 }
 
 fn is_write_tool(name: &str) -> bool {
@@ -540,6 +714,7 @@ fn is_write_tool(name: &str) -> bool {
         "fs_write_file"
             | "fs_str_replace_file"
             | "fs_replace_range"
+            | "fs_apply_patch"
             | "fs_move_path"
             | "fs_create_directory"
             | "fs_rename_directory"
@@ -637,6 +812,7 @@ fn doctor(state: &State) -> Value {
         "fs_write_file",
         "fs_str_replace_file",
         "fs_replace_range",
+        "fs_apply_patch",
         "fs_move_path",
         "fs_create_directory",
         "fs_rename_directory",
@@ -663,9 +839,10 @@ fn doctor(state: &State) -> Value {
         "output_root": state.output_root.to_string_lossy(),
         "audit_log_dir": state.audit_log_dir.as_ref().map(|path| path.to_string_lossy().to_string()),
         "client_roots": {"supported": false, "roots": [], "lastUpdatedAt": Value::Null},
-        "effective_permissions": {"can_read": true, "can_write": can_write, "can_mutate_paths": can_write, "can_delete_directories": false},
+        "effective_permissions": {"can_read": true, "can_write": can_write, "can_mutate_paths": can_write, "can_delete_directories": can_write,"can_write_patch_recovery_records":true},
         "available_tools": available_tools,
         "read_tools": read_tools,
+        "recovery_tools":["fs_patch_outcome_show"],
         "write_tools": write_tools,
         "default_glob_ignore_patterns": DEFAULT_GLOB_IGNORES,
         "default_grep_ignore_patterns": DEFAULT_GREP_IGNORES
@@ -733,59 +910,25 @@ fn read_file(state: &State, args: &Value, range: bool) -> Result<Value, FsError>
     };
     let timeout = integer(args, "timeout_ms")
         .unwrap_or(READ_TIMEOUT_MS as i64)
-        .max(1)
-        .min(60_000) as u64;
-    let started = std::time::Instant::now();
-    let bytes = fs::read(&path).map_err(|error| {
-        FsError::new(
-            "fs_read_file_failed",
-            format!("fs_read_file_failed: {error}"),
-            path_details(&path, &root),
-        )
-    })?;
-    if bytes.contains(&0) {
-        return Err(FsError::new(
-            "binary_file_not_supported",
-            format!("binary_file_not_supported: {}", path.display()),
-            path_details(&path, &root),
-        ));
-    }
-    if started.elapsed().as_millis() as u64 > timeout {
-        return Err(FsError::new(
-            if range {
-                "fs_read_file_range_timed_out"
-            } else {
-                "fs_read_file_timed_out"
-            },
-            "filesystem read timed out",
-            json!({"timeout_ms": timeout, "offset": offset, "limit": limit, "path": path, "root": root}),
-        ));
-    }
-    let text = String::from_utf8_lossy(&bytes).replace("\r\n", "\n");
-    let mut lines: Vec<&str> = text.split('\n').collect();
-    if lines.last() == Some(&"") {
-        lines.pop();
-    }
-    let start_index = offset.saturating_sub(1) as usize;
-    let end_index = (start_index + limit as usize).min(lines.len());
-    let selected = if start_index < lines.len() {
-        &lines[start_index..end_index]
-    } else {
-        &[]
-    };
-    let content = selected.join("\n");
-    let complete = end_index >= lines.len();
-    let next_offset = if complete {
-        None
-    } else {
-        Some((end_index + 1) as i64)
-    };
-    let (total_lines, total_lines_exact, line_window_complete) = if complete {
-        (json!(lines.len()), true, true)
+        .clamp(1, 60_000) as u64;
+    let window = stream_text_window(
+        &path,
+        &root,
+        offset as usize,
+        limit as usize,
+        timeout,
+        if range {
+            "fs_read_file_range"
+        } else {
+            "fs_read_file"
+        },
+    )?;
+    let content = window.selected.join("\n");
+    let (total_lines, total_lines_exact, line_window_complete) = if window.complete {
+        (json!(window.total_lines), true, true)
     } else {
         (Value::Null, false, false)
     };
-    let content_hash = sha256_bytes(&bytes);
     Ok(json!({
         "schema": "local.filesystem.read.v1",
         "path": path,
@@ -797,29 +940,172 @@ fn read_file(state: &State, args: &Value, range: bool) -> Result<Value, FsError>
         "line_window_complete": line_window_complete,
         "offset": offset,
         "limit": limit,
-        "returned_lines": selected.len(),
-        "next_offset": next_offset,
+        "returned_lines": window.selected.len(),
+        "next_offset": window.next_offset,
         "content": content,
-        "content_sha256": content_hash,
+        "content_sha256": window.sha256,
         "content_hash_scope": "full_file",
         "hash_source": "live_file_bytes",
         "cache_used": false,
         "content_window_sha256": sha256_bytes(content.as_bytes()),
         "max_limit": 1000,
         "limit_adjusted": false,
-        "pagination_required": next_offset.is_some(),
+        "pagination_required": window.next_offset.is_some(),
         "timeout_ms": timeout
     }))
 }
 
-fn write_file(state: &State, args: &Value) -> Result<Value, FsError> {
-    if args.get("payload_ref").is_some() || args.get("payload_path").is_some() {
-        return Err(FsError::new(
-            "payload_transport_not_supported_in_native_write",
-            "payload_transport_not_supported_in_native_write",
-            json!({"supported": ["content"]}),
-        ));
+struct TextWindow {
+    selected: Vec<String>,
+    next_offset: Option<i64>,
+    total_lines: usize,
+    complete: bool,
+    sha256: String,
+}
+
+fn stream_text_window(
+    path: &Path,
+    root: &Path,
+    offset: usize,
+    limit: usize,
+    timeout_ms: u64,
+    operation: &str,
+) -> Result<TextWindow, FsError> {
+    let mut file = fs::File::open(path).map_err(|error| {
+        FsError::new(
+            format!("{operation}_failed"),
+            format!("{operation}_failed: {error}"),
+            path_details(path, root),
+        )
+    })?;
+    let started = std::time::Instant::now();
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut pending = Vec::new();
+    let mut selected = Vec::new();
+    let mut retained = 0_usize;
+    let mut line_number = 0_usize;
+    let mut bounded = false;
+    let mut next_offset = None;
+    loop {
+        if started.elapsed().as_millis() as u64 > timeout_ms {
+            return Err(FsError::new(
+                format!("{operation}_timed_out"),
+                format!("{operation}_timed_out"),
+                json!({"timeout_ms":timeout_ms,"path":path,"root":root,"offset":offset,"limit":limit}),
+            ));
+        }
+        let count = file.read(&mut buffer).map_err(|error| {
+            FsError::new(
+                format!("{operation}_failed"),
+                format!("{operation}_failed: {error}"),
+                path_details(path, root),
+            )
+        })?;
+        if count == 0 {
+            break;
+        }
+        let chunk = &buffer[..count];
+        if chunk.contains(&0) {
+            return Err(FsError::new(
+                "binary_file_not_supported",
+                format!("binary_file_not_supported: {}", path.display()),
+                path_details(path, root),
+            ));
+        }
+        digest.update(chunk);
+        if bounded {
+            continue;
+        }
+        for byte in chunk {
+            if selected.len() >= limit
+                && line_number >= offset.saturating_add(limit).saturating_sub(1)
+            {
+                next_offset = Some((line_number + 1) as i64);
+                bounded = true;
+                break;
+            }
+            if *byte == b'\n' {
+                line_number += 1;
+                let line = if pending.last() == Some(&b'\r') {
+                    &pending[..pending.len() - 1]
+                } else {
+                    pending.as_slice()
+                };
+                if line_number >= offset && selected.len() < limit {
+                    retained = retained.saturating_add(line.len());
+                    if retained > MAX_READ_WINDOW_BYTES {
+                        return Err(FsError::new(
+                            "fs_read_window_too_large",
+                            "fs_read_window_too_large",
+                            json!({"path":path,"max_window_bytes":MAX_READ_WINDOW_BYTES,"line":line_number}),
+                        ));
+                    }
+                    selected.push(String::from_utf8(line.to_vec()).map_err(|_| {
+                        FsError::new(
+                            "text_file_not_utf8",
+                            "text_file_not_utf8",
+                            path_details(path, root),
+                        )
+                    })?);
+                } else if line_number >= offset.saturating_add(limit) {
+                    next_offset = Some(line_number as i64);
+                    bounded = true;
+                }
+                pending.clear();
+                if bounded {
+                    break;
+                }
+            } else {
+                pending.push(*byte);
+                if pending.len() > MAX_READ_LINE_BYTES {
+                    return Err(FsError::new(
+                        "fs_read_line_too_large",
+                        "fs_read_line_too_large",
+                        json!({"path":path,"max_line_bytes":MAX_READ_LINE_BYTES,"line":line_number+1}),
+                    ));
+                }
+            }
+        }
     }
+    if !bounded && !pending.is_empty() {
+        line_number += 1;
+        let line = if pending.last() == Some(&b'\r') {
+            &pending[..pending.len() - 1]
+        } else {
+            pending.as_slice()
+        };
+        if line_number >= offset && selected.len() < limit {
+            retained = retained.saturating_add(line.len());
+            if retained > MAX_READ_WINDOW_BYTES {
+                return Err(FsError::new(
+                    "fs_read_window_too_large",
+                    "fs_read_window_too_large",
+                    json!({"path":path,"max_window_bytes":MAX_READ_WINDOW_BYTES,"line":line_number}),
+                ));
+            }
+            selected.push(String::from_utf8(line.to_vec()).map_err(|_| {
+                FsError::new(
+                    "text_file_not_utf8",
+                    "text_file_not_utf8",
+                    path_details(path, root),
+                )
+            })?);
+        } else if line_number >= offset.saturating_add(limit) {
+            next_offset = Some(line_number as i64);
+            bounded = true;
+        }
+    }
+    Ok(TextWindow {
+        selected,
+        next_offset,
+        total_lines: line_number,
+        complete: !bounded,
+        sha256: hex::encode(digest.finalize()),
+    })
+}
+
+fn write_file(state: &State, args: &Value) -> Result<Value, FsError> {
     let (path, root) = resolve_allowed(
         state,
         args.get("path").and_then(Value::as_str),
@@ -844,18 +1130,15 @@ fn write_file(state: &State, args: &Value) -> Result<Value, FsError> {
         .unwrap_or(true);
     let timeout_ms = integer(args, "timeout_ms")
         .unwrap_or(WRITE_TIMEOUT_MS as i64)
-        .max(1)
-        .min(300_000) as u64;
+        .clamp(1, 300_000) as u64;
     let started = std::time::Instant::now();
 
-    let before_bytes = match fs::metadata(&path) {
-        Ok(metadata) if metadata.is_file() => Some(fs::read(&path).map_err(|error| {
-            FsError::new(
-                "fs_write_file_read_failed",
-                format!("fs_write_file_read_failed: {error}"),
-                path_details(&path, &root),
-            )
-        })?),
+    let before_sha256 = match fs::metadata(&path) {
+        Ok(metadata) if metadata.is_file() => Some(sha256_file_with_timeout(
+            &path,
+            timeout_ms,
+            "fs_write_file",
+        )?),
         Ok(metadata) if metadata.is_dir() => {
             return Err(FsError::new(
                 "fs_write_file_destination_is_directory",
@@ -879,15 +1162,14 @@ fn write_file(state: &State, args: &Value) -> Result<Value, FsError> {
             ));
         }
     };
-    let before_sha256 = before_bytes.as_ref().map(|bytes| sha256_bytes(bytes));
-    if create_only && before_bytes.is_some() {
+    if create_only && before_sha256.is_some() {
         return Err(FsError::new(
             "write_file_destination_exists",
             "write_file_destination_exists",
             path_details(&path, &root),
         ));
     }
-    if !overwrite && before_bytes.is_some() {
+    if !overwrite && before_sha256.is_some() {
         return Err(FsError::new(
             "write_file_overwrite_refused",
             "write_file_overwrite_refused",
@@ -978,13 +1260,7 @@ fn str_replace_file(state: &State, args: &Value) -> Result<Value, FsError> {
             path_details(&path, &root),
         ));
     }
-    let before = fs::read_to_string(&path).map_err(|error| {
-        FsError::new(
-            "fs_str_replace_file_read_failed",
-            format!("fs_str_replace_file_read_failed: {error}"),
-            path_details(&path, &root),
-        )
-    })?;
+    let before = read_bounded_mutation_text(&path, &root, "fs_str_replace_file")?;
     let before_sha256 = sha256_bytes(before.as_bytes());
     if let Some(expected) = args
         .get("expected_sha256")
@@ -1074,13 +1350,7 @@ fn replace_range(state: &State, args: &Value) -> Result<Value, FsError> {
         .get("replacement")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let before = fs::read_to_string(&path).map_err(|error| {
-        FsError::new(
-            "fs_replace_range_read_failed",
-            format!("fs_replace_range_read_failed: {error}"),
-            path_details(&path, &root),
-        )
-    })?;
+    let before = read_bounded_mutation_text(&path, &root, "fs_replace_range")?;
     let before_sha256 = sha256_bytes(before.as_bytes());
     if let Some(expected) = args
         .get("expected_sha256")
@@ -1229,6 +1499,7 @@ fn delete_directory(state: &State, args: &Value) -> Result<Value, FsError> {
         "fs_delete_directory",
     )?;
     assert_mutation_target_allowed(&path, &root, "fs_delete_directory")?;
+    assert_not_authority_root(&path, &root, "fs_delete_directory")?;
     let recursive = args
         .get("recursive")
         .and_then(Value::as_bool)
@@ -1299,6 +1570,8 @@ fn move_path(state: &State, args: &Value, directory_only: bool) -> Result<Value,
         resolve_allowed(state, args.get("from").and_then(Value::as_str), operation)?;
     let (to, to_root) = resolve_allowed(state, args.get("to").and_then(Value::as_str), operation)?;
     assert_mutation_target_allowed(&to, &to_root, operation)?;
+    assert_not_authority_root(&from, &from_root, operation)?;
+    assert_not_authority_root(&to, &to_root, operation)?;
     if same_path(&from, &to) {
         return Err(FsError::new(
             "move_source_and_destination_same",
@@ -1431,10 +1704,12 @@ fn metadata_guard(
             .or_else(|| args.get(format!("{prefix}_{name}")))
     };
     let expected_size = value("size").and_then(Value::as_u64);
+    let expected_mtime = value("mtime").and_then(Value::as_str);
     let expected_sha = value("sha256").and_then(Value::as_str);
     let expected_tree = value("tree_sha256").and_then(Value::as_str);
     let expected_entries = value("entry_count").and_then(Value::as_u64);
-    if expected_size.is_none()
+    if expected_mtime.is_none()
+        && expected_size.is_none()
         && expected_sha.is_none()
         && expected_tree.is_none()
         && expected_entries.is_none()
@@ -1449,14 +1724,16 @@ fn metadata_guard(
         )
     })?;
     let actual_size = metadata.len();
+    let actual_mtime = mtime_iso(&metadata);
     let (actual_tree, actual_entries) = if metadata.is_dir() {
         let (entries, _tree_entries, tree, _truncated) = directory_fingerprint(path, path);
         (Some(tree), Some(entries as u64))
     } else {
         (None, None)
     };
-    let details = json!({"operation": operation, "path": path, "root": root, "expected_size": expected_size, "actual_size": actual_size, "expected_sha256": expected_sha, "expected_tree_sha256": expected_tree, "actual_tree_sha256": actual_tree, "expected_entry_count": expected_entries, "actual_entry_count": actual_entries});
-    if expected_size.is_some_and(|expected| expected != actual_size)
+    let details = json!({"operation": operation, "path": path, "root": root, "expected_mtime":expected_mtime,"actual_mtime":actual_mtime,"expected_size": expected_size, "actual_size": actual_size, "expected_sha256": expected_sha, "expected_tree_sha256": expected_tree, "actual_tree_sha256": actual_tree, "expected_entry_count": expected_entries, "actual_entry_count": actual_entries});
+    if expected_mtime.is_some_and(|expected| expected != actual_mtime)
+        || expected_size.is_some_and(|expected| expected != actual_size)
         || expected_entries.is_some_and(|expected| Some(expected) != actual_entries)
         || expected_tree.is_some_and(|expected| Some(expected) != actual_tree.as_deref())
     {
@@ -1477,13 +1754,7 @@ fn metadata_guard(
                 details,
             ));
         }
-        let actual = sha256_bytes(&fs::read(path).map_err(|error| {
-            FsError::new(
-                format!("{operation}_expected_metadata_mismatch"),
-                error.to_string(),
-                path_details(path, root),
-            )
-        })?);
+        let actual = sha256_file_with_timeout(path, 60_000, operation)?;
         if actual != expected {
             return Err(FsError::new(
                 format!("{operation}_expected_metadata_mismatch"),
@@ -1545,6 +1816,17 @@ fn assert_mutation_target_allowed(
                 "refusal_reason": format!("transient_executable_write_disallowed:{}", path.display()),
                 "remediation": "Do not create or edit executable wrappers/scripts under .ai/tmp or .ai/temp. Use structured_command_start or the owning MCP surface directly and preserve its execution_ref as evidence.",
             }),
+        ));
+    }
+    Ok(())
+}
+
+fn assert_not_authority_root(path: &Path, root: &Path, operation: &str) -> Result<(), FsError> {
+    if same_path(path, root) {
+        return Err(FsError::new(
+            "filesystem_authority_root_mutation_refused",
+            "filesystem_authority_root_mutation_refused",
+            json!({"operation":operation,"path":path,"root":root,"remediation":"Choose a descendant path; an allowed authority root cannot itself be moved, overwritten, or deleted."}),
         ));
     }
     Ok(())
@@ -1628,9 +1910,14 @@ fn stat_tool(state: &State, args: &Value) -> Result<Value, FsError> {
     value.insert("size".into(), json!(metadata.len()));
     value.insert("mtime".into(), json!(mtime_iso(&metadata)));
     if metadata.is_file() {
-        if let Ok(bytes) = fs::read(&path) {
-            value.insert("sha256".into(), json!(sha256_bytes(&bytes)));
-        }
+        let timeout = args
+            .get("timeout_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(60_000);
+        value.insert(
+            "sha256".into(),
+            json!(sha256_file_with_timeout(&path, timeout, "fs_stat")?),
+        );
     }
     if metadata.is_dir() {
         let (entry_count, tree_entry_count, tree_sha256, truncated) =
@@ -1641,6 +1928,72 @@ fn stat_tool(state: &State, args: &Value) -> Result<Value, FsError> {
         value.insert("tree_sha256".into(), json!(tree_sha256));
     }
     Ok(Value::Object(value))
+}
+
+fn sha256_file_with_timeout(
+    path: &Path,
+    timeout_ms: u64,
+    operation: &str,
+) -> Result<String, FsError> {
+    let mut file = fs::File::open(path).map_err(|error| {
+        FsError::new(
+            format!("{operation}_read_failed"),
+            format!("{operation}_read_failed: {error}"),
+            json!({"path":path}),
+        )
+    })?;
+    let started = std::time::Instant::now();
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        if started.elapsed().as_millis() as u64 > timeout_ms {
+            return Err(FsError::new(
+                format!("{operation}_timed_out"),
+                format!("{operation}_timed_out"),
+                json!({"path":path,"timeout_ms":timeout_ms}),
+            ));
+        }
+        let count = file.read(&mut buffer).map_err(|error| {
+            FsError::new(
+                format!("{operation}_read_failed"),
+                format!("{operation}_read_failed: {error}"),
+                json!({"path":path}),
+            )
+        })?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+    }
+    Ok(hex::encode(digest.finalize()))
+}
+
+fn read_bounded_mutation_text(
+    path: &Path,
+    root: &Path,
+    operation: &str,
+) -> Result<String, FsError> {
+    let metadata = fs::metadata(path).map_err(|error| {
+        FsError::new(
+            format!("{operation}_read_failed"),
+            format!("{operation}_read_failed: {error}"),
+            path_details(path, root),
+        )
+    })?;
+    if metadata.len() > MAX_TEXT_MUTATION_BYTES {
+        return Err(FsError::new(
+            format!("{operation}_file_too_large"),
+            format!("{operation}_file_too_large"),
+            json!({"path":path,"size":metadata.len(),"max_bytes":MAX_TEXT_MUTATION_BYTES}),
+        ));
+    }
+    fs::read_to_string(path).map_err(|error| {
+        FsError::new(
+            format!("{operation}_read_failed"),
+            format!("{operation}_read_failed: {error}"),
+            path_details(path, root),
+        )
+    })
 }
 
 fn search_tool(state: &mut State, args: &Value, grep: bool) -> Result<Value, FsError> {
@@ -1673,8 +2026,7 @@ fn search_tool(state: &mut State, args: &Value, grep: bool) -> Result<Value, FsE
     let offset = integer(args, "offset").unwrap_or(0).max(0) as usize;
     let limit = integer(args, "limit")
         .unwrap_or(if grep { 80 } else { 100 })
-        .max(1)
-        .min(500) as usize;
+        .clamp(1, 500) as usize;
     let cache_policy = args
         .get("cache_policy")
         .and_then(Value::as_str)
@@ -1712,8 +2064,8 @@ fn search_tool(state: &mut State, args: &Value, grep: bool) -> Result<Value, FsE
     let mut cache_hit = false;
     let mut snapshot_reused = false;
     let mut cached_snapshot: Option<String> = None;
-    let all_matches = if let Some(snapshot) = snapshot_id {
-        let matches = state.snapshots.get(snapshot).cloned().ok_or_else(|| {
+    let (all_matches, snapshot_complete) = if let Some(snapshot) = snapshot_id {
+        let captured = state.snapshots.get(snapshot).cloned().ok_or_else(|| {
             FsError::new(
                 format!("{operation}_snapshot_not_found"),
                 format!("{operation}_snapshot_not_found: {snapshot}"),
@@ -1722,12 +2074,12 @@ fn search_tool(state: &mut State, args: &Value, grep: bool) -> Result<Value, FsE
         })?;
         cache_hit = true;
         snapshot_reused = true;
-        matches
+        captured
     } else if cache_policy != "bypass" && cache_policy != "refresh" {
-        if let Some((id, matches)) = state.cache.get(&cache_key).cloned() {
+        if let Some((id, matches, complete)) = state.cache.get(&cache_key).cloned() {
             cache_hit = true;
             cached_snapshot = Some(id);
-            matches
+            (matches, complete)
         } else {
             run_search_command(&scope, pattern, args, grep, output_mode, operation)?
         }
@@ -1739,23 +2091,49 @@ fn search_tool(state: &mut State, args: &Value, grep: bool) -> Result<Value, FsE
     } else if let Some(snapshot) = cached_snapshot {
         Some(snapshot)
     } else if cache_policy != "bypass" {
-        let digest = sha256_bytes(all_matches.join("\n").as_bytes());
+        let digest = sha256_bytes(
+            format!(
+                "{cache_key}\n{}\n{snapshot_complete}",
+                all_matches.join("\n")
+            )
+            .as_bytes(),
+        );
         let id = format!("s_{}", &digest[..24]);
+        state.cache.insert(
+            cache_key,
+            (id.clone(), all_matches.clone(), snapshot_complete),
+        );
         state
-            .cache
-            .insert(cache_key, (id.clone(), all_matches.clone()));
-        state.snapshots.insert(id.clone(), all_matches.clone());
+            .snapshots
+            .insert(id.clone(), (all_matches.clone(), snapshot_complete));
         Some(id)
     } else {
         snapshot_id.map(str::to_string)
     };
+    if let Some(id) = snapshot.as_deref() {
+        touch_snapshot(state, id);
+    }
+    if !snapshot_complete && offset >= all_matches.len() {
+        return Err(FsError::new(
+            format!("{operation}_capture_boundary_reached"),
+            format!(
+                "{operation}_capture_boundary_reached: the bounded search capture is exhausted"
+            ),
+            json!({
+                "offset": offset,
+                "captured_entries": all_matches.len(),
+                "snapshot_id": snapshot,
+                "remediation": "Narrow the search path or pattern, then start a refreshed search."
+            }),
+        ));
+    }
     let page: Vec<String> = all_matches
         .iter()
         .skip(offset)
         .take(limit)
         .cloned()
         .collect();
-    let has_more = offset + page.len() < all_matches.len();
+    let has_more = offset + page.len() < all_matches.len() || !snapshot_complete;
     let mut value = Map::new();
     value.insert(
         "schema".into(),
@@ -1772,7 +2150,7 @@ fn search_tool(state: &mut State, args: &Value, grep: bool) -> Result<Value, FsE
     value.insert("offset".into(), json!(offset));
     value.insert("limit".into(), json!(limit));
     value.insert("count".into(), json!(all_matches.len()));
-    value.insert("count_exact".into(), json!(true));
+    value.insert("count_exact".into(), json!(snapshot_complete));
     value.insert("scanned".into(), json!(all_matches.len()));
     value.insert("scanned_unit".into(), json!("matched_entries"));
     value.insert("returned".into(), json!(page.len()));
@@ -1788,7 +2166,7 @@ fn search_tool(state: &mut State, args: &Value, grep: bool) -> Result<Value, FsE
         "requested_snapshot_id".into(),
         snapshot_id.map(|value| json!(value)).unwrap_or(Value::Null),
     );
-    value.insert("snapshot_complete".into(), json!(true));
+    value.insert("snapshot_complete".into(), json!(snapshot_complete));
     value.insert(
         "cache_memory_bytes".into(),
         json!(all_matches.iter().map(|value| value.len()).sum::<usize>()),
@@ -1848,6 +2226,18 @@ fn search_tool(state: &mut State, args: &Value, grep: bool) -> Result<Value, FsE
     Ok(Value::Object(value))
 }
 
+fn touch_snapshot(state: &mut State, id: &str) {
+    state.snapshot_order.retain(|entry| entry != id);
+    state.snapshot_order.push(id.to_string());
+    while state.snapshot_order.len() > 4 {
+        let evicted = state.snapshot_order.remove(0);
+        state.snapshots.remove(&evicted);
+        state
+            .cache
+            .retain(|_, (snapshot, _, _)| snapshot != &evicted);
+    }
+}
+
 fn run_search_command(
     scope: &Path,
     pattern: &str,
@@ -1855,7 +2245,7 @@ fn run_search_command(
     grep: bool,
     output_mode: &str,
     operation: &str,
-) -> Result<Vec<String>, FsError> {
+) -> Result<(Vec<String>, bool), FsError> {
     let mut rg_args = Vec::new();
     if grep {
         rg_args.extend(
@@ -1911,10 +2301,14 @@ fn run_search_command(
             .unwrap_or(SEARCH_TIMEOUT_MS),
         operation,
     )?;
-    Ok(matches
-        .into_iter()
-        .map(|value| normalize_search_result(&value, grep))
-        .collect())
+    Ok((
+        matches
+            .0
+            .into_iter()
+            .map(|value| normalize_search_result(&value, grep))
+            .collect(),
+        matches.1,
+    ))
 }
 
 fn normalize_search_result(value: &str, grep: bool) -> String {
@@ -2090,7 +2484,7 @@ fn file_metrics(state: &mut State, args: &Value) -> Result<Value, FsError> {
                 .map(str::to_string)
         });
     let offset = integer(args, "offset").unwrap_or(0).max(0) as usize;
-    let limit = integer(args, "limit").unwrap_or(100).max(1).min(100) as usize;
+    let limit = integer(args, "limit").unwrap_or(100).clamp(1, 100) as usize;
     let max_file = integer(args, "max_bytes_per_file")
         .unwrap_or(8 * 1024 * 1024)
         .max(1) as u64;
@@ -2195,31 +2589,987 @@ fn file_metrics(state: &mut State, args: &Value) -> Result<Value, FsError> {
     Ok(Value::Object(result))
 }
 
+#[derive(Clone, Debug)]
+struct ParsedPatchFile {
+    old_path: Option<String>,
+    new_path: Option<String>,
+    move_to: Option<String>,
+    delete: bool,
+    hunks: Vec<ParsedPatchHunk>,
+}
+
+#[derive(Clone, Debug)]
+struct ParsedPatchHunk {
+    old_start: Option<usize>,
+    lines: Vec<(char, String)>,
+}
+
+struct PlannedPatch {
+    parsed: ParsedPatchFile,
+    source: PathBuf,
+    target: PathBuf,
+    root: PathBuf,
+    before: Option<Vec<u8>>,
+    target_before: Option<Vec<u8>>,
+    after: Option<Vec<u8>>,
+}
+
+fn apply_patch_tool(state: &State, args: &Value) -> Result<Value, FsError> {
+    let patch = args
+        .get("patch")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if patch.trim().is_empty() {
+        return Err(FsError::new(
+            "patch_required",
+            "Patch text is required.",
+            json!({}),
+        ));
+    }
+    let operation_id = args
+        .get("operation_id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            format!(
+                "patch-{}-{}",
+                std::process::id(),
+                OffsetDateTime::now_utc().unix_timestamp_nanos()
+            )
+        });
+    if !valid_operation_id(&operation_id) {
+        return Err(FsError::new(
+            "patch_operation_id_invalid",
+            "patch_operation_id_invalid",
+            json!({"operation_id":operation_id}),
+        ));
+    }
+    let patch_sha256 = sha256_bytes(patch.as_bytes());
+    let mut recovery_count = 0_u64;
+    if let Some(previous) = read_patch_outcome(state, &operation_id)? {
+        if previous.get("patch_sha256").and_then(Value::as_str) != Some(&patch_sha256) {
+            return Err(FsError::new(
+                "patch_operation_id_conflict",
+                "patch_operation_id_conflict",
+                json!({"operation_id":operation_id,"existing_patch_sha256":previous.get("patch_sha256"),"requested_patch_sha256":patch_sha256}),
+            ));
+        }
+        if previous.get("status").and_then(Value::as_str) == Some("interrupted_before_mutation")
+            && previous.get("retry_safe").and_then(Value::as_bool) == Some(true)
+        {
+            recovery_count = previous
+                .get("recovery_count")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                + 1;
+        } else {
+            let mut replay = previous;
+            if let Some(object) = replay.as_object_mut() {
+                object.insert("operation_replayed".into(), json!(true));
+            }
+            return Ok(replay);
+        }
+    }
+    let timeout_ms = integer(args, "timeout_ms")
+        .unwrap_or(WRITE_TIMEOUT_MS as i64)
+        .clamp(1, 300_000) as u64;
+    let started = std::time::Instant::now();
+    write_patch_outcome(
+        state,
+        &operation_id,
+        &json!({
+            "schema":"local.filesystem.apply_patch.outcome.v1","status":"accepted","operation_id":operation_id,
+            "patch_sha256":patch_sha256,"mutation_started":false,"owner_pid":std::process::id(),"timeout_ms":timeout_ms,
+            "accepted_at":now_rfc3339(),"recovery_count":recovery_count
+        }),
+    )?;
+    let parsed = match parse_patch(patch) {
+        Ok(files) if !files.is_empty() => files,
+        Ok(_) => {
+            return patch_failure(
+                state,
+                &operation_id,
+                &patch_sha256,
+                FsError::new(
+                    "patch_contains_no_files",
+                    "patch_contains_no_files",
+                    json!({"expected_format":"unified_diff_or_codex_apply_patch"}),
+                ),
+            )
+        }
+        Err(error) => return patch_failure(state, &operation_id, &patch_sha256, error),
+    };
+    macro_rules! plan_or_fail {
+        ($expression:expr) => {
+            match $expression {
+                Ok(value) => value,
+                Err(error) => return patch_failure(state, &operation_id, &patch_sha256, error),
+            }
+        };
+    }
+    let expected = plan_or_fail!(expected_patch_hashes(args));
+    let mut matched = std::collections::HashSet::new();
+    let mut plans = Vec::new();
+    for file in parsed {
+        if started.elapsed().as_millis() as u64 > timeout_ms {
+            return patch_failure(
+                state,
+                &operation_id,
+                &patch_sha256,
+                FsError::new(
+                    "fs_apply_patch_timed_out",
+                    "fs_apply_patch_timed_out",
+                    json!({"phase":"planning","timeout_ms":timeout_ms}),
+                ),
+            );
+        }
+        let source_name = file.old_path.as_deref().or(file.new_path.as_deref());
+        let source_name = plan_or_fail!(source_name.ok_or_else(|| FsError::new(
+            "patch_path_required",
+            "patch_path_required",
+            json!({})
+        )));
+        let target_name = plan_or_fail!(file
+            .move_to
+            .as_deref()
+            .or(file.new_path.as_deref())
+            .or(file.old_path.as_deref())
+            .ok_or_else(|| FsError::new(
+                "patch_target_path_required",
+                "patch_target_path_required",
+                json!({})
+            )));
+        let (source, source_root) =
+            plan_or_fail!(resolve_allowed(state, Some(source_name), "fs_apply_patch"));
+        let (target, target_root) =
+            plan_or_fail!(resolve_allowed(state, Some(target_name), "fs_apply_patch"));
+        if source_root != target_root {
+            return patch_failure(
+                state,
+                &operation_id,
+                &patch_sha256,
+                FsError::new(
+                    "patch_cross_root_move_refused",
+                    "patch_cross_root_move_refused",
+                    json!({"source":source,"target":target}),
+                ),
+            );
+        }
+        if file.delete || !same_path(&source, &target) {
+            plan_or_fail!(assert_not_authority_root(
+                &source,
+                &source_root,
+                "fs_apply_patch"
+            ));
+        }
+        plan_or_fail!(assert_not_authority_root(
+            &target,
+            &target_root,
+            "fs_apply_patch"
+        ));
+        if !file.delete {
+            plan_or_fail!(assert_mutation_target_allowed(
+                &target,
+                &target_root,
+                "fs_apply_patch"
+            ));
+        }
+        if source.exists()
+            && fs::metadata(&source).is_ok_and(|metadata| metadata.len() > MAX_TEXT_MUTATION_BYTES)
+        {
+            return patch_failure(
+                state,
+                &operation_id,
+                &patch_sha256,
+                FsError::new(
+                    "fs_apply_patch_source_too_large",
+                    "fs_apply_patch_source_too_large",
+                    json!({"path":source,"max_bytes":MAX_TEXT_MUTATION_BYTES}),
+                ),
+            );
+        }
+        if !same_path(&source, &target)
+            && target.exists()
+            && fs::metadata(&target).is_ok_and(|metadata| metadata.len() > MAX_TEXT_MUTATION_BYTES)
+        {
+            return patch_failure(
+                state,
+                &operation_id,
+                &patch_sha256,
+                FsError::new(
+                    "fs_apply_patch_target_too_large",
+                    "fs_apply_patch_target_too_large",
+                    json!({"path":target,"max_bytes":MAX_TEXT_MUTATION_BYTES}),
+                ),
+            );
+        }
+        let before = if source.exists() {
+            Some(plan_or_fail!(fs::read(&source).map_err(|error| {
+                FsError::new(
+                    "patch_source_read_failed",
+                    format!("patch_source_read_failed: {error}"),
+                    path_details(&source, &source_root),
+                )
+            })))
+        } else {
+            None
+        };
+        let target_before = if same_path(&source, &target) {
+            before.clone()
+        } else if target.exists() {
+            Some(plan_or_fail!(fs::read(&target).map_err(|error| {
+                FsError::new(
+                    "patch_target_read_failed",
+                    format!("patch_target_read_failed: {error}"),
+                    path_details(&target, &target_root),
+                )
+            })))
+        } else {
+            None
+        };
+        if file.old_path.is_some() && before.is_none() {
+            return patch_failure(
+                state,
+                &operation_id,
+                &patch_sha256,
+                FsError::new(
+                    "patch_source_not_found",
+                    "patch_source_not_found",
+                    path_details(&source, &source_root),
+                ),
+            );
+        }
+        plan_or_fail!(match_expected_patch_hash(
+            &expected,
+            &mut matched,
+            &file,
+            &source,
+            &target,
+            before.as_deref(),
+        ));
+        let after = if file.delete {
+            plan_or_fail!(apply_patch_content(
+                before.as_deref().unwrap_or_default(),
+                &file.hunks,
+                true
+            )
+            .map(|_| None))
+        } else {
+            Some(plan_or_fail!(apply_patch_content(
+                before.as_deref().unwrap_or_default(),
+                &file.hunks,
+                false,
+            )))
+        };
+        plans.push(PlannedPatch {
+            parsed: file,
+            source,
+            target,
+            root: target_root,
+            before,
+            target_before,
+            after,
+        });
+    }
+    let unmatched: Vec<_> = expected
+        .keys()
+        .filter(|key| !matched.contains(*key))
+        .cloned()
+        .collect();
+    if !unmatched.is_empty() {
+        return patch_failure(
+            state,
+            &operation_id,
+            &patch_sha256,
+            FsError::new(
+                "fs_apply_patch_expected_sha256_unmatched",
+                "fs_apply_patch_expected_sha256_unmatched",
+                json!({"unmatched_expected_sha256_keys":unmatched}),
+            ),
+        );
+    }
+    let changes: Vec<Value> = plans.iter().map(patch_change).collect();
+    if args
+        .get("dry_run")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        let outcome = json!({"schema":"local.filesystem.apply_patch.outcome.v1","status":"checked","operation_id":operation_id,"patch_sha256":patch_sha256,"mutation_started":false,"dry_run":true,"timeout_ms":timeout_ms,"recovery_count":recovery_count,"changed_files":changes,"finished_at":now_rfc3339()});
+        write_patch_outcome(state, &operation_id, &outcome)?;
+        return Ok(outcome);
+    }
+    let recovery_plan = json!({
+        "before_state":plans.iter().flat_map(|plan| patch_states(plan, false)).collect::<Vec<_>>(),
+        "after_state":plans.iter().flat_map(|plan| patch_states(plan, true)).collect::<Vec<_>>(),
+        "changed_files":changes
+    });
+    write_patch_outcome(
+        state,
+        &operation_id,
+        &json!({"schema":"local.filesystem.apply_patch.outcome.v1","status":"applying","operation_id":operation_id,"patch_sha256":patch_sha256,"mutation_started":true,"owner_pid":std::process::id(),"timeout_ms":timeout_ms,"recovery_count":recovery_count,"started_at":now_rfc3339(),"recovery_plan":recovery_plan}),
+    )?;
+    let result = apply_planned_patch(state, &plans, started, timeout_ms);
+    match result {
+        Ok(()) => {
+            let outcome = json!({"schema":"local.filesystem.apply_patch.outcome.v1","status":"patched","operation_id":operation_id,"patch_sha256":patch_sha256,"mutation_started":true,"rollback_performed":false,"recovery_count":recovery_count,"changed_files":changes,"finished_at":now_rfc3339(),"outcome_reader":{"tool":"fs_patch_outcome_show","operation_id":operation_id}});
+            write_patch_outcome(state, &operation_id, &outcome)?;
+            Ok(outcome)
+        }
+        Err(error) => {
+            rollback_planned_patch(&plans);
+            let outcome = json!({"schema":"local.filesystem.apply_patch.outcome.v1","status":"failed_rolled_back","operation_id":operation_id,"patch_sha256":patch_sha256,"mutation_started":true,"rollback_performed":true,"rollback_succeeded":true,"error":diagnostic(&error),"finished_at":now_rfc3339()});
+            write_patch_outcome(state, &operation_id, &outcome)?;
+            Err(error)
+        }
+    }
+}
+
+fn parse_patch(text: &str) -> Result<Vec<ParsedPatchFile>, FsError> {
+    if text
+        .lines()
+        .any(|line| line.trim_end() == "*** Begin Patch")
+    {
+        parse_codex_patch(text)
+    } else {
+        parse_unified_patch(text)
+    }
+}
+
+fn parse_codex_patch(text: &str) -> Result<Vec<ParsedPatchFile>, FsError> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut files = Vec::new();
+    let mut index = lines
+        .iter()
+        .position(|line| line.trim_end() == "*** Begin Patch")
+        .ok_or_else(|| patch_parse_error("patch_begin_marker_missing", 1))?
+        + 1;
+    while index < lines.len() {
+        let line = lines[index];
+        if line == "*** End Patch" {
+            return Ok(files);
+        }
+        let (old_path, new_path, delete) =
+            if let Some(path) = line.strip_prefix("*** Update File: ") {
+                (
+                    Some(clean_patch_path(path)?),
+                    Some(clean_patch_path(path)?),
+                    false,
+                )
+            } else if let Some(path) = line.strip_prefix("*** Add File: ") {
+                (None, Some(clean_patch_path(path)?), false)
+            } else if let Some(path) = line.strip_prefix("*** Delete File: ") {
+                (Some(clean_patch_path(path)?), None, true)
+            } else {
+                return Err(patch_parse_error("patch_file_header_invalid", index + 1));
+            };
+        index += 1;
+        let mut move_to = None;
+        if index < lines.len() {
+            if let Some(path) = lines[index].strip_prefix("*** Move to: ") {
+                move_to = Some(clean_patch_path(path)?);
+                index += 1;
+            }
+        }
+        let mut hunks = Vec::new();
+        let mut current = ParsedPatchHunk {
+            old_start: None,
+            lines: Vec::new(),
+        };
+        while index < lines.len() && !lines[index].starts_with("*** ") {
+            let item = lines[index];
+            if item.starts_with("@@") {
+                if !current.lines.is_empty() {
+                    hunks.push(current);
+                }
+                current = ParsedPatchHunk {
+                    old_start: parse_hunk_start(item),
+                    lines: Vec::new(),
+                };
+            } else {
+                let (kind, body) = match item.as_bytes().first().copied() {
+                    Some(b'+') => ('+', &item[1..]),
+                    Some(b'-') => ('-', &item[1..]),
+                    Some(b' ') => (' ', &item[1..]),
+                    _ => (' ', item),
+                };
+                current.lines.push((kind, body.to_string()));
+            }
+            index += 1;
+        }
+        if !current.lines.is_empty() {
+            hunks.push(current);
+        }
+        files.push(ParsedPatchFile {
+            old_path,
+            new_path,
+            move_to,
+            delete,
+            hunks,
+        });
+    }
+    Err(patch_parse_error("patch_end_marker_missing", lines.len()))
+}
+
+fn parse_unified_patch(text: &str) -> Result<Vec<ParsedPatchFile>, FsError> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut files = Vec::new();
+    let mut index = 0;
+    while index < lines.len() {
+        if !lines[index].starts_with("--- ") {
+            index += 1;
+            continue;
+        }
+        let old_raw = lines[index][4..].split('\t').next().unwrap_or_default();
+        index += 1;
+        if index >= lines.len() || !lines[index].starts_with("+++ ") {
+            return Err(patch_parse_error(
+                "patch_new_file_header_missing",
+                index + 1,
+            ));
+        }
+        let new_raw = lines[index][4..].split('\t').next().unwrap_or_default();
+        index += 1;
+        let old_path = if old_raw == "/dev/null" {
+            None
+        } else {
+            Some(clean_patch_path(old_raw)?)
+        };
+        let new_path = if new_raw == "/dev/null" {
+            None
+        } else {
+            Some(clean_patch_path(new_raw)?)
+        };
+        let delete = new_path.is_none();
+        let mut hunks = Vec::new();
+        while index < lines.len() && !lines[index].starts_with("--- ") {
+            if !lines[index].starts_with("@@") {
+                index += 1;
+                continue;
+            }
+            let mut hunk = ParsedPatchHunk {
+                old_start: parse_hunk_start(lines[index]),
+                lines: Vec::new(),
+            };
+            index += 1;
+            while index < lines.len()
+                && !lines[index].starts_with("@@")
+                && !lines[index].starts_with("--- ")
+            {
+                let item = lines[index];
+                if item == "\\ No newline at end of file" {
+                    index += 1;
+                    continue;
+                }
+                let Some(prefix) = item.as_bytes().first().copied() else {
+                    return Err(patch_parse_error("patch_hunk_line_invalid", index + 1));
+                };
+                if !matches!(prefix, b' ' | b'+' | b'-') {
+                    return Err(patch_parse_error("patch_hunk_line_invalid", index + 1));
+                }
+                hunk.lines.push((prefix as char, item[1..].to_string()));
+                index += 1;
+            }
+            hunks.push(hunk);
+        }
+        files.push(ParsedPatchFile {
+            old_path,
+            new_path,
+            move_to: None,
+            delete,
+            hunks,
+        });
+    }
+    Ok(files)
+}
+
+fn clean_patch_path(value: &str) -> Result<String, FsError> {
+    let mut path = value.trim().replace('\\', "/");
+    if path.starts_with("a/") || path.starts_with("b/") {
+        path = path[2..].to_string();
+    }
+    if path.is_empty() || path == "/dev/null" || path.split('/').any(|part| part == "..") {
+        return Err(FsError::new(
+            "patch_path_invalid",
+            "patch_path_invalid",
+            json!({"path":value}),
+        ));
+    }
+    Ok(path)
+}
+
+fn parse_hunk_start(header: &str) -> Option<usize> {
+    let value = header
+        .split_whitespace()
+        .find(|part| part.starts_with('-'))?
+        .trim_start_matches('-');
+    value.split(',').next()?.parse().ok()
+}
+
+fn apply_patch_content(
+    before: &[u8],
+    hunks: &[ParsedPatchHunk],
+    deleting: bool,
+) -> Result<Vec<u8>, FsError> {
+    let text = std::str::from_utf8(before)
+        .map_err(|_| FsError::new("patch_source_not_utf8", "patch_source_not_utf8", json!({})))?;
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let trailing = text.ends_with('\n');
+    let mut lines: Vec<String> = if text.is_empty() {
+        Vec::new()
+    } else {
+        text.trim_end_matches(['\r', '\n'])
+            .split(['\n'])
+            .map(|line| line.trim_end_matches('\r').to_string())
+            .collect()
+    };
+    let mut delta: isize = 0;
+    let mut cursor = 0usize;
+    for hunk in hunks {
+        let old: Vec<&str> = hunk
+            .lines
+            .iter()
+            .filter(|(kind, _)| *kind != '+')
+            .map(|(_, line)| line.as_str())
+            .collect();
+        let replacement: Vec<String> = hunk
+            .lines
+            .iter()
+            .filter(|(kind, _)| *kind != '-')
+            .map(|(_, line)| line.clone())
+            .collect();
+        let position = if let Some(start) = hunk.old_start {
+            (start.saturating_sub(1) as isize + delta).max(0) as usize
+        } else {
+            find_patch_context(&lines, &old, cursor).ok_or_else(|| {
+                FsError::new(
+                    "patch_context_not_found",
+                    "patch_context_not_found",
+                    json!({"context":old}),
+                )
+            })?
+        };
+        if position + old.len() > lines.len()
+            || lines[position..position + old.len()]
+                .iter()
+                .map(String::as_str)
+                .ne(old.iter().copied())
+        {
+            return Err(FsError::new(
+                "patch_context_mismatch",
+                "patch_context_mismatch",
+                json!({"line":position+1,"expected":old}),
+            ));
+        }
+        lines.splice(position..position + old.len(), replacement.clone());
+        delta += replacement.len() as isize - old.len() as isize;
+        cursor = position + replacement.len();
+    }
+    if deleting {
+        return Ok(Vec::new());
+    }
+    let mut output = lines.join(newline);
+    if trailing || (!hunks.is_empty() && before.is_empty()) {
+        output.push_str(newline);
+    }
+    Ok(output.into_bytes())
+}
+
+fn find_patch_context(lines: &[String], context: &[&str], start: usize) -> Option<usize> {
+    if context.is_empty() {
+        return Some(start.min(lines.len()));
+    }
+    (start..=lines.len().saturating_sub(context.len())).find(|index| {
+        lines[*index..*index + context.len()]
+            .iter()
+            .map(String::as_str)
+            .eq(context.iter().copied())
+    })
+}
+
+fn expected_patch_hashes(args: &Value) -> Result<HashMap<String, String>, FsError> {
+    let Some(value) = args.get("expected_sha256") else {
+        return Ok(HashMap::new());
+    };
+    let object = value.as_object().ok_or_else(|| {
+        FsError::new(
+            "expected_sha256_must_be_object",
+            "expected_sha256_must_be_object",
+            json!({}),
+        )
+    })?;
+    let mut result = HashMap::new();
+    for (key, value) in object {
+        let hash = value.as_str().unwrap_or_default();
+        if !valid_sha256(hash) {
+            return Err(FsError::new(
+                "expected_sha256_value_invalid",
+                "expected_sha256_value_invalid",
+                json!({"key":key}),
+            ));
+        }
+        result.insert(key.replace('\\', "/"), hash.to_ascii_lowercase());
+    }
+    Ok(result)
+}
+
+fn match_expected_patch_hash(
+    expected: &HashMap<String, String>,
+    matched: &mut std::collections::HashSet<String>,
+    file: &ParsedPatchFile,
+    source: &Path,
+    target: &Path,
+    before: Option<&[u8]>,
+) -> Result<(), FsError> {
+    for key in [
+        file.old_path.as_deref(),
+        file.new_path.as_deref(),
+        Some(normalize_path(source).as_str()),
+        Some(normalize_path(target).as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Some(want) = expected.get(key) {
+            let actual = before.map(sha256_bytes);
+            if actual.as_deref() != Some(want) {
+                return Err(FsError::new(
+                    "fs_apply_patch_expected_sha256_mismatch",
+                    "fs_apply_patch_expected_sha256_mismatch",
+                    json!({"key":key,"expected_sha256":want,"actual_sha256":actual}),
+                ));
+            }
+            matched.insert(key.to_string());
+        }
+    }
+    Ok(())
+}
+
+fn patch_change(plan: &PlannedPatch) -> Value {
+    json!({"path":plan.target,"root":plan.root,"relative_path":relative_path(&plan.root,&plan.target),"operation":if plan.parsed.delete{"delete"}else if plan.parsed.old_path.is_none(){"add"}else if !same_path(&plan.source,&plan.target){"move"}else{"update"},"hunks":plan.parsed.hunks.len(),"deleted":plan.parsed.delete,"before_sha256":plan.before.as_deref().map(sha256_bytes),"after_sha256":plan.after.as_deref().map(sha256_bytes)})
+}
+
+fn patch_states(plan: &PlannedPatch, after: bool) -> Vec<Value> {
+    let mut values = Vec::new();
+    let content = if after {
+        plan.after.as_deref()
+    } else {
+        plan.target_before.as_deref()
+    };
+    values.push(
+        json!({"path":plan.target,"exists":content.is_some(),"sha256":content.map(sha256_bytes)}),
+    );
+    if !same_path(&plan.source, &plan.target) {
+        let source_content = if after { None } else { plan.before.as_deref() };
+        values.push(json!({"path":plan.source,"exists":source_content.is_some(),"sha256":source_content.map(sha256_bytes)}));
+    }
+    values
+}
+
+fn apply_planned_patch(
+    state: &State,
+    plans: &[PlannedPatch],
+    started: std::time::Instant,
+    timeout_ms: u64,
+) -> Result<(), FsError> {
+    for plan in plans {
+        if started.elapsed().as_millis() as u64 > timeout_ms {
+            return Err(FsError::new(
+                "fs_apply_patch_timed_out",
+                "fs_apply_patch_timed_out",
+                json!({"phase":"mutation","timeout_ms":timeout_ms}),
+            ));
+        }
+        if let Some(after) = &plan.after {
+            if let Some(parent) = plan.target.parent() {
+                fs::create_dir_all(parent).map_err(|e| {
+                    FsError::new(
+                        "patch_parent_create_failed",
+                        format!("patch_parent_create_failed: {e}"),
+                        json!({"path":parent}),
+                    )
+                })?;
+            }
+            fs::write(&plan.target, after).map_err(|e| {
+                FsError::new(
+                    "patch_write_failed",
+                    format!("patch_write_failed: {e}"),
+                    path_details(&plan.target, &plan.root),
+                )
+            })?;
+            if !same_path(&plan.source, &plan.target) && plan.source.exists() {
+                fs::remove_file(&plan.source).map_err(|e| {
+                    FsError::new(
+                        "patch_move_source_remove_failed",
+                        format!("patch_move_source_remove_failed: {e}"),
+                        path_details(&plan.source, &plan.root),
+                    )
+                })?;
+            }
+        } else {
+            fs::remove_file(&plan.source).map_err(|e| {
+                FsError::new(
+                    "patch_delete_failed",
+                    format!("patch_delete_failed: {e}"),
+                    path_details(&plan.source, &plan.root),
+                )
+            })?;
+        }
+        append_audit(
+            state,
+            "fs_apply_patch",
+            &plan.target,
+            &plan.root,
+            json!({"before_sha256":plan.before.as_deref().map(sha256_bytes),"after_sha256":plan.after.as_deref().map(sha256_bytes),"hunks":plan.parsed.hunks.len()}),
+        )?;
+    }
+    Ok(())
+}
+
+fn rollback_planned_patch(plans: &[PlannedPatch]) {
+    for plan in plans.iter().rev() {
+        if let Some(before) = &plan.before {
+            if let Some(parent) = plan.source.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            let _ = fs::write(&plan.source, before);
+        } else if plan.source.exists() {
+            let _ = fs::remove_file(&plan.source);
+        }
+        if !same_path(&plan.source, &plan.target) {
+            if let Some(before) = &plan.target_before {
+                if let Some(parent) = plan.target.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                let _ = fs::write(&plan.target, before);
+            } else if plan.target.exists() {
+                let _ = fs::remove_file(&plan.target);
+            }
+        }
+    }
+}
+
+fn patch_outcome_path(state: &State, operation: &str) -> PathBuf {
+    state
+        .output_root
+        .join(".narada/local-filesystem-mcp/patch-outcomes")
+        .join(format!("{operation}.json"))
+}
+fn read_patch_outcome(state: &State, operation: &str) -> Result<Option<Value>, FsError> {
+    let path = patch_outcome_path(state, operation);
+    match fs::read(&path) {
+        Ok(bytes) => {
+            if bytes.len() > 2 * 1024 * 1024 {
+                return Err(FsError::new(
+                    "fs_patch_outcome_too_large",
+                    "fs_patch_outcome_too_large",
+                    json!({"path":path}),
+                ));
+            }
+            serde_json::from_slice(&bytes).map(Some).map_err(|e| {
+                FsError::new(
+                    "fs_patch_outcome_invalid",
+                    format!("fs_patch_outcome_invalid: {e}"),
+                    json!({"path":path}),
+                )
+            })
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(FsError::new(
+            "fs_patch_outcome_read_failed",
+            format!("fs_patch_outcome_read_failed: {e}"),
+            json!({"path":path}),
+        )),
+    }
+}
+fn write_patch_outcome(state: &State, operation: &str, value: &Value) -> Result<(), FsError> {
+    let path = patch_outcome_path(state, operation);
+    let parent = path.parent().ok_or_else(|| {
+        FsError::new(
+            "fs_patch_outcome_path_invalid",
+            "fs_patch_outcome_path_invalid",
+            json!({"path":path}),
+        )
+    })?;
+    fs::create_dir_all(parent).map_err(|e| {
+        FsError::new(
+            "fs_patch_outcome_write_failed",
+            format!("fs_patch_outcome_write_failed: {e}"),
+            json!({"path":path}),
+        )
+    })?;
+    let temp = path.with_extension(format!("json.tmp-{}", std::process::id()));
+    let bytes = serde_json::to_vec_pretty(value)
+        .map_err(|e| FsError::new("fs_patch_outcome_encode_failed", e.to_string(), json!({})))?;
+    fs::write(&temp, bytes)
+        .and_then(|_| {
+            if path.exists() {
+                fs::remove_file(&path)?;
+            }
+            fs::rename(&temp, &path)
+        })
+        .map_err(|e| {
+            FsError::new(
+                "fs_patch_outcome_write_failed",
+                format!("fs_patch_outcome_write_failed: {e}"),
+                json!({"path":path}),
+            )
+        })
+}
+fn patch_failure<T>(
+    state: &State,
+    operation: &str,
+    patch_sha: &str,
+    error: FsError,
+) -> Result<T, FsError> {
+    let _ = write_patch_outcome(
+        state,
+        operation,
+        &json!({"schema":"local.filesystem.apply_patch.outcome.v1","status":"failed_before_mutation","operation_id":operation,"patch_sha256":patch_sha,"mutation_started":false,"retry_safe":true,"error":diagnostic(&error),"finished_at":now_rfc3339()}),
+    );
+    Err(error)
+}
+fn patch_parse_error(code: &str, line: usize) -> FsError {
+    FsError::new(code, code, json!({"line":line}))
+}
+fn now_rfc3339() -> String {
+    OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| "unknown".into())
+}
+
 fn patch_outcome(state: &State, args: &Value) -> Result<Value, FsError> {
     let operation = args
         .get("operation_id")
         .and_then(Value::as_str)
         .ok_or_else(|| FsError::new("operation_id_required", "operation_id_required", json!({})))?;
-    let path = state
-        .output_root
-        .join(".narada")
-        .join("local-filesystem-mcp")
-        .join("patch-outcomes")
-        .join(format!("{operation}.json"));
-    let text = fs::read_to_string(&path).map_err(|_| {
+    if !valid_operation_id(operation) {
+        return Err(FsError::new(
+            "patch_operation_id_invalid",
+            "patch_operation_id_invalid",
+            json!({"operation_id":operation}),
+        ));
+    }
+    let value = read_patch_outcome(state, operation)?.ok_or_else(|| {
         FsError::new(
             "fs_patch_outcome_not_found",
             format!("fs_patch_outcome_not_found: {operation}"),
-            json!({"operation_id": operation, "path": path}),
+            json!({"operation_id":operation,"path":patch_outcome_path(state,operation)}),
         )
     })?;
-    serde_json::from_str(&text).map_err(|_| {
-        FsError::new(
-            "fs_patch_outcome_invalid",
-            "fs_patch_outcome_invalid",
-            json!({"operation_id": operation, "path": path}),
+    reconcile_patch_outcome(state, operation, value)
+}
+
+fn reconcile_patch_outcome(
+    state: &State,
+    operation: &str,
+    mut value: Value,
+) -> Result<Value, FsError> {
+    let status = value
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !matches!(status, "accepted" | "applying") {
+        return Ok(value);
+    }
+    let pid = value.get("owner_pid").and_then(Value::as_u64).unwrap_or(0) as u32;
+    if process_is_alive(pid) {
+        if let Some(object) = value.as_object_mut() {
+            object.insert("recovery".into(),json!({"status":"owner_active","terminal":false,"retry_safe":false,"remediation":"Wait for the owning MCP surface to finish, then call fs_patch_outcome_show again."}));
+        }
+        return Ok(value);
+    }
+    let (terminal, retry_safe, reason) = if status == "accepted" {
+        (
+            "interrupted_before_mutation",
+            true,
+            "owner_exited_before_mutation_started",
         )
+    } else {
+        let plan = value.get("recovery_plan").cloned().unwrap_or(Value::Null);
+        let after = patch_state_set_matches(state, plan.get("after_state"));
+        let before = patch_state_set_matches(state, plan.get("before_state"));
+        if after {
+            (
+                "patched_recovered",
+                false,
+                "filesystem_matches_planned_after_state",
+            )
+        } else if before {
+            (
+                "interrupted_before_mutation",
+                true,
+                "filesystem_matches_captured_before_state",
+            )
+        } else {
+            (
+                "interrupted_partial",
+                false,
+                "filesystem_matches_neither_captured_state",
+            )
+        }
+    };
+    if let Some(object) = value.as_object_mut() {
+        object.insert("status".into(), json!(terminal));
+        object.insert("finished_at".into(), json!(now_rfc3339()));
+        object.insert("recovered_at".into(), json!(now_rfc3339()));
+        object.insert("retry_safe".into(), json!(retry_safe));
+        object.insert("recovery".into(),json!({"status":terminal,"terminal":true,"retry_safe":retry_safe,"reason":reason,"remediation":if retry_safe{"Retry fs_apply_patch with the same operation_id and identical patch."}else if terminal=="patched_recovered"{"Treat the operation as complete; do not retry it."}else{"Inspect affected files before using a new operation_id."}}));
+    }
+    write_patch_outcome(state, operation, &value)?;
+    Ok(value)
+}
+
+fn patch_state_set_matches(state: &State, value: Option<&Value>) -> bool {
+    let Some(entries) = value.and_then(Value::as_array) else {
+        return false;
+    };
+    if entries.is_empty() {
+        return false;
+    }
+    entries.iter().all(|entry| {
+        let Some(path) = entry.get("path").and_then(Value::as_str) else {
+            return false;
+        };
+        let Ok((resolved, _)) = resolve_allowed(state, Some(path), "fs_patch_outcome_show") else {
+            return false;
+        };
+        let expected_exists = entry
+            .get("exists")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if resolved.exists() != expected_exists {
+            return false;
+        }
+        if !expected_exists {
+            return true;
+        }
+        let Some(expected) = entry.get("sha256").and_then(Value::as_str) else {
+            return false;
+        };
+        fs::read(&resolved)
+            .ok()
+            .is_some_and(|bytes| sha256_bytes(&bytes) == expected)
     })
+}
+
+fn process_is_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+            .output()
+            .ok()
+            .is_some_and(|output| {
+                String::from_utf8_lossy(&output.stdout).contains(&format!("\"{pid}\""))
+            })
+    }
+    #[cfg(not(windows))]
+    {
+        Path::new(&format!("/proc/{pid}")).exists()
+    }
 }
 
 fn list_tools(mode: &str) -> Vec<Value> {
@@ -2273,6 +3623,10 @@ fn list_tools(mode: &str) -> Vec<Value> {
             "Replace an inclusive line range in a text file under an allowed root.",
         ));
         names.push((
+            "fs_apply_patch",
+            "Apply a unified diff or Codex-style patch atomically under allowed roots, with durable replay and recovery by operation_id.",
+        ));
+        names.push((
             "fs_move_path",
             "Move a file or directory under allowed roots.",
         ));
@@ -2293,15 +3647,17 @@ fn list_tools(mode: &str) -> Vec<Value> {
         let mut properties = Map::new();
         match *name {
             "fs_guidance" => { properties.insert("workflow".into(), json!({"type":"string"})); properties.insert("tool".into(), json!({"type":"string"})); }
-            "fs_read_file" => { properties.insert("path".into(), json!({"type":"string"})); properties.insert("offset".into(), json!({"type":"integer","default":1})); properties.insert("limit".into(), json!({"type":"integer","default":400})); properties.insert("timeout_ms".into(), json!({"type":"integer"})); }
-            "fs_read_file_range" => { properties.insert("path".into(), json!({"type":"string"})); properties.insert("start_line".into(), json!({"type":"integer"})); properties.insert("end_line".into(), json!({"type":"integer"})); properties.insert("timeout_ms".into(), json!({"type":"integer"})); }
-            "fs_stat" => { properties.insert("path".into(), json!({"type":"string"})); }
-            "fs_glob_search" => { properties.insert("pattern".into(), json!({"type":"string"})); properties.insert("directory".into(), json!({"type":"string","default":"."})); properties.insert("ignore".into(), json!({"type":"array","items":{"type":"string"}})); properties.insert("offset".into(), json!({"type":"integer","default":0})); properties.insert("limit".into(), json!({"type":"integer","default":100})); properties.insert("timeout_ms".into(), json!({"type":"integer"})); properties.insert("cache_policy".into(), json!({"type":"string","enum":["auto","snapshot","refresh","bypass"],"default":"auto"})); properties.insert("snapshot_id".into(), json!({"type":"string"})); }
-            "fs_grep_search" => { properties.insert("pattern".into(), json!({"type":"string"})); properties.insert("path".into(), json!({"type":"string","default":"."})); properties.insert("output_mode".into(), json!({"type":"string","enum":["files_with_matches","count_matches","content"],"default":"files_with_matches"})); properties.insert("ignore".into(), json!({"type":"array","items":{"type":"string"}})); properties.insert("offset".into(), json!({"type":"integer","default":0})); properties.insert("limit".into(), json!({"type":"integer","default":80})); properties.insert("timeout_ms".into(), json!({"type":"integer"})); properties.insert("cache_policy".into(), json!({"type":"string","enum":["auto","snapshot","refresh","bypass"],"default":"auto"})); properties.insert("snapshot_id".into(), json!({"type":"string"})); }
-            "fs_repository_inventory" => { properties.insert("pattern".into(), json!({"type":"string","default":"**/*"})); properties.insert("directory".into(), json!({"type":"string","description":"Canonical inventory scope; mutually exclusive with root."})); properties.insert("root".into(), json!({"type":"string","description":"Compatibility alias for directory; mutually exclusive with directory."})); properties.insert("ignore".into(), json!({"type":"array","items":{"type":"string"}})); properties.insert("include_generated".into(), json!({"type":"boolean","default":false})); properties.insert("offset".into(), json!({"type":"integer","default":0})); properties.insert("limit".into(), json!({"type":"integer","default":100})); properties.insert("timeout_ms".into(), json!({"type":"integer"})); properties.insert("cache_policy".into(), json!({"type":"string","enum":["auto","snapshot","refresh","bypass"],"default":"auto"})); properties.insert("snapshot_id".into(), json!({"type":"string"})); }
-            "fs_file_metrics" => { properties.insert("pattern".into(), json!({"type":"string","default":"**/*"})); properties.insert("directory".into(), json!({"type":"string","default":"."})); properties.insert("root".into(), json!({"type":"string"})); properties.insert("ignore".into(), json!({"type":"array","items":{"type":"string"}})); properties.insert("exclude".into(), json!({"type":"array","items":{"type":"string"}})); properties.insert("offset".into(), json!({"type":"integer","default":0})); properties.insert("limit".into(), json!({"type":"integer","default":100})); properties.insert("max_bytes_per_file".into(), json!({"type":"integer"})); properties.insert("max_total_scan_bytes".into(), json!({"type":"integer"})); properties.insert("timeout_ms".into(), json!({"type":"integer"})); properties.insert("cache_policy".into(), json!({"type":"string","enum":["auto","snapshot","refresh","bypass"],"default":"auto"})); properties.insert("snapshot_id".into(), json!({"type":"string"})); }
+            "fs_read_file" => { properties.insert("path".into(), json!({"type":"string"})); properties.insert("offset".into(), json!({"type":"integer","minimum":1,"maximum":10_000_000,"default":1})); properties.insert("limit".into(), json!({"type":"integer","minimum":1,"maximum":1_000,"default":400})); properties.insert("timeout_ms".into(), json!({"type":"integer","minimum":1,"maximum":60_000,"default":READ_TIMEOUT_MS})); }
+            "fs_read_file_range" => { properties.insert("path".into(), json!({"type":"string"})); properties.insert("start_line".into(), json!({"type":"integer","minimum":1,"maximum":10_000_000})); properties.insert("end_line".into(), json!({"type":"integer","minimum":1,"maximum":10_000_000})); properties.insert("timeout_ms".into(), json!({"type":"integer","minimum":1,"maximum":60_000,"default":READ_TIMEOUT_MS})); }
+            "fs_stat" => { properties.insert("path".into(), json!({"type":"string"})); properties.insert("timeout_ms".into(),json!({"type":"integer","minimum":1,"maximum":300_000,"default":60_000})); }
+            "fs_glob_search" => { properties.insert("pattern".into(), json!({"type":"string"})); properties.insert("directory".into(), json!({"type":"string","default":"."})); properties.insert("ignore".into(), json!({"type":"array","items":{"type":"string"}})); properties.insert("offset".into(), json!({"type":"integer","minimum":0,"maximum":10_000_000,"default":0})); properties.insert("limit".into(), json!({"type":"integer","minimum":1,"maximum":500,"default":100})); properties.insert("timeout_ms".into(), json!({"type":"integer","minimum":1,"maximum":300_000,"default":SEARCH_TIMEOUT_MS})); properties.insert("cache_policy".into(), json!({"type":"string","enum":["auto","snapshot","refresh","bypass"],"default":"auto"})); properties.insert("snapshot_id".into(), json!({"type":"string"})); }
+            "fs_grep_search" => { properties.insert("pattern".into(), json!({"type":"string"})); properties.insert("path".into(), json!({"type":"string","default":"."})); properties.insert("output_mode".into(), json!({"type":"string","enum":["files_with_matches","count_matches","content"],"default":"files_with_matches"})); properties.insert("ignore".into(), json!({"type":"array","items":{"type":"string"}})); properties.insert("offset".into(), json!({"type":"integer","minimum":0,"maximum":10_000_000,"default":0})); properties.insert("limit".into(), json!({"type":"integer","minimum":1,"maximum":500,"default":80})); properties.insert("timeout_ms".into(), json!({"type":"integer","minimum":1,"maximum":300_000,"default":SEARCH_TIMEOUT_MS})); properties.insert("cache_policy".into(), json!({"type":"string","enum":["auto","snapshot","refresh","bypass"],"default":"auto"})); properties.insert("snapshot_id".into(), json!({"type":"string"})); }
+            "fs_repository_inventory" => { properties.insert("pattern".into(), json!({"type":"string","default":"**/*"})); properties.insert("directory".into(), json!({"type":"string","description":"Canonical inventory scope; mutually exclusive with root."})); properties.insert("root".into(), json!({"type":"string","description":"Compatibility alias for directory; mutually exclusive with directory."})); properties.insert("ignore".into(), json!({"type":"array","items":{"type":"string"}})); properties.insert("include_generated".into(), json!({"type":"boolean","default":false})); properties.insert("offset".into(), json!({"type":"integer","minimum":0,"maximum":10_000_000,"default":0})); properties.insert("limit".into(), json!({"type":"integer","minimum":1,"maximum":500,"default":100})); properties.insert("timeout_ms".into(), json!({"type":"integer","minimum":1,"maximum":300_000,"default":SEARCH_TIMEOUT_MS})); properties.insert("cache_policy".into(), json!({"type":"string","enum":["auto","snapshot","refresh","bypass"],"default":"auto"})); properties.insert("snapshot_id".into(), json!({"type":"string"})); }
+            "fs_file_metrics" => { properties.insert("pattern".into(), json!({"type":"string","default":"**/*"})); properties.insert("directory".into(), json!({"type":"string","default":"."})); properties.insert("root".into(), json!({"type":"string"})); properties.insert("ignore".into(), json!({"type":"array","items":{"type":"string"}})); properties.insert("exclude".into(), json!({"type":"array","items":{"type":"string"}})); properties.insert("offset".into(), json!({"type":"integer","minimum":0,"maximum":10_000_000,"default":0})); properties.insert("limit".into(), json!({"type":"integer","minimum":1,"maximum":100,"default":100})); properties.insert("max_bytes_per_file".into(), json!({"type":"integer","minimum":1,"maximum":1_073_741_824,"default":8_388_608})); properties.insert("max_total_scan_bytes".into(), json!({"type":"integer","minimum":1,"maximum":1_073_741_824,"default":268_435_456})); properties.insert("timeout_ms".into(), json!({"type":"integer","minimum":1,"maximum":300_000,"default":SEARCH_TIMEOUT_MS})); properties.insert("cache_policy".into(), json!({"type":"string","enum":["auto","snapshot","refresh","bypass"],"default":"auto"})); properties.insert("snapshot_id".into(), json!({"type":"string"})); }
             "fs_patch_outcome_show" => { properties.insert("operation_id".into(), json!({"type":"string"})); }
             "fs_write_file" => {
+                properties.insert("payload_ref".into(), json!({"type":"string","maxLength":96}));
+                properties.insert("payload_path".into(), json!({"type":"string","maxLength":32_768}));
                 properties.insert("path".into(), json!({"type":"string"}));
                 properties.insert("content".into(), json!({"type":"string"}));
                 properties.insert("overwrite".into(), json!({"type":"boolean","default":true}));
@@ -2323,14 +3679,29 @@ fn list_tools(mode: &str) -> Vec<Value> {
                 properties.insert("replacement".into(), json!({"type":"string"}));
                 properties.insert("expected_sha256".into(), json!({"type":"string"}));
             }
+            "fs_apply_patch" => {
+                properties.insert("patch".into(), json!({"type":"string","maxLength":8_388_608}));
+                properties.insert("operation_id".into(), json!({"type":"string","pattern":"^[A-Za-z0-9._-]{1,160}$","maxLength":160}));
+                properties.insert("dry_run".into(), json!({"type":"boolean","default":false}));
+                properties.insert("timeout_ms".into(), json!({"type":"integer","minimum":1,"maximum":300_000,"default":WRITE_TIMEOUT_MS}));
+                properties.insert("expected_sha256".into(), json!({"type":"object","maxProperties":256,"additionalProperties":{"type":"string","pattern":"^[0-9a-fA-F]{64}$","maxLength":64}}));
+            }
             "fs_move_path" => {
                 properties.insert("from".into(), json!({"type":"string"}));
                 properties.insert("to".into(), json!({"type":"string"}));
                 properties.insert("overwrite".into(), json!({"type":"boolean","default":false}));
                 properties.insert("expected_from_size".into(), json!({"type":"integer"}));
+                properties.insert("expected_from_mtime".into(), json!({"type":"string"}));
                 properties.insert("expected_from_sha256".into(), json!({"type":"string"}));
+                properties.insert("expected_from_tree_sha256".into(), json!({"type":"string"}));
+                properties.insert("expected_from_entry_count".into(), json!({"type":"integer"}));
                 properties.insert("expected_to_size".into(), json!({"type":"integer"}));
+                properties.insert("expected_to_mtime".into(), json!({"type":"string"}));
                 properties.insert("expected_to_sha256".into(), json!({"type":"string"}));
+                properties.insert("expected_to_tree_sha256".into(), json!({"type":"string"}));
+                properties.insert("expected_to_entry_count".into(), json!({"type":"integer"}));
+                properties.insert("expected_from".into(), expected_metadata_schema());
+                properties.insert("expected_to".into(), expected_metadata_schema());
             }
             "fs_create_directory" => {
                 properties.insert("path".into(), json!({"type":"string"}));
@@ -2339,13 +3710,25 @@ fn list_tools(mode: &str) -> Vec<Value> {
             "fs_rename_directory" => {
                 properties.insert("from".into(), json!({"type":"string"}));
                 properties.insert("to".into(), json!({"type":"string"}));
+                properties.insert("expected_from_mtime".into(), json!({"type":"string"}));
+                properties.insert("expected_from_size".into(), json!({"type":"integer"}));
+                properties.insert("expected_from_tree_sha256".into(), json!({"type":"string"}));
+                properties.insert("expected_from_entry_count".into(), json!({"type":"integer"}));
+                properties.insert("expected_to_mtime".into(), json!({"type":"string"}));
+                properties.insert("expected_to_size".into(), json!({"type":"integer"}));
+                properties.insert("expected_to_tree_sha256".into(), json!({"type":"string"}));
+                properties.insert("expected_to_entry_count".into(), json!({"type":"integer"}));
+                properties.insert("expected_from".into(), expected_metadata_schema());
+                properties.insert("expected_to".into(), expected_metadata_schema());
             }
             "fs_delete_directory" => {
                 properties.insert("path".into(), json!({"type":"string"}));
                 properties.insert("recursive".into(), json!({"type":"boolean","default":false}));
                 properties.insert("expected_size".into(), json!({"type":"integer"}));
+                properties.insert("expected_mtime".into(), json!({"type":"string"}));
                 properties.insert("expected_tree_sha256".into(), json!({"type":"string"}));
                 properties.insert("expected_entry_count".into(), json!({"type":"integer"}));
+                properties.insert("expected".into(), expected_metadata_schema());
             }
             _ => {}
         }
@@ -2358,15 +3741,312 @@ fn list_tools(mode: &str) -> Vec<Value> {
             "fs_patch_outcome_show" => vec!["operation_id"],
             "fs_str_replace_file" => vec!["path", "old", "new"],
             "fs_replace_range" => vec!["path", "start_line", "end_line", "replacement"],
+            "fs_apply_patch" => vec!["patch"],
             "fs_move_path" => vec!["from", "to"],
             "fs_create_directory" => vec!["path"],
             "fs_rename_directory" => vec!["from", "to"],
             "fs_delete_directory" => vec!["path"],
             _ => Vec::new()
         };
-        let write_tool = is_write_tool(name);
-        json!({"name": name, "canonical_name": name, "description": description, "inputSchema": {"type":"object","properties": properties,"required": required,"additionalProperties":false}, "annotations": {"title":name,"readOnlyHint":!write_tool,"destructiveHint":write_tool,"idempotentHint":true,"openWorldHint":false}, "outputSchema":{"type":"object","additionalProperties":true}})
+        let write_tool = tool_has_write_effect(name);
+        let destructive = matches!(*name,"fs_str_replace_file"|"fs_replace_range"|"fs_apply_patch"|"fs_move_path"|"fs_rename_directory"|"fs_delete_directory");
+        let idempotent = !matches!(*name,"fs_str_replace_file"|"fs_replace_range"|"fs_move_path"|"fs_rename_directory"|"fs_delete_directory");
+        bound_tool_properties(&mut properties);
+        json!({"name": name, "canonical_name": name, "description": description, "inputSchema": {"title":format!("{name} arguments"),"type":"object","properties": properties,"required": required,"additionalProperties":false}, "annotations": {"title":name,"readOnlyHint":!write_tool,"destructiveHint":destructive,"idempotentHint":idempotent,"openWorldHint":false}, "outputSchema":{"title":format!("{name} result"),"type":"object","maxProperties":256,"additionalProperties":true}})
     }).collect()
+}
+
+fn expected_metadata_schema() -> Value {
+    json!({"type":"object","maxProperties":5,"additionalProperties":false,"properties":{
+        "mtime":{"type":"string","maxLength":128},"size":{"type":"integer","minimum":0,"maximum":9_007_199_254_740_991_i64},
+        "sha256":{"type":"string","pattern":"^[0-9a-fA-F]{64}$","maxLength":64},"tree_sha256":{"type":"string","pattern":"^[0-9a-fA-F]{64}$","maxLength":64},
+        "entry_count":{"type":"integer","minimum":0,"maximum":5_000}
+    }})
+}
+
+fn tool_has_write_effect(name: &str) -> bool {
+    is_write_tool(name) || name == "fs_patch_outcome_show"
+}
+
+fn bound_tool_properties(properties: &mut Map<String, Value>) {
+    for (name, schema) in properties.iter_mut() {
+        let Some(object) = schema.as_object_mut() else {
+            continue;
+        };
+        match object.get("type").and_then(Value::as_str) {
+            Some("string") if !object.contains_key("maxLength") => {
+                let limit = if matches!(name.as_str(), "content" | "replacement" | "old" | "new") {
+                    8_388_608
+                } else {
+                    32_768
+                };
+                object.insert("maxLength".into(), json!(limit));
+            }
+            Some("array") => {
+                object.entry("maxItems").or_insert_with(|| json!(256));
+                if let Some(items) = object.get_mut("items").and_then(Value::as_object_mut) {
+                    if items.get("type").and_then(Value::as_str) == Some("string") {
+                        items.entry("maxLength").or_insert_with(|| json!(32_768));
+                    }
+                }
+            }
+            Some("integer") => {
+                object.entry("minimum").or_insert_with(|| json!(0));
+                let maximum = if name == "limit" {
+                    1_000_i64
+                } else if name == "timeout_ms" {
+                    300_000
+                } else if name.contains("bytes") {
+                    1_073_741_824
+                } else if name.contains("entry_count") {
+                    5_000_000
+                } else if matches!(name.as_str(), "offset" | "start_line" | "end_line") {
+                    10_000_000
+                } else {
+                    9_007_199_254_740_991
+                };
+                object.entry("maximum").or_insert_with(|| json!(maximum));
+            }
+            Some("object") => {
+                object.entry("maxProperties").or_insert_with(|| json!(256));
+            }
+            _ => {}
+        }
+    }
+}
+
+fn validate_tool_arguments(mode: &str, name: &str, args: &Value) -> Result<(), FsError> {
+    let tool = list_tools(mode)
+        .into_iter()
+        .find(|tool| tool.get("name").and_then(Value::as_str) == Some(name))
+        .ok_or_else(|| {
+            FsError::new(
+                format!("tool_not_available_in_{mode}_mode"),
+                format!("tool_not_available_in_{mode}_mode: {name}"),
+                json!({"tool_name":name,"mode":mode}),
+            )
+        })?;
+    let schema = tool
+        .get("inputSchema")
+        .and_then(Value::as_object)
+        .expect("tool schema");
+    let object = args.as_object().ok_or_else(|| {
+        FsError::new(
+            "tool_arguments_must_be_object",
+            "tool_arguments_must_be_object",
+            json!({"tool_name":name,"actual_type":json_type(args)}),
+        )
+    })?;
+    let properties = schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .expect("properties");
+    let unknown: Vec<&String> = object
+        .keys()
+        .filter(|key| !properties.contains_key(*key))
+        .collect();
+    if !unknown.is_empty() {
+        return Err(FsError::new(
+            "tool_argument_unknown",
+            "tool_argument_unknown",
+            json!({"tool_name":name,"fields":unknown}),
+        ));
+    }
+    for required in schema
+        .get("required")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        if !object.contains_key(required) {
+            return Err(FsError::new(
+                "tool_argument_required",
+                "tool_argument_required",
+                json!({"tool_name":name,"field":required}),
+            ));
+        }
+    }
+    for (field, value) in object {
+        validate_schema_value(name, field, value, &properties[field])?;
+    }
+    Ok(())
+}
+
+fn validate_schema_value(
+    tool_name: &str,
+    field: &str,
+    value: &Value,
+    schema: &Value,
+) -> Result<(), FsError> {
+    let expected = schema.get("type").and_then(Value::as_str).unwrap_or("any");
+    let valid = match expected {
+        "string" => value.is_string(),
+        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+        "boolean" => value.is_boolean(),
+        "array" => value.is_array(),
+        "object" => value.is_object(),
+        _ => true,
+    };
+    if !valid {
+        return Err(FsError::new(
+            "tool_argument_type_invalid",
+            "tool_argument_type_invalid",
+            json!({"tool_name":tool_name,"field":field,"expected":expected,"actual":json_type(value)}),
+        ));
+    }
+    if let Some(text) = value.as_str() {
+        if let Some(max) = schema.get("maxLength").and_then(Value::as_u64) {
+            if text.chars().count() as u64 > max {
+                return Err(FsError::new(
+                    "tool_argument_too_long",
+                    "tool_argument_too_long",
+                    json!({"tool_name":tool_name,"field":field,"maximum":max}),
+                ));
+            }
+        }
+        if let Some(values) = schema.get("enum").and_then(Value::as_array) {
+            if !values
+                .iter()
+                .any(|candidate| candidate.as_str() == Some(text))
+            {
+                return Err(FsError::new(
+                    "tool_argument_enum_invalid",
+                    "tool_argument_enum_invalid",
+                    json!({"tool_name":tool_name,"field":field,"allowed":values}),
+                ));
+            }
+        }
+        if field == "operation_id" && !valid_operation_id(text) {
+            return Err(FsError::new(
+                "patch_operation_id_invalid",
+                "patch_operation_id_invalid",
+                json!({"operation_id":text}),
+            ));
+        }
+        if matches!(
+            field,
+            "expected_sha256" | "expected_from_sha256" | "expected_to_sha256"
+        ) && !text.is_empty()
+            && !valid_sha256(text)
+        {
+            return Err(FsError::new(
+                "tool_argument_sha256_invalid",
+                "tool_argument_sha256_invalid",
+                json!({"tool_name":tool_name,"field":field}),
+            ));
+        }
+    }
+    if let Some(items) = value.as_array() {
+        let max = schema
+            .get("maxItems")
+            .and_then(Value::as_u64)
+            .unwrap_or(256);
+        if items.len() as u64 > max {
+            return Err(FsError::new(
+                "tool_argument_array_too_large",
+                "tool_argument_array_too_large",
+                json!({"tool_name":tool_name,"field":field,"maximum":max}),
+            ));
+        }
+        if let Some(item_schema) = schema.get("items") {
+            for item in items {
+                validate_schema_value(tool_name, field, item, item_schema)?;
+            }
+        }
+    }
+    if let Some(number) = value.as_i64() {
+        if schema
+            .get("minimum")
+            .and_then(Value::as_i64)
+            .is_some_and(|min| number < min)
+            || schema
+                .get("maximum")
+                .and_then(Value::as_i64)
+                .is_some_and(|max| number > max)
+        {
+            return Err(FsError::new(
+                "tool_argument_integer_out_of_range",
+                "tool_argument_integer_out_of_range",
+                json!({"tool_name":tool_name,"field":field,"value":number,"minimum":schema.get("minimum"),"maximum":schema.get("maximum")}),
+            ));
+        }
+    }
+    if let Some(object) = value.as_object() {
+        let max = schema
+            .get("maxProperties")
+            .and_then(Value::as_u64)
+            .unwrap_or(256);
+        if object.len() as u64 > max {
+            return Err(FsError::new(
+                "tool_argument_object_too_large",
+                "tool_argument_object_too_large",
+                json!({"tool_name":tool_name,"field":field,"maximum":max}),
+            ));
+        }
+        let declared = schema.get("properties").and_then(Value::as_object);
+        if schema.get("additionalProperties") == Some(&Value::Bool(false)) {
+            let unknown: Vec<_> = object
+                .keys()
+                .filter(|key| declared.is_none_or(|properties| !properties.contains_key(*key)))
+                .collect();
+            if !unknown.is_empty() {
+                return Err(FsError::new(
+                    "tool_argument_nested_unknown",
+                    "tool_argument_nested_unknown",
+                    json!({"tool_name":tool_name,"field":field,"fields":unknown}),
+                ));
+            }
+        }
+        for (key, item) in object {
+            if key.chars().count() > 32_768 {
+                return Err(FsError::new(
+                    "tool_argument_key_too_long",
+                    "tool_argument_key_too_long",
+                    json!({"tool_name":tool_name,"field":field}),
+                ));
+            }
+            if let Some(child) = declared
+                .and_then(|properties| properties.get(key))
+                .or_else(|| {
+                    schema
+                        .get("additionalProperties")
+                        .filter(|value| value.is_object())
+                })
+            {
+                validate_schema_value(tool_name, key, item, child)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn json_type(value: &Value) -> &'static str {
+    if value.is_null() {
+        "null"
+    } else if value.is_object() {
+        "object"
+    } else if value.is_array() {
+        "array"
+    } else if value.is_string() {
+        "string"
+    } else if value.is_boolean() {
+        "boolean"
+    } else {
+        "number"
+    }
+}
+
+fn valid_operation_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 160
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn resolve_allowed(
@@ -2526,8 +4206,8 @@ fn freshness(path: &Path) -> Value {
             value.insert("mtime".into(), json!(mtime_iso(&metadata)));
             value.insert("mtime_ms".into(), json!(modified_ms));
             if metadata.is_file() {
-                if let Ok(bytes) = fs::read(path) {
-                    value.insert("sha256".into(), json!(sha256_bytes(&bytes)));
+                if let Ok(hash) = sha256_file_with_timeout(path, 60_000, "filesystem_freshness") {
+                    value.insert("sha256".into(), json!(hash));
                 }
             } else if metadata.is_dir() {
                 let (entry_count, tree_entry_count, tree_sha256, truncated) =
@@ -2598,37 +4278,137 @@ fn walk_directory(path: &Path, root: &Path, entries: &mut Vec<String>, truncated
     }
 }
 
-fn run_rg(args: &[String], timeout: u64, operation: &str) -> Result<Vec<String>, FsError> {
+fn run_rg(args: &[String], timeout: u64, operation: &str) -> Result<(Vec<String>, bool), FsError> {
     let started = std::time::Instant::now();
-    let output = Command::new("rg").args(args).output().map_err(|error| {
+    let mut child = Command::new("rg")
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            FsError::new(
+                format!("{operation}_failed"),
+                format!("{operation}_failed: {error}"),
+                json!({"operation": operation}),
+            )
+        })?;
+    let stdout = child.stdout.take().expect("rg stdout");
+    let stderr = child.stderr.take().expect("rg stderr");
+    let (sender, receiver) = mpsc::sync_channel::<Result<Option<String>, String>>(64);
+    thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        loop {
+            let mut bytes = Vec::new();
+            match reader.read_until(b'\n', &mut bytes) {
+                Ok(0) => {
+                    let _ = sender.send(Ok(None));
+                    break;
+                }
+                Ok(_) => {
+                    if bytes.len() > MAX_SEARCH_LINE_BYTES {
+                        let _ = sender.send(Err("search_result_line_too_large".into()));
+                        break;
+                    }
+                    while matches!(bytes.last(), Some(b'\n' | b'\r')) {
+                        bytes.pop();
+                    }
+                    match String::from_utf8(bytes) {
+                        Ok(line) => {
+                            if sender.send(Ok(Some(line))).is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => {
+                            let _ = sender.send(Err("search_result_not_utf8".into()));
+                            break;
+                        }
+                    }
+                }
+                Err(error) => {
+                    let _ = sender.send(Err(format!("search_stdout_read_failed: {error}")));
+                    break;
+                }
+            }
+        }
+    });
+    let stderr_reader = thread::spawn(move || {
+        let mut reader = stderr.take((64 * 1024 + 1) as u64);
+        let mut bytes = Vec::new();
+        let _ = reader.read_to_end(&mut bytes);
+        bytes
+    });
+    let mut matches = Vec::new();
+    let mut bytes = 0_usize;
+    let mut complete = false;
+    let mut capture_limited = false;
+    loop {
+        let elapsed = started.elapsed().as_millis() as u64;
+        if elapsed > timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(FsError::new(
+                format!("{operation}_timed_out"),
+                format!("{operation}_timed_out"),
+                json!({"operation":operation,"timeout_ms":timeout}),
+            ));
+        }
+        match receiver.recv_timeout(Duration::from_millis(10)) {
+            Ok(Ok(Some(line))) => {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                bytes = bytes.saturating_add(line.len());
+                if matches.len() >= MAX_SEARCH_CAPTURE_ENTRIES || bytes > MAX_SEARCH_CAPTURE_BYTES {
+                    capture_limited = true;
+                    let _ = child.kill();
+                    break;
+                }
+                matches.push(line);
+            }
+            Ok(Ok(None)) => {
+                complete = true;
+                break;
+            }
+            Ok(Err(code)) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(FsError::new(
+                    code.clone(),
+                    code,
+                    json!({"operation":operation}),
+                ));
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if child.try_wait().ok().flatten().is_some() {
+                    complete = true;
+                    break;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                complete = true;
+                break;
+            }
+        }
+    }
+    let status = child.wait().map_err(|error| {
         FsError::new(
             format!("{operation}_failed"),
             format!("{operation}_failed: {error}"),
-            json!({"operation": operation}),
+            json!({"operation":operation}),
         )
     })?;
-    if started.elapsed().as_millis() as u64 > timeout {
-        return Err(FsError::new(
-            format!("{operation}_timed_out"),
-            format!("{operation}_timed_out"),
-            json!({"operation": operation, "timeout_ms": timeout}),
-        ));
-    }
-    if output.status.code().unwrap_or(2) > 1 {
+    let stderr = stderr_reader.join().unwrap_or_default();
+    if !capture_limited && status.code().unwrap_or(2) > 1 {
         return Err(FsError::new(
             format!("{operation}_failed"),
             format!(
                 "{operation}_failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
+                String::from_utf8_lossy(&stderr).trim()
             ),
-            json!({"operation": operation, "status": output.status.code()}),
+            json!({"operation": operation, "status": status.code(),"stderr_truncated":stderr.len()>64*1024}),
         ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| line.trim_end_matches('\r').to_string())
-        .collect())
+    Ok((matches, complete && !capture_limited))
 }
 
 fn render_grep(line: &str, mode: &str) -> String {
@@ -2679,16 +4459,28 @@ fn classify(path: &str) -> &'static str {
 }
 
 fn count_lines(path: &Path) -> io::Result<(usize, bool)> {
-    let bytes = fs::read(path)?;
-    if bytes.contains(&0) {
-        return Ok((0, true));
+    let mut file = fs::File::open(path)?;
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut lines = 0_usize;
+    let mut any = false;
+    let mut last_newline = false;
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        let chunk = &buffer[..count];
+        if chunk.contains(&0) {
+            return Ok((0, true));
+        }
+        any = true;
+        lines += chunk.iter().filter(|byte| **byte == b'\n').count();
+        last_newline = chunk.last() == Some(&b'\n');
     }
-    let text = String::from_utf8_lossy(&bytes).replace("\r\n", "\n");
-    let mut lines: Vec<&str> = text.split('\n').collect();
-    if lines.last() == Some(&"") {
-        lines.pop();
+    if any && !last_newline {
+        lines += 1;
     }
-    Ok((lines.len(), false))
+    Ok((lines, false))
 }
 
 fn aggregate_metrics(files: &[Value]) -> Value {
@@ -2765,12 +4557,7 @@ pub(crate) fn write_message<W: Write>(
     let body = serde_json::to_string(value)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     if framed {
-        write!(
-            writer,
-            "Content-Length: {}\r\n\r\n{}",
-            body.as_bytes().len(),
-            body
-        )
+        write!(writer, "Content-Length: {}\r\n\r\n{}", body.len(), body)
     } else {
         writeln!(writer, "{body}")
     }
@@ -2790,6 +4577,7 @@ mod tests {
             audit_log_dir: None,
             cache: HashMap::new(),
             snapshots: HashMap::new(),
+            snapshot_order: Vec::new(),
         }
     }
 
@@ -2904,12 +4692,12 @@ mod tests {
     }
 
     #[test]
-    fn guidance_does_not_recommend_an_unavailable_patch_producer() {
+    fn guidance_recommends_the_native_patch_recovery_sequence() {
         let root = test_root("guidance");
         let state = test_state(&root, "write");
         let result = guidance(&state, &json!({"workflow": "safe_edit"})).unwrap();
-        assert_eq!(result["patch_recovery"]["apply_patch_available"], false);
-        assert!(!result["patch_recovery"]["sequence"]
+        assert_eq!(result["patch_recovery"]["apply_patch_available"], true);
+        assert!(result["patch_recovery"]["sequence"]
             .to_string()
             .contains("Call fs_apply_patch once"));
         fs::remove_dir_all(&root).unwrap();
@@ -2939,5 +4727,210 @@ mod tests {
         assert!(text.len() < 100);
         assert!(!text.contains("large"));
         assert_eq!(result["structuredContent"]["large"][2], 3);
+    }
+
+    #[test]
+    fn every_filesystem_schema_is_named_closed_and_bounded() {
+        for mode in ["read", "write"] {
+            for tool in list_tools(mode) {
+                let schema = &tool["inputSchema"];
+                assert!(
+                    schema["title"]
+                        .as_str()
+                        .is_some_and(|value| !value.is_empty()),
+                    "{}",
+                    tool["name"]
+                );
+                assert_eq!(schema["additionalProperties"], false, "{}", tool["name"]);
+                for (field, property) in schema["properties"].as_object().unwrap() {
+                    match property["type"].as_str().unwrap_or_default() {
+                        "string" => assert!(
+                            property["maxLength"].is_number(),
+                            "{}:{field}",
+                            tool["name"]
+                        ),
+                        "array" => {
+                            assert!(property["maxItems"].is_number(), "{}:{field}", tool["name"])
+                        }
+                        "integer" => {
+                            assert!(property["minimum"].is_number(), "{}:{field}", tool["name"]);
+                            assert!(property["maximum"].is_number(), "{}:{field}", tool["name"]);
+                        }
+                        "object" => assert!(
+                            property["maxProperties"].is_number(),
+                            "{}:{field}",
+                            tool["name"]
+                        ),
+                        _ => {}
+                    }
+                }
+                assert!(tool["outputSchema"]["title"].is_string());
+            }
+        }
+    }
+
+    #[test]
+    fn native_apply_patch_supports_codex_unified_replay_and_conflict() {
+        let root = test_root("native-patch");
+        let state = test_state(&root, "write");
+        fs::write(root.join("value.txt"), "one\ntwo\n").unwrap();
+        let codex = "*** Begin Patch\n*** Update File: value.txt\n@@\n-one\n+ONE\n two\n*** Add File: added.txt\n+added\n*** End Patch";
+        let first =
+            apply_patch_tool(&state, &json!({"patch":codex,"operation_id":"patch-one"})).unwrap();
+        assert_eq!(first["status"], "patched");
+        assert_eq!(
+            fs::read_to_string(root.join("value.txt")).unwrap(),
+            "ONE\ntwo\n"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("added.txt")).unwrap(),
+            "added\n"
+        );
+        let replay =
+            apply_patch_tool(&state, &json!({"patch":codex,"operation_id":"patch-one"})).unwrap();
+        assert_eq!(replay["operation_replayed"], true);
+        assert_eq!(apply_patch_tool(&state, &json!({"patch":"*** Begin Patch\n*** Delete File: added.txt\n*** End Patch","operation_id":"patch-one"})).unwrap_err().code, "patch_operation_id_conflict");
+        let unified = "--- a/value.txt\n+++ b/value.txt\n@@ -1,2 +1,2 @@\n ONE\n-two\n+TWO";
+        let checked = apply_patch_tool(
+            &state,
+            &json!({"patch":unified,"operation_id":"patch-two","dry_run":true}),
+        )
+        .unwrap();
+        assert_eq!(checked["status"], "checked");
+        assert_eq!(
+            fs::read_to_string(root.join("value.txt")).unwrap(),
+            "ONE\ntwo\n"
+        );
+        assert_eq!(
+            patch_outcome(&state, &json!({"operation_id":"patch-two"})).unwrap()["status"],
+            "checked"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_filesystem_rejects_unknown_and_unbounded_arguments() {
+        assert_eq!(
+            validate_tool_arguments(
+                "write",
+                "fs_write_file",
+                &json!({"path":"x","content":"y","surprise":true})
+            )
+            .unwrap_err()
+            .code,
+            "tool_argument_unknown"
+        );
+        assert_eq!(
+            validate_tool_arguments("read", "fs_read_file", &json!({"path":"x","limit":300_001}))
+                .unwrap_err()
+                .code,
+            "tool_argument_integer_out_of_range"
+        );
+        assert_eq!(
+            validate_tool_arguments(
+                "write",
+                "fs_apply_patch",
+                &json!({"patch":"x","operation_id":"bad/id"})
+            )
+            .unwrap_err()
+            .code,
+            "patch_operation_id_invalid"
+        );
+    }
+
+    #[test]
+    fn native_apply_patch_moves_deletes_guards_and_records_recovery() {
+        let root = test_root("native-patch-boundaries");
+        let state = test_state(&root, "write");
+        fs::write(root.join("move.txt"), "move me\n").unwrap();
+        let moved = apply_patch_tool(&state, &json!({
+            "patch":"*** Begin Patch\n*** Update File: move.txt\n*** Move to: moved.txt\n@@\n-move me\n+moved\n*** End Patch",
+            "operation_id":"move-patch","expected_sha256":{"move.txt":sha256_bytes(b"move me\n")}
+        })).unwrap();
+        assert_eq!(moved["status"], "patched");
+        assert!(!root.join("move.txt").exists());
+        assert_eq!(
+            fs::read_to_string(root.join("moved.txt")).unwrap(),
+            "moved\n"
+        );
+        let deleted = apply_patch_tool(&state, &json!({
+            "patch":"*** Begin Patch\n*** Delete File: moved.txt\n*** End Patch","operation_id":"delete-patch"
+        })).unwrap();
+        assert_eq!(deleted["changed_files"][0]["operation"], "delete");
+        assert!(!root.join("moved.txt").exists());
+
+        fs::write(root.join("guard.txt"), "guard\n").unwrap();
+        let error = apply_patch_tool(&state, &json!({
+            "patch":"*** Begin Patch\n*** Update File: guard.txt\n@@\n-guard\n+changed\n*** End Patch",
+            "operation_id":"guard-patch","expected_sha256":{"guard.txt":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+        })).unwrap_err();
+        assert_eq!(error.code, "fs_apply_patch_expected_sha256_mismatch");
+        assert_eq!(
+            fs::read_to_string(root.join("guard.txt")).unwrap(),
+            "guard\n"
+        );
+        let recovered = patch_outcome(&state, &json!({"operation_id":"guard-patch"})).unwrap();
+        assert_eq!(recovered["status"], "failed_before_mutation");
+        assert_eq!(recovered["retry_safe"], true);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_patch_reconciles_interrupted_applying_state() {
+        let root = test_root("native-patch-recovery");
+        let state = test_state(&root, "write");
+        let path = root.join("recovered.txt");
+        fs::write(&path, "after\n").unwrap();
+        write_patch_outcome(&state,"recover-applying",&json!({
+            "schema":"local.filesystem.apply_patch.outcome.v1","status":"applying","operation_id":"recover-applying",
+            "patch_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","owner_pid":4294967294_u32,
+            "recovery_plan":{"before_state":[{"path":path,"exists":true,"sha256":sha256_bytes(b"before\n")}],"after_state":[{"path":path,"exists":true,"sha256":sha256_bytes(b"after\n")}],"changed_files":[]}
+        })).unwrap();
+        let outcome = patch_outcome(&state, &json!({"operation_id":"recover-applying"})).unwrap();
+        assert_eq!(outcome["status"], "patched_recovered");
+        assert_eq!(outcome["retry_safe"], false);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_reads_and_search_snapshots_have_hard_memory_bounds() {
+        let root = test_root("bounded-memory");
+        let mut state = test_state(&root, "read");
+        let path = root.join("huge-line.txt");
+        fs::write(&path, vec![b'x'; MAX_READ_LINE_BYTES + 1]).unwrap();
+        assert_eq!(
+            read_file(&state, &json!({"path":path,"limit":1}), false)
+                .unwrap_err()
+                .code,
+            "fs_read_line_too_large"
+        );
+        for index in 0..5 {
+            let id = format!("snapshot-{index}");
+            state.snapshots.insert(id.clone(), (vec![id.clone()], true));
+            touch_snapshot(&mut state, &id);
+        }
+        assert_eq!(state.snapshots.len(), 4);
+        assert!(!state.snapshots.contains_key("snapshot-0"));
+        state
+            .snapshots
+            .insert("truncated".into(), (vec!["one".into()], false));
+        let boundary = search_tool(
+            &mut state,
+            &json!({
+                "directory": root,
+                "pattern": "*",
+                "snapshot_id": "truncated",
+                "offset": 1
+            }),
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(boundary.code, "fs_glob_search_capture_boundary_reached");
+        let outcome = list_tools("read")
+            .into_iter()
+            .find(|tool| tool["name"] == "fs_patch_outcome_show")
+            .unwrap();
+        assert_eq!(outcome["annotations"]["readOnlyHint"], false);
+        fs::remove_dir_all(root).unwrap();
     }
 }
