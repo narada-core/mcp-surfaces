@@ -2,6 +2,7 @@ use serde_json::{json, Map, Value};
 use rusqlite::{params, types::ValueRef, Connection, OpenFlags, OptionalExtension};
 use std::fs;
 use std::path::{Path, PathBuf};
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 const SERVER_NAME: &str = "narada-site-loop-mcp";
 const DB_RELATIVE: &str = ".ai/task-lifecycle.db";
@@ -56,7 +57,7 @@ pub fn list_tools() -> Vec<Value> {
         tools.push(tool(name, description, schema, true));
     }
     for name in MUTATING_TOOLS {
-        tools.push(tool(name, "Site Loop mutation remains owned by the configured JS authority until a complete native adapter is admitted.", json!({"type":"object","additionalProperties":true}), false));
+        tools.push(tool(name, mutation_description(name), mutation_schema(name), false));
     }
     tools
 }
@@ -100,6 +101,8 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<V
         "site_loop_attention_list" => attention_list(args, root),
         "site_loop_attention_show" => attention_show(args, root),
         "site_loop_output_show" => output_show(args, root),
+        "site_loop_attention_ack" => attention_ack(args, root),
+        "site_loop_control_set" => control_set(args, root),
         name if MUTATING_TOOLS.contains(&name) => Err(authority_boundary(name)),
         _ => Err(error("unknown_tool", &format!("unknown_tool:{name}"))),
     }
@@ -111,6 +114,30 @@ fn guidance_tool() -> Value {
 
 fn guidance(args: &Map<String, Value>) -> Value {
     json!({"schema":"narada.mcp_surface.guidance.v0","status":"ok","surface_id":"site-loop","guidance_tool":"site_loop_guidance","purpose":"Inspect site-loop configuration, status, proof, and recovery posture.","requested":{"workflow":args.get("workflow").cloned().unwrap_or(Value::Null),"tool":args.get("tool").cloned().unwrap_or(Value::Null)},"first_use":["Call site_loop_doctor first.","Use site_loop_unified_status and site_loop_health before recovery.","Use site_loop_proof_status/readiness/coherence to distinguish freshness from coherence.","Keep scheduler, resident carrier, task lifecycle, and control mutations with their owning authorities."],"boundaries":["This native slice is read-only except for no local writes.","Configured commands are reported, never executed.","Resident launch and loop control remain explicit authority boundaries."]})
+}
+
+fn mutation_description(name: &str) -> &'static str {
+    match name {
+        "site_loop_attention_ack" => "Acknowledge one durable Site Loop attention record through the native store authority.",
+        "site_loop_control_set" => "Set durable Site Loop control flags through the native store authority.",
+        "site_test_run" => "Run one configured allowlisted Site test without shell interpolation.",
+        "site_loop_proof_run" => "Run a controlled resident proof through native Site Loop authorities.",
+        "site_loop_recovery_drill" => "Run the governed resident recovery drill through native Site Loop authorities.",
+        "site_loop_run_once" => "Run one bounded Site Loop pass under the configured authority boundary.",
+        _ => "Apply a Site Loop mutation.",
+    }
+}
+
+fn mutation_schema(name: &str) -> Value {
+    match name {
+        "site_test_run" => json!({"type":"object","properties":{"selector":{"type":"string","minLength":1,"maxLength":256}},"required":["selector"],"additionalProperties":false}),
+        "site_loop_proof_run" => json!({"type":"object","properties":{"proof_kind":{"type":"string","enum":["resident_production"]},"wait_for_completion":{"type":"boolean"},"timeout_ms":{"type":"integer","minimum":1,"maximum":120000},"poll_ms":{"type":"integer","minimum":10,"maximum":10000},"limit":{"type":"integer","minimum":1,"maximum":500},"ensure_resident":{"type":"boolean"},"require_live_carrier":{"type":"boolean"}},"required":["proof_kind"],"additionalProperties":false}),
+        "site_loop_recovery_drill" => json!({"type":"object","properties":{"id":{"type":"string","minLength":1,"maxLength":256},"reason":{"type":"string","minLength":1,"maxLength":4096},"title":{"type":"string","maxLength":1024},"summary":{"type":"string","maxLength":8192},"timeout_ms":{"type":"integer","minimum":1,"maximum":120000},"poll_ms":{"type":"integer","minimum":10,"maximum":10000}},"required":["reason"],"additionalProperties":false}),
+        "site_loop_attention_ack" => json!({"type":"object","properties":{"attention_id":{"type":"string","minLength":1,"maxLength":512},"reason":{"type":"string","minLength":1,"maxLength":4096},"acknowledged_by":{"type":"string","minLength":1,"maxLength":256}},"required":["attention_id","reason"],"additionalProperties":false}),
+        "site_loop_control_set" => json!({"type":"object","properties":{"enabled":{"type":"boolean"},"paused":{"type":"boolean"},"reason":{"type":"string","minLength":1,"maxLength":4096},"changed_by":{"type":"string","minLength":1,"maxLength":256}},"required":["reason"],"additionalProperties":false}),
+        "site_loop_run_once" => json!({"type":"object","properties":{"dry_run":{"type":"boolean"},"wait_for_completion":{"type":"boolean"},"timeout_ms":{"type":"integer","minimum":1,"maximum":10000},"test_authority":{"type":"boolean"},"limit":{"type":"integer","minimum":1,"maximum":500},"drain":{"type":"boolean"},"ensureResident":{"type":"boolean"},"requireLiveCarrier":{"type":"boolean"}},"additionalProperties":false}),
+        _ => json!({"type":"object","properties":{},"additionalProperties":false}),
+    }
 }
 
 fn config_path(root: &Path) -> PathBuf { root.join(".narada").join("capabilities").join("site-loop-config.json") }
@@ -353,6 +380,60 @@ fn attention_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value
     Ok(json!({"schema":"narada.site_operating_loop.loop_attention_show.v1","status":if row.is_some(){"ok"}else{"not_found"},"attention":row.map(attention_record)}))
 }
 
+fn now_iso() -> String { OffsetDateTime::now_utc().format(&Rfc3339).unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string()) }
+
+fn required_bounded(args: &Map<String, Value>, name: &str, max: usize) -> Result<String, Value> {
+    let value = args.get(name).and_then(Value::as_str).map(str::trim).filter(|value| !value.is_empty()).ok_or_else(|| error(&format!("site_loop_{name}_required"), &format!("{name} is required")))?;
+    if value.chars().count() > max { return Err(error(&format!("site_loop_{name}_too_long"), &format!("{name} exceeds {max} characters"))); }
+    Ok(value.to_string())
+}
+
+fn open_write_db(root: &Path, required_table: &str) -> Result<Connection, Value> {
+    let path = db_path(root);
+    if !path.is_file() { return Err(error("site_loop_store_not_prepared", "Site Loop store is missing; prepare it through the owning lifecycle authority.")); }
+    let connection = Connection::open(&path).map_err(|e| error("site_loop_store_open_failed", &e.to_string()))?;
+    if !table_exists(&connection, required_table) { return Err(error("site_loop_store_not_prepared", &format!("Site Loop store is missing required table {required_table}; prepare it through the owning lifecycle authority."))); }
+    Ok(connection)
+}
+
+fn attention_ack(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let attention_id = required_bounded(args, "attention_id", 512)?;
+    let reason = required_bounded(args, "reason", 4096)?;
+    let acknowledged_by = args.get("acknowledged_by").and_then(Value::as_str).map(str::trim).filter(|value| !value.is_empty()).unwrap_or("site-loop-mcp");
+    if acknowledged_by.chars().count() > 256 { return Err(error("site_loop_acknowledged_by_too_long", "acknowledged_by exceeds 256 characters")); }
+    let mut connection = open_write_db(root, "site_loop_escalations")?;
+    let transaction = connection.transaction().map_err(|e| error("site_loop_attention_ack_failed", &e.to_string()))?;
+    let escalation_id = transaction.query_row("SELECT escalation_id FROM site_loop_escalations WHERE envelope_id = ? OR escalation_id = ? LIMIT 1", params![attention_id, attention_id], |row| row.get::<_, String>(0)).optional().map_err(|e| error("site_loop_attention_ack_failed", &e.to_string()))?;
+    let Some(escalation_id) = escalation_id else { return Ok(json!({"schema":"narada.site_operating_loop.loop_attention_ack.v1","status":"not_found","attention_id":attention_id})); };
+    let at = now_iso();
+    transaction.execute("UPDATE site_loop_escalations SET status='acknowledged', acknowledged_at=?, acknowledged_by=?, ack_reason=? WHERE escalation_id=?", params![at, acknowledged_by, reason, escalation_id]).map_err(|e| error("site_loop_attention_ack_failed", &e.to_string()))?;
+    transaction.commit().map_err(|e| error("site_loop_attention_ack_failed", &e.to_string()))?;
+    let shown = attention_show(&Map::from_iter([("attention_id".to_string(), json!(attention_id))]), root)?;
+    let loop_id = shown.get("attention").and_then(|value| value.get("loop_id")).and_then(Value::as_str).unwrap_or("narada.site.operating.loop");
+    let read = open_db(root)?.ok_or_else(|| error("site_loop_store_not_prepared", "Site Loop store disappeared after acknowledgement."))?;
+    Ok(json!({"schema":"narada.site_operating_loop.loop_attention_ack.v1","status":"acknowledged","attention":shown.get("attention").cloned().unwrap_or(Value::Null),"health":health_summary(&read,loop_id)?}))
+}
+
+fn control_set(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let reason = required_bounded(args, "reason", 4096)?;
+    let enabled = args.get("enabled").and_then(Value::as_bool);
+    let explicit_paused = args.get("paused").and_then(Value::as_bool);
+    if enabled.is_none() && explicit_paused.is_none() { return Err(error("site_loop_control_value_required", "Provide enabled or paused.")); }
+    let paused = explicit_paused.unwrap_or_else(|| !enabled.unwrap_or(true));
+    if enabled.is_some_and(|value| value == paused) { return Err(error("site_loop_control_values_conflict", "enabled and paused contradict each other.")); }
+    let changed_by = args.get("changed_by").and_then(Value::as_str).map(str::trim).filter(|value| !value.is_empty()).unwrap_or("site-loop-mcp");
+    if changed_by.chars().count() > 256 { return Err(error("site_loop_changed_by_too_long", "changed_by exceeds 256 characters")); }
+    let connection = open_write_db(root, "site_loop_control")?;
+    let loop_id = configured_loop_id(args, root);
+    let mode = if paused { "paused" } else { "running" };
+    let at = now_iso();
+    connection.execute("INSERT INTO site_loop_control (loop_id,paused,mode,reason,updated_at) VALUES (?,?,?,?,?) ON CONFLICT(loop_id) DO UPDATE SET paused=excluded.paused,mode=excluded.mode,reason=excluded.reason,updated_at=excluded.updated_at", params![loop_id, if paused {1}else{0}, mode, reason, at]).map_err(|e| error("site_loop_control_set_failed", &e.to_string()))?;
+    let mut result = control_summary(&connection, &loop_id)?;
+    result["status"] = json!("updated");
+    result["changed_by"] = json!(changed_by);
+    Ok(result)
+}
+
 fn load_config(root: &Path) -> Result<Option<Value>, Value> {
     let path = config_path(root);
     if !path.exists() { return Ok(None); }
@@ -525,6 +606,7 @@ mod tests {
             "CREATE TABLE site_loop_runs (run_id TEXT, loop_id TEXT, status TEXT, dry_run INTEGER, started_at TEXT, finished_at TEXT, summary_json TEXT, error_json TEXT, evidence_ref TEXT, evidence_sha256 TEXT, evidence_bytes INTEGER);\
              CREATE TABLE site_loop_step_runs (step_run_id TEXT, run_id TEXT, step_id TEXT, status TEXT, started_at TEXT, finished_at TEXT, input_refs_json TEXT, output_refs_json TEXT, input_ref_count INTEGER, output_ref_count INTEGER, input_refs_digest TEXT, output_refs_digest TEXT, evidence_json TEXT, error_json TEXT, evidence_ref TEXT, evidence_sha256 TEXT, evidence_bytes INTEGER);\
              CREATE TABLE site_loop_escalations (escalation_id TEXT, loop_id TEXT, directive_id TEXT, classification TEXT, status TEXT, envelope_id TEXT, created_at TEXT, acknowledged_at TEXT, acknowledged_by TEXT, ack_reason TEXT, escalation_summary_json TEXT, escalation_ref TEXT, escalation_sha256 TEXT, escalation_bytes INTEGER);\
+             CREATE TABLE site_loop_control (loop_id TEXT PRIMARY KEY, paused INTEGER NOT NULL DEFAULT 0, mode TEXT NOT NULL DEFAULT 'running', reason TEXT, updated_at TEXT NOT NULL);\
              INSERT INTO site_loop_runs VALUES ('run-1','loop-1','completed',0,'2026-01-01T00:00:00Z',NULL,'{\"worked\":true}',NULL,NULL,NULL,NULL);\
              INSERT INTO site_loop_step_runs VALUES ('step-1','run-1','prepare','completed','2026-01-01T00:00:00Z',NULL,'[]','{\"ok\":true}',0,1,NULL,NULL,'{\"evidence\":{}}',NULL,NULL,NULL,NULL);\
              INSERT INTO site_loop_escalations VALUES ('esc-1','loop-1','directive-1','proof','opened','env-1','2026-01-01T00:00:00Z',NULL,NULL,NULL,'{\"severity\":\"error\"}',NULL,NULL,NULL);",
@@ -536,7 +618,26 @@ mod tests {
         assert_eq!(run_show(&json_map(json!({"run_id":"run-1"})), &root).expect("run")["steps"][0]["step_id"], "prepare");
         assert_eq!(attention_list(&args, &root).expect("attention")["attention"][0]["severity"], "error");
         assert_eq!(attention_show(&json_map(json!({"attention_id":"env-1"})), &root).expect("attention show")["status"], "ok");
+        let acknowledged = attention_ack(&json_map(json!({"attention_id":"env-1","reason":"reviewed","acknowledged_by":"agent:test"})), &root).expect("ack");
+        assert_eq!(acknowledged["status"], "acknowledged");
+        assert_eq!(acknowledged["attention"]["ack_reason"], "reviewed");
+        assert_eq!(attention_ack(&json_map(json!({"attention_id":"missing","reason":"reviewed"})), &root).expect("missing")["status"], "not_found");
+        let paused = control_set(&json_map(json!({"enabled":false,"reason":"maintenance","changed_by":"agent:test"})), &root).expect("pause");
+        assert_eq!(paused["paused"], true);
+        assert_eq!(control_summary(&Connection::open(db_path(&root)).expect("read"), paused["loop_id"].as_str().expect("loop id")).expect("control")["mode"], "paused");
+        let conflict = control_set(&json_map(json!({"enabled":true,"paused":true,"reason":"conflict"})), &root).expect_err("conflict");
+        assert_eq!(conflict["code"], "site_loop_control_values_conflict");
         fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn native_site_loop_mutation_schemas_are_named_and_closed() {
+        let tools = list_tools();
+        for name in MUTATING_TOOLS {
+            let tool = tools.iter().find(|tool| tool["name"] == *name).unwrap_or_else(|| panic!("missing {name}"));
+            assert_eq!(tool["inputSchema"]["additionalProperties"], false, "{name}");
+            assert!(tool["inputSchema"]["properties"].as_object().is_some_and(|properties| !properties.is_empty()), "{name}");
+        }
     }
 
     fn json_map(value: Value) -> Map<String, Value> { value.as_object().cloned().expect("object") }
