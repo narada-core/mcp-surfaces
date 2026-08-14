@@ -68,8 +68,8 @@ fn submit_schema() -> Value { json!({"type":"object","properties":{"surface_id":
 fn update_status_schema() -> Value { json!({"type":"object","properties":{"feedback_id":{"type":"string","minLength":1},"status":{"type":"string","enum":FEEDBACK_STATUSES},"resolution_note":{"type":"string","minLength":1},"task_ref":{"type":"string"},"task_status":{"type":"string"}},"required":["feedback_id","status","resolution_note"],"additionalProperties":false}) }
 fn update_status_batch_schema() -> Value { json!({"type":"object","properties":{"updates":{"type":"array","minItems":1,"maxItems":MAX_IMPORT_IDS,"items":update_status_schema()}},"required":["updates"],"additionalProperties":false}) }
 fn convert_to_task_schema() -> Value { json!({"type":"object","properties":{"feedback_id":{"type":"string","minLength":1},"task_title":{"type":"string","minLength":1},"resolution_note":{"type":"string","minLength":1}},"required":["feedback_id"],"additionalProperties":false}) }
-fn import_schema() -> Value { json!({"type":"object","properties":{"source_feedback_root":{"type":"string","minLength":1},"source_db_path":{"type":"string","minLength":1},"feedback_ids":{"type":"array","minItems":1,"maxItems":MAX_IMPORT_IDS,"items":{"type":"string","minLength":1}}},"required":["feedback_ids"],"oneOf":[{"required":["source_feedback_root"]},{"required":["source_db_path"]}],"additionalProperties":false}) }
-fn guidance(args: &Map<String, Value>) -> Value { json!({"schema":"narada.mcp_surface.guidance.v0","status":"ok","surface_id":"surface-feedback","guidance_tool":"surface_feedback_guidance","purpose":"Inspect bounded feedback evidence with explicit read scope.","requested":{"workflow":args.get("workflow").cloned().unwrap_or(Value::Null),"tool":args.get("tool").cloned().unwrap_or(Value::Null)},"first_use":["Call surface_feedback_doctor first.","Choose a server-bound read scope explicitly.","Use list or actionable_queue for bounded discovery, then show before mutation.","Task conversion remains owner-authorized."],"boundaries":["The native slice reads and writes only the configured feedback SQLite store.","It does not create tasks or execute them; task conversion remains with the task-lifecycle authority.","Authority and provenance scopes remain server-bound."]}) }
+fn import_schema() -> Value { json!({"type":"object","properties":{"source_db_path":{"type":"string","minLength":1,"description":"Canonical exact source database path. The runtime accepts source_feedback_root only as a legacy transport compatibility form."},"feedback_ids":{"type":"array","minItems":1,"maxItems":MAX_IMPORT_IDS,"items":{"type":"string","minLength":1}}},"required":["source_db_path","feedback_ids"],"additionalProperties":false}) }
+fn guidance(args: &Map<String, Value>) -> Value { json!({"schema":"narada.mcp_surface.guidance.v0","status":"ok","surface_id":"surface-feedback","guidance_tool":"surface_feedback_guidance","purpose":"Inspect bounded feedback evidence with explicit read scope.","requested":{"workflow":args.get("workflow").cloned().unwrap_or(Value::Null),"tool":args.get("tool").cloned().unwrap_or(Value::Null)},"first_use":["Call surface_feedback_doctor first and inspect capabilities.read_scopes.","Use all_authorized for the canonical local store or store_reconciliation for explicit reconciliation work.","Use list or actionable_queue for bounded discovery, then show before mutation.","Task conversion remains owner-authorized."],"read_scope_summary":{"available":["all_authorized","store_reconciliation"],"server_authority_required":["authority_visible","owned_surfaces","authority_site_submissions"]},"boundaries":["The native surface reads and writes only the configured feedback SQLite store.","Task creation is delegated to the task-lifecycle authority adapter; Surface Feedback does not own tasks.","Authority and provenance scopes remain server-bound."]}) }
 
 fn feedback_path(root: &Path) -> std::path::PathBuf { root.join(".feedback/surface-feedback.db") }
 
@@ -342,11 +342,19 @@ fn optional_text(value: &Value) -> Option<String> { value.as_str().map(str::to_s
 
 fn doctor(root: &Path) -> Result<Value, Value> {
     let path = feedback_path(root);
-    if !path.exists() { return Ok(json!({"schema":"narada.surface_feedback.doctor.v1","status":"ok","feedback_root":root.to_string_lossy(),"db_path":path.to_string_lossy(),"store_status":"missing","read_only_native":true,"server_name":SERVER_NAME})); }
+    if !path.exists() { return Ok(json!({"schema":"narada.surface_feedback.doctor.v1","status":"ok","feedback_root":root.to_string_lossy(),"db_path":path.to_string_lossy(),"store_status":"missing","feedback_entries":0,"read_only_native":false,"native_write_available":false,"capabilities":capabilities(root, false),"server_name":SERVER_NAME})); }
     let db = open_db(root)?;
     let table: Option<String> = db.query_row("SELECT name FROM sqlite_master WHERE type='table' AND name='feedback_entries'", [], |row| row.get(0)).optional().map_err(|e| error("feedback_store_probe_failed", &e.to_string()))?;
     let rows = if table.is_some() { db.query_row("SELECT COUNT(*) FROM feedback_entries", [], |row| row.get::<_, i64>(0)).unwrap_or(0) } else { 0 };
-    Ok(json!({"schema":"narada.surface_feedback.doctor.v1","status":"ok","feedback_root":root.to_string_lossy(),"db_path":path.to_string_lossy(),"store_status":if table.is_some(){"ready"}else{"schema_missing"},"feedback_entries":rows,"read_only_native":true,"server_name":SERVER_NAME}))
+    let ready = table.is_some();
+    Ok(json!({"schema":"narada.surface_feedback.doctor.v1","status":"ok","feedback_root":root.to_string_lossy(),"db_path":path.to_string_lossy(),"store_status":if ready{"ready"}else{"schema_missing"},"feedback_entries":rows,"read_only_native":false,"native_write_available":ready,"capabilities":capabilities(root, ready),"server_name":SERVER_NAME}))
+}
+
+fn capabilities(root: &Path, store_ready: bool) -> Value {
+    let authority_configured = authority().is_ok();
+    let task_handoff_configured = task_authority_adapter(root).is_some();
+    let unavailable = |reason: &str| json!({"available":false,"reason":reason});
+    json!({"read_scopes":{"all_authorized":{"available":store_ready,"purpose":"canonical local feedback store"},"store_reconciliation":{"available":store_ready,"purpose":"explicit source/store reconciliation"},"authority_visible":unavailable("native_authority_scope_projection_not_implemented"),"owned_surfaces":unavailable("native_authority_scope_projection_not_implemented"),"authority_site_submissions":unavailable("native_authority_scope_projection_not_implemented")},"mutations":{"submit":{"available":store_ready},"import":{"available":store_ready},"status_update":{"available":store_ready && authority_configured,"reason":if authority_configured{Value::Null}else{json!("feedback_authority_unconfigured")}},"task_handoff":{"available":store_ready && authority_configured && task_handoff_configured,"reason":if authority_configured && task_handoff_configured{Value::Null}else{json!("task_or_site_authority_unconfigured")}}}})
 }
 
 fn scope(args: &Map<String, Value>) -> Result<String, Value> {
@@ -379,12 +387,16 @@ fn feedback_list(args: &Map<String, Value>, root: &Path, actionable: bool) -> Re
     let until = args.get("until").and_then(Value::as_str);
     let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(50).clamp(1, 200) as i64;
     let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0).min(10_000) as i64;
+    let fetch_limit = limit + 1;
     let status = if actionable { Some("submitted") } else { requested_status };
     let status2 = if actionable { Some("acknowledged") } else { None };
     let mut stmt = db.prepare("SELECT feedback_id,surface_id,submitter_site_id,submitter_principal,kind,summary,details,status,resolution_note,resolved_by,task_ref,task_status,created_at,updated_at FROM feedback_entries WHERE (?1 IS NULL OR surface_id=?1) AND (?2 IS NULL OR submitter_site_id=?2) AND (?3 IS NULL OR kind=?3) AND (?4 IS NULL OR status=?4 OR status=?5) AND (?6 IS NULL OR created_at>=?6) AND (?7 IS NULL OR created_at<=?7) ORDER BY created_at DESC LIMIT ?8 OFFSET ?9").map_err(|e| error("feedback_query_prepare_failed", &e.to_string()))?;
-    let rows = stmt.query_map(params![surface_id, submitter_site, kind, status, status2, since, until, limit, offset], |row| Ok(json!({"feedback_id":row.get::<_,String>(0)?,"surface_id":row.get::<_,String>(1)?,"submitter_site_id":row.get::<_,String>(2)?,"submitter_principal":row.get::<_,String>(3)?,"kind":row.get::<_,String>(4)?,"summary":row.get::<_,String>(5)?,"details":row.get::<_,String>(6)?,"status":row.get::<_,String>(7)?,"resolution_note":row.get::<_,Option<String>>(8)?,"resolved_by":row.get::<_,Option<String>>(9)?,"task_ref":row.get::<_,Option<String>>(10)?,"task_status":row.get::<_,Option<String>>(11)?,"created_at":row.get::<_,String>(12)?,"updated_at":row.get::<_,String>(13)?}))).map_err(|e| error("feedback_query_failed", &e.to_string()))?;
-    let mut entries = Vec::new(); for row in rows.take(200) { entries.push(row.map_err(|e| error("feedback_row_decode_failed", &e.to_string()))?); }
-    Ok(json!({"schema":"narada.surface_feedback.list.v1","status":"ok","scope":read_scope,"count":entries.len(),"offset":offset,"limit":limit,"entries":entries,"read_only_native":true}))
+    let rows = stmt.query_map(params![surface_id, submitter_site, kind, status, status2, since, until, fetch_limit, offset], |row| Ok(json!({"feedback_id":row.get::<_,String>(0)?,"surface_id":row.get::<_,String>(1)?,"submitter_site_id":row.get::<_,String>(2)?,"submitter_principal":row.get::<_,String>(3)?,"kind":row.get::<_,String>(4)?,"summary":row.get::<_,String>(5)?,"details":row.get::<_,String>(6)?,"status":row.get::<_,String>(7)?,"resolution_note":row.get::<_,Option<String>>(8)?,"resolved_by":row.get::<_,Option<String>>(9)?,"task_ref":row.get::<_,Option<String>>(10)?,"task_status":row.get::<_,Option<String>>(11)?,"created_at":row.get::<_,String>(12)?,"updated_at":row.get::<_,String>(13)?}))).map_err(|e| error("feedback_query_failed", &e.to_string()))?;
+    let mut entries = Vec::new(); for row in rows.take(201) { entries.push(row.map_err(|e| error("feedback_row_decode_failed", &e.to_string()))?); }
+    let has_more = entries.len() > limit as usize;
+    entries.truncate(limit as usize);
+    let next_offset = has_more.then_some(offset + entries.len() as i64);
+    Ok(json!({"schema":"narada.surface_feedback.list.v1","status":"ok","scope":read_scope,"count":entries.len(),"returned":entries.len(),"offset":offset,"limit":limit,"has_more":has_more,"next_offset":next_offset,"entries":entries,"read_only_native":true}))
 }
 
 fn feedback_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
@@ -395,9 +407,10 @@ fn feedback_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value>
 
 fn feedback_stats(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     let read_scope = scope(args)?; let surface_id = args.get("surface_id").and_then(Value::as_str); let db = open_db(root)?;
+    let total = db.query_row("SELECT COUNT(*) FROM feedback_entries WHERE (?1 IS NULL OR surface_id=?1)", params![surface_id], |row| row.get::<_,i64>(0)).map_err(|e|error("feedback_stats_query_failed",&e.to_string()))?;
     let mut by_surface = Vec::new(); let mut stmt = db.prepare("SELECT surface_id,COUNT(*) FROM feedback_entries WHERE (?1 IS NULL OR surface_id=?1) GROUP BY surface_id ORDER BY COUNT(*) DESC LIMIT 100").map_err(|e|error("feedback_stats_prepare_failed",&e.to_string()))?; let rows = stmt.query_map(params![surface_id], |row| Ok(json!({"surface_id":row.get::<_,String>(0)?,"count":row.get::<_,i64>(1)?}))).map_err(|e|error("feedback_stats_query_failed",&e.to_string()))?; for row in rows { by_surface.push(row.map_err(|e|error("feedback_stats_row_failed",&e.to_string()))?); }
     let mut by_status = Vec::new(); let mut stmt = db.prepare("SELECT status,COUNT(*) FROM feedback_entries WHERE (?1 IS NULL OR surface_id=?1) GROUP BY status ORDER BY COUNT(*) DESC LIMIT 20").map_err(|e|error("feedback_stats_prepare_failed",&e.to_string()))?; let rows = stmt.query_map(params![surface_id], |row| Ok(json!({"status":row.get::<_,String>(0)?,"count":row.get::<_,i64>(1)?}))).map_err(|e|error("feedback_stats_query_failed",&e.to_string()))?; for row in rows { by_status.push(row.map_err(|e|error("feedback_stats_row_failed",&e.to_string()))?); }
-    Ok(json!({"schema":"narada.surface_feedback.stats.v1","status":"ok","scope":read_scope,"by_surface":by_surface,"by_status":by_status,"read_only_native":true}))
+    Ok(json!({"schema":"narada.surface_feedback.stats.v1","status":"ok","scope":read_scope,"total":total,"by_surface":by_surface,"by_status":by_status,"read_only_native":true}))
 }
 
 fn proof_template(args: &Map<String, Value>) -> Value {
@@ -463,11 +476,13 @@ mod tests {
         assert_eq!(find("surface_feedback_update_status")["inputSchema"]["required"], json!(["feedback_id","status","resolution_note"]));
         assert!(find("surface_feedback_update_status_batch")["inputSchema"]["properties"]["updates"].is_object());
         assert!(find("surface_feedback_convert_to_task")["inputSchema"]["properties"]["feedback_id"].is_object());
-        assert!(find("surface_feedback_import")["inputSchema"]["properties"]["feedback_ids"].is_object());
+        let import = find("surface_feedback_import");
+        assert_eq!(import["inputSchema"]["required"], json!(["source_db_path","feedback_ids"]));
+        assert!(import["inputSchema"].get("oneOf").is_none());
     }
 
     #[test]
-    fn native_feedback_reads_are_bounded_and_mutations_refuse() {
+    fn native_feedback_reads_are_bounded_and_capabilities_are_honest() {
         let root = std::env::temp_dir().join(format!("narada-feedback-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(root.join(".feedback")).expect("root");
         let db = Connection::open(root.join(".feedback/surface-feedback.db")).expect("db");
@@ -475,6 +490,12 @@ mod tests {
         drop(db);
         let list = feedback_list(&json!({"scope":"all_authorized","limit":1}).as_object().unwrap(), &root, false).expect("list");
         assert_eq!(list["count"], 1);
+        assert_eq!(list["has_more"], false);
+        assert_eq!(list["next_offset"], Value::Null);
+        let doctor = doctor(&root).expect("doctor");
+        assert_eq!(doctor["read_only_native"], false);
+        assert_eq!(doctor["capabilities"]["read_scopes"]["all_authorized"]["available"], true);
+        assert_eq!(doctor["capabilities"]["read_scopes"]["authority_visible"]["available"], false);
         let submitted = call_tool("surface_feedback_submit", &json!({"surface_id":"site-loop","submitter_site_id":"site-a","submitter_principal":"agent-a","kind":"observation","summary":"native write"}).as_object().unwrap(), &root).expect("submit");
         assert_eq!(submitted["status"], "submitted");
         std::fs::remove_dir_all(root).expect("cleanup");
@@ -499,7 +520,7 @@ mod tests {
         let submitted = feedback_submit(&json!({"surface_id":"calendar","submitter_site_id":"site-a","submitter_principal":"agent-a","kind":"bug","summary":"batch me"}).as_object().unwrap(), &root).expect("submit");
         let batch = feedback_update_status_batch(&json!({"updates":[{"feedback_id":submitted["feedback_id"].clone(),"status":"acknowledged","resolution_note":"ack"}]}).as_object().unwrap(), &root).expect("batch");
         assert_eq!(batch["status"], "updated");
-        let imported = feedback_import(&json!({"source_feedback_root":source_root.to_string_lossy(),"feedback_ids":["f2"]}).as_object().unwrap(), &root).expect("import");
+        let imported = feedback_import(&json!({"source_db_path":source_root.join(".feedback/surface-feedback.db").to_string_lossy(),"feedback_ids":["f2"]}).as_object().unwrap(), &root).expect("import");
         assert_eq!(imported["status"], "imported");
         assert_eq!(imported["imported_count"], 1);
         std::fs::remove_dir_all(root).expect("cleanup");
