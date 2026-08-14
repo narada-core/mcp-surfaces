@@ -3991,9 +3991,15 @@ fn site_launch(
     let engine = runtime_engine(&component, implementation)?;
     let proxy = native_proxy_entrypoint().ok_or("registrar_native_runtime_proxy_missing")?;
     let mut effective_command = if engine == "rust" {
-        projection["command"].as_str().unwrap_or("node").to_string()
+        projection["command"]
+            .as_str()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or("registrar_native_projection_command_missing")?
+            .to_string()
     } else {
-        runtime_executable(&engine)?
+        return Err(format!(
+            "registrar_non_native_runtime_retired:{engine}"
+        ));
     };
     let mut effective_entrypoint = entrypoint.to_string();
     let mut effective_args = args.to_vec();
@@ -4173,16 +4179,14 @@ fn component_kind(surface: &str) -> String {
     .into()
 }
 fn runtime_engine(component: &str, implementation: Option<&str>) -> Result<String, String> {
+    if implementation == Some("js") {
+        return Err("registrar_legacy_javascript_runtime_retired".into());
+    }
     let workspace = workspace_repo_root().ok_or("registrar_workspace_root_unavailable")?;
     let path=workspace.parent().unwrap_or(&workspace).join("narada/packages/operator-surface-runtime-contract/contracts/runtime-implementation-matrix.json");
     let matrix: Value =
         serde_json::from_str(&fs::read_to_string(path).map_err(|error| error.to_string())?)
             .map_err(|error| error.to_string())?;
-    let component = if implementation == Some("js") {
-        "mcp-javascript-fallback-runtime"
-    } else {
-        component
-    };
     let row = matrix["rows"]
         .as_array()
         .into_iter()
@@ -4194,8 +4198,11 @@ fn runtime_engine(component: &str, implementation: Option<&str>) -> Result<Strin
     } else {
         row.pointer("/profile_runtime_engine_kinds/native")
             .and_then(Value::as_str)
-            .unwrap_or("bun")
+            .ok_or_else(|| format!("registrar_runtime_profile_engine_missing:{component}"))?
     };
+    if engine != "rust" {
+        return Err(format!("registrar_non_native_runtime_retired:{engine}"));
+    }
     if row
         .pointer(&format!("/implementations/{engine}/status"))
         .and_then(Value::as_str)
@@ -4206,37 +4213,6 @@ fn runtime_engine(component: &str, implementation: Option<&str>) -> Result<Strin
         ));
     }
     Ok(engine.into())
-}
-fn runtime_executable(engine: &str) -> Result<String, String> {
-    let override_name = if engine == "bun" {
-        "NARADA_BUN_EXECUTABLE"
-    } else {
-        "NARADA_NODE_EXECUTABLE"
-    };
-    let candidates = env::var_os(override_name)
-        .map(PathBuf::from)
-        .into_iter()
-        .chain(env::var_os("PATH").into_iter().flat_map(|path| {
-            env::split_paths(&path)
-                .map(|dir| dir.join(format!("{engine}.exe")))
-                .collect::<Vec<_>>()
-        }))
-        .chain(if engine == "bun" {
-            Some(
-                user_site_root()
-                    .parent()
-                    .unwrap_or(Path::new(""))
-                    .join(".bun/bin/bun.exe"),
-            )
-        } else {
-            None
-        });
-    for path in candidates {
-        if path.exists() {
-            return Ok(path.to_string_lossy().replace('\\', "/"));
-        }
-    }
-    Err(format!("registrar_runtime_executable_unresolved:{engine}"))
 }
 
 fn refresh_site_sidecar_bindings(contract: &Value, site: &Value) -> Result<Value, String> {

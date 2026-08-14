@@ -14,9 +14,9 @@ pub trait AuthorityAdapter {
 }
 
 /// Forward a boundary operation only when its owning authority has been
-/// explicitly configured.  An absent entrypoint returns `None`, preserving
-/// the surface's structured refusal and the Bun fallback selected by the
-/// runtime matrix.  A configured entrypoint is authoritative for that call.
+/// explicitly configured. An absent entrypoint returns `None`, preserving
+/// the surface's structured refusal; there is no implicit interpreter or
+/// runtime fallback. A configured entrypoint is authoritative for that call.
 pub fn call_if_configured(
     surface_id: &str,
     method: &str,
