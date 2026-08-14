@@ -321,6 +321,16 @@ fn list_tools() -> Vec<Value> {
             false,
         ),
         tool(
+            "git_commit",
+            "Create a commit from already staged changes under a required work scope.",
+            false,
+        ),
+        tool(
+            "git_push",
+            "Push the current branch or an explicit remote and branch without force.",
+            false,
+        ),
+        tool(
             "git_status",
             "Inspect branch, upstream, remotes, and bounded dirty-state summaries.",
             true,
@@ -406,6 +416,8 @@ fn call_tool(
         "git_workflow_record" => git_workflow_record(state, args, cancellation),
         "git_add" => git_add(state, args, cancellation),
         "git_unstage" => git_unstage(state, args, cancellation),
+        "git_commit" => git_commit(state, args, cancellation),
+        "git_push" => git_push(state, args, cancellation),
         "git_status" => git_status(state, args, cancellation),
         "git_sync_status" => git_sync_status(state, args, cancellation),
         "git_branch_list" => git_branch_list(state, args, cancellation),
@@ -920,6 +932,308 @@ fn git_unstage(
     cancellation: Option<Arc<AtomicBool>>,
 ) -> Result<Value, GitError> {
     git_index_change(state, args, cancellation, false)
+}
+
+fn git_commit(
+    state: &State,
+    args: &Value,
+    cancellation: Option<Arc<AtomicBool>>,
+) -> Result<Value, GitError> {
+    if state.mode != "write" {
+        return Err(GitError::new(
+            "git_write_mode_required",
+            "git_write_mode_required",
+            json!({"tool_name": "git_commit", "mode": state.mode, "mutation_started": false, "atomic": true}),
+        ));
+    }
+    let _write_guard = state.git_write_lock.lock().map_err(|_| {
+        GitError::new(
+            "git_write_lock_unavailable",
+            "git_write_lock_unavailable",
+            json!({"mutation_started": false, "atomic": true}),
+        )
+    })?;
+    let cwd = resolve_cwd(state, args)?;
+    let cwd_text = cwd.to_string_lossy().to_string();
+    let message = args
+        .get("message")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            GitError::new(
+                "git_commit_requires_message",
+                "git_commit_requires_message",
+                json!({"mutation_started": false, "atomic": true}),
+            )
+        })?;
+    let scope_ref = args
+        .get("work_scope_ref")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            GitError::new(
+                "git_commit_requires_work_scope_ref",
+                "git_commit_requires_work_scope_ref",
+                json!({"mutation_started": false, "atomic": true}),
+            )
+        })?;
+    let repository_root = git_text(
+        state,
+        &cwd,
+        &["rev-parse", "--show-toplevel"],
+        cancellation.clone(),
+        "git_commit_failed",
+    )?
+    .trim()
+    .to_string();
+    let scope = resolve_work_scope(state, scope_ref, &repository_root)?;
+    let head = git_text(
+        state,
+        &cwd,
+        &["rev-parse", "HEAD"],
+        cancellation.clone(),
+        "git_commit_failed",
+    )?
+    .trim()
+    .to_string();
+    if scope.base_state.get("head").and_then(Value::as_str) != Some(head.as_str()) {
+        return Err(GitError::new(
+            "git_work_scope_head_drift",
+            "git_work_scope_head_drift",
+            json!({"work_scope_ref": scope_ref, "expected_head": scope.base_state.get("head"), "actual_head": head, "mutation_started": false, "atomic": true}),
+        ));
+    }
+    let status_text = git_text(
+        state,
+        &cwd,
+        &[
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "-b",
+            "--untracked-files=all",
+        ],
+        cancellation.clone(),
+        "git_commit_failed",
+    )?;
+    let status = parse_status(&status_text);
+    let staged_entries = status
+        .get("status_entries")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|entry| entry.get("staged").and_then(Value::as_bool) == Some(true))
+        .cloned()
+        .collect::<Vec<_>>();
+    if staged_entries.is_empty() {
+        return Err(GitError::new(
+            "git_commit_requires_staged_changes",
+            "git_commit_requires_staged_changes",
+            json!({"mutation_started": false, "atomic": true}),
+        ));
+    }
+    let mut staged_paths = staged_entries
+        .iter()
+        .filter_map(|entry| entry.get("path").and_then(Value::as_str))
+        .map(|path| path.replace('\\', "/"))
+        .collect::<Vec<_>>();
+    staged_paths.sort();
+    staged_paths.dedup();
+    let out_of_scope = staged_paths
+        .iter()
+        .filter(|path| {
+            !scope
+                .allowed_paths
+                .iter()
+                .any(|allowed| path_matches(path, allowed))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if !out_of_scope.is_empty() {
+        return Err(GitError::new(
+            "git_commit_paths_outside_work_scope",
+            "git_commit_paths_outside_work_scope",
+            json!({"work_scope_ref": scope_ref, "out_of_scope_staged_paths": out_of_scope, "mutation_started": false, "atomic": true}),
+        ));
+    }
+    if let Some(values) = args.get("expected_staged_paths").and_then(Value::as_array) {
+        let mut expected = values
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(|path| path.replace('\\', "/"))
+                    .ok_or_else(|| {
+                        GitError::new(
+                            "git_commit_expected_staged_paths_invalid",
+                            "git_commit_expected_staged_paths_invalid",
+                            json!({"mutation_started": false, "atomic": true}),
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        expected.sort();
+        expected.dedup();
+        if expected != staged_paths {
+            return Err(GitError::new(
+                "git_commit_staged_scope_mismatch",
+                "git_commit_staged_scope_mismatch",
+                json!({"expected_staged_paths": expected, "actual_staged_paths": staged_paths, "mutation_started": false, "atomic": true}),
+            ));
+        }
+    }
+    let body = args
+        .get("body")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let mut commit_args = vec!["commit", "-m", message];
+    if let Some(body) = body {
+        commit_args.extend(["-m", body]);
+    }
+    let result = run_git(state, &cwd, &commit_args, cancellation.clone());
+    if result.exit_code != Some(0) || result.timed_out || result.cancelled {
+        return Err(GitError::new(
+            "git_commit_failed",
+            "git_commit_failed",
+            json!({"exit_code": result.exit_code, "timed_out": result.timed_out, "cancelled": result.cancelled, "diagnostic_text": result.diagnostic_text, "output_preview": result.output_text.chars().take(PREVIEW_CHAR_LIMIT).collect::<String>()}),
+        ));
+    }
+    let commit = git_text(
+        state,
+        &cwd,
+        &["rev-parse", "HEAD"],
+        cancellation.clone(),
+        "git_commit_failed",
+    )?
+    .trim()
+    .to_string();
+    let post_status = git_status(state, &json!({"working_directory": cwd_text}), cancellation)?;
+    let output = format!("{}{}", result.output_text, result.diagnostic_text);
+    Ok(
+        json!({"schema": "narada.git.commit.v1", "status": "ok", "working_directory": cwd_text, "commit": commit, "commit_ref": format!("git_commit:{commit}"), "committed_entries": staged_entries, "committed_files": staged_paths, "committed_file_count": staged_paths.len(), "work_scope_ref": scope_ref, "summary": result.output_text.lines().find(|line| !line.trim().is_empty()).unwrap_or("commit created"), "output": output, "post_status": post_status}),
+    )
+}
+
+fn git_push(
+    state: &State,
+    args: &Value,
+    cancellation: Option<Arc<AtomicBool>>,
+) -> Result<Value, GitError> {
+    if state.mode != "write" {
+        return Err(GitError::new(
+            "git_write_mode_required",
+            "git_write_mode_required",
+            json!({"tool_name": "git_push", "mode": state.mode, "mutation_started": false, "atomic": true}),
+        ));
+    }
+    let _write_guard = state.git_write_lock.lock().map_err(|_| {
+        GitError::new(
+            "git_write_lock_unavailable",
+            "git_write_lock_unavailable",
+            json!({"mutation_started": false, "atomic": true}),
+        )
+    })?;
+    let cwd = resolve_cwd(state, args)?;
+    let cwd_text = cwd.to_string_lossy().to_string();
+    let scope_ref = args
+        .get("work_scope_ref")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            GitError::new(
+                "git_push_requires_work_scope_ref",
+                "git_push_requires_work_scope_ref",
+                json!({"mutation_started": false, "atomic": true}),
+            )
+        })?;
+    let repository_root = git_text(
+        state,
+        &cwd,
+        &["rev-parse", "--show-toplevel"],
+        cancellation.clone(),
+        "git_push_failed",
+    )?
+    .trim()
+    .to_string();
+    let _scope = resolve_work_scope(state, scope_ref, &repository_root)?;
+    let head = git_text(
+        state,
+        &cwd,
+        &["rev-parse", "HEAD"],
+        cancellation.clone(),
+        "git_push_failed",
+    )?
+    .trim()
+    .to_string();
+    if let Some(expected) = args.get("expected_commit").and_then(Value::as_str) {
+        let expected = expected.strip_prefix("git_commit:").unwrap_or(expected);
+        if expected != head {
+            return Err(GitError::new(
+                "git_push_head_mismatch",
+                "git_push_head_mismatch",
+                json!({"expected_commit": expected, "actual_head": head, "mutation_started": false, "atomic": true}),
+            ));
+        }
+    }
+    let remote = args.get("remote").and_then(Value::as_str);
+    let branch = args.get("branch").and_then(Value::as_str);
+    if remote.is_some() != branch.is_some() {
+        return Err(GitError::new(
+            "git_push_remote_and_branch_required_together",
+            "git_push_remote_and_branch_required_together",
+            json!({"mutation_started": false, "atomic": true}),
+        ));
+    }
+    let mut push_args = vec!["push"];
+    if let (Some(remote), Some(branch)) = (remote, branch) {
+        validate_commit(remote)?;
+        validate_commit(branch)?;
+        push_args.extend([remote, branch]);
+    } else {
+        git_text(
+            state,
+            &cwd,
+            &[
+                "rev-parse",
+                "--abbrev-ref",
+                "--symbolic-full-name",
+                "@{upstream}",
+            ],
+            cancellation.clone(),
+            "git_push_target_unresolved",
+        )?;
+    }
+    let result = run_git(state, &cwd, &push_args, cancellation.clone());
+    if result.exit_code != Some(0) || result.timed_out || result.cancelled {
+        return Err(GitError::new(
+            "git_push_failed",
+            "git_push_failed",
+            json!({"exit_code": result.exit_code, "timed_out": result.timed_out, "cancelled": result.cancelled, "diagnostic_text": result.diagnostic_text, "output_preview": result.output_text.chars().take(PREVIEW_CHAR_LIMIT).collect::<String>()}),
+        ));
+    }
+    let post_head = git_text(
+        state,
+        &cwd,
+        &["rev-parse", "HEAD"],
+        cancellation.clone(),
+        "git_push_failed",
+    )?
+    .trim()
+    .to_string();
+    if post_head != head {
+        return Err(GitError::new(
+            "git_push_post_state_head_mismatch",
+            "git_push_post_state_head_mismatch",
+            json!({"expected_commit": head, "actual_head": post_head, "mutation_started": true, "atomic": false}),
+        ));
+    }
+    let post_status = git_status(state, &json!({"working_directory": cwd_text}), cancellation)?;
+    let output = format!("{}{}", result.output_text, result.diagnostic_text);
+    Ok(
+        json!({"schema": "narada.git.push.v1", "status": "ok", "working_directory": cwd_text, "remote": remote, "branch": branch, "commit": head, "commit_ref": format!("git_commit:{head}"), "work_scope_ref": scope_ref, "summary": result.output_text.lines().chain(result.diagnostic_text.lines()).find(|line| !line.trim().is_empty()).unwrap_or("push completed"), "output": output, "post_status": post_status}),
+    )
 }
 
 fn git_index_change(

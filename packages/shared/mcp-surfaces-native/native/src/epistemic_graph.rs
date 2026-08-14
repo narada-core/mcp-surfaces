@@ -1,6 +1,7 @@
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -27,6 +28,9 @@ const CORE_RELATIONS: &[&str] = &[
 ];
 const MAX_OPERATIONS: usize = 200;
 const MAX_PAGE: u64 = 100;
+const MAX_BATCH_QUERIES: usize = 20;
+const MAX_SOURCE_FILES: usize = 20;
+const MAX_SOURCE_BYTES: u64 = 1_048_576;
 
 pub fn list_tools() -> Vec<Value> {
     vec![
@@ -46,6 +50,18 @@ pub fn list_tools() -> Vec<Value> {
             "epistemic_graph_query",
             "List bounded entities, or set record_kind to read assessments, test outcomes, or sweeps.",
             json!({"type":"object","properties":{"kind":{"type":"string","enum":ENTITY_KINDS,"description":"Entity kind filter."},"record_kind":{"type":"string","enum":["assessment.record","test_outcome.record","sweep.record"],"description":"When present, query durable non-entity records instead of entities."},"text":{"type":"string"},"compact":{"type":"boolean","default":false,"description":"Return identity and summary fields without full stored payloads."},"limit":{"type":"integer","minimum":1,"maximum":100},"offset":{"type":"integer","minimum":0}},"additionalProperties":false}),
+            true,
+        ),
+        tool(
+            "epistemic_graph_query_batch",
+            "Run several compact bounded graph queries in one call.",
+            json!({"type":"object","properties":{"queries":{"type":"array","minItems":1,"maxItems":20,"items":{"type":"object","properties":{"text":{"type":"string"},"kind":{"type":"string","enum":ENTITY_KINDS},"record_kind":{"type":"string","enum":["assessment.record","test_outcome.record","sweep.record"]}},"additionalProperties":false}},"limit_per_query":{"type":"integer","minimum":1,"maximum":20}},"required":["queries"],"additionalProperties":false}),
+            true,
+        ),
+        tool(
+            "epistemic_graph_source_inspect",
+            "Inspect epistemically relevant Markdown sections in bounded site-local source files.",
+            json!({"type":"object","properties":{"paths":{"type":"array","minItems":1,"maxItems":20,"items":{"type":"string","minLength":1}},"max_sections_per_file":{"type":"integer","minimum":1,"maximum":50},"max_chars_per_section":{"type":"integer","minimum":100,"maximum":4000}},"required":["paths"],"additionalProperties":false}),
             true,
         ),
         tool(
@@ -71,6 +87,12 @@ pub fn list_tools() -> Vec<Value> {
             "Read immutable proposal metadata and a bounded page of operations.",
             json!({"type":"object","properties":{"proposal_id":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":100},"offset":{"type":"integer","minimum":0}},"required":["proposal_id"],"additionalProperties":false}),
             true,
+        ),
+        tool(
+            "epistemic_graph_proposal_resubmit",
+            "Create a new immutable proposal by dropping and replacing explicitly identified operations from an earlier proposal.",
+            proposal_resubmit_schema(),
+            false,
         ),
         tool(
             "epistemic_graph_proposal_review",
@@ -104,10 +126,13 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, site_root: &Path) -> Res
         "epistemic_graph_guidance" => Ok(guidance()),
         "epistemic_graph_status" => status(site_root),
         "epistemic_graph_query" => query(site_root, args),
+        "epistemic_graph_query_batch" => query_batch(site_root, args),
+        "epistemic_graph_source_inspect" => source_inspect(site_root, args),
         "epistemic_graph_neighborhood" => neighborhood(site_root, args),
         "epistemic_graph_proposal_submit" => proposal_submit(site_root, args),
         "epistemic_graph_capture_sources" => capture_sources(site_root, args),
         "epistemic_graph_proposal_read" => proposal_read(site_root, args),
+        "epistemic_graph_proposal_resubmit" => proposal_resubmit(site_root, args),
         "epistemic_graph_proposal_review" => proposal_review(site_root, args),
         "epistemic_graph_proposal_admit" => proposal_admit(site_root, args),
         "epistemic_graph_proposal_reject" => proposal_reject(site_root, args),
@@ -342,6 +367,134 @@ fn proposal_read(root: &Path, args: &Map<String, Value>) -> Result<Value, Value>
     }))
 }
 
+fn operation_identity(operation: &Value) -> Option<String> {
+    let (kind, field) = match operation.get("op").and_then(Value::as_str)? {
+        "entity.declare" => ("entity", "entity_id"),
+        "relation.declare" => ("relation", "relation_id"),
+        "assessment.record" => ("assessment", "assessment_id"),
+        "test_outcome.record" => ("test_outcome", "outcome_id"),
+        "sweep.record" => ("sweep", "sweep_id"),
+        _ => return None,
+    };
+    operation
+        .get(field)
+        .and_then(Value::as_str)
+        .map(|identity| format!("{kind}:{identity}"))
+}
+
+fn proposal_resubmit_schema() -> Value {
+    let operation_items = proposal_schema()
+        .pointer("/properties/operations/items")
+        .cloned()
+        .unwrap_or_else(|| json!({"type":"object"}));
+    json!({
+        "type":"object",
+        "properties":{
+            "source_proposal_id":{"type":"string","minLength":1},
+            "actor":{"type":"string","minLength":1},
+            "authority_basis":{"type":"object","minProperties":1},
+            "idempotency_key":{"type":"string","minLength":1},
+            "expected_ledger_head":{"type":["string","null"]},
+            "drop_operation_ids":{"type":"array","maxItems":200,"uniqueItems":true,"items":{"type":"string","minLength":1}},
+            "replacements":{"type":"array","maxItems":200,"items":operation_items}
+        },
+        "required":["source_proposal_id","actor","authority_basis","idempotency_key","expected_ledger_head"],
+        "additionalProperties":false
+    })
+}
+
+fn proposal_resubmit(root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
+    let source_id = required(args, "source_proposal_id")?;
+    let source = load_proposal(root, &source_id)?;
+    let original = source["operations"].as_array().ok_or_else(|| {
+        error(
+            "proposal_corrupt",
+            "proposal operations missing",
+            json!({"proposal_id":source_id}),
+        )
+    })?;
+    let requested_drops = args
+        .get("drop_operation_ids")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let drop_ids = requested_drops
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect::<HashSet<_>>();
+    if drop_ids.len() != requested_drops.len() {
+        return Err(error(
+            "invalid_proposal_resubmission",
+            "drop_operation_ids must contain unique strings",
+            Value::Null,
+        ));
+    }
+    let known = original
+        .iter()
+        .filter_map(operation_identity)
+        .collect::<HashSet<_>>();
+    let missing = drop_ids.difference(&known).cloned().collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(error(
+            "proposal_operation_not_found",
+            "one or more drop_operation_ids do not identify source proposal operations",
+            json!({"missing":missing}),
+        ));
+    }
+    let replacements = args
+        .get("replacements")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    validate_operations(&replacements, false)?;
+    let mut operations = original
+        .iter()
+        .filter(|operation| {
+            operation_identity(operation)
+                .map(|identity| !drop_ids.contains(&identity))
+                .unwrap_or(true)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    operations.extend(replacements);
+    if operations.is_empty() || operations.len() > MAX_OPERATIONS {
+        return Err(error(
+            "invalid_proposal_resubmission",
+            "resulting operations count must be between 1 and 200",
+            json!({"count":operations.len()}),
+        ));
+    }
+    let mut submit_args = Map::new();
+    for key in [
+        "actor",
+        "authority_basis",
+        "idempotency_key",
+        "expected_ledger_head",
+    ] {
+        if let Some(value) = args.get(key) {
+            submit_args.insert(key.to_string(), value.clone());
+        }
+    }
+    submit_args.insert("operations".into(), json!(operations));
+    let receipt = proposal_submit(root, &submit_args)?;
+    Ok(json!({
+        "schema":"narada.epistemic.proposal_resubmission.v1",
+        "status":"draft_submitted",
+        "source_proposal_id":source_id,
+        "proposal_id":receipt["proposal_id"],
+        "proposal_digest":receipt["proposal_digest"],
+        "operation_count":receipt["operation_count"],
+        "dropped_operation_ids":drop_ids,
+        "replacement_count":args.get("replacements").and_then(Value::as_array).map_or(0, Vec::len),
+        "expected_ledger_head":receipt["expected_ledger_head"],
+        "next":{"review":{"tool":"epistemic_graph_proposal_review","proposal_id":receipt["proposal_id"]}},
+        "admission_requires_explicit_call":true,
+        "certifies_truth":false,
+        "bounded":true
+    }))
+}
+
 fn proposal_lifecycle(root: &Path, proposal_id: &str) -> Result<Value, Value> {
     for path in ledger_files(root)? {
         let event = read_json(&path)?;
@@ -530,6 +683,189 @@ fn query(root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
     Ok(
         json!({"schema":"narada.epistemic.query.v1","status":"ok","result_kind":"entities","compact":compact,"items":items,"offset":offset,"limit":limit,"returned":items.len(),"bounded":true}),
     )
+}
+
+fn query_batch(root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
+    let queries = args
+        .get("queries")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            error(
+                "invalid_batch_query",
+                "queries must be an array",
+                Value::Null,
+            )
+        })?;
+    if queries.is_empty() || queries.len() > MAX_BATCH_QUERIES {
+        return Err(error(
+            "invalid_batch_query",
+            "queries count must be between 1 and 20",
+            json!({"count":queries.len()}),
+        ));
+    }
+    let limit = args
+        .get("limit_per_query")
+        .and_then(Value::as_u64)
+        .unwrap_or(5)
+        .min(20);
+    let mut results = Vec::with_capacity(queries.len());
+    for (index, item) in queries.iter().enumerate() {
+        let item = item.as_object().ok_or_else(|| {
+            error(
+                "invalid_batch_query",
+                "each query must be an object",
+                json!({"index":index}),
+            )
+        })?;
+        let mut query_args = item.clone();
+        query_args.insert("compact".into(), json!(true));
+        query_args.insert("limit".into(), json!(limit));
+        query_args.insert("offset".into(), json!(0));
+        let result = query(root, &query_args)?;
+        results.push(json!({
+            "index":index,
+            "text":item.get("text"),
+            "kind":item.get("kind"),
+            "record_kind":item.get("record_kind"),
+            "returned":result["returned"],
+            "items":result["items"]
+        }));
+    }
+    Ok(json!({
+        "schema":"narada.epistemic.query_batch.v1",
+        "status":"ok",
+        "query_count":queries.len(),
+        "limit_per_query":limit,
+        "results":results,
+        "bounded":true
+    }))
+}
+
+fn source_inspect(root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
+    let paths = args.get("paths").and_then(Value::as_array).ok_or_else(|| {
+        error(
+            "invalid_source_inspection",
+            "paths must be an array",
+            Value::Null,
+        )
+    })?;
+    if paths.is_empty() || paths.len() > MAX_SOURCE_FILES {
+        return Err(error(
+            "invalid_source_inspection",
+            "paths count must be between 1 and 20",
+            json!({"count":paths.len()}),
+        ));
+    }
+    let max_sections = args
+        .get("max_sections_per_file")
+        .and_then(Value::as_u64)
+        .unwrap_or(20)
+        .min(50) as usize;
+    let max_chars = args
+        .get("max_chars_per_section")
+        .and_then(Value::as_u64)
+        .unwrap_or(1200)
+        .clamp(100, 4000) as usize;
+    let canonical_root = fs::canonicalize(root).map_err(io_error("site_root_resolve_failed"))?;
+    let relevant = [
+        "record",
+        "status",
+        "epistemic boundary",
+        "decision",
+        "verdict",
+        "scope",
+        "next",
+        "subsequent",
+        "forward",
+        "correction",
+        "update",
+    ];
+    let mut files = Vec::with_capacity(paths.len());
+    for value in paths {
+        let locator = value.as_str().ok_or_else(|| {
+            error(
+                "invalid_source_inspection",
+                "each path must be a string",
+                Value::Null,
+            )
+        })?;
+        let requested = PathBuf::from(locator);
+        let candidate = if requested.is_absolute() {
+            requested
+        } else {
+            canonical_root.join(requested)
+        };
+        let canonical = fs::canonicalize(&candidate).map_err(io_error("source_resolve_failed"))?;
+        if !canonical.starts_with(&canonical_root) {
+            return Err(error(
+                "source_outside_site",
+                "source path must remain inside the site root",
+                json!({"path":locator}),
+            ));
+        }
+        let metadata = fs::metadata(&canonical).map_err(io_error("source_metadata_failed"))?;
+        if metadata.len() > MAX_SOURCE_BYTES {
+            return Err(error(
+                "source_too_large",
+                "source exceeds the 1 MiB inspection limit",
+                json!({"path":locator,"size":metadata.len(),"max_size":MAX_SOURCE_BYTES}),
+            ));
+        }
+        let content = fs::read_to_string(&canonical).map_err(io_error("source_read_failed"))?;
+        let lines = content.lines().collect::<Vec<_>>();
+        let headings = lines
+            .iter()
+            .enumerate()
+            .filter_map(|(index, line)| {
+                let trimmed = line.trim_start();
+                trimmed
+                    .starts_with('#')
+                    .then_some((index, trimmed.trim_start_matches('#').trim()))
+            })
+            .collect::<Vec<_>>();
+        let title = headings.first().map(|(_, heading)| *heading);
+        let mut sections = Vec::new();
+        for (heading_index, (start, heading)) in headings.iter().enumerate() {
+            let normalized = heading.to_ascii_lowercase();
+            if !relevant.iter().any(|needle| normalized.contains(needle)) {
+                continue;
+            }
+            let end = headings
+                .get(heading_index + 1)
+                .map(|(line, _)| *line)
+                .unwrap_or(lines.len());
+            let full = lines[*start..end].join("\n");
+            let excerpt = full.chars().take(max_chars).collect::<String>();
+            sections.push(json!({
+                "heading":heading,
+                "start_line":start + 1,
+                "end_line":end,
+                "excerpt":excerpt,
+                "truncated":full.chars().count() > max_chars
+            }));
+            if sections.len() == max_sections {
+                break;
+            }
+        }
+        files.push(json!({
+            "path":locator,
+            "title":title,
+            "line_count":lines.len(),
+            "sections":sections,
+            "section_count":sections.len(),
+            "sections_truncated":headings.iter().filter(|(_, heading)| {
+                let normalized = heading.to_ascii_lowercase();
+                relevant.iter().any(|needle| normalized.contains(needle))
+            }).count() > sections.len()
+        }));
+    }
+    Ok(json!({
+        "schema":"narada.epistemic.source_inspection.v1",
+        "status":"ok",
+        "file_count":files.len(),
+        "files":files,
+        "bounded":true
+    }))
 }
 
 fn neighborhood(root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
@@ -1140,6 +1476,95 @@ mod tests {
             validate_operations(&[operation], false).expect_err("unlocated source must refuse");
         assert_eq!(failure["code"], "required_argument_missing");
         assert_eq!(failure["details"]["field"], "locator");
+    }
+
+    #[test]
+    fn source_inspection_returns_all_relevant_sections_with_line_ranges() {
+        let root = std::env::temp_dir().join(format!("epistemic-source-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(root.join("ledger")).expect("ledger directory");
+        fs::write(
+            root.join("ledger/example.md"),
+            "# Example\n\n## Record\nA\n\n## Decision\nB\n\n## Subsequent Update\nC\n",
+        )
+        .expect("source");
+        let result = source_inspect(
+            &root,
+            &Map::from_iter([("paths".into(), json!(["ledger/example.md"]))]),
+        )
+        .expect("inspection");
+        assert_eq!(result["files"][0]["title"], "Example");
+        assert_eq!(result["files"][0]["section_count"], 3);
+        assert_eq!(result["files"][0]["sections"][1]["start_line"], 6);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn batch_query_and_resubmission_are_bounded_and_identity_driven() {
+        let root = std::env::temp_dir().join(format!("epistemic-batch-test-{}", Uuid::new_v4()));
+        let proposal = proposal_submit(
+            &root,
+            &Map::from_iter([
+                ("actor".into(), json!("tester")),
+                ("authority_basis".into(), json!({"kind":"test"})),
+                ("idempotency_key".into(), json!("batch-p1")),
+                ("expected_ledger_head".into(), Value::Null),
+                ("operations".into(), json!([
+                    {"op":"entity.declare","entity_id":"claim:keep","kind":"claim","title":"Keep alpha"},
+                    {"op":"entity.declare","entity_id":"claim:drop","kind":"claim","title":"Drop beta"}
+                ])),
+            ]),
+        )
+        .expect("proposal");
+        let resubmitted = proposal_resubmit(
+            &root,
+            &Map::from_iter([
+                ("source_proposal_id".into(), proposal["proposal_id"].clone()),
+                ("actor".into(), json!("tester")),
+                ("authority_basis".into(), json!({"kind":"test"})),
+                ("idempotency_key".into(), json!("batch-p2")),
+                ("expected_ledger_head".into(), Value::Null),
+                ("drop_operation_ids".into(), json!(["entity:claim:drop"])),
+                ("replacements".into(), json!([
+                    {"op":"entity.declare","entity_id":"claim:replacement","kind":"claim","title":"Replacement beta"}
+                ])),
+            ]),
+        )
+        .expect("resubmit");
+        assert_eq!(resubmitted["operation_count"], 2);
+        let page = proposal_read(
+            &root,
+            &Map::from_iter([("proposal_id".into(), resubmitted["proposal_id"].clone())]),
+        )
+        .expect("read resubmission");
+        assert_eq!(page["operations"][0]["entity_id"], "claim:keep");
+        assert_eq!(page["operations"][1]["entity_id"], "claim:replacement");
+
+        proposal_admit(
+            &root,
+            &Map::from_iter([
+                ("proposal_id".into(), resubmitted["proposal_id"].clone()),
+                ("actor".into(), json!("tester")),
+                ("authority_basis".into(), json!({"kind":"test"})),
+                ("expected_ledger_head".into(), Value::Null),
+                ("idempotency_key".into(), json!("batch-a1")),
+            ]),
+        )
+        .expect("admit");
+        let result = query_batch(
+            &root,
+            &Map::from_iter([
+                (
+                    "queries".into(),
+                    json!([{"text":"alpha"},{"text":"replacement"}]),
+                ),
+                ("limit_per_query".into(), json!(1)),
+            ]),
+        )
+        .expect("batch query");
+        assert_eq!(result["query_count"], 2);
+        assert_eq!(result["results"][0]["returned"], 1);
+        assert_eq!(result["results"][1]["returned"], 1);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

@@ -3,6 +3,7 @@ use narada_mcp_materialization_contract::{
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, Read, Write};
@@ -246,8 +247,13 @@ fn extend_epistemic_catalog(contract: &mut Value) {
         ("epistemic_graph_guidance", true),
         ("epistemic_graph_status", true),
         ("epistemic_graph_query", true),
+        ("epistemic_graph_query_batch", true),
+        ("epistemic_graph_source_inspect", true),
         ("epistemic_graph_neighborhood", true),
         ("epistemic_graph_proposal_submit", false),
+        ("epistemic_graph_capture_sources", false),
+        ("epistemic_graph_proposal_read", true),
+        ("epistemic_graph_proposal_resubmit", false),
         ("epistemic_graph_proposal_review", false),
         ("epistemic_graph_proposal_admit", false),
         ("epistemic_graph_proposal_reject", false),
@@ -278,7 +284,10 @@ fn extend_epistemic_catalog(contract: &mut Value) {
     });
     let descriptor_digest = sha256_text(&canonical_json(&descriptor));
     let tool_contract_digest = sha256_text(&canonical_json(&descriptor["tools"]));
-    let names = tools.iter().map(|(name, _)| json!(name)).collect::<Vec<_>>();
+    let names = tools
+        .iter()
+        .map(|(name, _)| json!(name))
+        .collect::<Vec<_>>();
     let item = json!({
         "id":"epistemic-graph","package":"mcp-surfaces-native","entrypoint":"{mcp_surfaces_root}/shared/mcp-surfaces-native/dist/native/narada-mcp-surfaces.exe",
         "kind":"mcp_surface","args":["--surface-id","epistemic-graph","--site-root","{site_root}"],"tools":names,
@@ -287,15 +296,24 @@ fn extend_epistemic_catalog(contract: &mut Value) {
         "authority_locus":{"kind":"local_site"},"mutation_locus":{"kind":"local_site"},
         "narada_scope":{"injection_scope":"local_site","authority_locus":{"kind":"local_site"},"mutation_locus":{"kind":"local_site"},"restart_owner":"local_site","scope_source":"registrar_surface_catalog"}
     });
-    let count = if let Some(items) = contract.pointer_mut("/read_models/registrar_surface_list/items").and_then(Value::as_array_mut) {
-        if !items.iter().any(|candidate| candidate["id"] == "epistemic-graph") {
+    let count = if let Some(items) = contract
+        .pointer_mut("/read_models/registrar_surface_list/items")
+        .and_then(Value::as_array_mut)
+    {
+        if !items
+            .iter()
+            .any(|candidate| candidate["id"] == "epistemic-graph")
+        {
             items.push(item);
         }
         Some(items.len())
     } else {
         None
     };
-    if let (Some(count), Some(slot)) = (count, contract.pointer_mut("/read_models/registrar_surface_list/count")) {
+    if let (Some(count), Some(slot)) = (
+        count,
+        contract.pointer_mut("/read_models/registrar_surface_list/count"),
+    ) {
         *slot = json!(count);
     }
 }
@@ -3274,12 +3292,9 @@ fn site_bind(contract: &Value, args: &Value) -> Result<Value, String> {
     )?;
     let config_path = config_dir.join(&file_name);
     let rendered = serde_json::to_string_pretty(&config).map_err(|error| error.to_string())? + "\n";
-    let binding_changed = fs::read_to_string(&config_path).ok().as_deref() != Some(rendered.as_str());
-    fs::write(
-        &config_path,
-        rendered,
-    )
-    .map_err(|error| error.to_string())?;
+    let binding_changed =
+        fs::read_to_string(&config_path).ok().as_deref() != Some(rendered.as_str());
+    fs::write(&config_path, rendered).map_err(|error| error.to_string())?;
     let registry_result = write_site_registry(contract, &site)?;
     Ok(json!({
         "status":"bound","site_id":site_id,"surface_id":surface_id,"projection_id":projection["id"],"file":file_name,"server_key":server_key,"binding_id":binding_id,"registry":registry_result,
@@ -3873,6 +3888,109 @@ fn runtime_executable(engine: &str) -> Result<String, String> {
     Err(format!("registrar_runtime_executable_unresolved:{engine}"))
 }
 
+fn refresh_site_sidecar_bindings(contract: &Value, site: &Value) -> Result<Value, String> {
+    let site_id = site["site_id"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .ok_or("registrar_site_id_missing")?;
+    let config_dir = site_mcp_control_root(Path::new(site["root"].as_str().unwrap_or("")))
+        .join(".ai")
+        .join("mcp");
+    if !config_dir.exists() {
+        return Ok(json!({"inspected":0,"refreshed":0,"changed":0}));
+    }
+    let aggregate_name = format!("{site_id}-mcp.json");
+    let mut paths = fs::read_dir(&config_dir)
+        .map_err(|error| error.to_string())?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            let file_name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("");
+            path.extension().and_then(|value| value.to_str()) == Some("json")
+                && file_name.starts_with("narada-")
+                && file_name != aggregate_name
+        })
+        .collect::<Vec<_>>();
+    paths.sort();
+    if paths.len() > 256 {
+        return Err(format!(
+            "registrar_site_binding_refresh_limit_exceeded:{site_id}:{}",
+            paths.len()
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    let mut inspected = 0usize;
+    let mut refreshed = 0usize;
+    let mut changed = 0usize;
+    for path in paths {
+        let config: Value = serde_json::from_slice(
+            &fs::read(&path)
+                .map_err(|error| format!("registrar_site_binding_read_failed:{error}"))?,
+        )
+        .map_err(|error| {
+            format!(
+                "registrar_site_binding_parse_failed:{}:{error}",
+                path_text(&path)
+            )
+        })?;
+        let Some(servers) = config.get("mcpServers").and_then(Value::as_object) else {
+            continue;
+        };
+        if servers.len() > 64 {
+            return Err(format!(
+                "registrar_site_binding_server_limit_exceeded:{}:{}",
+                path_text(&path),
+                servers.len()
+            ));
+        }
+        for server in servers.values() {
+            inspected += 1;
+            let Some(surface_id) = server
+                .get("surface_id")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            let projection_id = server
+                .get("projection_id")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("default");
+            if !seen.insert((surface_id.to_string(), projection_id.to_string())) {
+                continue;
+            }
+            let result = site_bind(
+                contract,
+                &json!({
+                    "site_id":site_id,
+                    "surface_id":surface_id,
+                    "projection_id":projection_id,
+                    "allow_sidecar":true
+                }),
+            )?;
+            if result["status"] != "bound" {
+                return Err(format!(
+                    "registrar_site_binding_refresh_refused:{site_id}:{surface_id}:{}",
+                    result
+                ));
+            }
+            refreshed += 1;
+            if result
+                .pointer("/activation/binding_changed")
+                .and_then(Value::as_bool)
+                == Some(true)
+            {
+                changed += 1;
+            }
+        }
+    }
+    Ok(json!({"inspected":inspected,"refreshed":refreshed,"changed":changed}))
+}
+
 fn site_surface_registry_sync(contract: &Value, args: &Value) -> Result<Value, String> {
     let requested = args
         .get("site_id")
@@ -3883,13 +4001,15 @@ fn site_surface_registry_sync(contract: &Value, args: &Value) -> Result<Value, S
     let catalog = site_list(contract);
     let sites = catalog["items"].as_array().cloned().unwrap_or_default();
     let site = lookup_site_value(&sites, requested)?;
-    let registry = build_site_surface_registry(contract, &site)?;
     let path = capability_registry_path(Path::new(site["root"].as_str().unwrap_or("")));
     if args.get("dry_run").and_then(Value::as_bool) == Some(true) {
+        let registry = build_site_surface_registry(contract, &site)?;
         return Ok(
             json!({"status":"dry_run","site_id":requested,"path":path_text(&path),"registry":registry}),
         );
     }
+    let binding_refresh = refresh_site_sidecar_bindings(contract, &site)?;
+    let registry = build_site_surface_registry(contract, &site)?;
     fs::create_dir_all(
         path.parent()
             .ok_or("registrar_site_registry_path_invalid")?,
@@ -3912,7 +4032,7 @@ fn site_surface_registry_sync(contract: &Value, args: &Value) -> Result<Value, S
         })
         .sum::<usize>();
     Ok(
-        json!({"status":"synced","site_id":site["site_id"],"path":path_text(&path),"surface_count":surfaces.len(),"tool_count":tool_count}),
+        json!({"status":"synced","site_id":site["site_id"],"path":path_text(&path),"surface_count":surfaces.len(),"tool_count":tool_count,"binding_refresh":binding_refresh}),
     )
 }
 
@@ -4383,6 +4503,28 @@ mod tests {
             validate_contract(&contract).unwrap_err(),
             "unsupported_schema"
         );
+    }
+
+    #[test]
+    fn native_epistemic_catalog_matches_live_surface_tools() {
+        let mut contract = embedded_contract();
+        extend_epistemic_catalog(&mut contract);
+        let surface = contract
+            .pointer("/read_models/registrar_surface_list/items")
+            .and_then(Value::as_array)
+            .and_then(|items| items.iter().find(|item| item["id"] == "epistemic-graph"))
+            .expect("epistemic catalog");
+        let names = surface["tools"].as_array().expect("tool names");
+        assert_eq!(names.len(), 14);
+        for required in [
+            "epistemic_graph_query_batch",
+            "epistemic_graph_source_inspect",
+            "epistemic_graph_capture_sources",
+            "epistemic_graph_proposal_read",
+            "epistemic_graph_proposal_resubmit",
+        ] {
+            assert!(names.iter().any(|name| name == required), "{required}");
+        }
     }
 
     #[test]

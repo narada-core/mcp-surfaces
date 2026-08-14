@@ -1654,7 +1654,12 @@ fn shared_surface_registry(surface_id: &str, surface_root: &str) -> Option<(Stri
         "artifacts" => (entrypoint("artifacts-mcp", "main.js"), vec![]),
         "epistemic-graph" => (
             entrypoint("shared/mcp-surfaces-native", "narada-mcp-surfaces.exe"),
-            vec!["--surface-id", "epistemic-graph", "--site-root", "{site_root}"],
+            vec![
+                "--surface-id",
+                "epistemic-graph",
+                "--site-root",
+                "{site_root}",
+            ],
         ),
         "nars-session" => (entrypoint("nars-session-mcp", "main.js"), vec![]),
         "quota-meter" => (entrypoint("quota-meter-mcp", "main.js"), vec![]),
@@ -3154,15 +3159,12 @@ fn open_connection(
                 session.terminate();
                 return Err(error);
             }
-            let tools_result = match session.request(
-                "tools/list",
-                json!({}),
-                state.policy.attach_timeout_ms,
-            ) {
-                Ok(value) => value,
-                Err(error) => {
-                    session.terminate();
-                    return Err(error.with_details(json!({
+            let tools_result =
+                match session.request("tools/list", json!({}), state.policy.attach_timeout_ms) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        session.terminate();
+                        return Err(error.with_details(json!({
                         "connection_id":connection_id,
                         "surface_id":surface_id,
                         "entrypoint":entrypoint,
@@ -3172,8 +3174,8 @@ fn open_connection(
                         "stderr_tail":session.stderr_tail(),
                         "runtime_lifecycle":runtime_lifecycle(Some(&connection_id),Some(&lifecycle))
                     })));
-                }
-            };
+                    }
+                };
             (
                 init.get("serverInfo").cloned().unwrap_or_else(|| json!({})),
                 tools_result,
@@ -3931,6 +3933,7 @@ fn call_attached_tool(
         .get("isError")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let compacted = compact_child_result(&enriched);
     let bounded = build_bounded_result(
         state,
         &connection_id,
@@ -3943,7 +3946,7 @@ fn call_attached_tool(
                 .unwrap_or("surface"),
             tool_name
         ),
-        &enriched,
+        &compacted,
         is_error,
     )?;
     let connection = state
@@ -4329,6 +4332,18 @@ fn bounded_page(text: &str, offset: usize, limit: usize, max_bytes: usize) -> (S
         end -= 1;
     }
     (String::new(), offset)
+}
+
+fn compact_child_result(value: &Value) -> Value {
+    let Some(object) = value.as_object() else {
+        return value.clone();
+    };
+    if !object.contains_key("structuredContent") {
+        return value.clone();
+    }
+    let mut compacted = object.clone();
+    compacted.remove("content");
+    Value::Object(compacted)
 }
 
 fn build_bounded_result(
@@ -4889,7 +4904,23 @@ fn call_tool(name: &str, arguments: Value, state: &mut LoaderState) -> Result<Va
 
 #[cfg(test)]
 mod tests {
-    use super::extract_proxy_child_args;
+    use super::{compact_child_result, extract_proxy_child_args};
+    use serde_json::json;
+
+    #[test]
+    fn compact_child_result_removes_duplicate_text_when_structured_data_exists() {
+        let child = json!({
+            "content":[{"type":"text","text":"duplicate"}],
+            "structuredContent":{"schema":"example.v1","status":"ok"},
+            "isError":false
+        });
+        let compacted = compact_child_result(&child);
+        assert!(compacted.get("content").is_none());
+        assert_eq!(compacted["structuredContent"]["schema"], "example.v1");
+        assert_eq!(compacted["isError"], false);
+        let text_only = json!({"content":[{"type":"text","text":"only"}]});
+        assert_eq!(compact_child_result(&text_only), text_only);
+    }
 
     #[test]
     fn proxy_child_args_require_separator() {
