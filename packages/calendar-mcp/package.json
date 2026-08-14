@@ -21,7 +21,7 @@
   "scripts": {
     "build": "tsc -b",
     "typecheck": "tsc -b --pretty false",
-    "test": "pnpm run test:bun",
+    "test": "cargo test --locked --manifest-path ../shared/mcp-surfaces-native/native/Cargo.toml calendar",
     "test:bun": "pnpm build && bun dist/test/calendar-mcp.test.js && bun dist/test/protocol-smoke.test.js",
     "test:node": "pnpm build && node --disable-warning=ExperimentalWarning dist/test/calendar-mcp.test.js && node --disable-warning=ExperimentalWarning dist/test/protocol-smoke.test.js",
     "test:e2e:external": "pnpm build && node --disable-warning=ExperimentalWarning dist/test/site-fabric-calendar-e2e.test.js"

@@ -1,6 +1,6 @@
 # @narada-core/calendar-mcp
 
-Policy-gated Microsoft Graph calendar MCP surface for live calendar reads and guarded event management.
+Policy-gated native Rust Microsoft Graph calendar authority for live reads and guarded event management. Credentials remain server-bound inside the native process.
 
 ## Configuration
 
@@ -36,5 +36,5 @@ Calendar telemetry is optional and disabled unless the site enables `.ai/mcp-tel
 ## Verification
 
 ```powershell
-pnpm --filter @narada-core/calendar-mcp test
+cargo test --locked --manifest-path packages/shared/mcp-surfaces-native/native/Cargo.toml calendar
 ```

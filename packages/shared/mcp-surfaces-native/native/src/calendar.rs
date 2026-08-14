@@ -10,38 +10,98 @@ const SERVER_NAME: &str = "narada-calendar-mcp";
 const DEFAULT_GRAPH_BASE_URL: &str = "https://graph.microsoft.com/v1.0";
 const MAX_TEXT_BYTES: u64 = 512_000;
 
-// Calendar remains an explicit authority boundary.  This native module owns the
-// wire contract, local policy inspection, and output paging; the Graph adapter
-// is not silently reimplemented here because it transmits credentials and can
-// mutate external calendar state.
+// Calendar keeps Graph credentials server-bound while the native launch profile
+// explicitly activates the Rust Graph authority for reads and guarded writes.
 pub fn list_tools() -> Vec<Value> {
     vec![
         guidance_tool(),
-        tool("calendar_doctor", "Inspect local Microsoft Graph calendar policy posture.", json!({"type":"object","properties":{},"additionalProperties":false}), true),
-        tool("calendar_list", "List calendars for an allowed mailbox.", json!({"type":"object","properties":{"mailbox_id":{"type":"string","default":"me"},"limit":{"type":"integer","minimum":1,"maximum":100,"default":20}},"additionalProperties":false}), true),
-        tool("calendar_event_query", "Query calendar view events over an explicit time window.", json!({"type":"object","properties":{"mailbox_id":{"type":"string","default":"me"},"calendar_id":{"type":"string"},"start_datetime":{"type":"string"},"end_datetime":{"type":"string"},"select":{"type":"string"},"filter":{"type":"string"},"orderby":{"type":"string","default":"start/dateTime"},"limit":{"type":"integer","minimum":1,"maximum":100,"default":20}},"required":["start_datetime","end_datetime"],"additionalProperties":false}), true),
-        tool("calendar_event_show", "Read one calendar event.", json!({"type":"object","properties":{"mailbox_id":{"type":"string","default":"me"},"event_id":{"type":"string"},"select":{"type":"string"}},"required":["event_id"],"additionalProperties":false}), true),
-        tool("calendar_event_create", "Create an event when the approved Graph adapter is available.", write_schema(true, false), false),
-        tool("calendar_event_update", "Update an event when the approved Graph adapter is available.", write_schema(false, true), false),
-        tool("calendar_event_delete", "Delete an event when the approved Graph adapter is available.", json!({"type":"object","properties":{"mailbox_id":{"type":"string","default":"me"},"event_id":{"type":"string"},"confirm_write":{"type":"boolean","default":false},"approval_token":{"type":"string"}},"required":["event_id"],"additionalProperties":false}), false),
-        tool("calendar_output_show", "Read a materialized Calendar MCP output ref with offset/limit paging.", json!({"type":"object","properties":{"ref":{"type":"string"},"output_ref":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":0}},"additionalProperties":false}), true),
+        tool(
+            "calendar_doctor",
+            "Inspect local Microsoft Graph calendar policy posture.",
+            json!({"type":"object","properties":{},"additionalProperties":false}),
+            true,
+        ),
+        tool(
+            "calendar_list",
+            "List calendars for an allowed mailbox.",
+            json!({"type":"object","properties":{"mailbox_id":{"type":"string","default":"me"},"limit":{"type":"integer","minimum":1,"maximum":100,"default":20}},"additionalProperties":false}),
+            true,
+        ),
+        tool(
+            "calendar_event_query",
+            "Query calendar view events over an explicit time window.",
+            json!({"type":"object","properties":{"mailbox_id":{"type":"string","default":"me"},"calendar_id":{"type":"string"},"start_datetime":{"type":"string"},"end_datetime":{"type":"string"},"select":{"type":"string"},"filter":{"type":"string"},"orderby":{"type":"string","default":"start/dateTime"},"limit":{"type":"integer","minimum":1,"maximum":100,"default":20}},"required":["start_datetime","end_datetime"],"additionalProperties":false}),
+            true,
+        ),
+        tool(
+            "calendar_event_show",
+            "Read one calendar event.",
+            json!({"type":"object","properties":{"mailbox_id":{"type":"string","default":"me"},"event_id":{"type":"string"},"select":{"type":"string"}},"required":["event_id"],"additionalProperties":false}),
+            true,
+        ),
+        tool(
+            "calendar_event_create",
+            "Create an event through the policy-gated native Graph authority.",
+            write_schema(true, false),
+            false,
+        ),
+        tool(
+            "calendar_event_update",
+            "Update an event through the policy-gated native Graph authority.",
+            write_schema(false, true),
+            false,
+        ),
+        tool(
+            "calendar_event_delete",
+            "Delete an event through the policy-gated native Graph authority.",
+            json!({"type":"object","properties":{"mailbox_id":{"type":"string","default":"me"},"event_id":{"type":"string"},"confirm_write":{"type":"boolean","default":false},"approval_token":{"type":"string"}},"required":["event_id"],"additionalProperties":false}),
+            false,
+        ),
+        tool(
+            "calendar_output_show",
+            "Read a materialized Calendar MCP output ref with offset/limit paging.",
+            json!({"type":"object","properties":{"ref":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":10000}},"required":["ref"],"additionalProperties":false}),
+            true,
+        ),
     ]
 }
 
 pub fn auxiliary(method: &str, params: &Map<String, Value>) -> Result<Value, Value> {
     match method {
-        "prompts/list" => Ok(json!({"prompts":[{"name":"calendar_workflow","title":"Calendar Workflow","description":"Live calendar reads and guarded event writes.","arguments":[]}]})),
+        "prompts/list" => Ok(
+            json!({"prompts":[{"name":"calendar_workflow","title":"Calendar Workflow","description":"Live calendar reads and guarded event writes.","arguments":[]}]}),
+        ),
         "prompts/get" => {
-            if params.get("name").and_then(Value::as_str) != Some("calendar_workflow") { return Err(error("unknown_prompt", "unknown_prompt")); }
-            Ok(json!({"description":"Live calendar reads and guarded event writes.","messages":[{"role":"user","content":{"type":"text","text":"Use calendar_event_query with explicit start and end timestamps. Event writes require site policy opt-in, confirm_write=true, and an approved external adapter."}}]}))
+            if params.get("name").and_then(Value::as_str) != Some("calendar_workflow") {
+                return Err(error("unknown_prompt", "unknown_prompt"));
+            }
+            Ok(
+                json!({"description":"Live calendar reads and guarded event writes.","messages":[{"role":"user","content":{"type":"text","text":"Use calendar_event_query with explicit start and end timestamps. Event writes require site policy opt-in and confirm_write=true; credentials remain inside the native Graph authority."}}]}),
+            )
         }
         "completion/complete" => {
-            let is_name = params.get("argument").and_then(Value::as_object).and_then(|v| v.get("name")).and_then(Value::as_str) == Some("name");
-            let values = if is_name { list_tools().iter().filter_map(|v| v.get("name").cloned()).take(100).collect::<Vec<_>>() } else { Vec::new() };
+            let is_name = params
+                .get("argument")
+                .and_then(Value::as_object)
+                .and_then(|v| v.get("name"))
+                .and_then(Value::as_str)
+                == Some("name");
+            let values = if is_name {
+                list_tools()
+                    .iter()
+                    .filter_map(|v| v.get("name").cloned())
+                    .take(100)
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
             Ok(json!({"completion":{"values":values,"total":values.len(),"hasMore":false}}))
         }
         "logging/setLevel" => Ok(json!({})),
-        _ => Err(error("unsupported_mcp_method", &format!("unsupported_mcp_method:{method}"))),
+        _ => Err(error(
+            "unsupported_mcp_method",
+            &format!("unsupported_mcp_method:{method}"),
+        )),
     }
 }
 
@@ -50,7 +110,12 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<V
         "calendar_guidance" => Ok(guidance(args)),
         "calendar_doctor" => doctor(root),
         "calendar_output_show" => output_show(args, root),
-        "calendar_list" | "calendar_event_query" | "calendar_event_show" | "calendar_event_create" | "calendar_event_update" | "calendar_event_delete" => authority_call(name, args, root),
+        "calendar_list"
+        | "calendar_event_query"
+        | "calendar_event_show"
+        | "calendar_event_create"
+        | "calendar_event_update"
+        | "calendar_event_delete" => authority_call(name, args, root),
         _ => Err(error("unknown_tool", &format!("unknown_tool:{name}"))),
     }
 }
@@ -76,7 +141,12 @@ fn native_graph_authority_enabled() -> bool {
 }
 
 fn guidance_tool() -> Value {
-    tool("calendar_guidance", "Show model-facing operating guidance for calendar MCP workflows.", json!({"type":"object","properties":{"workflow":{"type":"string"},"tool":{"type":"string"}},"additionalProperties":false}), true)
+    tool(
+        "calendar_guidance",
+        "Show model-facing operating guidance for calendar MCP workflows.",
+        json!({"type":"object","properties":{"workflow":{"type":"string"},"tool":{"type":"string"}},"additionalProperties":false}),
+        true,
+    )
 }
 
 fn tool(name: &str, description: &str, input_schema: Value, read_only: bool) -> Value {
@@ -153,9 +223,20 @@ fn doctor(root: &Path) -> Result<Value, Value> {
     let path = root.join(".ai/calendar-mcp.json");
     let mut policy = Value::Object(Map::new());
     if path.exists() {
-        if fs::metadata(&path).map_err(|e| error("calendar_policy_read_failed", &e.to_string()))?.len() > MAX_TEXT_BYTES { return Err(error("calendar_policy_too_large", "calendar_policy_too_large")); }
-        let text = fs::read_to_string(&path).map_err(|e| error("calendar_policy_read_failed", &e.to_string()))?;
-        policy = serde_json::from_str(&text).map_err(|e| error("calendar_policy_invalid_json", &e.to_string()))?;
+        if fs::metadata(&path)
+            .map_err(|e| error("calendar_policy_read_failed", &e.to_string()))?
+            .len()
+            > MAX_TEXT_BYTES
+        {
+            return Err(error(
+                "calendar_policy_too_large",
+                "calendar_policy_too_large",
+            ));
+        }
+        let text = fs::read_to_string(&path)
+            .map_err(|e| error("calendar_policy_read_failed", &e.to_string()))?;
+        policy = serde_json::from_str(&text)
+            .map_err(|e| error("calendar_policy_invalid_json", &e.to_string()))?;
     }
     let object = policy.as_object().cloned().unwrap_or_default();
     let allowed = object
@@ -163,14 +244,22 @@ fn doctor(root: &Path) -> Result<Value, Value> {
         .or_else(|| object.get("allowedMailboxes"))
         .and_then(Value::as_array)
         .map(|items| {
-            items.iter()
+            items
+                .iter()
                 .filter_map(Value::as_str)
                 .filter(|value| !value.trim().is_empty())
                 .map(ToOwned::to_owned)
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let writes = object.get("allow_event_writes").and_then(Value::as_bool).unwrap_or(false) || object.get("allowEventWrites").and_then(Value::as_bool).unwrap_or(false);
+    let writes = object
+        .get("allow_event_writes")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || object
+            .get("allowEventWrites")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
     let graph_base_url = object
         .get("graph_base_url")
         .and_then(Value::as_str)
@@ -184,7 +273,9 @@ fn doctor(root: &Path) -> Result<Value, Value> {
         .map(|value| !value.is_empty())
         .unwrap_or(false);
     let (has_access_token, auth_mode) = auth_posture(root);
-    Ok(json!({"schema":"narada.calendar_mcp.doctor.v1","status":"ok","site_root":root.to_string_lossy(),"graph_base_url":graph_base_url,"has_access_token":has_access_token,"auth_mode":auth_mode,"allowed_mailboxes":allowed,"allow_event_writes":writes,"write_approval_token_configured":write_approval_token_configured,"server_name":SERVER_NAME}))
+    Ok(
+        json!({"schema":"narada.calendar_mcp.doctor.v1","status":"ok","site_root":root.to_string_lossy(),"graph_base_url":graph_base_url,"has_access_token":has_access_token,"auth_mode":auth_mode,"allowed_mailboxes":allowed,"allow_event_writes":writes,"write_approval_token_configured":write_approval_token_configured,"server_name":SERVER_NAME}),
+    )
 }
 
 fn auth_posture(root: &Path) -> (bool, &'static str) {
@@ -219,15 +310,28 @@ fn auth_posture(root: &Path) -> (bool, &'static str) {
 }
 
 fn load_env_file(values: &mut HashMap<String, String>, path: &Path) {
-    let Ok(metadata) = fs::metadata(path) else { return };
-    if metadata.len() > MAX_TEXT_BYTES { return; }
-    let Ok(text) = fs::read_to_string(path) else { return };
+    let Ok(metadata) = fs::metadata(path) else {
+        return;
+    };
+    if metadata.len() > MAX_TEXT_BYTES {
+        return;
+    }
+    let Ok(text) = fs::read_to_string(path) else {
+        return;
+    };
     for line in text.lines() {
-        let Some((key, raw_value)) = line.split_once('=') else { continue };
+        let Some((key, raw_value)) = line.split_once('=') else {
+            continue;
+        };
         let key = key.trim();
-        if key.is_empty() || key.starts_with('#') { continue; }
+        if key.is_empty() || key.starts_with('#') {
+            continue;
+        }
         let mut value = raw_value.trim().to_string();
-        if value.len() >= 2 && ((value.starts_with('"') && value.ends_with('"')) || (value.starts_with('\'') && value.ends_with('\''))) {
+        if value.len() >= 2
+            && ((value.starts_with('"') && value.ends_with('"'))
+                || (value.starts_with('\'') && value.ends_with('\'')))
+        {
             value = value[1..value.len() - 1].to_string();
         }
         values.insert(key.to_string(), value);
@@ -235,44 +339,115 @@ fn load_env_file(values: &mut HashMap<String, String>, path: &Path) {
 }
 
 fn non_empty_value(values: &HashMap<String, String>, key: &str) -> bool {
-    values.get(key).is_some_and(|value| !value.trim().is_empty())
+    values
+        .get(key)
+        .is_some_and(|value| !value.trim().is_empty())
 }
 
 fn output_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     let ref_value = args.get("ref").and_then(Value::as_str).map(str::trim);
-    let output_ref_value = args.get("output_ref").and_then(Value::as_str).map(str::trim);
+    let output_ref_value = args
+        .get("output_ref")
+        .and_then(Value::as_str)
+        .map(str::trim);
     if let (Some(reference), Some(output_ref)) = (ref_value, output_ref_value) {
-        if reference != output_ref { return Err(error("output_show_ref_alias_conflict", "output_show_ref_alias_conflict")); }
+        if reference != output_ref {
+            return Err(error(
+                "output_show_ref_alias_conflict",
+                "output_show_ref_alias_conflict",
+            ));
+        }
     }
-    let reference = ref_value.or(output_ref_value).ok_or_else(|| error("output_show_requires_ref", "output_show_requires_ref"))?;
-    let id = reference.strip_prefix("mcp_output:").ok_or_else(|| error("output_ref_invalid", "output_ref_invalid"))?;
-    if id.len() < 3 || id.len() > 64 || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') { return Err(error("output_ref_invalid", "output_ref_invalid")); }
-    let path = root.join(".ai/tmp/mcp-outputs/workspace").join(format!("{id}.json"));
-    if fs::metadata(&path).map_err(|_| error("output_ref_not_found", "output_ref_not_found"))?.len() > MAX_TEXT_BYTES { return Err(error("output_ref_too_large", "output_ref_too_large")); }
-    let text = fs::read_to_string(&path).map_err(|_| error("output_ref_not_found", "output_ref_not_found"))?;
-    let record: Value = serde_json::from_str(&text).map_err(|e| error("output_ref_invalid_json", &e.to_string()))?;
-    if record.get("schema").and_then(Value::as_str) != Some("narada.mcp_output_ref.v1") { return Err(error("output_ref_schema_unsupported", "output_ref_schema_unsupported")); }
-    if record.get("ref").and_then(Value::as_str) != Some(reference) || record.get("output_id").and_then(Value::as_str) != Some(id) { return Err(error("output_ref_metadata_mismatch", "output_ref_metadata_mismatch")); }
+    let reference = ref_value
+        .or(output_ref_value)
+        .ok_or_else(|| error("output_show_requires_ref", "output_show_requires_ref"))?;
+    let id = reference
+        .strip_prefix("mcp_output:")
+        .ok_or_else(|| error("output_ref_invalid", "output_ref_invalid"))?;
+    if id.len() < 3
+        || id.len() > 64
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(error("output_ref_invalid", "output_ref_invalid"));
+    }
+    let path = root
+        .join(".ai/tmp/mcp-outputs/workspace")
+        .join(format!("{id}.json"));
+    if fs::metadata(&path)
+        .map_err(|_| error("output_ref_not_found", "output_ref_not_found"))?
+        .len()
+        > MAX_TEXT_BYTES
+    {
+        return Err(error("output_ref_too_large", "output_ref_too_large"));
+    }
+    let text = fs::read_to_string(&path)
+        .map_err(|_| error("output_ref_not_found", "output_ref_not_found"))?;
+    let record: Value = serde_json::from_str(&text)
+        .map_err(|e| error("output_ref_invalid_json", &e.to_string()))?;
+    if record.get("schema").and_then(Value::as_str) != Some("narada.mcp_output_ref.v1") {
+        return Err(error(
+            "output_ref_schema_unsupported",
+            "output_ref_schema_unsupported",
+        ));
+    }
+    if record.get("ref").and_then(Value::as_str) != Some(reference)
+        || record.get("output_id").and_then(Value::as_str) != Some(id)
+    {
+        return Err(error(
+            "output_ref_metadata_mismatch",
+            "output_ref_metadata_mismatch",
+        ));
+    }
     let full = record.get("full_output").cloned().unwrap_or(Value::Null);
     let presentation = serde_json::to_string_pretty(&full).unwrap_or_else(|_| full.to_string());
     let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
-    let limit = args.get("limit").or_else(|| args.get("output_limit")).and_then(Value::as_u64).unwrap_or(10000).min(10000) as usize;
+    let limit = args
+        .get("limit")
+        .or_else(|| args.get("output_limit"))
+        .and_then(Value::as_u64)
+        .unwrap_or(10000)
+        .min(10000) as usize;
     let chars = presentation.chars().collect::<Vec<_>>();
     let start = offset.min(chars.len());
     let chunk = chars.iter().skip(start).take(limit).collect::<String>();
     let end = start + chunk.chars().count();
-    Ok(json!({"schema":"narada.mcp_output_page.v1","status":"ok","ref":reference,"tool_name":record.get("tool_name"),"full_output_char_length":record.get("full_output_char_length").cloned().unwrap_or_else(|| json!(chars.len())),"byte_size":text.len(),"original_truncated":record.get("truncated").and_then(Value::as_bool).unwrap_or(false),"path":format!(".ai/tmp/mcp-outputs/workspace/{id}.json"),"offset":start,"limit":limit,"next_offset":if end<chars.len(){json!(end)}else{Value::Null},"output_limit":limit,"output_truncated":end<chars.len(),"output_text":chunk}))
+    Ok(
+        json!({"schema":"narada.mcp_output_page.v1","status":"ok","ref":reference,"tool_name":record.get("tool_name"),"full_output_char_length":record.get("full_output_char_length").cloned().unwrap_or_else(|| json!(chars.len())),"byte_size":text.len(),"original_truncated":record.get("truncated").and_then(Value::as_bool).unwrap_or(false),"path":format!(".ai/tmp/mcp-outputs/workspace/{id}.json"),"offset":start,"limit":limit,"next_offset":if end<chars.len(){json!(end)}else{Value::Null},"output_limit":limit,"output_truncated":end<chars.len(),"output_text":chunk}),
+    )
 }
 
 fn write_schema(create: bool, update: bool) -> Value {
     let mut properties = Map::new();
     properties.insert("mailbox_id".into(), json!({"type":"string","default":"me"}));
-    for key in ["subject","body_text","body_html","start_datetime","end_datetime","time_zone","location","online_meeting_provider","approval_token"] { properties.insert(key.into(), json!({"type":"string"})); }
-    properties.insert("attendees".into(), json!({"type":"array","items":{"type":["string","object"]}}));
+    for key in [
+        "subject",
+        "body_text",
+        "body_html",
+        "start_datetime",
+        "end_datetime",
+        "time_zone",
+        "location",
+        "online_meeting_provider",
+        "show_as",
+        "sensitivity",
+        "approval_token",
+    ] {
+        properties.insert(key.into(), json!({"type":"string"}));
+    }
+    properties.insert("attendees".into(), json!({"type":"array","items":{"oneOf":[{"type":"string"},{"type":"object","additionalProperties":false,"properties":{"emailAddress":{"type":"object","additionalProperties":false,"properties":{"address":{"type":"string"},"name":{"type":"string"}},"required":["address"]},"type":{"type":"string","enum":["required","optional","resource"]}},"required":["emailAddress"]}]}}));
     properties.insert("is_online_meeting".into(), json!({"type":"boolean"}));
-    properties.insert("confirm_write".into(), json!({"type":"boolean","default":false}));
-    if create { properties.insert("calendar_id".into(), json!({"type":"string"})); }
-    if update { properties.insert("event_id".into(), json!({"type":"string"})); }
+    properties.insert(
+        "confirm_write".into(),
+        json!({"type":"boolean","default":false}),
+    );
+    if create {
+        properties.insert("calendar_id".into(), json!({"type":"string"}));
+    }
+    if update {
+        properties.insert("event_id".into(), json!({"type":"string"}));
+    }
     json!({"type":"object","properties":properties,"required":if create {json!(["subject","start_datetime","end_datetime","time_zone"])} else {json!(["event_id"])},"additionalProperties":false})
 }
 
@@ -293,7 +468,9 @@ mod tests {
         let root = std::env::temp_dir().join(format!("narada-calendar-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).expect("root");
         let tools = list_tools();
-        assert!(tools.iter().any(|tool| tool["name"] == "calendar_event_query"));
+        assert!(tools
+            .iter()
+            .any(|tool| tool["name"] == "calendar_event_query"));
         let doctor = call_tool("calendar_doctor", &Map::new(), &root).expect("doctor");
         assert_eq!(doctor["has_access_token"], false);
         assert_eq!(doctor["auth_mode"], "missing");

@@ -104,11 +104,7 @@ impl CalendarGraphAdapter {
                     .collect()
             })
             .unwrap_or_default();
-        if allowed_mailboxes.len() > 32
-            || allowed_mailboxes
-                .iter()
-                .any(|value| value.len() > 320)
-        {
+        if allowed_mailboxes.len() > 32 || allowed_mailboxes.iter().any(|value| value.len() > 320) {
             return Err(unavailable(
                 "graph_allowed_mailboxes_invalid",
                 "allowed_mailboxes permits at most 32 values of at most 320 bytes",
@@ -271,7 +267,12 @@ impl CalendarGraphAdapter {
             Err(ureq::Error::Status(code, response)) => {
                 return Err(http_error(code, response));
             }
-            Err(error) => return Err(unavailable("graph_upload_request_failed", &error.to_string())),
+            Err(error) => {
+                return Err(unavailable(
+                    "graph_upload_request_failed",
+                    &error.to_string(),
+                ))
+            }
         };
         let status = response.status();
         let (_, body) = read_response_body(response)?;
@@ -504,7 +505,10 @@ fn resolve_auth_with_delegated_token(
     {
         return GraphAuth::Missing;
     }
-    let expires_at_ms = value.get("expires_at_ms").and_then(Value::as_i64).unwrap_or(0);
+    let expires_at_ms = value
+        .get("expires_at_ms")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
     let now_ms = (OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
     if expires_at_ms <= now_ms + 60_000 {
         return GraphAuth::Missing;
@@ -765,9 +769,14 @@ fn validate_upload_url(value: &str) -> Result<(), Value> {
             &MAX_URL_BYTES.to_string(),
         ));
     }
-    let insecure_test = std::env::var("NARADA_GRAPH_MAIL_ALLOW_INSECURE_TEST").ok().as_deref() == Some("1")
+    let insecure_test = std::env::var("NARADA_GRAPH_MAIL_ALLOW_INSECURE_TEST")
+        .ok()
+        .as_deref()
+        == Some("1")
         && value.starts_with("http://127.0.0.1:");
-    let Some(host_and_path) = value.strip_prefix(if insecure_test { "http://" } else { "https://" }) else {
+    let Some(host_and_path) =
+        value.strip_prefix(if insecure_test { "http://" } else { "https://" })
+    else {
         return Err(unavailable(
             "attachment_upload_url_must_be_https",
             "upload URL must use HTTPS",
@@ -785,10 +794,7 @@ fn validate_upload_url(value: &str) -> Result<(), Value> {
         host.as_str(),
         "outlook.office.com" | "outlook.office365.com" | "graph.microsoft.com"
     ) {
-        return Err(unavailable(
-            "attachment_upload_url_host_not_allowed",
-            &host,
-        ));
+        return Err(unavailable("attachment_upload_url_host_not_allowed", &host));
     }
     Ok(())
 }
@@ -796,6 +802,8 @@ fn validate_upload_url(value: &str) -> Result<(), Value> {
 fn unavailable(reason: &str, detail: &str) -> Value {
     json!({
         "schema":"narada.graph_authority.error.v1",
+        "code":reason,
+        "message":reason,
         "status":"unavailable",
         "reason":reason,
         "detail":detail,
@@ -811,6 +819,14 @@ mod tests {
     fn encoding_is_url_safe() {
         assert_eq!(encode_component("user@example.com"), "user%40example.com");
         assert_eq!(encode_component("a b"), "a%20b");
+    }
+
+    #[test]
+    fn unavailable_errors_have_actionable_jsonrpc_identity() {
+        let failure = unavailable("graph_access_token_missing", "configure credentials");
+        assert_eq!(failure["code"], "graph_access_token_missing");
+        assert_eq!(failure["message"], "graph_access_token_missing");
+        assert_eq!(failure["status"], "unavailable");
     }
 
     #[test]

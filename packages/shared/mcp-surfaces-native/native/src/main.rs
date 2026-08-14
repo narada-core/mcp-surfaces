@@ -1,5 +1,5 @@
-use serde_json::{json, Map, Value};
 use jsonschema::validator_for;
+use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::env;
 use std::fs::{create_dir_all, OpenOptions};
@@ -8,6 +8,9 @@ use std::path::{Path, PathBuf};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use uuid::Uuid;
+
+const MAX_MCP_REQUEST_BYTES: usize = 4 * 1024 * 1024;
+const MAX_MCP_HEADER_BYTES: usize = 64 * 1024;
 
 mod authority;
 mod browser_control_authority;
@@ -32,13 +35,13 @@ mod scheduler_activation;
 mod simple_surfaces;
 mod site_coherence;
 mod site_inbox;
-mod site_loop;
 mod site_lifecycle_authority;
+mod site_loop;
 mod site_registry_authority;
-mod speech_authority;
 mod sop;
 mod sop_authority;
 mod sop_engine;
+mod speech_authority;
 mod surface_feedback;
 mod worker_delegation;
 
@@ -88,7 +91,8 @@ fn main() {
 fn run() -> Result<(), String> {
     let options = parse_options(env::args().skip(1).collect())?;
     let _speech_shutdown = (options.surface_id == "speech").then(speech_authority::shutdown_guard);
-    let _browser_shutdown = (options.surface_id == "browser-control").then(browser_control_authority::shutdown_guard);
+    let _browser_shutdown =
+        (options.surface_id == "browser-control").then(browser_control_authority::shutdown_guard);
     for (key, value) in &options.environment {
         env::set_var(key, value);
     }
@@ -102,27 +106,25 @@ fn run() -> Result<(), String> {
     let mut reader = BufReader::new(stdin.lock());
     let mut stdout = io::stdout().lock();
     loop {
-        let mut first = String::new();
-        let read = reader
-            .read_line(&mut first)
-            .map_err(|error| format!("native_surface_stdin_read_failed:{error}"))?;
-        if read == 0 {
+        let Some(first) = read_line_bounded(&mut reader, MAX_MCP_REQUEST_BYTES)? else {
             break;
-        }
+        };
         if first.trim().is_empty() {
             continue;
         }
         let (body, framed) = if first.to_ascii_lowercase().starts_with("content-length:") {
             let mut header = first;
+            if header.len() > MAX_MCP_HEADER_BYTES {
+                return Err("native_surface_header_too_large".to_string());
+            }
             while !header.contains("\r\n\r\n") && !header.contains("\n\n") {
-                let mut line = String::new();
-                let read = reader
-                    .read_line(&mut line)
-                    .map_err(|error| format!("native_surface_header_read_failed:{error}"))?;
-                if read == 0 {
+                let Some(line) = read_line_bounded(&mut reader, MAX_MCP_HEADER_BYTES)? else {
                     return Err("native_surface_incomplete_content_length_header".to_string());
-                }
+                };
                 header.push_str(&line);
+                if header.len() > MAX_MCP_HEADER_BYTES {
+                    return Err("native_surface_header_too_large".to_string());
+                }
             }
             let length = header
                 .lines()
@@ -134,6 +136,9 @@ fn run() -> Result<(), String> {
                 .ok_or("native_surface_content_length_missing")?
                 .parse::<usize>()
                 .map_err(|_| "native_surface_content_length_invalid".to_string())?;
+            if length > MAX_MCP_REQUEST_BYTES {
+                return Err("native_surface_request_too_large".to_string());
+            }
             let mut body = vec![0_u8; length];
             reader
                 .read_exact(&mut body)
@@ -164,6 +169,23 @@ fn run() -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn read_line_bounded<R: BufRead>(reader: &mut R, maximum: usize) -> Result<Option<String>, String> {
+    let mut bytes = Vec::new();
+    let count = reader
+        .take((maximum + 1) as u64)
+        .read_until(b'\n', &mut bytes)
+        .map_err(|error| format!("native_surface_stdin_read_failed:{error}"))?;
+    if count == 0 {
+        return Ok(None);
+    }
+    if bytes.len() > maximum || !bytes.ends_with(b"\n") {
+        return Err("native_surface_request_line_too_large".to_string());
+    }
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|_| "native_surface_request_invalid_utf8".to_string())
 }
 fn parse_options(args: Vec<String>) -> Result<Options, String> {
     let mut surface_id = None;
@@ -380,9 +402,13 @@ fn handle_request(request: &Value, options: &Options) -> Option<Value> {
             }
             method
                 if options.surface_id == "speech"
-                    && matches!(method,"prompts/list"|"prompts/get"|"completion/complete"|"logging/setLevel") =>
+                    && matches!(
+                        method,
+                        "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel"
+                    ) =>
             {
-                speech_authority::auxiliary(method,&params).map(|value|modern_result(value,options))
+                speech_authority::auxiliary(method, &params)
+                    .map(|value| modern_result(value, options))
             }
             method
                 if matches!(
@@ -416,15 +442,23 @@ fn handle_request(request: &Value, options: &Options) -> Option<Value> {
             }
             method
                 if options.surface_id == "browser-control"
-                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+                    && matches!(
+                        method,
+                        "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel"
+                    ) =>
             {
-                browser_control_authority::auxiliary(method, &params).map(|value| modern_result(value, options))
+                browser_control_authority::auxiliary(method, &params)
+                    .map(|value| modern_result(value, options))
             }
             method
                 if options.surface_id == "cloudflare-carrier"
-                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+                    && matches!(
+                        method,
+                        "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel"
+                    ) =>
             {
-                cloudflare_carrier_authority::auxiliary(method, &params).map(|value| modern_result(value, options))
+                cloudflare_carrier_authority::auxiliary(method, &params)
+                    .map(|value| modern_result(value, options))
             }
             method
                 if matches!(
@@ -516,9 +550,12 @@ fn handle_request(request: &Value, options: &Options) -> Option<Value> {
             }
             method
                 if options.surface_id == "speech"
-                    && matches!(method,"prompts/list"|"prompts/get"|"completion/complete"|"logging/setLevel") =>
+                    && matches!(
+                        method,
+                        "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel"
+                    ) =>
             {
-                speech_authority::auxiliary(method,&params)
+                speech_authority::auxiliary(method, &params)
             }
             method
                 if matches!(
@@ -551,13 +588,19 @@ fn handle_request(request: &Value, options: &Options) -> Option<Value> {
             }
             method
                 if options.surface_id == "browser-control"
-                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+                    && matches!(
+                        method,
+                        "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel"
+                    ) =>
             {
                 browser_control_authority::auxiliary(method, &params)
             }
             method
                 if options.surface_id == "cloudflare-carrier"
-                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+                    && matches!(
+                        method,
+                        "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel"
+                    ) =>
             {
                 cloudflare_carrier_authority::auxiliary(method, &params)
             }
@@ -814,13 +857,20 @@ fn raw_list_tools(surface_id: &str) -> Vec<Value> {
 }
 
 fn normalize_input_schema(schema: &mut Value, field: Option<&str>) {
-    let Some(object) = schema.as_object_mut() else { return };
+    let Some(object) = schema.as_object_mut() else {
+        return;
+    };
     match object.get("type").and_then(Value::as_str) {
         Some("string") if !object.contains_key("maxLength") && !object.contains_key("enum") => {
             let name = field.unwrap_or_default().to_ascii_lowercase();
-            let maximum = if name.contains("path") || name.contains("root") || name.contains("file") {
+            let maximum = if name.contains("path") || name.contains("root") || name.contains("file")
+            {
                 4096
-            } else if name.contains("summary") || name.contains("body") || name.contains("context") || name.contains("output") {
+            } else if name.contains("summary")
+                || name.contains("body")
+                || name.contains("context")
+                || name.contains("output")
+            {
                 32768
             } else {
                 8192
@@ -830,15 +880,24 @@ fn normalize_input_schema(schema: &mut Value, field: Option<&str>) {
         Some("array") if !object.contains_key("maxItems") => {
             object.insert("maxItems".to_string(), json!(500));
         }
+        Some("object") if !object.contains_key("maxProperties") => {
+            object.insert("maxProperties".to_string(), json!(256));
+        }
         _ => {}
     }
     if let Some(properties) = object.get_mut("properties").and_then(Value::as_object_mut) {
-        for (name, child) in properties { normalize_input_schema(child, Some(name)); }
+        for (name, child) in properties {
+            normalize_input_schema(child, Some(name));
+        }
     }
-    if let Some(items) = object.get_mut("items") { normalize_input_schema(items, field); }
+    if let Some(items) = object.get_mut("items") {
+        normalize_input_schema(items, field);
+    }
     for keyword in ["allOf", "anyOf", "oneOf"] {
         if let Some(branches) = object.get_mut(keyword).and_then(Value::as_array_mut) {
-            for branch in branches { normalize_input_schema(branch, field); }
+            for branch in branches {
+                normalize_input_schema(branch, field);
+            }
         }
     }
 }
@@ -917,16 +976,19 @@ fn call_tool(
         ("mailbox", name) => mailbox::call_tool(name, &args, &options.site_root),
         ("epistemic-graph", name) => epistemic_graph::call_tool(name, &args, &options.site_root),
         ("speech", name) => speech_authority::call_tool(name, &args, &options.site_root),
-        ("browser-control", name) => browser_control_authority::call_tool(name, &args, &options.site_root),
-        ("cloudflare-carrier", name) => cloudflare_carrier_authority::call_tool(name, &args, &options.site_root),
+        ("browser-control", name) => {
+            browser_control_authority::call_tool(name, &args, &options.site_root)
+        }
+        ("cloudflare-carrier", name) => {
+            cloudflare_carrier_authority::call_tool(name, &args, &options.site_root)
+        }
         ("graph-mail", name)
             if graph_mail_authority::enabled() && graph_mail_authority::supports(name) =>
         {
             graph_mail_authority::call_tool(name, &args, &options.site_root)
         }
         ("scheduler", name) => scheduler::call_tool(name, &args, &options.site_root),
-        ("operator-console-overlay", name)
-        | ("graph-mail", name) => {
+        ("operator-console-overlay", name) | ("graph-mail", name) => {
             host_contracts::call_tool(surface_id, name, &args, &options.site_root)
         }
         ("site-lifecycle", name) | ("site-registry", name) | ("project-state", name) => {
@@ -1074,7 +1136,8 @@ fn operator_route_request(args: &Map<String, Value>, options: &Options) -> Resul
     let speaker_agent_id = optional_string(args, "speaker_agent_id");
     let target_site_id = optional_string(args, "target_site_id");
     let target_site_root = optional_string(args, "target_site_root");
-    let operation_kind = optional_string(args, "operation_kind").or_else(|| infer_operation_kind(intent_kind.as_deref()));
+    let operation_kind = optional_string(args, "operation_kind")
+        .or_else(|| infer_operation_kind(intent_kind.as_deref()));
     let role = optional_string(args, "role");
     let agent_kind = optional_string(args, "agent_kind");
     let principal = optional_string(args, "principal").or_else(|| speaker_agent_id.clone());
@@ -1093,12 +1156,21 @@ fn operator_route_request(args: &Map<String, Value>, options: &Options) -> Resul
     });
     let request_fingerprint = operator_route_fingerprint(args)?;
     if let Some(existing) = find_route_record(&request_id, options)? {
-        if existing.get("request_fingerprint").and_then(Value::as_str) != Some(request_fingerprint.as_str()) {
-            return Err(diagnostic("operator_route_request_id_conflict", "request_id already names a different routing request", json!({"request_id":request_id})));
+        if existing.get("request_fingerprint").and_then(Value::as_str)
+            != Some(request_fingerprint.as_str())
+        {
+            return Err(diagnostic(
+                "operator_route_request_id_conflict",
+                "request_id already names a different routing request",
+                json!({"request_id":request_id}),
+            ));
         }
         let mut replay = existing.as_object().cloned().unwrap_or_default();
         replay.insert("idempotency_replay".to_string(), json!(true));
-        replay.insert("log_path".to_string(), json!(route_log_path(options).to_string_lossy()));
+        replay.insert(
+            "log_path".to_string(),
+            json!(route_log_path(options).to_string_lossy()),
+        );
         return Ok(Value::Object(replay));
     }
     let recorded_at = now_iso();
@@ -1167,35 +1239,112 @@ fn operator_route_request(args: &Map<String, Value>, options: &Options) -> Resul
 }
 
 fn operator_route_fingerprint(args: &Map<String, Value>) -> Result<String, Value> {
-    let fields = ["transcript","target_runtime","target_identity","intent_kind","speaker_agent_id","target_site_id","target_site_root","operation_kind","role","agent_kind","principal","runtime_locus","runtime_handle","allow_inbox_fallback"];
-    let canonical = Value::Object(fields.into_iter().filter_map(|key| args.get(key).cloned().map(|value|(key.to_string(),value))).collect());
-    let bytes = serde_json::to_vec(&canonical).map_err(|cause| diagnostic("operator_route_fingerprint_failed", &cause.to_string(), Value::Null))?;
+    let fields = [
+        "transcript",
+        "target_runtime",
+        "target_identity",
+        "intent_kind",
+        "speaker_agent_id",
+        "target_site_id",
+        "target_site_root",
+        "operation_kind",
+        "role",
+        "agent_kind",
+        "principal",
+        "runtime_locus",
+        "runtime_handle",
+        "allow_inbox_fallback",
+    ];
+    let canonical = Value::Object(
+        fields
+            .into_iter()
+            .filter_map(|key| args.get(key).cloned().map(|value| (key.to_string(), value)))
+            .collect(),
+    );
+    let bytes = serde_json::to_vec(&canonical).map_err(|cause| {
+        diagnostic(
+            "operator_route_fingerprint_failed",
+            &cause.to_string(),
+            Value::Null,
+        )
+    })?;
     Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
 }
 
 fn route_log_path(options: &Options) -> PathBuf {
-    options.log_root.clone().unwrap_or_else(|| options.site_root.join(".narada").join("runtime").join("operator-routing")).join("operator-routing-log.jsonl")
+    options
+        .log_root
+        .clone()
+        .unwrap_or_else(|| {
+            options
+                .site_root
+                .join(".narada")
+                .join("runtime")
+                .join("operator-routing")
+        })
+        .join("operator-routing-log.jsonl")
 }
 
 fn find_route_record(request_id: &str, options: &Options) -> Result<Option<Value>, Value> {
     let path = route_log_path(options);
-    if !path.exists() { return Ok(None); }
-    let metadata = std::fs::metadata(&path).map_err(|cause| diagnostic("operator_route_log_read_failed", &cause.to_string(), Value::Null))?;
-    if metadata.len() > 16 * 1024 * 1024 { return Err(diagnostic("operator_route_log_too_large", "routing log exceeds the 16 MiB idempotency scan bound", json!({"path":path,"bytes":metadata.len()}))); }
-    let file = std::fs::File::open(&path).map_err(|cause| diagnostic("operator_route_log_read_failed", &cause.to_string(), Value::Null))?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let metadata = std::fs::metadata(&path).map_err(|cause| {
+        diagnostic(
+            "operator_route_log_read_failed",
+            &cause.to_string(),
+            Value::Null,
+        )
+    })?;
+    if metadata.len() > 16 * 1024 * 1024 {
+        return Err(diagnostic(
+            "operator_route_log_too_large",
+            "routing log exceeds the 16 MiB idempotency scan bound",
+            json!({"path":path,"bytes":metadata.len()}),
+        ));
+    }
+    let file = std::fs::File::open(&path).map_err(|cause| {
+        diagnostic(
+            "operator_route_log_read_failed",
+            &cause.to_string(),
+            Value::Null,
+        )
+    })?;
     for line in BufReader::new(file).lines().take(100_000) {
-        let line = line.map_err(|cause| diagnostic("operator_route_log_read_failed", &cause.to_string(), Value::Null))?;
-        let value: Value = serde_json::from_str(&line).map_err(|cause| diagnostic("operator_route_log_invalid", &cause.to_string(), Value::Null))?;
-        if value.get("request_id").and_then(Value::as_str) == Some(request_id) { return Ok(Some(value)); }
+        let line = line.map_err(|cause| {
+            diagnostic(
+                "operator_route_log_read_failed",
+                &cause.to_string(),
+                Value::Null,
+            )
+        })?;
+        let value: Value = serde_json::from_str(&line).map_err(|cause| {
+            diagnostic(
+                "operator_route_log_invalid",
+                &cause.to_string(),
+                Value::Null,
+            )
+        })?;
+        if value.get("request_id").and_then(Value::as_str) == Some(request_id) {
+            return Ok(Some(value));
+        }
     }
     Ok(None)
 }
 
 fn infer_operation_kind(intent_kind: Option<&str>) -> Option<String> {
-    let normalized = intent_kind.unwrap_or_default().to_ascii_lowercase().replace(['-', ' '], "_");
+    let normalized = intent_kind
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .replace(['-', ' '], "_");
     if normalized.contains("bind") || normalized.contains("runtime") {
         Some("runtime_binding".to_string())
-    } else if normalized.contains("admit") || normalized.contains("identity") || normalized.contains("role") || normalized.contains("instantiate") {
+    } else if normalized.contains("admit")
+        || normalized.contains("identity")
+        || normalized.contains("role")
+        || normalized.contains("instantiate")
+    {
         Some("role_admission".to_string())
     } else {
         None
@@ -1204,33 +1353,73 @@ fn infer_operation_kind(intent_kind: Option<&str>) -> Option<String> {
 
 #[allow(clippy::too_many_arguments)]
 fn operator_typed_handoff(
-    operation_kind: Option<&str>, target_runtime: &str, target_identity: Option<&str>, target_site_id: Option<&str>,
-    target_site_root: Option<&str>, role: Option<&str>, agent_kind: Option<&str>, principal: Option<&str>,
-    runtime_locus: Option<&str>, runtime_handle: Option<&str>,
+    operation_kind: Option<&str>,
+    target_runtime: &str,
+    target_identity: Option<&str>,
+    target_site_id: Option<&str>,
+    target_site_root: Option<&str>,
+    role: Option<&str>,
+    agent_kind: Option<&str>,
+    principal: Option<&str>,
+    runtime_locus: Option<&str>,
+    runtime_handle: Option<&str>,
 ) -> Option<Value> {
     let site_authority = target_site_root.map(|root| {
         let path = Path::new(root);
-        if path.file_name().is_some_and(|name| name.eq_ignore_ascii_case(".narada")) { path.to_path_buf() } else { path.join(".narada") }
+        if path
+            .file_name()
+            .is_some_and(|name| name.eq_ignore_ascii_case(".narada"))
+        {
+            path.to_path_buf()
+        } else {
+            path.join(".narada")
+        }
     });
     match operation_kind {
         Some("role_admission") => {
-            let missing = [("target_site_id", target_site_id), ("target_site_root", target_site_root), ("role", role), ("principal", principal)]
-                .into_iter().filter_map(|(name, value)| value.is_none().then_some(name)).collect::<Vec<_>>();
-            Some(json!({"schema":"narada.mcp_handoff.v1","status":if missing.is_empty(){"ready"}else{"needs_input"},"executable":missing.is_empty(),"target_surface":"site-lifecycle","tool":"site_admit_role","authority_locus":site_authority.map(|path|path.to_string_lossy().to_string()),"arguments":{"site_id":target_site_id,"site_root":target_site_root,"role":role,"agent_kind":agent_kind.unwrap_or(target_runtime),"identity":target_site_id.zip(role).map(|(site,role)|format!("{site}.{role}")).or_else(||target_identity.map(ToOwned::to_owned)),"by":principal,"execute":true,"authority_basis":"<operator-authority-basis>"},"required_inputs":missing,"mutation_authorized":false,"reason":"Durable project-role admission is owned by the project Site lifecycle surface."}))
+            let missing = [
+                ("target_site_id", target_site_id),
+                ("target_site_root", target_site_root),
+                ("role", role),
+                ("principal", principal),
+            ]
+            .into_iter()
+            .filter_map(|(name, value)| value.is_none().then_some(name))
+            .collect::<Vec<_>>();
+            Some(
+                json!({"schema":"narada.mcp_handoff.v1","status":if missing.is_empty(){"ready"}else{"needs_input"},"executable":missing.is_empty(),"target_surface":"site-lifecycle","tool":"site_admit_role","authority_locus":site_authority.map(|path|path.to_string_lossy().to_string()),"arguments":{"site_id":target_site_id,"site_root":target_site_root,"role":role,"agent_kind":agent_kind.unwrap_or(target_runtime),"identity":target_site_id.zip(role).map(|(site,role)|format!("{site}.{role}")).or_else(||target_identity.map(ToOwned::to_owned)),"by":principal,"execute":true,"authority_basis":"<operator-authority-basis>"},"required_inputs":missing,"mutation_authorized":false,"reason":"Durable project-role admission is owned by the project Site lifecycle surface."}),
+            )
         }
         Some("runtime_binding") => {
-            let missing = [("target_site_root", target_site_root), ("target_identity", target_identity), ("runtime_locus", runtime_locus), ("runtime_handle", runtime_handle)]
-                .into_iter().filter_map(|(name, value)| value.is_none().then_some(name)).collect::<Vec<_>>();
-            Some(json!({"schema":"narada.mcp_handoff.v1","status":if missing.is_empty(){"ready"}else{"needs_input"},"executable":missing.is_empty(),"target_surface":"site-lifecycle","tool":"site_bind_runtime","authority_locus":site_authority.map(|path|path.to_string_lossy().to_string()),"arguments":{"site_root":target_site_root,"identity":target_identity,"runtime_locus":runtime_locus,"handle":runtime_handle,"execute":true,"authority_basis":"<operator-authority-basis>"},"required_inputs":missing,"mutation_authorized":false,"reason":"Volatile runtime binding is owned by the owning runtime locus and requires observed target evidence."}))
+            let missing = [
+                ("target_site_root", target_site_root),
+                ("target_identity", target_identity),
+                ("runtime_locus", runtime_locus),
+                ("runtime_handle", runtime_handle),
+            ]
+            .into_iter()
+            .filter_map(|(name, value)| value.is_none().then_some(name))
+            .collect::<Vec<_>>();
+            Some(
+                json!({"schema":"narada.mcp_handoff.v1","status":if missing.is_empty(){"ready"}else{"needs_input"},"executable":missing.is_empty(),"target_surface":"site-lifecycle","tool":"site_bind_runtime","authority_locus":site_authority.map(|path|path.to_string_lossy().to_string()),"arguments":{"site_root":target_site_root,"identity":target_identity,"runtime_locus":runtime_locus,"handle":runtime_handle,"execute":true,"authority_basis":"<operator-authority-basis>"},"required_inputs":missing,"mutation_authorized":false,"reason":"Volatile runtime binding is owned by the owning runtime locus and requires observed target evidence."}),
+            )
         }
         Some(_) => None,
-        None => Some(json!({"schema":"narada.mcp_handoff.v1","status":"deferred","executable":false,"target_surface":"site-inbox","tool":"submit_to_site_inbox","authority_locus":"target Site","arguments":{"target_runtime":target_runtime,"target_identity":target_identity},"required_inputs":[],"mutation_authorized":false,"reason":"No typed project action was declared; retain the durable fallback envelope."})),
+        None => Some(
+            json!({"schema":"narada.mcp_handoff.v1","status":"deferred","executable":false,"target_surface":"site-inbox","tool":"submit_to_site_inbox","authority_locus":"target Site","arguments":{"target_runtime":target_runtime,"target_identity":target_identity},"required_inputs":[],"mutation_authorized":false,"reason":"No typed project action was declared; retain the durable fallback envelope."}),
+        ),
     }
 }
 
 fn append_route_record(record: &Value, options: &Options) -> Result<PathBuf, Value> {
     let path = route_log_path(options);
-    let root = path.parent().map(Path::to_path_buf).ok_or_else(|| diagnostic("operator_route_log_path_invalid", "routing log has no parent directory", Value::Null))?;
+    let root = path.parent().map(Path::to_path_buf).ok_or_else(|| {
+        diagnostic(
+            "operator_route_log_path_invalid",
+            "routing log has no parent directory",
+            Value::Null,
+        )
+    })?;
     create_dir_all(&root).map_err(|error| {
         diagnostic(
             "operator_route_log_create_failed",
@@ -1572,15 +1761,25 @@ mod tests {
             if schema.get("type").and_then(Value::as_str) == Some("string")
                 && schema.get("enum").is_none()
             {
-                assert!(schema.get("maxLength").and_then(Value::as_u64).is_some(), "unbounded string: {path}");
+                assert!(
+                    schema.get("maxLength").and_then(Value::as_u64).is_some(),
+                    "unbounded string: {path}"
+                );
             }
             if schema.get("type").and_then(Value::as_str) == Some("array") {
-                assert!(schema.get("maxItems").and_then(Value::as_u64).is_some(), "unbounded array: {path}");
+                assert!(
+                    schema.get("maxItems").and_then(Value::as_u64).is_some(),
+                    "unbounded array: {path}"
+                );
             }
             if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
-                for (name, child) in properties { assert_bounded(child, &format!("{path}/{name}")); }
+                for (name, child) in properties {
+                    assert_bounded(child, &format!("{path}/{name}"));
+                }
             }
-            if let Some(items) = schema.get("items") { assert_bounded(items, &format!("{path}/*")); }
+            if let Some(items) = schema.get("items") {
+                assert_bounded(items, &format!("{path}/*"));
+            }
         }
         let surfaces = [
             "site-inbox",
@@ -1644,9 +1843,15 @@ mod tests {
         let show = by_name("graph_mail_message_show");
         assert_eq!(show["inputSchema"]["required"], json!(["message_id"]));
         let upload = by_name("graph_mail_attachment_upload_chunk");
-        assert_eq!(upload["inputSchema"]["required"].as_array().map(Vec::len), Some(5));
+        assert_eq!(
+            upload["inputSchema"]["required"].as_array().map(Vec::len),
+            Some(5)
+        );
         let discard = by_name("graph_mail_ticket_draft_discard");
-        assert_eq!(discard["inputSchema"]["properties"]["confirm_discard"]["const"], true);
+        assert_eq!(
+            discard["inputSchema"]["properties"]["confirm_discard"]["const"],
+            true
+        );
         assert_eq!(discard["annotations"]["destructiveHint"], true);
         assert!(tools.iter().all(|tool| {
             tool["description"].as_str().is_some_and(|description| {
@@ -1668,14 +1873,22 @@ mod tests {
             "required":["confirm","mode","digest","limit"],
             "additionalProperties":false
         });
-        assert!(validate_input_schema(&schema, &json!({"confirm":true,"mode":"safe","digest":"a".repeat(64),"limit":5}), "arguments").is_ok());
+        assert!(validate_input_schema(
+            &schema,
+            &json!({"confirm":true,"mode":"safe","digest":"a".repeat(64),"limit":5}),
+            "arguments"
+        )
+        .is_ok());
         for invalid in [
             json!({"confirm":false,"mode":"safe","digest":"a".repeat(64),"limit":5}),
             json!({"confirm":true,"mode":"unsafe","digest":"a".repeat(64),"limit":5}),
             json!({"confirm":true,"mode":"safe","digest":"wrong","limit":5}),
             json!({"confirm":true,"mode":"safe","digest":"a".repeat(64),"limit":6}),
         ] {
-            assert!(validate_input_schema(&schema, &invalid, "arguments").is_err(), "accepted {invalid}");
+            assert!(
+                validate_input_schema(&schema, &invalid, "arguments").is_err(),
+                "accepted {invalid}"
+            );
         }
     }
 
@@ -1761,27 +1974,68 @@ mod tests {
         )
         .expect("route");
         assert_eq!(result["structuredContent"]["request_id"], "route-test");
-        let replay = call_tool("operator-routing", params.as_object().expect("params"), &options).expect("route replay");
+        let replay = call_tool(
+            "operator-routing",
+            params.as_object().expect("params"),
+            &options,
+        )
+        .expect("route replay");
         assert_eq!(replay["structuredContent"]["idempotency_replay"], true);
         let conflict_params = json!({"name":"operator_route_request","arguments":{"transcript":"different","target_runtime":"codex","request_id":"route-test"}});
-        let conflict = call_tool("operator-routing", conflict_params.as_object().expect("params"), &options).expect_err("request id conflict");
+        let conflict = call_tool(
+            "operator-routing",
+            conflict_params.as_object().expect("params"),
+            &options,
+        )
+        .expect_err("request id conflict");
         assert_eq!(conflict["code"], "operator_route_request_id_conflict");
         let log = root.join("log").join("operator-routing-log.jsonl");
         assert!(log.exists());
         let content = std::fs::read_to_string(log).expect("log");
         assert!(content.contains(r#""request_id":"route-test""#));
         let role_params = json!({"name":"operator_route_request","arguments":{"transcript":"admit resident","target_runtime":"codex","target_identity":"fixture.resident","operation_kind":"role_admission","target_site_id":"fixture","target_site_root":root.to_string_lossy(),"role":"resident","principal":"operator","request_id":"route-role"}});
-        let role = call_tool("operator-routing", role_params.as_object().expect("params"), &options).expect("role route");
-        assert_eq!(role["structuredContent"]["routing"]["handoff"]["status"], "ready");
-        assert_eq!(role["structuredContent"]["routing"]["handoff"]["tool"], "site_admit_role");
-        assert_eq!(role["structuredContent"]["routing"]["handoff"]["mutation_authorized"], false);
+        let role = call_tool(
+            "operator-routing",
+            role_params.as_object().expect("params"),
+            &options,
+        )
+        .expect("role route");
+        assert_eq!(
+            role["structuredContent"]["routing"]["handoff"]["status"],
+            "ready"
+        );
+        assert_eq!(
+            role["structuredContent"]["routing"]["handoff"]["tool"],
+            "site_admit_role"
+        );
+        assert_eq!(
+            role["structuredContent"]["routing"]["handoff"]["mutation_authorized"],
+            false
+        );
         let incomplete_params = json!({"name":"operator_route_request","arguments":{"transcript":"bind runtime","target_runtime":"codex","operation_kind":"runtime_binding","target_site_root":root.to_string_lossy(),"request_id":"route-runtime"}});
-        let incomplete = call_tool("operator-routing", incomplete_params.as_object().expect("params"), &options).expect("runtime route");
-        assert_eq!(incomplete["structuredContent"]["routing"]["handoff"]["status"], "needs_input");
-        assert_eq!(incomplete["structuredContent"]["routing"]["handoff"]["required_inputs"], json!(["target_identity","runtime_locus","runtime_handle"]));
-        let route_tool = list_tools("operator-routing").into_iter().find(|tool| tool["name"] == "operator_route_request").expect("route tool");
+        let incomplete = call_tool(
+            "operator-routing",
+            incomplete_params.as_object().expect("params"),
+            &options,
+        )
+        .expect("runtime route");
+        assert_eq!(
+            incomplete["structuredContent"]["routing"]["handoff"]["status"],
+            "needs_input"
+        );
+        assert_eq!(
+            incomplete["structuredContent"]["routing"]["handoff"]["required_inputs"],
+            json!(["target_identity", "runtime_locus", "runtime_handle"])
+        );
+        let route_tool = list_tools("operator-routing")
+            .into_iter()
+            .find(|tool| tool["name"] == "operator_route_request")
+            .expect("route tool");
         assert_eq!(route_tool["inputSchema"]["additionalProperties"], false);
-        assert_eq!(route_tool["inputSchema"]["properties"]["transcript"]["maxLength"], 65536);
+        assert_eq!(
+            route_tool["inputSchema"]["properties"]["transcript"]["maxLength"],
+            65536
+        );
         std::fs::remove_dir_all(root).expect("cleanup");
     }
     #[test]
@@ -1793,5 +2047,34 @@ mod tests {
         assert_eq!(response["result"]["resultType"], "complete");
         assert_eq!(response["result"]["cacheScope"], "public");
         assert!(response["result"]["ttlMs"].as_u64().unwrap_or(0) > 0);
+    }
+
+    #[test]
+    fn shared_wire_reader_refuses_oversized_lines() {
+        let input = format!("{}\n", "x".repeat(MAX_MCP_REQUEST_BYTES + 1));
+        assert_eq!(
+            read_line_bounded(&mut std::io::Cursor::new(input), MAX_MCP_REQUEST_BYTES).unwrap_err(),
+            "native_surface_request_line_too_large"
+        );
+    }
+
+    #[test]
+    fn calendar_catalog_is_named_closed_and_bounded() {
+        let tools = list_tools("calendar");
+        assert_eq!(tools.len(), 9);
+        for tool in tools {
+            let name = tool["name"].as_str().unwrap();
+            assert_eq!(tool["inputSchema"]["title"], format!("{name}.input"));
+            assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+            assert!(tool["inputSchema"]["maxProperties"].as_u64().is_some());
+        }
+        let output = list_tools("calendar")
+            .into_iter()
+            .find(|tool| tool["name"] == "calendar_output_show")
+            .unwrap();
+        assert_eq!(output["inputSchema"]["required"], json!(["ref"]));
+        assert!(output["inputSchema"]["properties"]
+            .get("output_ref")
+            .is_none());
     }
 }
