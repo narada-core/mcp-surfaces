@@ -252,6 +252,11 @@ fn call_site_lifecycle(name: &str, args: &Map<String, Value>, root: &Path) -> Re
         "site_bind_runtime" => return operator_surface_authority::bind_runtime(args, root),
         "site_create_presets_list" => return Ok(site_lifecycle_authority::create_presets()),
         "site_create_plan" => return site_lifecycle_authority::create_plan(args, root),
+        "site_discover" => {
+            if args.get("execute").and_then(Value::as_bool) != Some(true) { return Err(diagnostic("site_discover_execute_required","site_discover requires execute=true")); }
+            if args.get("authority_basis").and_then(Value::as_object).is_none_or(Map::is_empty) { return Err(diagnostic("site_discover_authority_required","site_discover requires a non-empty authority_basis")); }
+            return site_registry_authority::apply_discovery(args);
+        }
         "site_list" => {
             let listed = site_registry_authority::call("site_registry_list", &Map::new())?;
             let sites = listed["sites"].as_array().cloned().unwrap_or_default().into_iter().map(|site| json!({"siteId":site["site_id"],"variant":site["variant"],"substrate":site["substrate"],"health":"unknown","lastCycle":null,"failures":0})).collect::<Vec<_>>();

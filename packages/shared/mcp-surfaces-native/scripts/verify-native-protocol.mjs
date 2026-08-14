@@ -1790,6 +1790,9 @@ function runSiteLifecycleAuthorityParity() {
     ] }), 'utf8');
     const userSiteRoot = join(root, 'user-site');
     mkdirSync(userSiteRoot, { recursive: true });
+    const discoveryBase = join(root, 'discovery-base');
+    mkdirSync(join(discoveryBase, 'discovered'), { recursive: true });
+    writeFileSync(join(discoveryBase, 'discovered', 'config.json'), JSON.stringify({ substrate: 'fixture' }), 'utf8');
     const registry = new DatabaseSync(join(userSiteRoot, 'registry.db'));
     registry.exec('CREATE TABLE site_registry(site_id TEXT PRIMARY KEY,variant TEXT NOT NULL,site_root TEXT NOT NULL,substrate TEXT NOT NULL,aim_json TEXT,control_endpoint TEXT,last_seen_at TEXT,created_at TEXT NOT NULL,lifecycle_status TEXT NOT NULL,observation_status TEXT NOT NULL,sources_json TEXT NOT NULL,aliases_json TEXT NOT NULL,revision INTEGER NOT NULL,updated_at TEXT NOT NULL,retired_at TEXT,retire_reason TEXT); CREATE TABLE registry_management_audit(event_id TEXT PRIMARY KEY,site_id TEXT NOT NULL,operation TEXT NOT NULL,actor TEXT NOT NULL,reason TEXT,occurred_at TEXT NOT NULL,before_json TEXT,after_json TEXT,status TEXT NOT NULL);');
     registry.prepare('INSERT INTO site_registry VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run('fixture', 'native', root, 'windows', null, null, null, '2026-01-01T00:00:00Z', 'active', 'present', '[]', '[]', 1, '2026-08-14T00:00:00Z', null, null);
@@ -1824,8 +1827,12 @@ function runSiteLifecycleAuthorityParity() {
       { jsonrpc: '2.0', id: 23, method: 'tools/call', params: { name: 'site_create_plan', arguments: { preset: 'agent-site-core', site_id: 'planned', root: join(root, 'planned-site') } } },
       { jsonrpc: '2.0', id: 24, method: 'tools/call', params: { name: 'site_create_plan', arguments: {} } },
       { jsonrpc: '2.0', id: 25, method: 'tools/call', params: { name: 'site_create_plan', arguments: { config: 'refused-create.json' } } },
+      { jsonrpc: '2.0', id: 26, method: 'tools/call', params: { name: 'site_discover', arguments: {} } },
+      { jsonrpc: '2.0', id: 27, method: 'tools/call', params: { name: 'site_discover', arguments: { execute: true, authority_basis: { kind: 'operator_request', summary: 'fixture discovery' } } } },
+      { jsonrpc: '2.0', id: 28, method: 'tools/call', params: { name: 'site_discover', arguments: { execute: true, authority_basis: { kind: 'operator_request', summary: 'fixture discovery retry' } } } },
+      { jsonrpc: '2.0', id: 29, method: 'tools/call', params: { name: 'site_list', arguments: {} } },
     ];
-    const responses = runMailbox(executable, ['--surface-id', 'site-lifecycle', '--site-root', root], requests, root, { ...process.env, NARADA_USER_SITE_ROOT: userSiteRoot });
+    const responses = runMailbox(executable, ['--surface-id', 'site-lifecycle', '--site-root', root], requests, root, { ...process.env, NARADA_USER_SITE_ROOT: userSiteRoot, NARADA_NATIVE_SITES_BASE_DIR: discoveryBase });
     const tools = responses.find((response) => response.id === 1)?.result?.tools ?? [];
     for (const name of ['site_admit_role', 'site_verify_role', 'site_observe_runtime', 'site_bind_runtime']) {
       const tool = tools.find((candidate) => candidate.name === name);
@@ -1849,10 +1856,19 @@ function runSiteLifecycleAuthorityParity() {
     if (mailboxStructured(responses, 24, 'rust').error !== 'missing_config_or_shorthand') throw new Error('site_lifecycle.native_create_plan_missing_input_invalid');
     const refusedPlan = mailboxStructured(responses, 25, 'rust');
     if (refusedPlan.status !== 'refused' || !refusedPlan.refusals?.some((entry) => entry.code === 'unknown_package_refused') || !refusedPlan.refusals?.some((entry) => entry.code === 'source_runtime_state_import_refused')) throw new Error('site_lifecycle.native_create_plan_refusal_invalid');
+    if (!responses.find((response) => response.id === 26)?.error) throw new Error('site_lifecycle.native_discovery_execute_gate_missing');
+    const discovery = mailboxStructured(responses, 27, 'rust');
+    const replayedDiscovery = mailboxStructured(responses, 28, 'rust');
+    if (discovery.status !== 'applied' || discovery.mutation_performed !== true || discovery.applied?.[0] !== 'discovered' || replayedDiscovery.status !== 'unchanged' || replayedDiscovery.mutation_performed !== false) throw new Error('site_lifecycle.native_discovery_apply_retry_invalid');
+    if (!mailboxStructured(responses, 29, 'rust').sites?.some((site) => site.siteId === 'discovered')) throw new Error('site_lifecycle.native_discovery_readback_invalid');
+    const discoveryDb = new DatabaseSync(join(userSiteRoot, 'registry.db'), { readOnly: true });
+    const discoveryAuditCount = discoveryDb.prepare("SELECT COUNT(*) AS count FROM registry_management_audit WHERE site_id='discovered'").get().count;
+    discoveryDb.close();
+    if (discoveryAuditCount !== 1) throw new Error('site_lifecycle.native_discovery_audit_invalid');
     const identities = JSON.parse(readFileSync(join(root, '.narada', 'operator-surfaces', 'identities.json'), 'utf8'));
     const bindings = JSON.parse(readFileSync(join(root, '.narada', 'operator-surfaces', 'runtime-bindings.json'), 'utf8'));
     if (identities.identities?.length !== 1 || bindings.bindings?.length !== 1) throw new Error('site_lifecycle.native_artifact_readback_invalid');
-    return { status: 'passed', verified: ['four_authority_tools', 'create_presets_and_plans', 'registry_list_show', 'transformation_kinds_preflight', 'relation_list_validate', 'mutation_authority_preflight', 'root_confinement', 'closed_bounded_schemas', 'empty', 'execute_authority_gate', 'admission_replay_conflict', 'binding_evidence_replay', 'readback', 'artifact_compatibility'] };
+    return { status: 'passed', verified: ['four_authority_tools', 'create_presets_and_plans', 'registry_list_show', 'transactional_discovery_and_retry', 'transformation_kinds_preflight', 'relation_list_validate', 'mutation_authority_preflight', 'root_confinement', 'closed_bounded_schemas', 'empty', 'execute_authority_gate', 'admission_replay_conflict', 'binding_evidence_replay', 'readback', 'artifact_compatibility'] };
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
