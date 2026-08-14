@@ -1,4 +1,5 @@
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use rusqlite::{params, types::ValueRef, Connection, OpenFlags, OptionalExtension};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -455,6 +456,8 @@ fn execute_loop_once(root: &Path, config: &Value, limit: u64, timeout_ms: u64, t
     drop(connection);
     let deadline = Instant::now()+Duration::from_millis(timeout_ms.max(1));
     let resident = ensure_resident(root, config)?;
+    let scheduled_sops = emit_scheduled_sops(root, config, limit)?;
+    let inbox = bridge_materializable_inbox(root, config, limit)?;
     let dispatch = dispatch_pending_directives(root, config, limit)?;
     let queued = proof_requests(root)?.into_iter().find(|value| value.get("status").and_then(Value::as_str)==Some("queued"));
     let proof = if let Some(request) = queued {
@@ -463,7 +466,7 @@ fn execute_loop_once(root: &Path, config: &Value, limit: u64, timeout_ms: u64, t
     } else { json!({"status":"idle","reason":"no_queued_proof_request"}) };
     let reconciliation = reconcile_directive_outcomes(root, config, limit)?;
     let status = if proof.get("status").and_then(Value::as_str)==Some("failed") { "attention" } else { "ok" };
-    let summary = json!({"resident":resident,"directive_dispatch":dispatch,"proof":proof,"directive_reconciliation":reconciliation,"bounded":true,"limit":limit,"test_authority":test_authority});
+    let summary = json!({"resident":resident,"scheduled_sops":scheduled_sops,"inbox_bridge":inbox,"directive_dispatch":dispatch,"proof":proof,"directive_reconciliation":reconciliation,"bounded":true,"limit":limit,"test_authority":test_authority});
     let connection = Connection::open(db_path(root)).map_err(|cause| error("site_loop_store_open_failed", &cause.to_string()))?;
     connection.execute("UPDATE site_loop_runs SET status=?1,finished_at=?2,summary_json=?3 WHERE run_id=?4",params![status,now_iso(),serde_json::to_string(&summary).unwrap_or_else(|_|"{}".into()),run_id]).map_err(|cause| error("site_loop_run_finish_failed", &cause.to_string()))?;
     Ok(json!({"schema":"narada.site_loop.run.v2","status":status,"run_id":run_id,"loop_id":loop_id,"dry_run":false,"summary":summary}))
@@ -471,6 +474,28 @@ fn execute_loop_once(root: &Path, config: &Value, limit: u64, timeout_ms: u64, t
 
 fn ensure_native_loop_tables(connection: &Connection) -> Result<(), Value> {
     connection.execute_batch("CREATE TABLE IF NOT EXISTS site_loop_runs(run_id TEXT PRIMARY KEY,loop_id TEXT NOT NULL,status TEXT NOT NULL,dry_run INTEGER NOT NULL,started_at TEXT NOT NULL,finished_at TEXT,summary_json TEXT,error_json TEXT,evidence_ref TEXT,evidence_sha256 TEXT,evidence_bytes INTEGER); CREATE TABLE IF NOT EXISTS site_loop_control(loop_id TEXT PRIMARY KEY,enabled INTEGER NOT NULL DEFAULT 1,paused INTEGER NOT NULL DEFAULT 0,mode TEXT NOT NULL DEFAULT 'running',reason TEXT,updated_at TEXT NOT NULL);").map_err(|cause| error("site_loop_schema_prepare_failed", &cause.to_string()))
+}
+
+fn emit_scheduled_sops(root:&Path,config:&Value,limit:u64)->Result<Value,Value>{
+    let schedules=config.get("scheduled_sops").and_then(Value::as_array).cloned().unwrap_or_default(); let now=OffsetDateTime::now_utc(); let mut emitted=Vec::new(); let mut skipped=Vec::new();
+    for schedule in schedules.into_iter().take(limit as usize){let Some(object)=schedule.as_object() else{continue}; let Some(id)=object.get("id").and_then(Value::as_str) else{continue}; let Some(sop_id)=object.get("sop_id").and_then(Value::as_str) else{continue}; let Some(anchor_text)=object.get("anchor_at").and_then(Value::as_str) else{continue}; let Some(anchor)=OffsetDateTime::parse(anchor_text,&Rfc3339).ok() else{skipped.push(json!({"id":id,"reason":"anchor_invalid"}));continue}; let interval_days=object.get("interval_days").and_then(Value::as_f64).unwrap_or(0.0); if interval_days<=0.0||now<anchor{skipped.push(json!({"id":id,"reason":if interval_days<=0.0{"interval_invalid"}else{"before_anchor"}}));continue} let elapsed=(now-anchor).whole_seconds() as f64; let occurrence=(elapsed/(interval_days*86400.0)).floor() as i64; let occurrence_key=format!("site-loop-schedule:{id}:{occurrence}"); let mut arguments=Map::new(); arguments.insert("sop_id".into(),json!(sop_id)); arguments.insert("occurrence_key".into(),json!(occurrence_key)); arguments.insert("triggered_by".into(),json!(config.get("loop_id").and_then(Value::as_str).unwrap_or("site.loop"))); arguments.insert("trigger_source_kind".into(),json!("site_loop_schedule")); arguments.insert("trigger_source_ref".into(),json!(id)); arguments.insert("input".into(),json!({"schedule_id":id,"scheduled_for_bucket":occurrence,"title":object.get("title"),"instructions":object.get("instructions"),"target_role":object.get("target_role"),"preferred_agent_id":object.get("preferred_agent_id")})); match crate::sop::call_tool("sop_run_start",&arguments,root){Ok(value)=>emitted.push(value),Err(value)=>skipped.push(json!({"id":id,"reason":"sop_authority_refused","diagnostic":value}))}}
+    Ok(json!({"status":"ok","emitted_count":emitted.len(),"skipped_count":skipped.len(),"emitted":emitted,"skipped":skipped,"bounded":true}))
+}
+
+fn lifecycle_task_call(root:&Path,name:&str,arguments:Value)->Result<Value,Value>{
+    use narada_mcp_lifecycle::{LifecycleServer,Options,Surface};
+    let argv=vec!["--site-root".to_string(),root.to_string_lossy().to_string()]; let options=Options::parse(Surface::Task,&argv).map_err(|cause|error("task_lifecycle_options_invalid",&cause))?;
+    if !root.join(".ai/task-lifecycle.db").exists(){LifecycleServer::prepare_database(&options).map_err(|cause|error("task_lifecycle_prepare_failed",&cause))?;}
+    let mut server=LifecycleServer::new(options).map_err(|cause|error("task_lifecycle_open_failed",&cause))?; let response=server.handle_request(json!({"jsonrpc":"2.0","id":"site-loop","method":"tools/call","params":{"name":name,"arguments":arguments}})).ok_or_else(||error("task_lifecycle_response_missing","task lifecycle returned no response"))?;
+    if let Some(failure)=response.get("error"){return Err(json!({"schema":"narada.site_loop.error.v1","code":"task_lifecycle_call_failed","message":failure.get("message").and_then(Value::as_str).unwrap_or("task lifecycle call failed"),"details":failure,"tool_name":name}))}
+    response.pointer("/result/structuredContent").cloned().ok_or_else(||error("task_lifecycle_result_invalid","task lifecycle response omitted structuredContent"))
+}
+
+fn bridge_materializable_inbox(root:&Path,config:&Value,limit:u64)->Result<Value,Value>{
+    let mut filters=Map::new();filters.insert("status".into(),json!("received"));filters.insert("action".into(),json!("materialize"));filters.insert("limit".into(),json!(limit.min(100)));
+    let listed=crate::site_inbox::call_tool("inbox_list",&filters,root)?; let envelopes=listed.get("envelopes").and_then(Value::as_array).cloned().unwrap_or_default(); let mut materialized=Vec::new(); let mut refused=Vec::new();
+    for envelope in envelopes.into_iter().take(limit as usize){let Some(id)=envelope.get("envelope_id").and_then(Value::as_str) else{continue}; let digest=format!("{:x}",Sha256::digest(id.as_bytes())); let payload_id=format!("inbox-{}",&digest[..32]); let title=envelope.get("title").and_then(Value::as_str).unwrap_or("Inbox work"); let summary=envelope.get("summary").and_then(Value::as_str).unwrap_or(""); let payload=json!({"title":title,"goal":if summary.is_empty(){format!("Resolve admitted inbox envelope {id}")}else{summary.to_string()},"context":format!("Source inbox envelope: {id}"),"required_work":["Inspect the source envelope and perform only admitted local-site work."],"acceptance_criteria":["Report the disposition with evidence and preserve the source envelope reference."],"preferred_role":envelope.get("target_role"),"preferred_agent_id":config.pointer("/resident/agent_id"),"idempotency_key":format!("site-loop-inbox:{id}")}); let created=lifecycle_task_call(root,"mcp_payload_create",json!({"payload_id":payload_id,"payload":payload,"created_by":config.get("loop_id").and_then(Value::as_str).unwrap_or("site.loop")})); let created=match created{Ok(value)=>value,Err(value)=>{refused.push(json!({"envelope_id":id,"stage":"payload_create","diagnostic":value}));continue}}; let Some(reference)=created.get("ref").and_then(Value::as_str) else{refused.push(json!({"envelope_id":id,"stage":"payload_create","diagnostic":"payload_ref_missing"}));continue}; let task=match lifecycle_task_call(root,"task_lifecycle_create",json!({"payload_ref":reference})){Ok(value)=>value,Err(value)=>{refused.push(json!({"envelope_id":id,"stage":"task_create","diagnostic":value}));continue}}; let mut disposition=Map::new();disposition.insert("envelope_id".into(),json!(id));disposition.insert("principal".into(),json!(config.get("loop_id").and_then(Value::as_str).unwrap_or("site.loop")));disposition.insert("reason".into(),json!(format!("materialized as task {}",task.get("task_number").unwrap_or(&Value::Null)))); let acknowledged=crate::site_inbox::call_tool("inbox_acknowledge",&disposition,root)?; materialized.push(json!({"envelope_id":id,"payload_ref":reference,"task":task,"inbox":acknowledged}));}
+    Ok(json!({"status":"ok","materialized_count":materialized.len(),"refused_count":refused.len(),"materialized":materialized,"refused":refused,"bounded":true}))
 }
 
 fn dispatch_pending_directives(root: &Path, config: &Value, limit: u64) -> Result<Value, Value> {
@@ -1085,6 +1110,25 @@ mod tests {
         assert_eq!(result["stdout_truncated"], false);
         let refused = test_run(&json_map(json!({"selector":"arbitrary"})), &root).expect_err("allowlist");
         assert_eq!(refused["code"], "test_selector_not_approved");
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn native_site_loop_composes_sop_inbox_and_task_authorities() {
+        let root=std::env::temp_dir().join(format!("narada-site-loop-compose-{}",uuid::Uuid::new_v4())); fs::create_dir_all(root.join(".narada/capabilities")).expect("root");
+        let anchor=(OffsetDateTime::now_utc()-time::Duration::days(1)).format(&Rfc3339).expect("anchor");
+        fs::write(config_path(&root),serde_json::to_vec(&json!({"schema":"narada.site_loop.config.v2","loop_id":"compose.loop","site_id":"compose","display_name":"Compose","resident":{"agent_id":"compose.resident","role":"resident"},"scheduled_sops":[{"id":"daily","sop_id":"daily-demo","title":"Daily","instructions":"Do daily work","interval_days":1,"anchor_at":anchor,"target_role":"resident","preferred_agent_id":"compose.resident"}],"persistence":{"schema":"narada.site_loop.persistence.v2","evidence_root":".ai/site-loop-evidence","raw_retention_days":7,"summary_retention_days":90,"inline_summary_bytes":16384,"compression":"gzip"}})).expect("config json")).expect("config");
+        crate::sop::call_tool("sop_template_create",&json_map(json!({"sop_id":"daily-demo","title":"Daily demo","steps":[{"id":"manual","executor":"agent","title":"Manual","instructions":"Complete"}]})),&root).expect("template");
+        crate::sop::call_tool("sop_template_update",&json_map(json!({"sop_id":"daily-demo","status":"active"})),&root).expect("activate");
+        let config=load_config(&root).expect("load").expect("config");
+        assert_eq!(emit_scheduled_sops(&root,&config,10).expect("schedule")["emitted_count"],1);
+        let runs=crate::sop::call_tool("sop_run_list",&json_map(json!({"sop_id":"daily-demo","limit":10})),&root).expect("runs");
+        assert_eq!(runs["count"],1);
+        crate::site_inbox::call_tool("inbox_submit",&json_map(json!({"kind":"incident","title":"Materialize native incident","summary":"Create governed work","principal":"compose.test","target_role":"builder","idempotency_key":"compose-incident"})),&root).expect("inbox");
+        let bridged=bridge_materializable_inbox(&root,&config,10).expect("bridge");
+        assert_eq!(bridged["materialized_count"],1);
+        assert_eq!(bridged["materialized"][0]["inbox"]["status"],"acknowledged");
+        assert!(bridged["materialized"][0]["task"]["task_number"].as_i64().is_some());
         fs::remove_dir_all(root).expect("cleanup");
     }
 
