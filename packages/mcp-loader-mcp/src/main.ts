@@ -93,7 +93,6 @@ const STDERR_TAIL_LIMIT = 8000;
 const DEFAULT_ATTACH_TIMEOUT_MS = 30000;
 const DEFAULT_RUNTIME_LEASE_MS = 30000;
 const DEFAULT_LOADER_RESULT_INLINE_LIMIT = 12000;
-const FILE_MTIME_CLOCK_SKEW_MS = 1000;
 const SITE_TOOL_OBSERVATION_PAYLOAD_PREFIX = 'site-tools-';
 const SITE_TOOL_OBSERVATION_MAX_ENTRIES = 32;
 const SITE_TOOL_OBSERVATION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -417,35 +416,9 @@ function observeRuntimeFile(path: string): RuntimeFileObservation {
 
 export function classifyLoaderRuntimeFreshness(evidence: LoaderFreshnessEvidence): JsonRecord {
   const reasons: string[] = [];
-  const freshnessCutoffMs = evidence.processStartedAtMs + FILE_MTIME_CLOCK_SKEW_MS;
   for (const pair of evidence.filePairs) {
-    if (!pair.runtime.exists) reasons.push(`runtime_file_unavailable:${pair.name}`);
-    if (!pair.source.exists) reasons.push(`source_file_unavailable:${pair.name}`);
-    if (pair.runtime.mtime_ms !== null && pair.runtime.mtime_ms > freshnessCutoffMs) {
-      reasons.push(`runtime_file_changed_after_process_start:${pair.name}`);
-    }
-    if (pair.source.mtime_ms !== null && pair.source.mtime_ms > freshnessCutoffMs) {
-      reasons.push(`source_file_changed_after_process_start:${pair.name}`);
-    }
-    if (pair.runtime.mtime_ms !== null && pair.source.mtime_ms !== null && pair.source.mtime_ms > pair.runtime.mtime_ms) {
-      reasons.push(`source_file_newer_than_runtime_file:${pair.name}`);
-    }
-  }
-
-  const newestRuntimeMtime = evidence.filePairs
-    .map((pair) => pair.runtime.mtime_ms)
-    .filter((mtime): mtime is number => mtime !== null)
-    .reduce((latest, mtime) => Math.max(latest, mtime), 0);
-  for (const config of evidence.configFiles) {
-    if (!config.observation.exists) {
-      reasons.push(`config_file_unavailable:${config.name}`);
-      continue;
-    }
-    if (config.observation.mtime_ms !== null && config.observation.mtime_ms > freshnessCutoffMs) {
-      reasons.push(`config_file_changed_after_process_start:${config.name}`);
-    }
-    if (config.observation.mtime_ms !== null && config.observation.mtime_ms > newestRuntimeMtime) {
-      reasons.push(`config_file_newer_than_runtime_files:${config.name}`);
+    if (pair.name === 'loader_entrypoint' && !pair.runtime.exists) {
+      reasons.push('runtime_file_unavailable:loader_entrypoint');
     }
   }
 
@@ -462,7 +435,7 @@ export function classifyLoaderRuntimeFreshness(evidence: LoaderFreshnessEvidence
     reload_required: status === 'stale' ? true : status === 'current' ? false : null,
     process_started_at: new Date(evidence.processStartedAtMs).toISOString(),
     process_started_at_ms: evidence.processStartedAtMs,
-    freshness_scope: 'loader_source_runtime_dependencies_and_build_configuration',
+    freshness_scope: 'native_loader_artifact',
     runtime_entrypoint: entrypoint?.runtime ?? null,
     source_entrypoint: entrypoint?.source ?? null,
     source_files: evidence.filePairs.map((pair) => ({ name: pair.name, ...pair.source })),

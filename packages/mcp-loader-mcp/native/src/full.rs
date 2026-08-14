@@ -51,7 +51,6 @@ const SITE_TOOL_OBSERVATION_MAX_ENTRIES: usize = 32;
 const SITE_TOOL_OBSERVATION_MAX_AGE_MS: u128 = 7 * 24 * 60 * 60 * 1000;
 const SITE_TOOL_OBSERVATION_PAYLOAD_PREFIX: &str = "site-tools-";
 const SURFACE_HANDLE_PREFIX: &str = "msh_";
-const FILE_MTIME_CLOCK_SKEW_MS: u128 = 1_000;
 
 static ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -2475,73 +2474,28 @@ fn runtime_freshness(state: &LoaderState) -> Value {
             ),
         ),
     ];
+    // The Rust loader is the authority.  The source/dist TypeScript files and
+    // workspace package metadata remain in the response as diagnostics for
+    // older tooling, but they are not runtime dependencies of this binary.
+    // Treating their mtimes as loader freshness signals caused a supervisor to
+    // restart a healthy native loader after an unrelated package touch.
     let mut reasons = Vec::new();
-    let cutoff = state.started_ms + FILE_MTIME_CLOCK_SKEW_MS;
     let mut file_pairs = Vec::new();
-    let mut newest_runtime = 0_u128;
     for (name, source, runtime) in &pairs {
         let source_obs = observe_file(source);
         let runtime_obs = observe_file(runtime);
-        let source_exists = source_obs
-            .get("exists")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
         let runtime_exists = runtime_obs
             .get("exists")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        if !runtime_exists {
-            reasons.push(format!("runtime_file_unavailable:{}", name));
-        }
-        if !source_exists {
-            reasons.push(format!("source_file_unavailable:{}", name));
-        }
-        let source_mtime = source_obs
-            .get("mtime_ms")
-            .and_then(Value::as_u64)
-            .map(u128::from);
-        let runtime_mtime = runtime_obs
-            .get("mtime_ms")
-            .and_then(Value::as_u64)
-            .map(u128::from);
-        if runtime_mtime.is_some_and(|mtime| mtime > cutoff) {
-            reasons.push(format!("runtime_file_changed_after_process_start:{}", name));
-        }
-        if source_mtime.is_some_and(|mtime| mtime > cutoff) {
-            reasons.push(format!("source_file_changed_after_process_start:{}", name));
-        }
-        if source_mtime
-            .zip(runtime_mtime)
-            .is_some_and(|(source, runtime)| source > runtime)
-        {
-            reasons.push(format!("source_file_newer_than_runtime_file:{}", name));
-        }
-        if let Some(mtime) = runtime_mtime {
-            newest_runtime = newest_runtime.max(mtime);
+        if *name == "loader_entrypoint" && !runtime_exists {
+            reasons.push("runtime_file_unavailable:loader_entrypoint".to_string());
         }
         file_pairs.push(json!({"name":name,"source":source_obs,"runtime":runtime_obs}));
     }
     let mut config_observations = Vec::new();
     for (name, path) in &config_files {
         let observation = observe_file(path);
-        if !observation
-            .get("exists")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
-            reasons.push(format!("config_file_unavailable:{}", name));
-        } else if let Some(mtime) = observation
-            .get("mtime_ms")
-            .and_then(Value::as_u64)
-            .map(u128::from)
-        {
-            if mtime > cutoff {
-                reasons.push(format!("config_file_changed_after_process_start:{}", name));
-            }
-            if mtime > newest_runtime {
-                reasons.push(format!("config_file_newer_than_runtime_files:{}", name));
-            }
-        }
         config_observations.push(json!({"name":name,"observation":observation}));
     }
     let status = if reasons.iter().any(|reason| reason.contains("unavailable")) {
@@ -2583,7 +2537,7 @@ fn runtime_freshness(state: &LoaderState) -> Value {
         "reload_required":if status=="stale" {Value::Bool(true)} else if status=="current" {Value::Bool(false)} else {Value::Null},
         "process_started_at":ms_to_iso(state.started_ms),
         "process_started_at_ms":state.started_ms,
-        "freshness_scope":"loader_source_runtime_dependencies_and_build_configuration",
+        "freshness_scope":"native_loader_artifact",
         "runtime_entrypoint":entrypoint.get("runtime").cloned().unwrap_or(Value::Null),
         "source_entrypoint":entrypoint.get("source").cloned().unwrap_or(Value::Null),
         "source_files":source_files,
@@ -4347,15 +4301,17 @@ fn call_surface_handle_tool(
     call_attached_tool(&delegated, state)
 }
 
-fn call_binding_tool(
-    arguments: &JsonObject,
-    state: &mut LoaderState,
-) -> Result<Value, Diagnostic> {
+fn call_binding_tool(arguments: &JsonObject, state: &mut LoaderState) -> Result<Value, Diagnostic> {
     let opened = resume_or_open_surface(arguments, state)?;
     let handle = opened
         .get("surface_handle")
         .and_then(Value::as_str)
-        .ok_or_else(|| Diagnostic::new("surface_handle_missing", "surface_handle_missing_after_resume_or_open"))?;
+        .ok_or_else(|| {
+            Diagnostic::new(
+                "surface_handle_missing",
+                "surface_handle_missing_after_resume_or_open",
+            )
+        })?;
     let mut delegated = Map::new();
     delegated.insert("surface_handle".into(), json!(handle));
     delegated.insert(
@@ -4364,7 +4320,10 @@ fn call_binding_tool(
     );
     delegated.insert(
         "arguments".into(),
-        arguments.get("arguments").cloned().unwrap_or_else(|| json!({})),
+        arguments
+            .get("arguments")
+            .cloned()
+            .unwrap_or_else(|| json!({})),
     );
     if let Some(value) = arguments.get("include_runtime_metadata") {
         delegated.insert("include_runtime_metadata".into(), value.clone());
@@ -5091,8 +5050,9 @@ fn call_tool(name: &str, arguments: Value, state: &mut LoaderState) -> Result<Va
 mod tests {
     use super::{
         admitted_binding_entry, canonical_binding_id, child_error_diagnostic, compact_child_result,
-        extract_proxy_child_args, list_tools, request_error_details, try_parse_wire,
-        unavailable_handle_recovery, validate_input_schema, SurfaceHandle,
+        extract_proxy_child_args, list_tools, request_error_details, runtime_freshness,
+        try_parse_wire, unavailable_handle_recovery, validate_input_schema, LoaderState, Policy,
+        SurfaceHandle,
     };
     use serde_json::{json, Value};
     use std::io;
@@ -5130,6 +5090,40 @@ mod tests {
                 ["default"],
             true
         );
+    }
+
+    #[test]
+    fn native_loader_freshness_ignores_workspace_metadata_mtime() {
+        let state = LoaderState {
+            policy: Policy {
+                allowed_site_roots: Vec::new(),
+                allowed_entrypoint_prefixes: Vec::new(),
+                allowed_surface_ids: None,
+                allowed_env_vars: Vec::new(),
+                max_connections: 1,
+                max_request_bytes: 1024,
+                max_response_bytes: 1024,
+                attach_timeout_ms: 1000,
+                tool_call_timeout_ms: 1000,
+                tool_call_grace_ms: 100,
+            },
+            surface_root: String::new(),
+            workspace_root: env!("CARGO_MANIFEST_DIR").to_string(),
+            // An old process start must not make package/TS mtimes stale.
+            started_ms: 0,
+            run_id: "test-loader".to_string(),
+            owner_pid: 0,
+            ownership_marker: "test-loader".to_string(),
+            connections: std::collections::HashMap::new(),
+            handles: std::collections::HashMap::new(),
+            binding_admission: None,
+            standalone_ambient_attachment: false,
+        };
+        let freshness = runtime_freshness(&state);
+        assert_eq!(freshness["status"], "current");
+        assert_eq!(freshness["reload_required"], false);
+        assert_eq!(freshness["freshness_scope"], "native_loader_artifact");
+        assert_eq!(freshness["reasons"], json!([]));
     }
 
     #[test]
