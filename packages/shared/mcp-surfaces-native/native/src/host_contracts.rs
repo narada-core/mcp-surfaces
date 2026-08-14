@@ -12,20 +12,6 @@ const MAX_OUTPUT_LIMIT: u64 = 20_000;
 const DEFAULT_GRAPH_BASE_URL: &str = "https://graph.microsoft.com/v1.0";
 const CLOUDFLARE_PACKAGE_FILTER: &str = "@narada-core/cloudflare-carrier";
 const CLOUDFLARE_WORKER_URL: &str = "https://narada-cloudflare-carrier.andrei-kokoev.workers.dev";
-const BROWSER: &[(&str, bool)] = &[
-    ("browser_control_session_inventory", true),
-    ("browser_control_attach", false),
-    ("browser_control_status", true),
-    ("browser_control_navigate", false),
-    ("browser_control_accessibility_snapshot", true),
-    ("browser_control_screenshot", true),
-    ("browser_control_click", false),
-    ("browser_control_fill", false),
-    ("browser_control_wait", false),
-    ("browser_control_assert", true),
-    ("browser_control_detach", false),
-    ("mcp_output_show", true),
-];
 const OPERATOR: &[(&str, bool)] = &[
     ("operator_console_overlay_status", true),
     ("operator_console_overlay_open", false),
@@ -184,11 +170,8 @@ pub fn call_tool(
         ),
         ("graph-mail", "graph_mail_doctor") => Ok(graph_mail_doctor(root)),
         ("graph-mail", "graph_mail_auth_status") => Ok(graph_mail_auth_status(root)),
-        ("graph-mail", "graph_mail_output_show") | ("browser-control", "mcp_output_show") => {
+        ("graph-mail", "graph_mail_output_show") => {
             output_show(args, root)
-        }
-        ("browser-control", "browser_control_session_inventory") => {
-            Ok(browser_session_inventory(root))
         }
         _ => Err(boundary(
             surface_id,
@@ -201,7 +184,6 @@ pub fn call_tool(
 
 fn entries(surface_id: &str) -> &'static [(&'static str, bool)] {
     match surface_id {
-        "browser-control" => BROWSER,
         "operator-console-overlay" => OPERATOR,
         "cloudflare-carrier" => CLOUDFLARE,
         "scheduler" => SCHEDULER,
@@ -405,15 +387,6 @@ fn operator_status(root: &Path) -> Value {
     operator_status_at(root, &state_root)
 }
 
-fn browser_session_inventory(root: &Path) -> Value {
-    json!({
-        "schema":"narada.browser_control.result.v1",
-        "status":"ok",
-        "site_root":root.to_string_lossy(),
-        "sessions":[],
-        "count":0,
-    })
-}
 
 fn operator_status_at(root: &Path, state_root: &Path) -> Value {
     let state_directory = state_root.join("operator-console");
@@ -723,7 +696,7 @@ fn graph_mail_auth_status(root: &Path) -> Value {
     json!({"schema":"narada.graph_mail_mcp.auth_status.v1","status":"ok","allow_device_code_auth":graph_bool(&object, "allow_device_code_auth", "allowDeviceCodeAuth"),"device_code_tenant_configured":graph_string(&object, "device_code_tenant_id", "deviceCodeTenantId").is_some() || graph_non_empty_env(root, "GRAPH_TENANT_ID"),"device_code_client_configured":graph_string(&object, "device_code_client_id", "deviceCodeClientId").is_some() || graph_non_empty_env(root, "GRAPH_CLIENT_ID"),"device_code_allowed_scopes":scopes,"delegated_token":graph_delegated_token_summary(root)})
 }
 
-fn output_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+pub(crate) fn output_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     let ref_value = args.get("ref").and_then(Value::as_str).map(str::trim);
     let output_ref_value = args
         .get("output_ref")
@@ -1117,14 +1090,4 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn browser_session_inventory_is_empty_without_injection() {
-        let root = temp_root("browser");
-        let response = browser_session_inventory(&root);
-        assert_eq!(response["schema"], "narada.browser_control.result.v1");
-        assert_eq!(response["status"], "ok");
-        assert_eq!(response["count"], 0);
-        assert_eq!(response["sessions"].as_array().map(Vec::len), Some(0));
-        let _ = fs::remove_dir_all(root);
-    }
 }

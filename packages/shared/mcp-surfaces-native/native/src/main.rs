@@ -10,6 +10,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 mod authority;
+mod browser_control_authority;
 mod calendar;
 mod delegated_task;
 mod epistemic_graph;
@@ -86,6 +87,7 @@ fn main() {
 fn run() -> Result<(), String> {
     let options = parse_options(env::args().skip(1).collect())?;
     let _speech_shutdown = (options.surface_id == "speech").then(speech_authority::shutdown_guard);
+    let _browser_shutdown = (options.surface_id == "browser-control").then(browser_control_authority::shutdown_guard);
     for (key, value) in &options.environment {
         env::set_var(key, value);
     }
@@ -412,10 +414,15 @@ fn handle_request(request: &Value, options: &Options) -> Option<Value> {
                 scheduler::auxiliary(method, &params).map(|value| modern_result(value, options))
             }
             method
+                if options.surface_id == "browser-control"
+                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+            {
+                browser_control_authority::auxiliary(method, &params).map(|value| modern_result(value, options))
+            }
+            method
                 if matches!(
                     options.surface_id.as_str(),
-                    "browser-control"
-                        | "operator-console-overlay"
+                    "operator-console-overlay"
                         | "cloudflare-carrier"
                         | "graph-mail"
                 ) && matches!(
@@ -538,10 +545,15 @@ fn handle_request(request: &Value, options: &Options) -> Option<Value> {
                 scheduler::auxiliary(method, &params)
             }
             method
+                if options.surface_id == "browser-control"
+                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+            {
+                browser_control_authority::auxiliary(method, &params)
+            }
+            method
                 if matches!(
                     options.surface_id.as_str(),
-                    "browser-control"
-                        | "operator-console-overlay"
+                    "operator-console-overlay"
                         | "cloudflare-carrier"
                         | "graph-mail"
                 ) && matches!(
@@ -742,7 +754,8 @@ fn raw_list_tools(surface_id: &str) -> Vec<Value> {
         "mailbox" => mailbox::list_tools(),
         "scheduler" => scheduler::list_tools(),
         "speech" => speech_authority::list_tools(),
-        "browser-control" | "operator-console-overlay" | "cloudflare-carrier" | "graph-mail" => host_contracts::list_tools(surface_id),
+        "browser-control" => browser_control_authority::list_tools(),
+        "operator-console-overlay" | "cloudflare-carrier" | "graph-mail" => host_contracts::list_tools(surface_id),
         "catalog-observation" => vec![
             guidance_tool("catalog-observation"),
             tool("catalog_observation_observe", "Observe a provider model catalog through an installed Narada-owned observation port. Without that port, return a typed unavailable result rather than inferred catalog data.", json!({
@@ -894,14 +907,14 @@ fn call_tool(
         ("mailbox", name) => mailbox::call_tool(name, &args, &options.site_root),
         ("epistemic-graph", name) => epistemic_graph::call_tool(name, &args, &options.site_root),
         ("speech", name) => speech_authority::call_tool(name, &args, &options.site_root),
+        ("browser-control", name) => browser_control_authority::call_tool(name, &args, &options.site_root),
         ("graph-mail", name)
             if graph_mail_authority::enabled() && graph_mail_authority::supports(name) =>
         {
             graph_mail_authority::call_tool(name, &args, &options.site_root)
         }
         ("scheduler", name) => scheduler::call_tool(name, &args, &options.site_root),
-        ("browser-control", name)
-        | ("operator-console-overlay", name)
+        ("operator-console-overlay", name)
         | ("cloudflare-carrier", name)
         | ("graph-mail", name) => {
             host_contracts::call_tool(surface_id, name, &args, &options.site_root)

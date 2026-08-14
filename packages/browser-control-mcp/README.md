@@ -2,6 +2,11 @@
 
 Bounded host-level browser control for authenticated UX verification.
 
+The admitted runtime authority is the shared native Rust executable
+`narada-mcp-surfaces --surface-id browser-control --native-authority`. The
+TypeScript package preserves descriptor and parity-oracle sources; it is not a
+runtime fallback for native carrier profiles.
+
 The surface attaches only to an explicitly selected, already-running browser
 profile and session through a loopback Chrome DevTools Protocol endpoint. It
 does not launch browsers, perform login, extract cookies or credentials, run
@@ -37,5 +42,6 @@ only closes this MCP connection.
 ## Verification
 
 ```powershell
-pnpm --filter @narada-core/browser-control-mcp test
+cargo test --locked --manifest-path packages/shared/mcp-surfaces-native/native/Cargo.toml browser_control_authority
+cargo test --locked --manifest-path packages/shared/mcp-surfaces-native/native/Cargo.toml --test browser_control_protocol
 ```
