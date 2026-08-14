@@ -10,7 +10,6 @@ use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 
 const CONTRACT: &[u8] = include_bytes!("../tool-catalog.json.gz");
-const LEGACY_PROTOCOL_VERSION: &str = "2025-03-26";
 const MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
 const MAX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_HEADER_BYTES: usize = 64 * 1024;
@@ -79,19 +78,11 @@ fn dispatch(request: &Value) -> Value {
             return error(id, "modern_metadata_required".into());
         }
     }
-    if modern && method == "initialize" {
+    if method == "initialize" {
         return error(id, "initialize_removed".into());
     }
     if modern && method == "server/discover" {
         return json!({"jsonrpc":"2.0","id":id,"result":{"resultType":"complete","supportedVersions":[MODERN_PROTOCOL_VERSION],"capabilities":{"tools":{}},"serverInfo":{"name":"mcp-registrar","version":"0.1.0"},"_meta":{"io.modelcontextprotocol/serverInfo":{"name":"mcp-registrar","version":"0.1.0"}}}});
-    }
-    if method == "initialize" {
-        let requested = request
-            .pointer("/params/protocolVersion")
-            .and_then(Value::as_str);
-        if !matches!(requested, Some("2024-11-05" | "2025-03-26")) {
-            return error(id, "protocol_version_unsupported".into());
-        }
     }
     let mut contract: Value = match decode_contract() {
         Ok(v) => v,
@@ -111,9 +102,6 @@ fn dispatch(request: &Value) -> Value {
         }
     }
     let mut response = match method {
-        "initialize" => {
-            json!({"jsonrpc":"2.0","id":id,"result":{"protocolVersion":LEGACY_PROTOCOL_VERSION,"capabilities":{"tools":{}},"serverInfo":{"name":"mcp-registrar","version":"0.1.0"}}})
-        }
         "tools/list" => json!({"jsonrpc":"2.0","id":id,"result":{"tools":contract["tools"]}}),
         "tools/call" => {
             let name = request
@@ -5209,13 +5197,12 @@ mod tests {
 
     #[test]
     fn protocol_versions_are_honest_and_modern_requests_are_self_describing() {
-        let unsupported = dispatch(
-            &json!({"id":1,"method":"initialize","params":{"protocolVersion":"2099-01-01"}}),
-        );
-        assert_eq!(
-            unsupported["error"]["message"],
-            "protocol_version_unsupported"
-        );
+        for version in ["2024-11-05", "2025-03-26", "2099-01-01"] {
+            let removed = dispatch(
+                &json!({"id":1,"method":"initialize","params":{"protocolVersion":version}}),
+            );
+            assert_eq!(removed["error"]["message"], "initialize_removed");
+        }
         let incomplete = dispatch(
             &json!({"id":3,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":MODERN_PROTOCOL_VERSION}}}),
         );
