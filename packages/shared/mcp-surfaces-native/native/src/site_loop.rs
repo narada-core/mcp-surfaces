@@ -216,6 +216,47 @@ fn resident_status(root: &Path, config: &Value) -> Result<Value, Value> {
     Ok(json!({"schema":"narada.site_loop.resident_status.v1","status":"absent","resident_agent_id":resident_id,"live":false,"reason":"resident_launch_result_not_found","searched_result_count":searched_result_count,"bounded":true}))
 }
 
+fn narada_source_root(root: &Path) -> PathBuf {
+    if let Some(path) = std::env::var_os("NARADA_SRC_ROOT").map(PathBuf::from) { return path; }
+    let parent = root.parent().unwrap_or(root);
+    if parent.join("narada").is_dir() { return parent.to_path_buf(); }
+    let conventional = parent.join("src");
+    if conventional.join("narada").is_dir() { return conventional; }
+    conventional
+}
+
+fn resident_runtime_command(root: &Path) -> Result<PathBuf, Value> {
+    if let Some(path) = std::env::var_os("NARADA_AGENT_RUNTIME_SERVER_NATIVE").map(PathBuf::from).filter(|path| path.is_file()) { return Ok(path); }
+    let source = narada_source_root(root);
+    [source.join("narada/packages/agent-runtime-server/native/target/release/narada-agent-runtime-server-rust.exe"), source.join("narada/packages/agent-runtime-server/native/target/release/narada-agent-runtime-server-rust")]
+        .into_iter().find(|path| path.is_file()).ok_or_else(|| error("resident_runtime_unavailable", "narada-agent-runtime-server-rust is not built"))
+}
+
+fn ensure_resident(root: &Path, config: &Value) -> Result<Value, Value> {
+    let current = resident_status(root, config)?;
+    if current.get("live").and_then(Value::as_bool) == Some(true) { return Ok(json!({"schema":"narada.site_loop.resident_ensure.v1","status":"ok","action":"reused_live_carrier","resident":current})); }
+    let runtime = resident_runtime_command(root)?;
+    let host = std::env::current_exe().map_err(|cause| error("resident_host_executable_unavailable", &cause.to_string()))?;
+    let identity = config.pointer("/resident/agent_id").and_then(Value::as_str).unwrap_or("site.resident");
+    let session_id = format!("carrier_{}_{}", identity.chars().map(|ch| if ch.is_ascii_alphanumeric(){ch}else{'_'}).collect::<String>(), &uuid::Uuid::new_v4().simple().to_string()[..12]);
+    let mut command = Command::new(&host);
+    command.args(["--resident-runtime-host","--runtime",&runtime.to_string_lossy(),"--site-root",&root.to_string_lossy(),"--identity",identity,"--session",&session_id])
+        .current_dir(root).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    if let Some(environment) = config.pointer("/resident_launch/env").and_then(Value::as_object) {
+        for (key, value) in environment.iter().take(64) { if let Some(value) = value.as_str() { command.env(key, value); } }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000 | 0x0000_0200);
+    }
+    let child = command.spawn().map_err(|cause| error("resident_host_launch_failed", &cause.to_string()))?;
+    let result_path = root.join(".ai/runtime/agent-start-results").join(format!("resident-{session_id}.result.json"));
+    let record = json!({"schema":"narada.agent_start.result.v1","status":"launch_requested","identity":identity,"runtime":"narada-agent-runtime-server","runtime_engine_kind":"rust","carrier_session":{"carrier_session_id":session_id},"nars_launch":{"control_path":resident_session_roots(root,config)[0].join(&session_id).join("control.jsonl")},"native_host":{"executable":host,"pid":child.id()},"started_at":now_iso(),"launch_source":"site_loop.native_resident_ensure"});
+    write_json_atomically(&result_path, &record)?;
+    Ok(json!({"schema":"narada.site_loop.resident_ensure.v1","status":"launch_requested","action":"native_resident_host_started","carrier_session_id":session_id,"host_pid":child.id(),"runtime":runtime,"result_path":result_path,"control_path":record.pointer("/nars_launch/control_path")}))
+}
+
 fn safe_record_id(value: &str) -> bool {
     !value.is_empty() && value.len() <= 256 && value.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
 }
@@ -260,6 +301,7 @@ fn proof_run(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     }
     let config = load_config(root)?.ok_or_else(|| error("site_loop_config_missing", "site-loop config is required"))?;
     let object = config.as_object().ok_or_else(|| error("site_loop_config_invalid", "site-loop config must be an object"))?;
+    let resident_ensure = if args.get("ensure_resident").and_then(Value::as_bool) == Some(false) { json!({"status":"skipped","reason":"ensure_resident_false"}) } else { ensure_resident(root, &config)? };
     let requested_at = now_iso();
     let request_id = format!("resident_proof_request_{}_{}", requested_at.chars().filter(|ch| ch.is_ascii_digit()).collect::<String>(), &uuid::Uuid::new_v4().simple().to_string()[..8]);
     let fixture_id = format!("resident-e2e-{}", uuid::Uuid::new_v4().simple());
@@ -267,7 +309,7 @@ fn proof_run(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     let packet = json!({"schema":"narada.site_loop.resident_proof_request.v1","site_id":object.get("site_id").cloned().unwrap_or(Value::Null),"loop_id":object.get("loop_id").cloned().unwrap_or(Value::Null),"request_id":request_id,"fixture_id":fixture_id,"title":"Resident production proof","summary":"Controlled resident production proof.","timeout_ms":args.get("timeout_ms").and_then(Value::as_u64).unwrap_or(120000),"poll_ms":args.get("poll_ms").and_then(Value::as_u64).unwrap_or(5000),"status":"queued","requested_at":requested_at,"finished_at":Value::Null,"result":Value::Null});
     let path = proof_request_dir(root).join(format!("{request_id}.json"));
     write_json_atomically(&path, &packet)?;
-    Ok(json!({"schema":"narada.site_loop.resident_e2e.v1","status":"started","mode":"live_unattended_start_only","request_id":request_id,"request_path":path.to_string_lossy(),"request_status":"queued","reused":false,"next":{"tool":"site_loop_proof_status","arguments":{}}}))
+    Ok(json!({"schema":"narada.site_loop.resident_e2e.v1","status":"started","mode":"live_unattended_start_only","request_id":request_id,"request_path":path.to_string_lossy(),"request_status":"queued","resident_ensure":resident_ensure,"reused":false,"next":{"tool":"site_loop_proof_status","arguments":{}}}))
 }
 
 fn open_db(root: &Path) -> Result<Option<Connection>, Value> {
@@ -785,10 +827,10 @@ mod tests {
         fs::write(config_path(&root), r#"{"schema":"narada.site_loop.config.v2","loop_id":"site.loop","site_id":"test","display_name":"Test","resident":{},"scheduler":{},"policy":{},"persistence":{}}"#).expect("config");
         assert_eq!(config_validate(&root).expect("validation")["valid"], true);
         assert_eq!(call_tool("site_loop_run_once", &Map::new(), &root).expect_err("boundary")["status"], "unavailable");
-        let started = call_tool("site_loop_proof_run", &json_map(json!({"proof_kind":"resident_production"})), &root).expect("proof request");
+        let started = call_tool("site_loop_proof_run", &json_map(json!({"proof_kind":"resident_production","ensure_resident":false})), &root).expect("proof request");
         assert_eq!(started["status"], "started");
         assert_eq!(started["request_status"], "queued");
-        let reused = call_tool("site_loop_proof_run", &json_map(json!({"proof_kind":"resident_production"})), &root).expect("reused proof request");
+        let reused = call_tool("site_loop_proof_run", &json_map(json!({"proof_kind":"resident_production","ensure_resident":false})), &root).expect("reused proof request");
         assert_eq!(reused["reused"], true);
         let proof = call_tool("site_loop_proof_status", &Map::new(), &root).expect("proof status");
         assert_eq!(proof["request_count"], 1);

@@ -21,6 +21,7 @@ mod mailbox;
 mod mailbox_sync;
 mod operator_surface_authority;
 mod project_state_authority;
+mod resident_host;
 mod runtime_introspection;
 mod scheduler;
 mod scheduler_activation;
@@ -51,6 +52,14 @@ struct Options {
 }
 
 fn main() {
+    let arguments = env::args().skip(1).collect::<Vec<_>>();
+    if resident_host::is_host_mode(&arguments) {
+        if let Err(error) = resident_host::run(&arguments) {
+            let _ = writeln!(io::stderr(), "{error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if let Err(error) = run() {
         let _ = writeln!(io::stderr(), "{error}");
         std::process::exit(1);
