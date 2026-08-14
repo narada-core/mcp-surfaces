@@ -4,13 +4,19 @@ Policy-gated runtime attachment and proxying for MCP surfaces admitted by a Site
 
 ## Guidance
 
-Use mcp_loader_guidance for model-facing orientation, workflow selection, recovery guidance, and loader boundaries. Use the standard child tools/list response, mcp_loader_list_tools, or mcp_loader_tool_discovery_manifest for exact attached-tool interface schemas.
+Use `mcp_loader_guidance` for model-facing orientation, workflow selection,
+recovery guidance, and loader boundaries. Use `mcp_loader_list_tools` for exact
+attached-tool schemas. `mcp_loader_tool_discovery_manifest` returns compact
+canonical names by default; pass `compact: false` for schemas and
+`include_runtime_metadata: true` only when lifecycle evidence is material.
 
 Every loader lifecycle projection uses the `narada.mcp_loader.runtime_lifecycle.v1` shape. Attached replayable projections expose `runtime_lifecycle` with `managed_by: "mcp-loader"`, `restartable: true`, and connection-scoped inspect/restart actions. `session_pinned` and `restart_required` projections expose `restartable: false`, `restartability_status: "unavailable_for_lifecycle"`, no child restart action, and a carrier/runtime-supervisor recovery action instead. The machine-readable `loader_restart_action` describes the operation required to restart the loader itself; its `next_call.tool_name` is the external supervisor capability `restart_mcp_loader_process`, deliberately not a child-surface tool and not implemented by the loader process itself. Pre-attachment guidance exposes the same shape with `restartable: null` and `restartability_status: "available_after_successful_attach"`. Inspect `mcp_loader_surface_status` or `mcp_loader_connection_inventory`, then call `mcp_loader_surface_restart({ connection_id, reason })` only for an attached replayable projection. The agent session does not need to restart for that child replacement. Child-surface domain policy remains authoritative, and restart invalidates refs owned by the replaced child.
 
 Runtime lifecycle and freshness metadata is opt-in on ordinary discovery and proxy calls. Pass `include_runtime_metadata: true` when that evidence is material; compact responses are the default. A proxied child guidance result is augmented with loader lifecycle and freshness only when that flag is set.
 
 Use `mcp_loader_resume_or_open_surface` with a canonical `binding_id` for retryable agent workflows. It reuses a live logical handle within the current loader process and transparently reopens the admitted binding after a loader restart. Raw handles remain process-scoped.
+Opened handles and unavailable-handle recovery actions retain that canonical
+binding ID, so the returned `resume_or_open_surface` call is directly usable.
 
 ## Tools
 
@@ -25,8 +31,7 @@ The loader's own public tools are:
   `mcp_loader_detach`, and `mcp_loader_connection_inventory`.
 - `mcp_loader_list_tools`, `mcp_loader_tool_discovery_manifest`,
   `mcp_loader_call_tool`, and `mcp_loader_call_surface_tool`.
-- `mcp_loader_runtime_observation`, `mcp_loader_process`, and
-  `mcp_loader_process_ownership`, `mcp_loader_topology_diagnostics`.
+- `mcp_loader_runtime_observation` and `mcp_loader_process_ownership`.
 
 The exact child tool schemas remain owned by each attached surface and are
 discovered through the loader's tools/list projections.
@@ -35,25 +40,12 @@ discovered through the loader's tools/list projections.
 
 Call `mcp_loader_runtime_observation({ connection_id, carrier_kind })` after attach to obtain `RuntimeObservationV2`. The result includes stable logical identity, active generation state, heartbeat/lease freshness, descriptor and live tool-contract digests, lifecycle eligibility, and one bounded recovery actuator. A replayable child names `mcp_loader_surface_restart`; a session-pinned or restart-required projection names the carrier supervisor capability. The loader reports `runtime_state_root: null` because persistent observation records belong to the generic runtime-proxy observation store or another explicitly configured owner.
 
-## Process topology and consolidation
+## Process ownership
 
-`mcp_loader_topology_diagnostics` provides the operator-readable vocabulary
-and bounded evidence for one loader run:
-
-- a tool is an operation, a surface is the server boundary exposing tools, a
-  runtime proxy is the carrier-owned boundary, a loader attaches/proxies
-  children, and a session instance is one Site/session surface child;
-- counts are aggregated by surface, proxy, session, and loader owner, with
-  duplicate instance keys and known orphaned children called out;
-- the loader measures its own memory and explicitly marks child memory as
-  unavailable at this authority boundary. Host-wide proxy/conhost memory and
-  orphan reconciliation belong to `runtime-introspection` or the carrier
-  supervisor, so the loader never enumerates or terminates unrelated
-  processes;
-- per-session stdio isolation remains the default. Shared HTTP/daemon or
-  pooling mode is not implemented or selected; any future opt-in must prove
-  equivalent Site/session authority, lifecycle ownership, failure containment,
-  and conformance tests before it can be admitted.
+`mcp_loader_process_ownership` reports only direct children owned by the
+current loader run and bounded cleanup actions for known connections. Host-wide
+topology, memory accounting, proxy/conhost reconciliation, and unrelated
+processes remain outside Loader authority.
 
 ## Tool Call Timeouts
 

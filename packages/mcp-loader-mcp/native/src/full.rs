@@ -147,6 +147,7 @@ struct Connection {
 struct SurfaceHandle {
     handle: String,
     logical_connection_id: String,
+    binding_id: Option<String>,
     site_root: String,
     surface_id: String,
     runtime_kind: Option<String>,
@@ -2163,7 +2164,7 @@ fn list_tools() -> Vec<Value> {
         tool_definition("mcp_loader_surface_handle_inventory","List stable logical surface handles and the current child generation, without spawning or replacing a surface.",json!({}),&[],true,false),
         tool_definition("mcp_loader_list_tools","List tools exposed by an attached MCP surface. Runtime metadata is opt-in.",json!({"connection_id":{"type":"string"},"include_runtime_metadata":{"type":"boolean","default":false}}),&["connection_id"],true,false),
         tool_definition("mcp_loader_surface_status","Inspect the runtime status and loader-managed restartability of an attached MCP surface child process.",json!({"connection_id":{"type":"string"}}),&["connection_id"],true,false),
-        tool_definition("mcp_loader_tool_discovery_manifest","Return canonical semantic tool names for an attached surface and flag generated aliases as non-authoritative.",json!({"connection_id":{"type":"string"}}),&["connection_id"],true,false),
+        tool_definition("mcp_loader_tool_discovery_manifest","Return canonical semantic tool names for an attached surface and flag generated aliases as non-authoritative. Compact names are the default; exact schemas and runtime metadata are opt-in.",json!({"connection_id":{"type":"string"},"compact":{"type":"boolean","default":true},"include_runtime_metadata":{"type":"boolean","default":false}}),&["connection_id"],true,false),
         tool_definition("mcp_loader_call_tool","Call a tool on an attached MCP surface. Results are bounded by default and include a typed summary; set include_runtime_metadata=true when lifecycle/freshness evidence is needed on this call.",json!({"connection_id":{"type":"string"},"tool_name":{"type":"string"},"arguments":{"type":"object"},"include_runtime_metadata":{"type":"boolean"}}),&["connection_id","tool_name"],false,false),
         tool_definition("mcp_loader_call_surface_tool","Call a tool through a stable logical surface handle. Results are bounded by default and include a typed summary; set include_runtime_metadata=true for lifecycle/freshness evidence.",json!({"surface_handle":{"type":"string"},"tool_name":{"type":"string"},"arguments":{"type":"object"},"include_runtime_metadata":{"type":"boolean"}}),&["surface_handle","tool_name"],false,false),
         tool_definition("mcp_loader_read_result","Read a bounded page from a materialized proxied child result. The ref is bound to the same Site authority as the connection.",json!({"connection_id":{"type":"string"},"ref":{"type":"string"},"output_ref":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1},"timeout_ms":{"type":"integer","minimum":1,"maximum":15000}}),&["connection_id"],true,false),
@@ -2196,7 +2197,7 @@ fn guidance_result(arguments: &JsonObject, state: &LoaderState) -> Value {
             "Call mcp_loader_connection_inventory before attachment when recovering from capacity errors or an earlier interrupted session.",
             "Call mcp_loader_process_ownership when reconciling child processes after an interrupted attach; it reports only this loader run's direct children and safe known-connection cleanup actions.",
             "Call mcp_loader_list_site_surfaces and mcp_loader_site_fabric_diagnostics for the explicit Site root.",
-            "Use mcp_loader_attach_surface with an explicit surface_id and runtime_kind when the projection requires one.",
+            "Use mcp_loader_resume_or_open_surface with canonical binding_id for retryable workflows; use raw attach_surface only for low-level connection diagnostics.",
             "Inspect surface_projection.execution before attachment. mcp-loader accepts stdio projections only; surface_factory projections belong to the PC Site surface runtime.",
             "Use mcp_loader_list_tools or mcp_loader_tool_discovery_manifest after attachment; the child tools/list response owns exact tool schemas.",
             "Call mcp_loader_runtime_observation with connection_id and carrier_kind to obtain the V2 normalized observation.",
@@ -3411,6 +3412,7 @@ fn open_surface(arguments: &JsonObject, state: &mut LoaderState) -> Result<Value
     let record = SurfaceHandle {
         handle: handle.clone(),
         logical_connection_id: connection.logical_connection_id.clone(),
+        binding_id: connection.binding_id.clone(),
         site_root: connection.site_root.clone(),
         surface_id: connection.surface_id.clone(),
         runtime_kind: connection.runtime_kind.clone(),
@@ -3422,6 +3424,7 @@ fn open_surface(arguments: &JsonObject, state: &mut LoaderState) -> Result<Value
         "schema":"narada.mcp_loader.surface_handle_opened.v1","status":"opened","surface_handle":handle,
         "handle_scope":"loader_process","handle_survives_child_restart":true,"handle_survives_loader_restart":false,
         "logical_connection_id":connection.logical_connection_id,"connection_id":connection.connection_id,
+        "binding_id":connection.binding_id,
         "ownership":connection_ownership(connection),"generation_id":connection.generation_id,"site_root":connection.site_root,
         "surface_id":connection.surface_id,"runtime_kind":connection.runtime_kind,"runtime_requirements":connection.runtime_requirements,
         "tool_count":connection.tools.len(),"created_at":created_at,
@@ -3795,14 +3798,14 @@ fn surface_handle_inventory(state: &LoaderState) -> Value {
         let connection = find_connection_for_handle(handle, state);
         handles.push(json!({
             "surface_handle":handle.handle,"handle_scope":"loader_process","logical_connection_id":handle.logical_connection_id,
-            "site_root":handle.site_root,"surface_id":handle.surface_id,"runtime_kind":handle.runtime_kind,
+            "binding_id":handle.binding_id,"site_root":handle.site_root,"surface_id":handle.surface_id,"runtime_kind":handle.runtime_kind,
             "created_at":handle.created_at,"connection_id":connection.as_ref().map(|value| value.connection_id.clone()),
             "generation_id":connection.as_ref().map(|value| value.generation_id.clone()),
             "status":if connection.as_ref().is_some_and(|value| connection_live(value)) {"live"} else {"unavailable"},
             "recovery":if let Some(connection) = connection {
                 json!({"tool_name":"mcp_loader_surface_restart","arguments":{"connection_id":connection.connection_id}})
             } else {
-                json!({"tool_name":"mcp_loader_open_surface","arguments":{"site_root":handle.site_root,"surface_id":handle.surface_id,"runtime_kind":handle.runtime_kind}})
+                unavailable_handle_recovery(handle)
             }
         }));
     }
@@ -3829,6 +3832,14 @@ fn find_connection_for_handle<'a>(
         .find(|connection| connection_live(connection))
         .copied()
         .or_else(|| matches.first().copied())
+}
+
+fn unavailable_handle_recovery(handle: &SurfaceHandle) -> Value {
+    if let Some(binding_id) = &handle.binding_id {
+        json!({"tool_name":"mcp_loader_resume_or_open_surface","arguments":{"site_root":handle.site_root,"binding_id":binding_id,"surface_id":handle.surface_id,"runtime_kind":handle.runtime_kind}})
+    } else {
+        json!({"status":"unavailable","reason":"surface_handle_binding_id_unavailable","instruction":"Open the surface again from a canonical Site binding; this legacy handle cannot be resumed safely."})
+    }
 }
 
 fn list_attached_tools(arguments: &JsonObject, state: &LoaderState) -> Result<Value, Diagnostic> {
@@ -3863,22 +3874,41 @@ fn tool_discovery_manifest(
     state: &LoaderState,
 ) -> Result<Value, Diagnostic> {
     let connection = get_connection(arguments, state)?;
-    let tools: Vec<Value> = connection.tools.iter().map(|tool| {
-        json!({
-            "canonical_name":tool.get("name").and_then(Value::as_str).unwrap_or_default(),
-            "callable_name":tool.get("name").and_then(Value::as_str).unwrap_or_default(),
-            "generated_aliases":[],
-            "description":tool.get("description").cloned().unwrap_or(Value::Null),
-            "inputSchema":tool.get("inputSchema").or_else(|| tool.get("input_schema")).cloned().unwrap_or(Value::Null)
+    let compact = arguments
+        .get("compact")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let tools: Vec<Value> = connection
+        .tools
+        .iter()
+        .map(|tool| {
+            let mut item = json!({
+                "canonical_name":tool.get("name").and_then(Value::as_str).unwrap_or_default(),
+                "callable_name":tool.get("name").and_then(Value::as_str).unwrap_or_default(),
+                "generated_aliases":[]
+            });
+            if !compact {
+                item["description"] = tool.get("description").cloned().unwrap_or(Value::Null);
+                item["inputSchema"] = tool
+                    .get("inputSchema")
+                    .or_else(|| tool.get("input_schema"))
+                    .cloned()
+                    .unwrap_or(Value::Null);
+            }
+            item
         })
-    }).collect();
-    Ok(
-        json!({"schema":"narada.mcp_loader.tool_discovery_manifest.v1","connection_id":connection.connection_id,"surface_id":connection.surface_id,
-        "runtime_lifecycle":runtime_lifecycle(Some(&connection.connection_id),Some(&connection.lifecycle)),
-        "runtime_freshness":runtime_freshness(state),
-        "alias_policy":{"canonical_name_source":"tools/list.name","generated_aliases_authoritative":false,"guidance":"Use canonical_name/callable_name for directives and tool calls. Client-generated aliases should be treated as compatibility UI labels only."},
-        "tools":tools}),
-    )
+        .collect();
+    let mut result = json!({"schema":"narada.mcp_loader.tool_discovery_manifest.v1","connection_id":connection.connection_id,"surface_id":connection.surface_id,"compact":compact,"tool_count":tools.len(),"alias_policy":{"canonical_name_source":"tools/list.name","generated_aliases_authoritative":false,"guidance":"Use canonical_name/callable_name for directives and tool calls. Client-generated aliases should be treated as compatibility UI labels only."},"tools":tools});
+    if arguments
+        .get("include_runtime_metadata")
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        result["runtime_lifecycle"] =
+            runtime_lifecycle(Some(&connection.connection_id), Some(&connection.lifecycle));
+        result["runtime_freshness"] = runtime_freshness(state);
+    }
+    Ok(result)
 }
 
 fn get_connection<'a>(
@@ -4294,7 +4324,7 @@ fn call_surface_handle_tool(
         .map(|connection| connection.connection_id.clone());
     let Some(connection_id) = connection_id else {
         return Err(Diagnostic::new("surface_handle_connection_unavailable", format!("surface_handle_connection_unavailable:{}", handle_name))
-            .with_details(json!({"surface_handle":handle_name,"logical_connection_id":handle.logical_connection_id,"site_root":handle.site_root,"surface_id":handle.surface_id,"recovery":{"tool_name":"mcp_loader_open_surface","arguments":{"site_root":handle.site_root,"surface_id":handle.surface_id,"runtime_kind":handle.runtime_kind}}})));
+            .with_details(json!({"surface_handle":handle_name,"logical_connection_id":handle.logical_connection_id,"binding_id":handle.binding_id,"site_root":handle.site_root,"surface_id":handle.surface_id,"recovery":unavailable_handle_recovery(handle)})));
     };
     let mut delegated = arguments.clone();
     delegated.insert("connection_id".to_string(), json!(connection_id));
@@ -5011,7 +5041,8 @@ fn call_tool(name: &str, arguments: Value, state: &mut LoaderState) -> Result<Va
 mod tests {
     use super::{
         admitted_binding_entry, canonical_binding_id, child_error_diagnostic, compact_child_result,
-        extract_proxy_child_args, list_tools, request_error_details,
+        extract_proxy_child_args, list_tools, request_error_details, unavailable_handle_recovery,
+        SurfaceHandle,
     };
     use serde_json::json;
 
@@ -5032,12 +5063,45 @@ mod tests {
             "mcp_loader_list_site_surfaces",
             "mcp_loader_open_surface",
             "mcp_loader_list_tools",
+            "mcp_loader_tool_discovery_manifest",
         ] {
             assert_eq!(
                 find(name)["inputSchema"]["properties"]["include_runtime_metadata"]["default"],
                 false
             );
         }
+        assert_eq!(
+            find("mcp_loader_tool_discovery_manifest")["inputSchema"]["properties"]["compact"]
+                ["default"],
+            true
+        );
+    }
+
+    #[test]
+    fn unavailable_handle_recovery_is_executable_only_with_a_canonical_binding() {
+        let handle = SurfaceHandle {
+            handle: "msh_test".to_string(),
+            logical_connection_id: "logical-test".to_string(),
+            binding_id: Some("marici-git".to_string()),
+            site_root: "C:/Users/andrey/src/marici".to_string(),
+            surface_id: "git".to_string(),
+            runtime_kind: Some("native".to_string()),
+            created_at: "2026-08-14T00:00:00Z".to_string(),
+        };
+        let recovery = unavailable_handle_recovery(&handle);
+        assert_eq!(recovery["tool_name"], "mcp_loader_resume_or_open_surface");
+        assert_eq!(recovery["arguments"]["binding_id"], "marici-git");
+
+        let legacy = SurfaceHandle {
+            binding_id: None,
+            ..handle
+        };
+        let unavailable = unavailable_handle_recovery(&legacy);
+        assert_eq!(unavailable["status"], "unavailable");
+        assert_eq!(
+            unavailable["reason"],
+            "surface_handle_binding_id_unavailable"
+        );
     }
 
     #[test]
