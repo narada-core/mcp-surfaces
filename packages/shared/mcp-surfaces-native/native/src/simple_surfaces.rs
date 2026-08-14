@@ -1,4 +1,5 @@
 use crate::operator_surface_authority;
+use crate::project_state_authority;
 use crate::site_lifecycle_authority;
 use crate::site_registry_authority;
 use serde_json::{json, Map, Value};
@@ -217,10 +218,11 @@ pub fn list_tools(surface_id: &str) -> Vec<Value> {
                 ),
             ];
             tools.extend(PROJECT_STATE_COMMANDS.iter().map(|(name, _)| {
-                tool(
+                tool_with_schema(
                     name,
                     "Read one bounded virtual project-state projection.",
                     true,
+                    project_input_schema(name),
                 )
             }));
             tools
@@ -461,16 +463,41 @@ fn registry_input_schema(name: &str) -> Value {
     json!({"type":"object","properties":properties,"required":required,"additionalProperties":false})
 }
 
+fn project_input_schema(name: &str) -> Value {
+    let id = || json!({"type":"string","minLength":1,"maxLength":512});
+    let mut properties = Map::new();
+    let mut required = Vec::new();
+    match name {
+        "project_state_program_show" => { properties.insert("program_id".into(),id()); required.push("program_id"); }
+        "project_state_project_show" => { properties.insert("project_id".into(),id()); required.push("project_id"); }
+        "project_state_standard_show" => { properties.insert("standard_id".into(),id()); required.push("standard_id"); }
+        "project_state_project_list" => { properties.insert("program_id".into(),id()); }
+        "project_state_matrix" => { for key in ["project_id","object_id","lifecycle"] { properties.insert(key.into(),id()); } }
+        "project_state_gaps" | "project_state_handoff" => { for key in ["program_id","project_id"] { properties.insert(key.into(),id()); } }
+        "project_state_standards_list" => { properties.insert("selection".into(),json!({"type":"string","enum":["core","conditional","reference"]})); }
+        "project_state_applicability" => {
+            for key in ["program_id","project_id","standard_id"] { properties.insert(key.into(),id()); }
+            properties.insert("status".into(),json!({"type":"string","enum":["selected","conditional","reference","not_applicable"]}));
+        }
+        "project_state_standard_trace" => {
+            for key in ["program_id","project_id","standard_id","obligation_id","object_id","lifecycle"] { properties.insert(key.into(),id()); }
+            properties.insert("status".into(),json!({"type":"string","enum":["virtually_supported","open_gap","not_applicable"]}));
+        }
+        "project_state_standard_gaps" => { for key in ["program_id","project_id","standard_id"] { properties.insert(key.into(),id()); } }
+        _ => {}
+    }
+    json!({"type":"object","properties":properties,"required":required,"additionalProperties":false})
+}
+
 fn call_project_state(name: &str, args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     if name == "project_state_guidance" {
         return Ok(guidance_result("project-state", args));
     }
     if name == "project_state_doctor" {
-        return Ok(json!({
-            "schema":"narada.project_state.doctor.v1","status":"ok","server_name":"project-state-mcp",
-            "implementation":"rust-native","project_root":root.to_string_lossy(),"virtual_only":true,
-            "read_only":true,"cli_exists":false,"cli_path":null,"command_count":PROJECT_STATE_COMMANDS.len()
-        }));
+        let mut result = project_state_authority::doctor(root);
+        result["server_name"] = json!("project-state-mcp");
+        result["command_count"] = json!(PROJECT_STATE_COMMANDS.len());
+        return Ok(result);
     }
     if name == "project_state_command_map" {
         return Ok(json!({
@@ -483,66 +510,11 @@ fn call_project_state(name: &str, args: &Map<String, Value>, root: &Path) -> Res
         .iter()
         .find(|(tool, _)| *tool == name)
         .ok_or_else(|| diagnostic("unknown_tool", &format!("unknown_tool:{name}")))?;
-    let argv = project_cli_args(name, args)?;
-    Ok(json!({
-        "schema":"narada.project_state.cli_result.v1","status":"ok","tool":name,"cli_command":cli,
-        "read_only":true,"virtual_only":true,"mutation_performed":false,"implementation":"rust-native",
-        "result":{"args":argv,"project_root":root.to_string_lossy()}
-    }))
-}
-
-fn project_cli_args(name: &str, args: &Map<String, Value>) -> Result<Vec<String>, Value> {
-    let (mut argv, required) = match name {
-        "project_state_program_list" => (vec!["program".to_string(), "list".to_string()], None),
-        "project_state_program_show" => (
-            vec!["program".to_string(), "show".to_string()],
-            Some("program_id"),
-        ),
-        "project_state_project_list" => (vec!["project".to_string(), "list".to_string()], None),
-        "project_state_project_show" => (
-            vec!["project".to_string(), "show".to_string()],
-            Some("project_id"),
-        ),
-        "project_state_matrix" => (vec!["matrix".to_string()], None),
-        "project_state_gaps" => (vec!["gaps".to_string()], None),
-        "project_state_handoff" => (vec!["handoff".to_string()], None),
-        "project_state_standards_list" => (vec!["standards".to_string(), "list".to_string()], None),
-        "project_state_standard_show" => (
-            vec!["standards".to_string(), "show".to_string()],
-            Some("standard_id"),
-        ),
-        "project_state_applicability" => (vec!["applicability".to_string()], None),
-        "project_state_standard_trace" => (vec!["trace".to_string()], None),
-        "project_state_standard_gaps" => (vec!["standards".to_string(), "gaps".to_string()], None),
-        "project_state_validate" => (vec!["validate".to_string()], None),
-        _ => return Err(diagnostic("unknown_tool", &format!("unknown_tool:{name}"))),
-    };
-    if let Some(key) = required {
-        argv.push(require_string(args, key)?);
-    }
-    for (key, flag) in [
-        ("program_id", "--program"),
-        ("project_id", "--project"),
-        ("object_id", "--object"),
-        ("lifecycle", "--lifecycle"),
-        ("selection", "--selection"),
-        ("standard_id", "--standard"),
-        ("obligation_id", "--obligation"),
-        ("status", "--status"),
-    ] {
-        if required == Some(key) {
-            continue;
-        }
-        if let Some(value) = args
-            .get(key)
-            .and_then(Value::as_str)
-            .filter(|v| !v.trim().is_empty())
-        {
-            argv.push(flag.to_string());
-            argv.push(value.to_string());
-        }
-    }
-    Ok(argv)
+    let mut result = project_state_authority::call(name, args, root)?;
+    result["tool"] = json!(name);
+    result["cli_command"] = json!(cli);
+    result["project_root"] = json!(root.to_string_lossy());
+    Ok(result)
 }
 
 fn lifecycle_command_map() -> Vec<Value> {
@@ -843,17 +815,31 @@ mod tests {
 
     #[test]
     fn project_state_remains_virtual_and_argument_bounded() {
+        use sha2::{Digest, Sha256};
+        let root = std::env::temp_dir().join(format!("narada-project-state-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("tmp")).unwrap();
+        std::fs::create_dir_all(root.join("cad/nrc600/project_state")).unwrap();
+        let source = b"-- canonical project-state fixture";
+        std::fs::write(root.join("cad/nrc600/project_state/nrc600_project_state.sql"), source).unwrap();
+        let digest = Sha256::digest(source).iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+        std::fs::write(root.join("tmp/nrc600_project_state.json"), serde_json::to_vec(&json!({
+            "schema":"narada.project_state.registry.v5","source_sha256":digest,"project_id":"demo-project",
+            "programs":[{"id":"demo"}],"projects":[{"id":"demo-project"}],"program_memberships":[{"program_id":"demo","project_id":"demo-project"}],
+            "objects":[],"standards":[],"standard_applicability":[],"obligations":[],"obligation_mappings":[],"standard_gaps":[],"action_claims":[]
+        })).unwrap()).unwrap();
         let mut args = Map::new();
         args.insert("program_id".to_string(), json!("demo"));
         let result = call_tool(
             "project-state",
             "project_state_program_show",
             &args,
-            Path::new("C:/site"),
+            &root,
         )
         .unwrap();
         assert_eq!(result["status"], "ok");
         assert_eq!(result["virtual_only"], true);
-        assert_eq!(result["result"]["args"][2], "demo");
+        assert_eq!(result["source_hash_verified"], true);
+        assert_eq!(result["result"]["program"]["id"], "demo");
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

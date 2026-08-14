@@ -1905,6 +1905,67 @@ function runSiteLifecycleAuthorityParity() {
   }
 }
 
+function runProjectStateNativeProof() {
+  const sourceRoot = process.env.NARADA_PROJECT_STATE_FIXTURE_ROOT ?? join(process.env.USERPROFILE ?? '', 'src', 'narada.space');
+  const sourceSql = join(sourceRoot, 'cad', 'nrc600', 'project_state', 'nrc600_project_state.sql');
+  const sourceProjection = join(sourceRoot, 'tmp', 'nrc600_project_state.json');
+  if (!existsSync(sourceSql) || !existsSync(sourceProjection)) throw new Error('project_state.native_fixture_missing:' + sourceRoot);
+  const root = mkdtempSync(join(tmpdir(), 'narada-project-state-native-proof-'));
+  try {
+    mkdirSync(join(root, 'cad', 'nrc600', 'project_state'), { recursive: true });
+    mkdirSync(join(root, 'tmp'), { recursive: true });
+    writeFileSync(join(root, 'cad', 'nrc600', 'project_state', 'nrc600_project_state.sql'), readFileSync(sourceSql));
+    writeFileSync(join(root, 'tmp', 'nrc600_project_state.json'), readFileSync(sourceProjection));
+    const payload = JSON.parse(readFileSync(sourceProjection, 'utf8'));
+    const program = payload.programs?.[0];
+    const project = payload.projects?.find((item) => item.id === payload.project_id) ?? payload.projects?.[0];
+    const object = payload.objects?.[0];
+    const lifecycle = object?.cells?.[0]?.lifecycle;
+    const standard = payload.standards?.[0];
+    const applicability = payload.standard_applicability?.[0];
+    const mapping = payload.obligation_mappings?.[0];
+    const requests = [
+      { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} },
+      { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'project_state_guidance', arguments: {} } },
+      { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'project_state_doctor', arguments: {} } },
+      { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'project_state_command_map', arguments: {} } },
+      { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'project_state_program_list', arguments: {} } },
+      { jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'project_state_program_show', arguments: { program_id: program.id } } },
+      { jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'project_state_project_list', arguments: { program_id: program.id } } },
+      { jsonrpc: '2.0', id: 8, method: 'tools/call', params: { name: 'project_state_project_show', arguments: { project_id: project.id } } },
+      { jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'project_state_matrix', arguments: { project_id: project.id, object_id: object.id, lifecycle } } },
+      { jsonrpc: '2.0', id: 10, method: 'tools/call', params: { name: 'project_state_gaps', arguments: { program_id: program.id, project_id: project.id } } },
+      { jsonrpc: '2.0', id: 11, method: 'tools/call', params: { name: 'project_state_handoff', arguments: { program_id: program.id, project_id: project.id } } },
+      { jsonrpc: '2.0', id: 12, method: 'tools/call', params: { name: 'project_state_standards_list', arguments: { selection: standard.selection } } },
+      { jsonrpc: '2.0', id: 13, method: 'tools/call', params: { name: 'project_state_standard_show', arguments: { standard_id: standard.id } } },
+      { jsonrpc: '2.0', id: 14, method: 'tools/call', params: { name: 'project_state_applicability', arguments: { project_id: applicability.project_id, standard_id: applicability.standard_id, status: applicability.applicability } } },
+      { jsonrpc: '2.0', id: 15, method: 'tools/call', params: { name: 'project_state_standard_trace', arguments: { project_id: mapping.project_id, standard_id: mapping.standard_id, obligation_id: mapping.obligation_id, object_id: mapping.object_id, lifecycle: mapping.lifecycle, status: mapping.alignment_status } } },
+      { jsonrpc: '2.0', id: 16, method: 'tools/call', params: { name: 'project_state_standard_gaps', arguments: { project_id: project.id } } },
+      { jsonrpc: '2.0', id: 17, method: 'tools/call', params: { name: 'project_state_validate', arguments: {} } },
+      { jsonrpc: '2.0', id: 18, method: 'tools/call', params: { name: 'project_state_program_show', arguments: { program_id: '__missing__' } } },
+    ];
+    const responses = runMailbox(executable, ['--surface-id', 'project-state', '--site-root', root], requests, root);
+    const tools = responses.find((response) => response.id === 1)?.result?.tools ?? [];
+    if (tools.length !== 16) throw new Error('project_state.native_tool_count_invalid:' + tools.length);
+    for (const tool of tools) if (!tool.inputSchema?.title || tool.inputSchema?.additionalProperties !== false) throw new Error('project_state.native_schema_invalid:' + tool.name);
+    for (let id = 2; id <= 17; id += 1) if (responses.find((response) => response.id === id)?.error) throw new Error('project_state.native_tool_failed:' + id);
+    const doctor = mailboxStructured(responses, 3, 'rust');
+    const programs = mailboxStructured(responses, 5, 'rust');
+    const matrixResult = mailboxStructured(responses, 9, 'rust');
+    const handoff = mailboxStructured(responses, 11, 'rust');
+    if (doctor.source_hash_verified !== true || doctor.node_required !== false || programs.source_hash_verified !== true || programs.result?.programs?.length !== payload.programs.length) throw new Error('project_state.native_projection_authority_invalid');
+    if (matrixResult.result?.objects?.length !== 1 || handoff.result?.schema !== 'narada.project_state.virtual_handoff.v1') throw new Error('project_state.native_query_projection_invalid');
+    if (!responses.find((response) => response.id === 18)?.error) throw new Error('project_state.native_missing_record_not_refused');
+
+    writeFileSync(join(root, 'cad', 'nrc600', 'project_state', 'nrc600_project_state.sql'), '-- changed source');
+    const stale = runMailbox(executable, ['--surface-id', 'project-state', '--site-root', root], [{ jsonrpc: '2.0', id: 19, method: 'tools/call', params: { name: 'project_state_program_list', arguments: {} } }], root);
+    if (!stale.find((response) => response.id === 19)?.error) throw new Error('project_state.native_stale_projection_not_refused');
+    return { status: 'passed', implementation: 'rust-native', verified: ['all_16_tools', 'named_closed_schemas', 'source_hash_freshness', 'normal_queries', 'filters', 'matrix', 'virtual_handoff', 'validate', 'not_found', 'stale_projection_refusal', 'no_node_or_bun_runtime'] };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 function runSiteRegistryParity() {
   const root = mkdtempSync(join(tmpdir(), 'narada-site-registry-native-'));
   const userSiteRoot = join(root, 'Narada');
@@ -2818,6 +2879,7 @@ const operatorRoutingParity = runSlice('operator-routing', runOperatorRoutingPar
 const siteInboxParity = runSlice('site-inbox', runSiteInboxParity);
 const siteLifecycleAuthorityParity = runSlice('site-lifecycle', runSiteLifecycleAuthorityParity);
 const siteRegistryParity = runSlice('site-registry', runSiteRegistryParity);
+const projectStateParity = runSlice('project-state', runProjectStateNativeProof);
 const calendarParity = runSlice('calendar', runCalendarParity);
 const calendarAuthorityBridge = runSlice('calendar', runCalendarAuthorityBridge);
 const calendarNativeGraphParity = runSlice('calendar', runCalendarNativeGraphParity);
@@ -2859,6 +2921,7 @@ process.stdout.write(JSON.stringify({
   site_inbox_parity: siteInboxParity,
   site_lifecycle_authority_parity: siteLifecycleAuthorityParity,
   site_registry_parity: siteRegistryParity,
+  project_state_parity: projectStateParity,
   calendar_parity: calendarParity,
   calendar_authority_bridge: calendarAuthorityBridge,
   calendar_native_graph_parity: calendarNativeGraphParity,
