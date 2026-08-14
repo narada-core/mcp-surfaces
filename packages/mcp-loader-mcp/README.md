@@ -86,13 +86,13 @@ The payload's declared creator and id namespace are lineage hints and accidental
 
 `pnpm run build:native` publishes the full contract-compatible Rust loader under `dist/native/versions/<build-fingerprint>/` on Windows and atomically selects it through `dist/native/current.json`; no mutable unversioned executable is published or accepted. The native path covers the public MCP surface, Site-fabric resolution and policy checks, child supervision, initialization and tool routing, bounded timeouts, lifecycle diagnostics, freshness, stable logical handles across replayable child restart, inventory, observation, and bounded output references.
 
-The Rust implementation is admitted for the Narada native runtime profile. The TypeScript loader remains the explicit fallback and rollback path; select the native implementation for parity testing with MCP_LOADER_NATIVE=1. The existing Node/Bun behavior suite is parameterized to exercise both implementations.
+The Rust implementation is the sole admitted loader authority in every runtime profile. The loader does not guess, locate, or substitute Node/Bun runtimes and has no compiled-in TypeScript surface registry. It may still execute an external runtime when that exact command is part of the admitted Site-fabric declaration; that is child execution, not a loader implementation fallback.
 
-For a registrar-materialized native child, the Rust loader deliberately unwraps the native runtime-proxy record and launches `--child-command` directly. The carrier-level runtime proxy remains responsible for materialization preflight; mcp-loader is responsible for the attached native child's policy, ownership, supervision, and lifecycle. Bun/Node materializations retain the proxy as the child runtime. In native modes, `--entrypoint` is retained as a validated identity field and must match `--child-command`; `--child-applet` is recorded explicitly for multicall children.
+For a registrar-materialized native child, the Rust loader deliberately unwraps the native runtime-proxy record and launches `--child-command` directly. The carrier-level runtime proxy remains responsible for materialization preflight; mcp-loader is responsible for the attached child's policy, ownership, supervision, and lifecycle. In native modes, `--entrypoint` is retained as a validated identity field and must match `--child-command`; `--child-applet` is recorded explicitly for multicall children.
 
-Run pnpm run test:node and pnpm run test:bun for the TypeScript contract paths, pnpm run test:native for the focused Rust lifecycle test, and from this package run the full native suite with:
+Run the authoritative Rust suite with:
 
-    $env:MCP_LOADER_NATIVE='1'; node dist/test/protocol-smoke.test.js; node dist/test/mcp-loader-mcp.test.js
+    cargo test --locked --manifest-path native/Cargo.toml
 
 The bounded loader benchmark is pnpm run benchmark:loader. It measures Node/Node, Bun/Bun, and Rust/Node over the same initialize, tools/list, explicit stdio attach, repeated tools/call, and detach workload. It also reports peak loader memory, attached-child memory, and their combined peak; on Windows these are private bytes, while Unix uses RSS. Override NARADA_LOADER_BENCHMARK_SAMPLES and NARADA_LOADER_BENCHMARK_WARM_CALLS for a finite sample size.
 

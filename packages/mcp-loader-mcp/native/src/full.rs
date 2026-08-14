@@ -32,6 +32,7 @@ const SERVER_NAME: &str = "mcp-loader-mcp";
 const SERVER_VERSION: &str = "0.1.0";
 const DEFAULT_MAX_CONNECTIONS: usize = 8;
 const DEFAULT_MAX_REQUEST_BYTES: usize = 1024 * 1024;
+const MAX_WIRE_HEADER_BYTES: usize = 64 * 1024;
 const DEFAULT_MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 const DEFAULT_ATTACH_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_RUNTIME_LEASE_MS: u64 = 30_000;
@@ -91,11 +92,23 @@ struct ChildSpec {
     args: Vec<String>,
 }
 
+type PendingRequests = Arc<Mutex<HashMap<u64, mpsc::Sender<Result<Value, Diagnostic>>>>>;
+type RuntimeMetadata = (
+    String,
+    String,
+    Value,
+    Value,
+    Option<Value>,
+    Option<String>,
+    Option<String>,
+    Vec<String>,
+);
+
 struct ChildSession {
     spec: ChildSpec,
     child: Arc<Mutex<Child>>,
     stdin: Arc<Mutex<ChildStdin>>,
-    pending: Arc<Mutex<HashMap<u64, mpsc::Sender<Result<Value, Diagnostic>>>>>,
+    pending: PendingRequests,
     next_id: AtomicU64,
     closed: Arc<AtomicBool>,
     killed: Arc<AtomicBool>,
@@ -212,7 +225,6 @@ struct Policy {
 }
 
 struct LoaderState {
-    options: Options,
     policy: Policy,
     surface_root: String,
     workspace_root: String,
@@ -230,21 +242,29 @@ struct WireReader<R> {
     reader: R,
     buffer: Vec<u8>,
     eof: bool,
+    max_message_bytes: usize,
 }
 
 impl<R: Read> WireReader<R> {
-    fn new(reader: R) -> Self {
+    fn new(reader: R, max_message_bytes: usize) -> Self {
         Self {
             reader,
             buffer: Vec::new(),
             eof: false,
+            max_message_bytes,
         }
     }
 
     fn next(&mut self) -> io::Result<Option<(Value, bool)>> {
         loop {
-            if let Some(message) = try_parse_wire(&mut self.buffer)? {
+            if let Some(message) = try_parse_wire(&mut self.buffer, self.max_message_bytes)? {
                 return Ok(Some(message));
+            }
+            if self.buffer.len() > self.max_message_bytes + MAX_WIRE_HEADER_BYTES {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "MCP message exceeds configured byte limit",
+                ));
             }
             if self.eof {
                 if self.buffer.iter().all(|byte| byte.is_ascii_whitespace()) {
@@ -267,9 +287,22 @@ impl<R: Read> WireReader<R> {
     }
 }
 
-fn try_parse_wire(buffer: &mut Vec<u8>) -> io::Result<Option<(Value, bool)>> {
-    while matches!(buffer.first(), Some(b'\r' | b'\n' | b' ' | b'\t')) {
-        buffer.remove(0);
+fn try_parse_wire(
+    buffer: &mut Vec<u8>,
+    max_message_bytes: usize,
+) -> io::Result<Option<(Value, bool)>> {
+    if buffer.len() > max_message_bytes.saturating_add(MAX_WIRE_HEADER_BYTES) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "MCP message exceeds configured byte limit",
+        ));
+    }
+    let whitespace = buffer
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(buffer.len());
+    if whitespace > 0 {
+        buffer.drain(..whitespace);
     }
     if buffer.is_empty() {
         return Ok(None);
@@ -277,8 +310,20 @@ fn try_parse_wire(buffer: &mut Vec<u8>) -> io::Result<Option<(Value, bool)>> {
     if buffer.len() >= 15 && buffer[..15].eq_ignore_ascii_case(b"content-length:") {
         let (header_end, separator_len) = match find_header_end(buffer) {
             Some(found) => found,
+            None if buffer.len() > MAX_WIRE_HEADER_BYTES => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "MCP headers exceed configured byte limit",
+                ))
+            }
             None => return Ok(None),
         };
+        if header_end > MAX_WIRE_HEADER_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "MCP headers exceed configured byte limit",
+            ));
+        }
         let header = String::from_utf8_lossy(&buffer[..header_end]);
         let length = header
             .lines()
@@ -291,6 +336,12 @@ fn try_parse_wire(buffer: &mut Vec<u8>) -> io::Result<Option<(Value, bool)>> {
                 }
             })
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing Content-Length"))?;
+        if length > max_message_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "MCP body exceeds configured byte limit",
+            ));
+        }
         let body_start = header_end + separator_len;
         let body_end = body_start.saturating_add(length);
         if buffer.len() < body_end {
@@ -303,8 +354,20 @@ fn try_parse_wire(buffer: &mut Vec<u8>) -> io::Result<Option<(Value, bool)>> {
     }
     let newline = match buffer.iter().position(|byte| *byte == b'\n') {
         Some(position) => position,
+        None if buffer.len() > max_message_bytes => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "MCP JSONL message exceeds configured byte limit",
+            ))
+        }
         None => return Ok(None),
     };
+    if newline > max_message_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "MCP JSONL message exceeds configured byte limit",
+        ));
+    }
     let mut line = buffer.drain(..=newline).collect::<Vec<_>>();
     if line.last() == Some(&b'\n') {
         line.pop();
@@ -344,7 +407,12 @@ fn write_wire<W: Write>(writer: &mut W, value: &Value, framed: bool) -> io::Resu
 }
 
 impl ChildSession {
-    fn spawn(spec: ChildSpec, env_map: &HashMap<String, String>) -> Result<Self, Diagnostic> {
+    #[allow(clippy::while_let_loop)]
+    fn spawn(
+        spec: ChildSpec,
+        env_map: &HashMap<String, String>,
+        max_response_bytes: usize,
+    ) -> Result<Self, Diagnostic> {
         let mut command = Command::new(&spec.command);
         command
             .args(&spec.args)
@@ -377,14 +445,13 @@ impl ChildSession {
         let pid = child.id();
         let child = Arc::new(Mutex::new(child));
         let stdin = Arc::new(Mutex::new(stdin));
-        let pending: Arc<Mutex<HashMap<u64, mpsc::Sender<Result<Value, Diagnostic>>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+        let pending: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
         let closed = Arc::new(AtomicBool::new(false));
         let killed = Arc::new(AtomicBool::new(false));
         let reader_pending = Arc::clone(&pending);
         let reader_closed = Arc::clone(&closed);
         thread::spawn(move || {
-            let mut reader = WireReader::new(stdout);
+            let mut reader = WireReader::new(stdout, max_response_bytes);
             loop {
                 match reader.next() {
                     Ok(Some((message, _))) => {
@@ -890,7 +957,6 @@ fn run_server(options: Options) -> Result<(), Diagnostic> {
     let policy = build_policy(&options, &surface_root, &workspace_root);
     let standalone_ambient_attachment = options.standalone_ambient_attachment;
     let mut state = LoaderState {
-        options,
         policy,
         surface_root,
         workspace_root,
@@ -904,7 +970,7 @@ fn run_server(options: Options) -> Result<(), Diagnostic> {
         standalone_ambient_attachment,
     };
     let stdin = io::stdin();
-    let mut reader = WireReader::new(stdin.lock());
+    let mut reader = WireReader::new(stdin.lock(), state.policy.max_request_bytes);
     let stdout = io::stdout();
     let mut writer = stdout.lock();
     while let Some((request, framed)) = reader.next().map_err(|error| {
@@ -948,7 +1014,7 @@ fn build_policy(options: &Options, surface_root: &str, workspace_root: &str) -> 
         .clone()
         .unwrap_or_else(|| vec![workspace_root.to_string()]);
     if let Ok(configured) = env::var("NARADA_MCP_ALLOWED_SITE_ROOTS") {
-        site_roots.extend(configured.split(',').filter_map(|item| optional_str(item)));
+        site_roots.extend(configured.split(',').filter_map(optional_str));
     }
     if let Some(profile) = user_profile.as_deref() {
         site_roots.push(normalize_path(&join_path(profile, "Narada")));
@@ -958,7 +1024,7 @@ fn build_policy(options: &Options, surface_root: &str, workspace_root: &str) -> 
         .clone()
         .unwrap_or_else(|| vec![surface_root.to_string(), "{site_root}/tools/".to_string()]);
     if let Ok(configured) = env::var("NARADA_MCP_ALLOWED_ENTRYPOINT_PREFIXES") {
-        prefixes.extend(configured.split(',').filter_map(|item| optional_str(item)));
+        prefixes.extend(configured.split(',').filter_map(optional_str));
     }
     if let Some(profile) = user_profile.as_deref() {
         prefixes.push(normalize_path(&join_path(profile, "Narada/tools")));
@@ -1114,6 +1180,14 @@ fn dispatch(request: &Value, state: &mut LoaderState) -> Result<Value, Diagnosti
         .and_then(Value::as_str)
         .unwrap_or_default();
     let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
+    if let Some(version) = params.pointer("/_meta/io.modelcontextprotocol~1protocolVersion") {
+        if version.as_str() != Some(MODERN_PROTOCOL_VERSION) {
+            return Err(Diagnostic::new(
+                "protocol_version_unsupported",
+                format!("protocol_version_unsupported:{version}"),
+            ));
+        }
+    }
     if is_modern_request(&params) {
         validate_modern_request(&params)?;
         return match method {
@@ -1148,11 +1222,28 @@ fn dispatch_legacy(
                 .as_object()
                 .cloned()
                 .ok_or_else(|| Diagnostic::new("invalid_tool_call", "invalid_tool_call"))?;
+            for key in object.keys() {
+                if key != "name" && key != "arguments" && key != "_meta" {
+                    return Err(Diagnostic::new(
+                        "invalid_tool_call_parameter",
+                        format!("invalid_tool_call_parameter:{key}"),
+                    ));
+                }
+            }
             let name = required_string(&object, "name", "missing_tool_name")?;
             let args = object
                 .get("arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
+            let tool = list_tools()
+                .into_iter()
+                .find(|tool| tool.get("name").and_then(Value::as_str) == Some(name.as_str()))
+                .ok_or_else(|| Diagnostic::new("unknown_tool", format!("unknown_tool:{name}")))?;
+            validate_input_schema(
+                tool.get("inputSchema").unwrap_or(&Value::Null),
+                &args,
+                "arguments",
+            )?;
             let result = call_tool(&name, args, state)?;
             Ok(call_tool_result(result))
         }
@@ -1228,11 +1319,7 @@ fn normalize_path(raw: &str) -> String {
             Component::Normal(part) => parts.push(part.to_string_lossy().to_string()),
         }
     }
-    let mut output = if raw.contains(':') && raw.as_bytes().get(1) == Some(&b':') {
-        String::new()
-    } else {
-        String::new()
-    };
+    let mut output = String::new();
     if raw.len() >= 2 && raw.as_bytes()[1] == b':' {
         output.push_str(&raw[..2]);
     }
@@ -1543,10 +1630,14 @@ fn find_site_server(
     Ok(matches.into_iter().next())
 }
 
-fn shared_surface_registry(surface_id: &str, surface_root: &str) -> Option<(String, Vec<String>)> {
-    let entrypoint = |package: &str, file: &str| {
-        join_path(surface_root, &format!("{}/dist/src/{}", package, file))
-    };
+fn shared_surface_registry(
+    _surface_id: &str,
+    _surface_root: &str,
+) -> Option<(String, Vec<String>)> {
+    // Site fabric is the sole launch authority. Keeping a second compiled-in
+    // registry made stale TypeScript paths silently executable after migration.
+    None
+    /* Historical registry intentionally disabled; remove after downstream callers settle.
     let result = match surface_id {
         "operator-console-overlay" => (
             entrypoint("operator-console-overlay-mcp", "main.js"),
@@ -1684,7 +1775,7 @@ fn shared_surface_registry(surface_id: &str, surface_root: &str) -> Option<(Stri
         "quota-meter" => (entrypoint("quota-meter-mcp", "main.js"), vec![]),
         _ => return None,
     };
-    Some((result.0, result.1.into_iter().map(String::from).collect()))
+    Some((result.0, result.1.into_iter().map(String::from).collect())) */
 }
 
 fn extract_runtime_entrypoint(command: &str, args: &[String]) -> Option<String> {
@@ -1761,22 +1852,7 @@ fn runtime_matches(requirements: &[String], runtime_kind: Option<&str>) -> bool 
             .is_some_and(|kind| requirements.iter().any(|requirement| requirement == kind))
 }
 
-fn runtime_metadata(
-    site_root: &str,
-    surface_id: &str,
-) -> Result<
-    (
-        String,
-        String,
-        Value,
-        Value,
-        Option<Value>,
-        Option<String>,
-        Option<String>,
-        Vec<String>,
-    ),
-    Diagnostic,
-> {
+fn runtime_metadata(site_root: &str, surface_id: &str) -> Result<RuntimeMetadata, Diagnostic> {
     let bundle = read_site_fabric(site_root)?;
     let matched = find_site_server(
         bundle
@@ -2141,14 +2217,14 @@ fn tool_definition(
     json!({
         "name":name,
         "description":description,
-        "annotations":{"title":name,"readOnlyHint":read_only,"destructiveHint":destructive,"idempotentHint":false,"openWorldHint":true},
+        "annotations":{"title":name,"readOnlyHint":read_only,"destructiveHint":destructive,"idempotentHint":read_only,"openWorldHint":true},
         "inputSchema":{"type":"object","properties":properties,"additionalProperties":false,"required":required},
         "outputSchema":{"type":"object","additionalProperties":true}
     })
 }
 
 fn list_tools() -> Vec<Value> {
-    vec![
+    let mut tools = vec![
         guidance_definition(),
         tool_definition("mcp_loader_runtime_status","Inspect whether this loader process is current relative to its runtime, source, dependency, and build-configuration evidence and whether the loader process itself must be restarted.",json!({}),&[],true,false),
         tool_definition("mcp_loader_policy_inspect","Inspect the policy governing runtime MCP surface loading.",json!({}),&[],true,false),
@@ -2157,7 +2233,7 @@ fn list_tools() -> Vec<Value> {
         tool_definition("mcp_loader_runtime_observation","Return the normalized V2 runtime observation for one attached surface, including stable logical identity, generation state, lifecycle eligibility, contract digests, and bounded actuator guidance.",json!({"connection_id":{"type":"string"},"carrier_kind":{"type":"string"},"manifest_digest":{"type":"string"}}),&["connection_id","carrier_kind"],true,false),
         tool_definition("mcp_loader_list_site_surfaces","List resolvable MCP surfaces declared in a site's local fabric. Runtime metadata is opt-in.",json!({"site_root":{"type":"string"},"include_runtime_metadata":{"type":"boolean","default":false}}),&["site_root"],true,false),
         tool_definition("mcp_loader_site_fabric_diagnostics","Inspect site MCP fabric provenance and classify shared-registry drift or intentional entrypoint overrides.",json!({"site_root":{"type":"string"}}),&["site_root"],true,false),
-        tool_definition("mcp_loader_site_tool_inventory_check","Compare site fabric declarations with fresh child tools/list responses; compact output includes per-finding status and tool-name deltas, runtime-skipped surfaces produce partial coverage, and an immutable observation_ref is materialized for Registrar conformance checks.",json!({"site_root":{"type":"string"},"surface_ids":{"type":"array","items":{"type":"string"}},"runtime_kind":{"type":"string"},"include_ok":{"type":"boolean"}}),&["site_root"],true,false),
+        tool_definition("mcp_loader_site_tool_inventory_check","Compare site fabric declarations with fresh child tools/list responses; compact output includes per-finding status and tool-name deltas, runtime-skipped surfaces produce partial coverage, and an immutable observation_ref is materialized for Registrar conformance checks.",json!({"site_root":{"type":"string"},"surface_ids":{"type":"array","items":{"type":"string"}},"runtime_kind":{"type":"string"},"include_ok":{"type":"boolean"}}),&["site_root"],false,false),
         tool_definition("mcp_loader_attach_surface","Spawn and initialize an exactly admitted stdio MCP binding, return a connection id, and report loader-managed restartability.",json!({"site_root":{"type":"string"},"binding_id":{"type":"string"},"surface_id":{"type":"string"},"runtime_kind":{"type":"string"},"entrypoint":{"type":"string"},"args":{"type":"array","items":{"type":"string"}}}),&["site_root","binding_id"],false,false),
         tool_definition("mcp_loader_open_surface","Open an exactly admitted binding and return a stable logical handle for calls across loader-managed child generations. Runtime metadata is opt-in.",json!({"site_root":{"type":"string"},"binding_id":{"type":"string"},"surface_id":{"type":"string"},"runtime_kind":{"type":"string"},"entrypoint":{"type":"string"},"args":{"type":"array","items":{"type":"string"}},"include_runtime_metadata":{"type":"boolean","default":false}}),&["site_root","binding_id"],false,false),
         tool_definition("mcp_loader_resume_or_open_surface","Resume the current loader-process handle for a binding when present, otherwise reopen the admitted binding and return a fresh handle.",json!({"site_root":{"type":"string"},"binding_id":{"type":"string"},"surface_id":{"type":"string"},"runtime_kind":{"type":"string"},"include_runtime_metadata":{"type":"boolean","default":false}}),&["site_root","binding_id"],false,false),
@@ -2167,10 +2243,178 @@ fn list_tools() -> Vec<Value> {
         tool_definition("mcp_loader_tool_discovery_manifest","Return canonical semantic tool names for an attached surface and flag generated aliases as non-authoritative. Compact names are the default; exact schemas and runtime metadata are opt-in.",json!({"connection_id":{"type":"string"},"compact":{"type":"boolean","default":true},"include_runtime_metadata":{"type":"boolean","default":false}}),&["connection_id"],true,false),
         tool_definition("mcp_loader_call_tool","Call a tool on an attached MCP surface. Results are bounded by default and include a typed summary; set include_runtime_metadata=true when lifecycle/freshness evidence is needed on this call.",json!({"connection_id":{"type":"string"},"tool_name":{"type":"string"},"arguments":{"type":"object"},"include_runtime_metadata":{"type":"boolean"}}),&["connection_id","tool_name"],false,false),
         tool_definition("mcp_loader_call_surface_tool","Call a tool through a stable logical surface handle. Results are bounded by default and include a typed summary; set include_runtime_metadata=true for lifecycle/freshness evidence.",json!({"surface_handle":{"type":"string"},"tool_name":{"type":"string"},"arguments":{"type":"object"},"include_runtime_metadata":{"type":"boolean"}}),&["surface_handle","tool_name"],false,false),
-        tool_definition("mcp_loader_read_result","Read a bounded page from a materialized proxied child result. The ref is bound to the same Site authority as the connection.",json!({"connection_id":{"type":"string"},"ref":{"type":"string"},"output_ref":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1},"timeout_ms":{"type":"integer","minimum":1,"maximum":15000}}),&["connection_id"],true,false),
+        tool_definition("mcp_loader_read_result","Read a bounded page from a materialized proxied child result. The ref is bound to the same Site authority as the connection.",json!({"connection_id":{"type":"string"},"ref":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":20000},"timeout_ms":{"type":"integer","minimum":1,"maximum":15000}}),&["connection_id","ref"],true,false),
         tool_definition("mcp_loader_detach","Detach and terminate an attached MCP surface.",json!({"connection_id":{"type":"string"}}),&["connection_id"],false,true),
         tool_definition("mcp_loader_surface_restart","Replace an attached MCP surface child process with a freshly initialized connection using the same site, surface, entrypoint, and args; this does not restart the agent session.",json!({"connection_id":{"type":"string"},"reason":{"type":"string"}}),&["connection_id"],false,true),
-    ]
+    ];
+    for tool in &mut tools {
+        let name = tool
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("mcp_loader_tool")
+            .to_string();
+        if let Some(schema) = tool.get_mut("inputSchema") {
+            normalize_input_schema(schema, Some(&name));
+            if let Some(object) = schema.as_object_mut() {
+                object.insert("title".into(), json!(format!("{name}.input")));
+                object.insert("additionalProperties".into(), Value::Bool(false));
+                object.entry("maxProperties").or_insert(json!(64));
+            }
+        }
+    }
+    tools
+}
+
+fn normalize_input_schema(schema: &mut Value, field: Option<&str>) {
+    let Some(object) = schema.as_object_mut() else {
+        return;
+    };
+    match object.get("type").and_then(Value::as_str) {
+        Some("string") if !object.contains_key("maxLength") && !object.contains_key("enum") => {
+            let field = field.unwrap_or_default().to_ascii_lowercase();
+            let maximum =
+                if field.contains("path") || field.contains("root") || field.contains("entrypoint")
+                {
+                    4096
+                } else if field.contains("reason") || field.contains("digest") {
+                    8192
+                } else {
+                    1024
+                };
+            object.insert("maxLength".into(), json!(maximum));
+        }
+        Some("array") if !object.contains_key("maxItems") => {
+            object.insert("maxItems".into(), json!(256));
+        }
+        Some("object") if !object.contains_key("maxProperties") => {
+            object.insert("maxProperties".into(), json!(256));
+        }
+        _ => {}
+    }
+    if let Some(properties) = object.get_mut("properties").and_then(Value::as_object_mut) {
+        for (name, child) in properties {
+            normalize_input_schema(child, Some(name));
+        }
+    }
+    if let Some(items) = object.get_mut("items") {
+        normalize_input_schema(items, field);
+    }
+}
+
+fn validate_input_schema(schema: &Value, value: &Value, path: &str) -> Result<(), Diagnostic> {
+    let invalid = |reason: String| {
+        Diagnostic::new(
+            "input_schema_validation_failed",
+            format!("input_schema_validation_failed:{path}:{reason}"),
+        )
+        .with_details(json!({"path":path,"reason":reason}))
+    };
+    if let Some(expected) = schema.get("type").and_then(Value::as_str) {
+        let matches = match expected {
+            "object" => value.is_object(),
+            "array" => value.is_array(),
+            "string" => value.is_string(),
+            "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+            "number" => value.is_number(),
+            "boolean" => value.is_boolean(),
+            "null" => value.is_null(),
+            _ => true,
+        };
+        if !matches {
+            return Err(invalid("type_mismatch".into()));
+        }
+    }
+    if let Some(allowed) = schema.get("enum").and_then(Value::as_array) {
+        if !allowed.contains(value) {
+            return Err(invalid("enum_mismatch".into()));
+        }
+    }
+    match value {
+        Value::Object(arguments) => {
+            if schema.get("additionalProperties") == Some(&Value::Bool(false)) {
+                let properties = schema.get("properties").and_then(Value::as_object);
+                if let Some(key) = arguments
+                    .keys()
+                    .find(|key| !properties.is_some_and(|map| map.contains_key(*key)))
+                {
+                    return Err(invalid(format!("unknown_field:{key}")));
+                }
+            }
+            if let Some(required) = schema.get("required").and_then(Value::as_array) {
+                if let Some(field) = required
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .find(|field| !arguments.contains_key(*field))
+                {
+                    return Err(invalid(format!("required:{field}")));
+                }
+            }
+            validate_bound(schema, arguments.len(), "maxProperties", &invalid)?;
+            if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+                for (name, value) in arguments {
+                    if let Some(child) = properties.get(name) {
+                        validate_input_schema(child, value, &format!("{path}.{name}"))?;
+                    }
+                }
+            }
+        }
+        Value::Array(items) => {
+            validate_bound(schema, items.len(), "maxItems", &invalid)?;
+            if let Some(item_schema) = schema.get("items") {
+                for (index, item) in items.iter().enumerate() {
+                    validate_input_schema(item_schema, item, &format!("{path}[{index}]"))?;
+                }
+            }
+        }
+        Value::String(text) => {
+            validate_bound(schema, text.chars().count(), "maxLength", &invalid)?;
+            if schema
+                .get("minLength")
+                .and_then(Value::as_u64)
+                .is_some_and(|minimum| text.chars().count() < minimum as usize)
+            {
+                return Err(invalid("minLength".into()));
+            }
+        }
+        Value::Number(number) => {
+            let number = number.as_f64().unwrap_or_default();
+            if schema
+                .get("minimum")
+                .and_then(Value::as_f64)
+                .is_some_and(|minimum| number < minimum)
+            {
+                return Err(invalid("minimum".into()));
+            }
+            if schema
+                .get("maximum")
+                .and_then(Value::as_f64)
+                .is_some_and(|maximum| number > maximum)
+            {
+                return Err(invalid("maximum".into()));
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn validate_bound<F>(
+    schema: &Value,
+    actual: usize,
+    key: &str,
+    invalid: &F,
+) -> Result<(), Diagnostic>
+where
+    F: Fn(String) -> Diagnostic,
+{
+    if schema
+        .get(key)
+        .and_then(Value::as_u64)
+        .is_some_and(|maximum| actual > maximum as usize)
+    {
+        return Err(invalid(key.to_string()));
+    }
+    Ok(())
 }
 
 fn guidance_result(arguments: &JsonObject, state: &LoaderState) -> Value {
@@ -2777,10 +3021,8 @@ fn attach_surface(arguments: &JsonObject, state: &mut LoaderState) -> Result<Val
         (
             normalize_path(&explicit),
             extra_args.clone(),
-            value_string(arguments.get("child_command"))
-                .or_else(|| state.options.child_command.clone())
-                .unwrap_or_else(|| default_runtime_command()),
-            "entrypoint".to_string(),
+            normalize_path(&explicit),
+            "native_entrypoint".to_string(),
         )
     } else {
         let bundle = read_site_fabric(&site_root)?;
@@ -2909,8 +3151,8 @@ fn attach_surface(arguments: &JsonObject, state: &mut LoaderState) -> Result<Val
             (
                 normalize_path(&entrypoint),
                 args.into_iter().chain(extra_args.clone()).collect(),
-                default_runtime_command(),
-                "entrypoint".to_string(),
+                normalize_path(&entrypoint),
+                "native_entrypoint".to_string(),
             )
         } else {
             return Err(Diagnostic::new(
@@ -2955,80 +3197,6 @@ fn attach_surface(arguments: &JsonObject, state: &mut LoaderState) -> Result<Val
     let response = attached_response(&connection, state);
     state.connections.insert(id, connection);
     Ok(response)
-}
-
-fn default_runtime_command() -> String {
-    resolve_javascript_runtime()
-}
-
-fn resolve_javascript_runtime() -> String {
-    let exec = env::current_exe().unwrap_or_default();
-    let exec_base = exec
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    if ["node.exe", "node", "bun.exe", "bun", "deno.exe", "deno"].contains(&exec_base.as_str()) {
-        return exec.to_string_lossy().to_string();
-    }
-    let home = env::var("USERPROFILE")
-        .or_else(|_| env::var("HOME"))
-        .unwrap_or_default();
-    let bun_candidates = if cfg!(windows) {
-        vec![
-            format!("{}\\.bun\\bin\\bun.exe", home),
-            format!("{}\\.bun\\bin\\bun", home),
-        ]
-    } else {
-        vec![format!("{}/.bun/bin/bun", home)]
-    };
-    for candidate in &bun_candidates {
-        if Path::new(candidate).is_file() {
-            return candidate.clone();
-        }
-    }
-    if cfg!(windows) {
-        let program_files =
-            env::var("PROGRAMFILES").unwrap_or_else(|_| "C:\\Program Files".to_string());
-        let program_files_x86 =
-            env::var("PROGRAMFILES(X86)").unwrap_or_else(|_| "C:\\Program Files (x86)".to_string());
-        let node_candidates = [
-            format!("{}\\nodejs\\node.exe", program_files),
-            format!("{}\\nodejs\\node.exe", program_files_x86),
-        ];
-        for candidate in &node_candidates {
-            if Path::new(candidate).is_file() {
-                return candidate.clone();
-            }
-        }
-    }
-    let path_var = env::var("PATH")
-        .or_else(|_| env::var("Path"))
-        .or_else(|_| env::var("path"))
-        .unwrap_or_default();
-    let separator = if cfg!(windows) { ';' } else { ':' };
-    let names = if cfg!(windows) {
-        vec!["bun.exe", "bun", "node.exe", "node"]
-    } else {
-        vec!["bun", "node"]
-    };
-    for dir in path_var.split(separator) {
-        let dir = dir.trim();
-        if dir.is_empty() {
-            continue;
-        }
-        for name in &names {
-            let candidate = Path::new(dir).join(name);
-            if candidate.is_file() {
-                return candidate.to_string_lossy().to_string();
-            }
-        }
-    }
-    if cfg!(windows) {
-        "node.exe".to_string()
-    } else {
-        "node".to_string()
-    }
 }
 
 fn is_runtime_proxy_command(command: &str) -> bool {
@@ -3084,21 +3252,10 @@ fn extract_proxy_child_args(args: &[String]) -> Option<Vec<String>> {
 }
 
 fn resolve_child_command(command: &str) -> String {
-    let base = command
-        .replace('\\', "/")
-        .rsplit('/')
-        .next()
-        .unwrap_or(command)
-        .to_ascii_lowercase();
-    if ["bun", "bun.exe", "node", "node.exe"].contains(&base.as_str())
-        && !Path::new(command).is_absolute()
-    {
-        resolve_javascript_runtime()
-    } else {
-        command.to_string()
-    }
+    command.to_string()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn open_connection(
     state: &LoaderState,
     site_root: String,
@@ -3140,10 +3297,7 @@ fn open_connection(
         &generation_id,
         &ownership_marker,
     );
-    let session = match ChildSession::spawn(child_spec, &env_map) {
-        Ok(session) => session,
-        Err(error) => return Err(error),
-    };
+    let session = ChildSession::spawn(child_spec, &env_map, state.policy.max_response_bytes)?;
     let (server_info, tools_result) = match session.request(
         "server/discover",
         modern_request_params(),
@@ -3826,7 +3980,7 @@ fn find_connection_for_handle<'a>(
         .values()
         .filter(|connection| connection.logical_connection_id == handle.logical_connection_id)
         .collect();
-    matches.sort_by(|left, right| right.attached_ms.cmp(&left.attached_ms));
+    matches.sort_by_key(|connection| std::cmp::Reverse(connection.attached_ms));
     matches
         .iter()
         .find(|connection| connection_live(connection))
@@ -4460,7 +4614,7 @@ fn bounded_page(text: &str, offset: usize, limit: usize, max_bytes: usize) -> (S
     let mut end = (offset + limit).min(chars.len());
     while end > offset {
         let chunk: String = chars[offset..end].iter().collect();
-        if chunk.as_bytes().len() <= max_bytes {
+        if chunk.len() <= max_bytes {
             return (chunk, end);
         }
         end -= 1;
@@ -4490,7 +4644,7 @@ fn build_bounded_result(
     let full_text = pretty_json(value);
     let inline_limit = DEFAULT_LOADER_RESULT_INLINE_LIMIT;
     if utf16_len(&full_text) <= inline_limit
-        && full_text.as_bytes().len() + json_byte_len(value) <= MAX_INLINE_RESPONSE_BYTES
+        && full_text.len() + json_byte_len(value) <= MAX_INLINE_RESPONSE_BYTES
     {
         return Ok(
             json!({"content":[{"type":"text","text":full_text,"annotations":{"audience":["assistant"]}}],"structuredContent":value,"isError":if is_error {Value::Bool(true)} else {Value::Null}}),
@@ -4673,7 +4827,7 @@ fn payload_observation(
     );
     let reference = format!("mcp_payload:{}@v1", id);
     let payload_json = stable_json(observation);
-    let payload_size = payload_json.as_bytes().len();
+    let payload_size = payload_json.len();
     if payload_size > state.policy.max_response_bytes {
         return Err(Diagnostic::new(
             "payload_too_large",
@@ -4840,7 +4994,7 @@ fn site_tool_inventory(
                     let observed = sorted_unique(&raw_observed);
                     let duplicate_observed = duplicate_strings(&raw_observed);
                     let read_only: Vec<String> = sorted_unique(
-                        &observed_definitions
+                        observed_definitions
                             .iter()
                             .filter(|tool| {
                                 tool.get("annotations")
@@ -4855,7 +5009,7 @@ fn site_tool_inventory(
                             .as_slice(),
                     );
                     let mutating: Vec<String> = sorted_unique(
-                        &observed_definitions
+                        observed_definitions
                             .iter()
                             .filter(|tool| {
                                 tool.get("annotations")
@@ -4870,7 +5024,7 @@ fn site_tool_inventory(
                             .as_slice(),
                     );
                     let unclassified: Vec<String> = sorted_unique(
-                        &observed_definitions
+                        observed_definitions
                             .iter()
                             .filter(|tool| {
                                 tool.get("annotations")
@@ -5041,10 +5195,11 @@ fn call_tool(name: &str, arguments: Value, state: &mut LoaderState) -> Result<Va
 mod tests {
     use super::{
         admitted_binding_entry, canonical_binding_id, child_error_diagnostic, compact_child_result,
-        extract_proxy_child_args, list_tools, request_error_details, unavailable_handle_recovery,
-        SurfaceHandle,
+        extract_proxy_child_args, list_tools, request_error_details, try_parse_wire,
+        unavailable_handle_recovery, validate_input_schema, SurfaceHandle,
     };
-    use serde_json::json;
+    use serde_json::{json, Value};
+    use std::io;
 
     #[test]
     fn loader_discovery_defaults_to_compact_metadata_and_exposes_resume() {
@@ -5180,6 +5335,61 @@ mod tests {
                 "--site-root".to_string()
             ]),
             Some(vec!["--site-root".to_string()]),
+        );
+    }
+
+    fn assert_schema_bounded(schema: &Value) {
+        match schema.get("type").and_then(Value::as_str) {
+            Some("object") => {
+                assert!(schema
+                    .get("maxProperties")
+                    .and_then(Value::as_u64)
+                    .is_some());
+                if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+                    for child in properties.values() {
+                        assert_schema_bounded(child);
+                    }
+                }
+            }
+            Some("array") => {
+                assert!(schema.get("maxItems").and_then(Value::as_u64).is_some());
+                if let Some(items) = schema.get("items") {
+                    assert_schema_bounded(items);
+                }
+            }
+            Some("string") => {
+                assert!(schema.get("maxLength").and_then(Value::as_u64).is_some());
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn every_public_tool_schema_is_named_closed_bounded_and_rejects_unknown_input() {
+        for tool in list_tools() {
+            let name = tool["name"].as_str().expect("tool name");
+            let schema = &tool["inputSchema"];
+            assert_eq!(schema["title"], format!("{name}.input"));
+            assert_eq!(schema["additionalProperties"], false);
+            assert_schema_bounded(schema);
+            let error = validate_input_schema(schema, &json!({"unexpected": true}), "$args")
+                .expect_err("unknown input must be rejected");
+            assert_eq!(error.code, "input_schema_validation_failed");
+        }
+    }
+
+    #[test]
+    fn wire_parser_refuses_oversized_framed_and_jsonl_messages() {
+        let mut framed = b"Content-Length: 100\r\n\r\n{}".to_vec();
+        assert_eq!(
+            try_parse_wire(&mut framed, 16).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        let mut jsonl = vec![b'x'; 18];
+        jsonl.push(b'\n');
+        assert_eq!(
+            try_parse_wire(&mut jsonl, 16).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
         );
     }
 }
