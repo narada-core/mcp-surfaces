@@ -87,7 +87,17 @@ fn dispatch(request: &Value) -> Value {
                         .unwrap_or_else(|| json!({}));
                     surface_list(&contract, &args)
                 } else if name == "registrar_site_list" {
-                    site_list(&contract)
+                    let args = request
+                        .pointer("/params/arguments")
+                        .cloned()
+                        .unwrap_or_else(|| json!({}));
+                    site_list(&contract, &args)
+                } else if name == "registrar_carrier_list" {
+                    let args = request
+                        .pointer("/params/arguments")
+                        .cloned()
+                        .unwrap_or_else(|| json!({}));
+                    carrier_list(&contract, &args)
                 } else {
                     contract["read_models"][name].clone()
                 };
@@ -468,7 +478,7 @@ fn carrier_bind(contract: &Value, args: &Value) -> Result<Value, MutationFailure
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("andrey-user");
-    let sites = site_list(contract)["items"]
+    let sites = site_catalog(contract)["items"]
         .as_array()
         .cloned()
         .unwrap_or_default();
@@ -808,6 +818,17 @@ fn repair_native_contract(contract: &mut Value, declared: &str, current: &str) {
         {
             tool["inputSchema"] = json!({"type":"object","properties":{"compact":{"type":"boolean","default":true,"description":"Return identity and summary fields; set false for full descriptors."},"limit":{"type":"integer","minimum":1,"maximum":200,"default":50},"offset":{"type":"integer","minimum":0,"maximum":10000,"default":0}},"additionalProperties":false});
         }
+        for name in ["registrar_site_list", "registrar_carrier_list"] {
+            if let Some(tool) = tools.iter_mut().find(|tool| tool["name"] == name) {
+                tool["inputSchema"] = json!({"type":"object","properties":{"compact":{"type":"boolean","default":true,"description":"Return identity and summary fields; set false for full records."},"limit":{"type":"integer","minimum":1,"maximum":100,"default":20},"offset":{"type":"integer","minimum":0,"maximum":10000,"default":0}},"additionalProperties":false});
+            }
+        }
+        if let Some(tool) = tools
+            .iter_mut()
+            .find(|tool| tool["name"] == "registrar_site_surface_registry_sync")
+        {
+            tool["inputSchema"]["properties"]["include_registry"] = json!({"type":"boolean","default":false,"description":"Include the complete generated registry in a dry-run response; the default returns only its bounded summary."});
+        }
     }
     if let Some(plans) = contract
         .pointer_mut("/read_models/registrar_carrier_validation_plans")
@@ -864,6 +885,60 @@ fn surface_list(contract: &Value, args: &Value) -> Value {
     }).collect::<Vec<_>>();
     json!({"schema":"narada.registrar.surface_list.v1","status":"ok","items":projected,"returned":projected.len(),"total":total,"offset":offset,"limit":limit,"has_more":has_more,"next_offset":if has_more{json!(offset + limit)}else{Value::Null},"compact":compact})
 }
+fn carrier_list(contract: &Value, args: &Value) -> Value {
+    let items = contract
+        .pointer("/read_models/registrar_carrier_list/items")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    paginated_catalog("narada.registrar.carrier_list.v1", items, args, |carrier| {
+        json!({
+            "carrier_id":carrier["carrier_id"],
+            "kind":carrier["kind"],
+            "config_path":carrier["config_path"],
+            "site_binding_count":carrier["site_bindings"].as_array().map_or(0, Vec::len),
+            "surface_count":carrier["surfaces"].as_array().map_or(0, Vec::len)
+        })
+    })
+}
+
+fn paginated_catalog(
+    schema: &str,
+    items: Vec<Value>,
+    args: &Value,
+    compact_projection: impl Fn(&Value) -> Value,
+) -> Value {
+    let total = items.len();
+    let offset = args
+        .get("offset")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        .min(10_000) as usize;
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(20)
+        .clamp(1, 100) as usize;
+    let compact = args.get("compact").and_then(Value::as_bool).unwrap_or(true);
+    let page = items
+        .into_iter()
+        .skip(offset)
+        .take(limit + 1)
+        .collect::<Vec<_>>();
+    let has_more = page.len() > limit;
+    let projected = page
+        .into_iter()
+        .take(limit)
+        .map(|item| {
+            if compact {
+                compact_projection(&item)
+            } else {
+                item
+            }
+        })
+        .collect::<Vec<_>>();
+    json!({"schema":schema,"status":"ok","items":projected,"returned":projected.len(),"total":total,"offset":offset,"limit":limit,"has_more":has_more,"next_offset":if has_more{json!(offset + limit)}else{Value::Null},"compact":compact})
+}
 fn registrar_sync(contract: &Value, args: &Value) -> Result<Value, String> {
     let target = required_argument(args, "target", "registrar_requires_target")?;
     let carriers = contract
@@ -907,7 +982,7 @@ fn registrar_sync(contract: &Value, args: &Value) -> Result<Value, String> {
     ensure_surface(contract, &surface_id)?;
     let mut results = vec![];
     if target == "all_sites" || target == "all" {
-        for site in site_list(contract)["items"]
+        for site in site_catalog(contract)["items"]
             .as_array()
             .into_iter()
             .flatten()
@@ -946,7 +1021,7 @@ fn site_registry_conformance_check(contract: &Value, args: &Value) -> Result<Val
         "registrar_requires_observation_ref",
     )?;
     let include_ok = args.get("include_ok").and_then(Value::as_bool) == Some(true);
-    let sites = site_list(contract)["items"]
+    let sites = site_catalog(contract)["items"]
         .as_array()
         .cloned()
         .unwrap_or_default();
@@ -1959,10 +2034,10 @@ fn carrier_validate(contract: &Value, args: &Value) -> Result<Value, String> {
         .filter(|finding| finding["severity"] == "warning")
         .count();
     Ok(
-        json!({"status":if errors>0{"invalid"}else if warnings>0{"valid_with_warnings"}else{"valid"},"carrier_id":carrier_id,"server_count":servers.len(),"errors":errors,"warnings":warnings,"findings":findings}),
+        json!({"schema":"narada.registrar.carrier_validation.v1","status":if errors>0{"invalid"}else if warnings>0{"valid_with_warnings"}else{"valid"},"carrier_id":carrier_id,"server_count":servers.len(),"errors":errors,"warnings":warnings,"findings":findings,"bounded":true}),
     )
 }
-fn site_list(contract: &Value) -> Value {
+fn site_catalog(contract: &Value) -> Value {
     let fallback = &contract["read_models"]["registrar_site_list_fallback"];
     let registry_path = env::var_os("NARADA_SITE_REGISTRY_DB")
         .map(PathBuf::from)
@@ -2001,6 +2076,23 @@ fn site_list(contract: &Value) -> Value {
         }
         Err(message) => fallback_site_list(fallback, &registry_path, &message),
     }
+}
+
+fn site_list(contract: &Value, args: &Value) -> Value {
+    let catalog = site_catalog(contract);
+    let items = catalog["items"].as_array().cloned().unwrap_or_default();
+    let mut result = paginated_catalog("narada.registrar.site_list.v1", items, args, |site| {
+        json!({
+            "site_id":site["site_id"],
+            "root":site["root"],
+            "surface_count":site["surface_count"],
+            "surfaces_status":site["surfaces_status"]
+        })
+    });
+    result["catalog_source"] = catalog["catalog_source"].clone();
+    result["registry_path"] = catalog["registry_path"].clone();
+    result["compatibility_fallback_used"] = catalog["compatibility_fallback_used"].clone();
+    result
 }
 
 fn fallback_site_list(fallback: &Value, path: &Path, error_message: &str) -> Value {
@@ -2188,7 +2280,7 @@ fn site_surfaces(contract: &Value, args: &Value) -> Result<Value, String> {
     if requested == "narada-andrey" || requested == "narada-user-site" {
         return Err("registrar_legacy_site_id_rejected:site_id".into());
     }
-    let catalog = site_list(contract);
+    let catalog = site_catalog(contract);
     let candidates = catalog["items"].as_array().cloned().unwrap_or_default();
     let mut site = None;
     for candidate in candidates {
@@ -2209,7 +2301,9 @@ fn site_surfaces(contract: &Value, args: &Value) -> Result<Value, String> {
     let root = PathBuf::from(site["root"].as_str().unwrap_or(""));
     let found = scan_site_surfaces(contract, &root, &site_id)?;
     let count = found.len();
-    Ok(json!({"site_id":site_id,"surfaces":found,"count":count}))
+    Ok(
+        json!({"schema":"narada.registrar.site_surfaces.v1","status":"ok","site_id":site_id,"surfaces":found,"count":count,"bounded":true}),
+    )
 }
 
 fn scan_site_surfaces(contract: &Value, root: &Path, site_id: &str) -> Result<Vec<String>, String> {
@@ -2303,7 +2397,7 @@ fn site_output_reader_closure_check(contract: &Value, args: &Value) -> Result<Va
             requested.push((site_id, canonical_root(root)));
         }
     };
-    let catalog = site_list(contract);
+    let catalog = site_catalog(contract);
     let sites = catalog["items"].as_array().cloned().unwrap_or_default();
     for site_id in argument_strings(args, "site_id", "site_ids") {
         let site = lookup_site_value(&sites, &site_id)?;
@@ -2540,7 +2634,7 @@ fn surface_usage(contract: &Value, args: &Value) -> Result<Value, String> {
         .filter(|value| !value.is_empty())
         .ok_or_else(|| "registrar_requires_surface_id".to_string())?;
     let is_local = surface_id.ends_with(".local");
-    let catalog = site_list(contract);
+    let catalog = site_catalog(contract);
     let sites = catalog["items"].as_array().cloned().unwrap_or_default();
     let mut matching_sites = vec![];
     for site in &sites {
@@ -2825,7 +2919,7 @@ fn parse_jsonc(text: &str) -> Option<Value> {
 fn site_mcp_fabric_validate(contract: &Value, args: &Value) -> Result<Value, String> {
     let requested = required_argument(args, "site_id", "registrar_requires_site_id")?;
     let include_ok = args.get("include_ok").and_then(Value::as_bool) == Some(true);
-    let catalog = site_list(contract);
+    let catalog = site_catalog(contract);
     let sites = catalog["items"].as_array().cloned().unwrap_or_default();
     let site = lookup_site_value(&sites, &requested)?;
     let site_id = site["site_id"].as_str().unwrap_or(&requested);
@@ -3133,7 +3227,7 @@ fn site_mcp_fabric_validate(contract: &Value, args: &Value) -> Result<Value, Str
         .filter(|finding| finding["severity"] == "warning")
         .count();
     Ok(
-        json!({"status":if errors>0{"invalid"}else if warnings>0{"valid_with_warnings"}else{"valid"},"site_id":site_id,"server_count":servers.len(),"carrier_projection_count":carrier_servers.len(),"errors":errors,"warnings":warnings,"findings":findings}),
+        json!({"schema":"narada.registrar.site_fabric_validation.v1","status":if errors>0{"invalid"}else if warnings>0{"valid_with_warnings"}else{"valid"},"site_id":site_id,"server_count":servers.len(),"carrier_projection_count":carrier_servers.len(),"errors":errors,"warnings":warnings,"findings":findings,"bounded":true}),
     )
 }
 
@@ -3446,7 +3540,7 @@ fn merge_value(mut left: Value, right: Value) -> Value {
 fn site_bind(contract: &Value, args: &Value) -> Result<Value, String> {
     let site_id = required_argument(args, "site_id", "registrar_requires_site_id")?;
     let surface_id = required_argument(args, "surface_id", "registrar_requires_surface_id")?;
-    let catalog = site_list(contract);
+    let catalog = site_catalog(contract);
     let sites = catalog["items"].as_array().cloned().unwrap_or_default();
     let site = lookup_site_value(&sites, &site_id)?;
     let surfaces = contract
@@ -3524,7 +3618,7 @@ fn site_bind(contract: &Value, args: &Value) -> Result<Value, String> {
 fn site_unbind(contract: &Value, args: &Value) -> Result<Value, String> {
     let site_id = required_argument(args, "site_id", "registrar_requires_site_id")?;
     let surface_id = required_argument(args, "surface_id", "registrar_requires_surface_id")?;
-    let catalog = site_list(contract);
+    let catalog = site_catalog(contract);
     let sites = catalog["items"].as_array().cloned().unwrap_or_default();
     let site = lookup_site_value(&sites, &site_id)?;
     let directory = site_mcp_control_root(Path::new(site["root"].as_str().unwrap_or("")))
@@ -4208,15 +4302,27 @@ fn site_surface_registry_sync(contract: &Value, args: &Value) -> Result<Value, S
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| "registrar_requires_site_id".to_string())?;
-    let catalog = site_list(contract);
+    let catalog = site_catalog(contract);
     let sites = catalog["items"].as_array().cloned().unwrap_or_default();
     let site = lookup_site_value(&sites, requested)?;
     let path = capability_registry_path(Path::new(site["root"].as_str().unwrap_or("")));
     if args.get("dry_run").and_then(Value::as_bool) == Some(true) {
         let registry = build_site_surface_registry(contract, &site)?;
-        return Ok(
-            json!({"status":"dry_run","site_id":requested,"path":path_text(&path),"registry":registry}),
-        );
+        let surfaces = registry["surfaces"].as_array().cloned().unwrap_or_default();
+        let tool_count = surfaces
+            .iter()
+            .map(|surface| {
+                surface["registered_live_tools"]
+                    .as_array()
+                    .map_or(0, Vec::len)
+            })
+            .sum::<usize>();
+        let mut result = json!({"schema":"narada.registrar.site_surface_registry_sync.v1","status":"dry_run","site_id":requested,"path":path_text(&path),"surface_count":surfaces.len(),"tool_count":tool_count,"registry_included":false,"bounded":true});
+        if args.get("include_registry").and_then(Value::as_bool) == Some(true) {
+            result["registry"] = registry;
+            result["registry_included"] = json!(true);
+        }
+        return Ok(result);
     }
     let binding_refresh = refresh_site_sidecar_bindings(contract, &site)?;
     let registry = build_site_surface_registry(contract, &site)?;
@@ -4242,7 +4348,7 @@ fn site_surface_registry_sync(contract: &Value, args: &Value) -> Result<Value, S
         })
         .sum::<usize>();
     Ok(
-        json!({"status":"synced","site_id":site["site_id"],"path":path_text(&path),"surface_count":surfaces.len(),"tool_count":tool_count,"binding_refresh":binding_refresh}),
+        json!({"schema":"narada.registrar.site_surface_registry_sync.v1","status":"synced","site_id":site["site_id"],"path":path_text(&path),"surface_count":surfaces.len(),"tool_count":tool_count,"binding_refresh":binding_refresh,"bounded":true}),
     )
 }
 
@@ -4806,6 +4912,59 @@ mod tests {
         assert_ne!(first["items"][0]["id"], second["items"][0]["id"]);
         let full = surface_list(&contract, &json!({"limit":1,"compact":false}));
         assert!(full["items"][0].get("descriptor").is_some());
+    }
+
+    #[test]
+    fn carrier_inventory_is_compact_self_describing_and_paginated() {
+        let contract = embedded_contract();
+        let first = carrier_list(&contract, &json!({"limit":1}));
+        let second = carrier_list(&contract, &json!({"limit":1,"offset":1}));
+        assert_eq!(first["schema"], "narada.registrar.carrier_list.v1");
+        assert_eq!(first["status"], "ok");
+        assert_eq!(first["compact"], true);
+        assert_eq!(first["returned"], 1);
+        assert_eq!(first["has_more"], true);
+        assert!(first["items"][0].get("site_bindings").is_none());
+        assert_ne!(
+            first["items"][0]["carrier_id"],
+            second["items"][0]["carrier_id"]
+        );
+        let full = carrier_list(&contract, &json!({"limit":1,"compact":false}));
+        assert!(full["items"][0].get("site_bindings").is_some());
+    }
+
+    #[test]
+    fn repaired_contract_makes_expanding_reads_bounded_by_default() {
+        let mut contract = embedded_contract();
+        let declared = contract
+            .pointer("/read_models/registrar_surface_list/items/0/entrypoint")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        repair_native_contract(&mut contract, &declared, &declared);
+        let find = |name: &str| {
+            contract["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .unwrap()
+        };
+        for name in ["registrar_site_list", "registrar_carrier_list"] {
+            assert_eq!(
+                find(name)["inputSchema"]["properties"]["compact"]["default"],
+                true
+            );
+            assert_eq!(
+                find(name)["inputSchema"]["properties"]["limit"]["default"],
+                20
+            );
+        }
+        assert_eq!(
+            find("registrar_site_surface_registry_sync")["inputSchema"]["properties"]
+                ["include_registry"]["default"],
+            false
+        );
     }
 
     #[test]
