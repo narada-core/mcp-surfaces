@@ -1794,6 +1794,7 @@ function runSiteLifecycleAuthorityParity() {
     registry.exec('CREATE TABLE site_registry(site_id TEXT PRIMARY KEY,variant TEXT NOT NULL,site_root TEXT NOT NULL,substrate TEXT NOT NULL,aim_json TEXT,control_endpoint TEXT,last_seen_at TEXT,created_at TEXT NOT NULL,lifecycle_status TEXT NOT NULL,observation_status TEXT NOT NULL,sources_json TEXT NOT NULL,aliases_json TEXT NOT NULL,revision INTEGER NOT NULL,updated_at TEXT NOT NULL,retired_at TEXT,retire_reason TEXT); CREATE TABLE registry_management_audit(event_id TEXT PRIMARY KEY,site_id TEXT NOT NULL,operation TEXT NOT NULL,actor TEXT NOT NULL,reason TEXT,occurred_at TEXT NOT NULL,before_json TEXT,after_json TEXT,status TEXT NOT NULL);');
     registry.prepare('INSERT INTO site_registry VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run('fixture', 'native', root, 'windows', null, null, null, '2026-01-01T00:00:00Z', 'active', 'present', '[]', '[]', 1, '2026-08-14T00:00:00Z', null, null);
     registry.close();
+    writeFileSync(join(root, 'refused-create.json'), JSON.stringify({ schema: 'narada.create_site.options.v0', preset: 'minimal', site: { site_id: 'bad', site_kind: 'project', authority_locus: 'project', site_root: join(root, 'bad') }, packages: [{ name: '@outside/unknown' }], evidence: { invalid_source_site_inputs: [join(root, '.ai', 'task-lifecycle.db')] } }), 'utf8');
     const authority = { kind: 'operator_request', summary: 'native authority verifier' };
     const admission = { site_id: 'fixture', site_root: root, role: 'builder', agent_kind: 'codex_cli', by: 'operator', execute: true, authority_basis: authority };
     const binding = { site_root: root, identity: 'fixture.builder', runtime_locus: 'user-pc', handle: 'codex-thread:fixture', observed_handle: 'codex-thread:fixture', execute: true, authority_basis: authority };
@@ -1820,6 +1821,9 @@ function runSiteLifecycleAuthorityParity() {
       { jsonrpc: '2.0', id: 20, method: 'tools/call', params: { name: 'site_authority_preflight', arguments: { mutation_family: 'site' } } },
       { jsonrpc: '2.0', id: 21, method: 'tools/call', params: { name: 'site_relation_list', arguments: { cwd: tmpdir() } } },
       { jsonrpc: '2.0', id: 22, method: 'tools/call', params: { name: 'site_create_presets_list', arguments: {} } },
+      { jsonrpc: '2.0', id: 23, method: 'tools/call', params: { name: 'site_create_plan', arguments: { preset: 'agent-site-core', site_id: 'planned', root: join(root, 'planned-site') } } },
+      { jsonrpc: '2.0', id: 24, method: 'tools/call', params: { name: 'site_create_plan', arguments: {} } },
+      { jsonrpc: '2.0', id: 25, method: 'tools/call', params: { name: 'site_create_plan', arguments: { config: 'refused-create.json' } } },
     ];
     const responses = runMailbox(executable, ['--surface-id', 'site-lifecycle', '--site-root', root], requests, root, { ...process.env, NARADA_USER_SITE_ROOT: userSiteRoot });
     const tools = responses.find((response) => response.id === 1)?.result?.tools ?? [];
@@ -1840,10 +1844,15 @@ function runSiteLifecycleAuthorityParity() {
     if (mailboxStructured(responses, 20, 'rust').locus_state !== 'authority_locus' || !responses.find((response) => response.id === 21)?.error) throw new Error('site_lifecycle.native_mutation_preflight_or_root_bound_invalid');
     const presets = mailboxStructured(responses, 22, 'rust');
     if (presets.presets?.length !== 5 || presets.recommended_preset !== 'agent-site-core' || presets.presets?.find((preset) => preset.preset === 'agent-site-core')?.descriptor_components?.length !== 3) throw new Error('site_lifecycle.native_create_presets_invalid');
+    const plan = mailboxStructured(responses, 23, 'rust');
+    if (plan.status !== 'planned' || plan.selected_preset !== 'agent-site-core' || plan.package_descriptors?.length !== 3 || plan.planned_files?.length < 10 || existsSync(join(root, 'planned-site'))) throw new Error('site_lifecycle.native_create_plan_invalid');
+    if (mailboxStructured(responses, 24, 'rust').error !== 'missing_config_or_shorthand') throw new Error('site_lifecycle.native_create_plan_missing_input_invalid');
+    const refusedPlan = mailboxStructured(responses, 25, 'rust');
+    if (refusedPlan.status !== 'refused' || !refusedPlan.refusals?.some((entry) => entry.code === 'unknown_package_refused') || !refusedPlan.refusals?.some((entry) => entry.code === 'source_runtime_state_import_refused')) throw new Error('site_lifecycle.native_create_plan_refusal_invalid');
     const identities = JSON.parse(readFileSync(join(root, '.narada', 'operator-surfaces', 'identities.json'), 'utf8'));
     const bindings = JSON.parse(readFileSync(join(root, '.narada', 'operator-surfaces', 'runtime-bindings.json'), 'utf8'));
     if (identities.identities?.length !== 1 || bindings.bindings?.length !== 1) throw new Error('site_lifecycle.native_artifact_readback_invalid');
-    return { status: 'passed', verified: ['four_authority_tools', 'create_presets', 'registry_list_show', 'transformation_kinds_preflight', 'relation_list_validate', 'mutation_authority_preflight', 'root_confinement', 'closed_bounded_schemas', 'empty', 'execute_authority_gate', 'admission_replay_conflict', 'binding_evidence_replay', 'readback', 'artifact_compatibility'] };
+    return { status: 'passed', verified: ['four_authority_tools', 'create_presets_and_plans', 'registry_list_show', 'transformation_kinds_preflight', 'relation_list_validate', 'mutation_authority_preflight', 'root_confinement', 'closed_bounded_schemas', 'empty', 'execute_authority_gate', 'admission_replay_conflict', 'binding_evidence_replay', 'readback', 'artifact_compatibility'] };
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

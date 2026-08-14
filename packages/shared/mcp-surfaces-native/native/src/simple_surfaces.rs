@@ -251,6 +251,7 @@ fn call_site_lifecycle(name: &str, args: &Map<String, Value>, root: &Path) -> Re
         "site_observe_runtime" => return operator_surface_authority::observe_runtime(args, root),
         "site_bind_runtime" => return operator_surface_authority::bind_runtime(args, root),
         "site_create_presets_list" => return Ok(site_lifecycle_authority::create_presets()),
+        "site_create_plan" => return site_lifecycle_authority::create_plan(args, root),
         "site_list" => {
             let listed = site_registry_authority::call("site_registry_list", &Map::new())?;
             let sites = listed["sites"].as_array().cloned().unwrap_or_default().into_iter().map(|site| json!({"siteId":site["site_id"],"variant":site["variant"],"substrate":site["substrate"],"health":"unknown","lastCycle":null,"failures":0})).collect::<Vec<_>>();
@@ -587,6 +588,10 @@ fn lifecycle_input_schema(name: &str) -> Value {
     properties.insert("site_root".to_string(), json!({"type":"string","minLength":1,"maxLength":4096,"description":"Explicit workspace root or its .narada authority root."}));
     properties.insert("root".to_string(), json!({"type":"string","minLength":1,"maxLength":4096}));
     properties.insert("cwd".to_string(), json!({"type":"string","minLength":1,"maxLength":4096}));
+    properties.insert("config".to_string(), json!({"type":"string","minLength":1,"maxLength":4096}));
+    properties.insert("preset".to_string(), json!({"type":"string","enum":["minimal","agent-site-core","agent-memory","task-lifecycle","site-machinery"]}));
+    properties.insert("site_kind".to_string(), json!({"type":"string","minLength":1,"maxLength":128}));
+    properties.insert("authority_locus".to_string(), json!({"type":"string","minLength":1,"maxLength":128}));
     properties.insert(
         "kind".to_string(),
         json!({"type":"string","minLength":1,"maxLength":128,"description":"Lifecycle kind or preflight selector."}),

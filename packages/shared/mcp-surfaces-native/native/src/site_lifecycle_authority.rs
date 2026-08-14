@@ -40,6 +40,323 @@ pub(crate) fn create_presets() -> Value {
     json!({"schema":"narada.create_site.presets.v0","status":"ok","recommended_preset":"agent-site-core","default_interactive_preset":"agent-site-core","presets":presets,"non_claims":["source Site import/migration/lift","implicit capability grants","private MCP client config mutation","real Windows profile mutation outside target Site artifacts","PC/operator-surface mutation"]})
 }
 
+pub(crate) fn create_plan(args: &Map<String, Value>, bound_root: &Path) -> Result<Value, Value> {
+    if args.contains_key("output_plan") {
+        return Err(error("site_create_plan_output_refused","site_create_plan is read-only; persist a returned plan through an explicit filesystem write authority"));
+    }
+    let (config, config_path) = if let Some(path) = text(args, "config") {
+        let requested = PathBuf::from(path);
+        let absolute = if requested.is_absolute() {
+            requested
+        } else {
+            bound_root.join(requested)
+        };
+        let canonical = absolute
+            .canonicalize()
+            .map_err(io_error("site_create_config_unavailable"))?;
+        let bound = bound_root
+            .canonicalize()
+            .map_err(io_error("site_lifecycle_bound_root_unavailable"))?;
+        if !canonical.starts_with(&bound) {
+            return Err(error(
+                "site_create_config_outside_bound_site",
+                "config must remain inside the bound Site root",
+            ));
+        }
+        let metadata =
+            fs::metadata(&canonical).map_err(io_error("site_create_config_stat_failed"))?;
+        if metadata.len() > 4 * 1024 * 1024 {
+            return Err(error(
+                "site_create_config_too_large",
+                "create-site config exceeds 4 MiB",
+            ));
+        }
+        let value = serde_json::from_slice::<Value>(
+            &fs::read(&canonical).map_err(io_error("site_create_config_read_failed"))?,
+        )
+        .map_err(|cause| error("site_create_config_invalid", &cause.to_string()))?;
+        (value, canonical.to_string_lossy().to_string())
+    } else {
+        let preset = text(args, "preset").unwrap_or_else(|| "agent-site-core".to_string());
+        let site_id = text(args, "site_id");
+        let root = text(args, "root");
+        if site_id.is_none() || root.is_none() {
+            return Ok(
+                json!({"status":"error","error":"missing_config_or_shorthand","message":"site_create_plan requires config or site_id and root."}),
+            );
+        }
+        (
+            preset_config(
+                &preset,
+                &site_id.unwrap(),
+                &root.unwrap(),
+                text(args, "site_kind").as_deref().unwrap_or("project"),
+                text(args, "authority_locus")
+                    .as_deref()
+                    .unwrap_or("project"),
+            ),
+            "<inline:create-site-options>".to_string(),
+        )
+    };
+    Ok(build_plan(&config, &config_path))
+}
+
+fn preset_config(
+    preset: &str,
+    site_id: &str,
+    root: &str,
+    site_kind: &str,
+    authority_locus: &str,
+) -> Value {
+    let packages = packages_for_preset(preset);
+    let components = packages
+        .iter()
+        .map(|v| Value::String((*v).to_string()))
+        .collect::<Vec<_>>();
+    let (mut storage, mut mcp, mut capabilities, mut inbox, mut task, mut context) = (
+        json!({"intent":"none"}),
+        json!({"intent":"none","surfaces":[]}),
+        json!({"policy":"none","required":[],"denied":[]}),
+        json!({"enable":"drop_only"}),
+        json!({"enable":false}),
+        json!({"enable":false}),
+    );
+    match preset {
+        "agent-site-core" => {
+            storage = json!({"intent":"descriptor_only","driver_preference":"sqlite3-cli","mutation_mode":"none"});
+            mcp = json!({"intent":"descriptor_only","surfaces":["site_task_lifecycle","agent_context_memory"]});
+            capabilities = json!({"policy":"declare_required","required":["task_lifecycle","agent_context_memory","canonical_inbox"],"denied":["source_task_db_import","source_checkpoint_import","source_inbox_history_import"]});
+            inbox = json!({"enable":"canonical_envelope_intake"});
+            task = json!({"enable":"descriptor_only","package":"@narada-core/site-task-lifecycle"});
+            context =
+                json!({"enable":"descriptor_only","package":"@narada-core/agent-context-memory"});
+        }
+        "task-lifecycle" => {
+            storage = json!({"intent":"descriptor_only","driver_preference":"sqlite3-cli","mutation_mode":"none"});
+            mcp = json!({"intent":"descriptor_only","surfaces":["site_task_lifecycle"]});
+            capabilities = json!({"policy":"declare_required","required":["task_lifecycle"],"denied":["source_task_db_import"]});
+            inbox = json!({"enable":"canonical_envelope_intake"});
+            task = json!({"enable":"descriptor_only","package":"@narada-core/site-task-lifecycle"});
+        }
+        "agent-memory" => {
+            storage = json!({"intent":"descriptor_only","driver_preference":"sqlite3-cli","mutation_mode":"none"});
+            mcp = json!({"intent":"descriptor_only","surfaces":["agent_context_memory"]});
+            capabilities = json!({"policy":"declare_required","required":["agent_context_memory"],"denied":["source_checkpoint_import"]});
+            context =
+                json!({"enable":"descriptor_only","package":"@narada-core/agent-context-memory"});
+        }
+        "site-machinery" => {
+            capabilities = json!({"policy":"declare_required","required":["canonical_inbox","site_config_awareness","site_lift_adoption"],"denied":["source_site_runtime_import","cross_site_mutation"]});
+            inbox = json!({"enable":"canonical_envelope_intake"});
+        }
+        _ => {}
+    }
+    json!({"schema":"narada.create_site.options.v0","mode":"dry_run","preset":preset,"template_catalog":{"template_id":format!("narada-proper.templates.site.{preset}.v0"),"template_components":components},"site":{"site_id":site_id,"site_kind":site_kind,"authority_locus":authority_locus,"site_root":root,"workspace_root":root,"substrate":"windows-native","execution_surface":"windows_native","sync_posture":"hybrid_capable_plain_folder"},"packages":packages.iter().map(|name|json!({"name":name})).collect::<Vec<_>>(),"identity":{"named_agents":[],"role_assignments":[],"role_compatibility_identities":[],"claimed_identity_evidence":[],"mechanical_verification_basis":[]},"storage":storage,"mcp":mcp,"capabilities":capabilities,"inbox":inbox,"task_lifecycle":task,"agent_context":context,"operator_surface":{"intent":"none"},"windows_pwsh":{"profile":"emit_example","path_style":"windows"},"evidence":{"template_refs":[format!("narada-proper.templates.site.{preset}.v0")],"refused_imports":[]}})
+}
+
+fn build_plan(config: &Value, config_path: &str) -> Value {
+    let preset = config["preset"].as_str().unwrap_or("minimal");
+    let packages = config["packages"].as_array().cloned().unwrap_or_default();
+    let descriptors = packages
+        .iter()
+        .map(|pkg| package_descriptor(pkg["name"].as_str().unwrap_or_default()))
+        .collect::<Vec<_>>();
+    let mut refusals = Vec::new();
+    if config["schema"] != "narada.create_site.options.v0" {
+        refusals.push(json!({"code":"invalid_config_schema","message":"Expected schema narada.create_site.options.v0.","evidence":config["schema"]}));
+    }
+    if ![
+        "minimal",
+        "agent-site-core",
+        "agent-memory",
+        "task-lifecycle",
+        "site-machinery",
+    ]
+    .contains(&preset)
+    {
+        refusals.push(json!({"code":if preset=="full-operator-surface-aware-user-site"{"preset_requires_unadmitted_operator_surface"}else{"unsupported_preset"},"message":format!("Unsupported descriptor-only preset: {preset}"),"evidence":preset}));
+    }
+    for coordinate in ["site_id", "site_kind", "authority_locus", "site_root"] {
+        if config["site"][coordinate]
+            .as_str()
+            .map(str::trim)
+            .unwrap_or_default()
+            .is_empty()
+        {
+            refusals.push(json!({"code":"missing_site_coordinate","message":format!("Missing site.{coordinate}.")}));
+        }
+    }
+    for descriptor in &descriptors {
+        if descriptor["posture"] == "unknown_package_refused" {
+            refusals.push(json!({"code":"unknown_package_refused","message":"Only Narada proper create-site template components can be expanded by this dry-run command.","evidence":descriptor["package_name"]}));
+        }
+    }
+    if config.pointer("/operator_surface/pc_locus_required") == Some(&Value::Bool(true)) {
+        refusals.push(json!({"code":"pc_locus_authority_missing","message":"create site does not assume PC-locus authority; PC setup requires separate admission."}));
+    }
+    for(value,code,reason)in[(config.pointer("/storage/intent"),"live_adapter_admission_missing","create-site dry-run cannot admit or execute a storage adapter."),(config.pointer("/mcp/intent"),"live_mcp_registration_admission_missing","create-site dry-run cannot perform live MCP registration."),(config.pointer("/capabilities/policy"),"package_selection_does_not_grant_live_capability","Capability grants require separate admission; package/template selection is descriptor-only."),(config.pointer("/windows_pwsh/profile"),"live_profile_write_admission_missing","Windows PowerShell profile writes require separate local admission and execute posture.")]{let denied=matches!((value.and_then(Value::as_str),code),(Some("local_adapter_admitted"),_)|(Some("local_registration_admitted"),_)|(Some("admit_local"),_)|(Some("admit_profile_write"),_));if denied{refusals.push(json!({"code":code,"message":reason}));}}
+    let mut strings = Vec::new();
+    collect_strings(config, 0, &mut strings);
+    for value in strings {
+        let lower = value.replace('/', "\\").to_ascii_lowercase();
+        if lower.contains("task-lifecycle.db")
+            || lower.contains("agent-context.sqlite")
+            || lower.contains("agent-context.db")
+            || lower.contains("\\.narada\\checkpoints")
+            || lower.contains("\\.ai\\checkpoints")
+            || lower.contains("\\.ai\\do-not-open\\tasks")
+            || lower.contains("\\.ai\\inbox")
+            || lower.contains("\\operator-surfaces\\")
+            || lower.contains("\\secrets\\")
+            || lower.contains("\\tokens\\")
+            || lower.contains("\\credentials\\")
+        {
+            refusals.push(json!({"code":"source_runtime_state_import_refused","message":"source runtime or secret state is not a valid create-site input; use a separate migration/lift/import path.","path":value}));
+        }
+    }
+    let root = config
+        .pointer("/site/site_root")
+        .and_then(Value::as_str)
+        .unwrap_or("<site-root>");
+    let template_id = config
+        .pointer("/template_catalog/template_id")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .unwrap_or_else(|| format!("narada-proper.templates.site.{preset}.v0"));
+    let components = config
+        .pointer("/template_catalog/template_components")
+        .cloned()
+        .unwrap_or_else(|| {
+            Value::Array(
+                descriptors
+                    .iter()
+                    .map(|v| v["package_name"].clone())
+                    .collect(),
+            )
+        });
+    let planned = planned_files(config, &descriptors, root);
+    let admissions = required_admissions(config, &descriptors);
+    json!({"schema":"narada.create_site.dry_run_plan.v0","status":if refusals.is_empty(){"planned"}else{"refused"},"command":"narada sites create","mode":"dry_run","config_path":config_path,"selected_preset":preset,"selected_template":{"template_id":template_id,"template_components":components},"site":config["site"],"package_descriptors":descriptors,"required_local_admissions":admissions,"planned_files":planned,"refusals":refusals,"warnings":[],"evidence":{"template_refs":config.pointer("/evidence/template_refs").cloned().unwrap_or(json!([])),"source_refs_rejected_as_normal_inputs":config.pointer("/evidence/invalid_source_site_inputs").cloned().unwrap_or(json!([])),"dry_run_only":true,"package_selection_grants_live_capability":false,"source_state_imported":false},"non_claims":["filesystem Site creation","local adapter admission","DB init execution","MCP registration execution","runtime hydration execution","capability or secret grants","operator-surface or PC-locus runtime mutation","migration/lift/import from existing Sites"]})
+}
+fn planned_files(config: &Value, descriptors: &[Value], root: &str) -> Vec<Value> {
+    let mut files = vec![
+        json!({"path":format!("{root}\\config.json"),"purpose":"Compatibility projection of Site governance coordinates; .narada/site.json is authority seed","mutation":"planned_only_projection"}),
+        json!({"path":format!("{root}\\AGENTS.md"),"purpose":"Site-local agent execution contract","mutation":"planned_only"}),
+        json!({"path":format!("{root}\\.narada\\site.json"),"purpose":"Site authority seed coordinates","mutation":"planned_only"}),
+        json!({"path":format!("{root}\\.narada\\lineage\\events\\site-created.json"),"purpose":"Append-only Site origin/build lineage event","mutation":"planned_only"}),
+        json!({"path":format!("{root}\\.narada\\README.md"),"purpose":"Site-local Narada substrate orientation","mutation":"planned_only"}),
+        json!({"path":format!("{root}\\.narada\\admission\\admission-ledger.jsonl"),"purpose":"Site-local admission ledger","mutation":"planned_only"}),
+        json!({"path":format!("{root}\\.narada\\inbox\\README.md"),"purpose":"Site-local intake placeholder","mutation":"planned_only"}),
+    ];
+    if config
+        .pointer("/task_lifecycle/enable")
+        .is_some_and(|v| v != false)
+    {
+        files.push(json!({"path":format!("{root}\\.ai\\site-task-lifecycle-admission.json"),"purpose":"Task lifecycle local admission manifest","mutation":"requires_separate_admission"}));
+    }
+    if config
+        .pointer("/agent_context/enable")
+        .is_some_and(|v| v != false)
+    {
+        files.push(json!({"path":format!("{root}\\.ai\\agent-context-memory-admission.json"),"purpose":"Agent context local admission manifest","mutation":"requires_separate_admission"}));
+    }
+    if config.pointer("/mcp/intent") == Some(&Value::String("descriptor_only".to_string())) {
+        if let Some(surfaces) = config.pointer("/mcp/surfaces").and_then(Value::as_array) {
+            for surface in surfaces.iter().filter_map(Value::as_str) {
+                files.push(json!({"path":format!("{root}\\.narada\\mcp\\descriptors\\{surface}.json"),"purpose":format!("{surface} MCP descriptor"),"mutation":"descriptor_materialization_only"}));
+            }
+        }
+    }
+    for descriptor in descriptors
+        .iter()
+        .filter(|v| v["posture"] == "descriptor_only")
+    {
+        let safe = descriptor["package_name"]
+            .as_str()
+            .unwrap_or_default()
+            .trim_start_matches("@narada-core/");
+        files.push(json!({"path":format!("{root}\\.narada\\admission\\package-slices\\{safe}.json"),"purpose":format!("{} descriptor package slice",descriptor["package_name"].as_str().unwrap_or_default()),"mutation":"descriptor_materialization_only"}));
+    }
+    files
+}
+fn required_admissions(config: &Value, descriptors: &[Value]) -> Vec<Value> {
+    let mut values =
+        vec![json!({"admission":"filesystem_creation","status":"not_admitted_in_dry_run"})];
+    if config
+        .pointer("/storage/intent")
+        .and_then(Value::as_str)
+        .is_some_and(|v| v != "none")
+    {
+        values.push(
+            json!({"admission":"local_storage_adapter","status":"separate_admission_required"}),
+        );
+    }
+    if config
+        .pointer("/task_lifecycle/enable")
+        .is_some_and(|v| v != false)
+    {
+        values.push(json!({"admission":"task_lifecycle_db_init_and_mutation","status":"separate_admission_required"}));
+    }
+    if config
+        .pointer("/agent_context/enable")
+        .is_some_and(|v| v != false)
+    {
+        values.push(json!({"admission":"agent_context_storage_and_hydration","status":"separate_admission_required"}));
+    }
+    if config
+        .pointer("/mcp/intent")
+        .and_then(Value::as_str)
+        .is_some_and(|v| v != "none")
+    {
+        values.push(
+            json!({"admission":"live_mcp_registration","status":"separate_admission_required"}),
+        );
+    }
+    for (package, admission) in [
+        (
+            "@narada-core/site-inbox",
+            "site_inbox_local_substrate_and_publication",
+        ),
+        (
+            "@narada-core/site-config",
+            "site_config_registry_probe_execution",
+        ),
+        (
+            "@narada-core/site-lift",
+            "site_lift_adoption_materialization",
+        ),
+    ] {
+        if descriptors.iter().any(|v| v["package_name"] == package) {
+            values.push(json!({"admission":admission,"status":"separate_admission_required"}));
+        }
+    }
+    if !descriptors.is_empty() {
+        values.push(
+            json!({"admission":"package_descriptor_selection","status":"included_in_dry_run"}),
+        );
+    }
+    values
+}
+fn collect_strings(value: &Value, depth: usize, out: &mut Vec<String>) {
+    if depth > 32 || out.len() >= 10_000 {
+        return;
+    }
+    match value {
+        Value::String(v) => out.push(v.clone()),
+        Value::Array(values) => {
+            for value in values.iter().take(10_000 - out.len()) {
+                collect_strings(value, depth + 1, out)
+            }
+        }
+        Value::Object(values) => {
+            for value in values.values().take(10_000 - out.len()) {
+                collect_strings(value, depth + 1, out)
+            }
+        }
+        _ => {}
+    }
+}
+
 fn packages_for_preset(preset: &str) -> Vec<&'static str> {
     match preset {
         "agent-site-core" => vec![
