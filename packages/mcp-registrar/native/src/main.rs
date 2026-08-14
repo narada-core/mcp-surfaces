@@ -1554,6 +1554,46 @@ fn carrier_diff(contract: &Value, args: &Value) -> Result<Value, String> {
         .as_ref()
         .map(carrier_servers)
         .unwrap_or_default();
+    if let (Some(current_content), Some(receipt)) = (
+        current_content.as_deref(),
+        native_materialization_receipt(config_path, &carrier_id),
+    ) {
+        let current_sha256 = sha256_text(current_content);
+        if current_sha256 == receipt.expected_sha256 {
+            let mut unchanged = current_servers.keys().cloned().collect::<Vec<_>>();
+            unchanged.sort();
+            return Ok(json!({
+                "schema":"narada.registrar.carrier_projection_diff.v1",
+                "status":"clean",
+                "carrier_id":carrier_id,
+                "config_path":config_path,
+                "current_exists":true,
+                "projection_changed":false,
+                "server_projection_changed":false,
+                "carrier_metadata_or_format_only":false,
+                "change_scopes":[],
+                "explanation_code":"carrier_projection_matches_native_materialization_receipt",
+                "comparison_authority":"native_materialization_receipt",
+                "generation_sidecar_path":receipt.sidecar_path,
+                "generated_sha256":receipt.expected_sha256,
+                "current_sha256":current_sha256,
+                "generated_byte_size":current_content.len(),
+                "current_byte_size":current_content.len(),
+                "added":[],
+                "removed":[],
+                "changed":[],
+                "unchanged":unchanged.clone(),
+                "added_count":0,
+                "removed_count":0,
+                "changed_count":0,
+                "server_changed_count":0,
+                "count_semantics":"added_removed_changed_counts_cover_server_definitions_only",
+                "server_changes":{"added":[],"removed":[],"changed":[],"unchanged":unchanged,"added_count":0,"removed_count":0,"changed_count":0},
+                "runtime_contract_version":plan["runtime_contract_version"],
+                "materialization_validation":plan["materialization_validation"]
+            }));
+        }
+    }
     let mut added = vec![];
     let mut removed = vec![];
     let mut changed = vec![];
@@ -1614,6 +1654,39 @@ fn carrier_diff(contract: &Value, args: &Value) -> Result<Value, String> {
         "materialization_validation":plan["materialization_validation"]
     });
     Ok(result)
+}
+
+struct NativeMaterializationReceipt {
+    sidecar_path: String,
+    expected_sha256: String,
+}
+
+fn native_materialization_receipt(
+    config_path: &str,
+    carrier_id: &str,
+) -> Option<NativeMaterializationReceipt> {
+    let sidecar_path = format!("{config_path}.narada-generation.json");
+    let sidecar: Value = serde_json::from_str(&fs::read_to_string(&sidecar_path).ok()?).ok()?;
+    if sidecar.get("carrier_id").and_then(Value::as_str) != Some(carrier_id)
+        || sidecar
+            .pointer("/managed_projection/scope")
+            .and_then(Value::as_str)
+            != Some("whole_document")
+        || sidecar
+            .get("config_path")
+            .and_then(Value::as_str)
+            .is_none_or(|declared| comparable_path(declared) != comparable_path(config_path))
+    {
+        return None;
+    }
+    let expected_sha256 = sidecar
+        .pointer("/config_artifact/bytes_sha256")
+        .and_then(Value::as_str)?
+        .to_string();
+    Some(NativeMaterializationReceipt {
+        sidecar_path,
+        expected_sha256,
+    })
 }
 
 fn sha256_text(text: &str) -> String {
@@ -4701,5 +4774,34 @@ mod tests {
         assert_ne!(first["items"][0]["id"], second["items"][0]["id"]);
         let full = surface_list(&contract, &json!({"limit":1,"compact":false}));
         assert!(full["items"][0].get("descriptor").is_some());
+    }
+
+    #[test]
+    fn native_materialization_receipt_is_accepted_only_for_its_carrier_and_config() {
+        let nonce = format!(
+            "narada-registrar-receipt-{}-{}",
+            std::process::id(),
+            time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+        );
+        let config_path = env::temp_dir().join(format!("{nonce}.json"));
+        let config_path_text = config_path.to_string_lossy().to_string();
+        let sidecar_path = format!("{config_path_text}.narada-generation.json");
+        fs::write(
+            &sidecar_path,
+            serde_json::to_vec(&json!({
+                "carrier_id":"kimi-test",
+                "config_path":config_path_text,
+                "config_artifact":{"bytes_sha256":"abc123"},
+                "managed_projection":{"scope":"whole_document"}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let receipt = native_materialization_receipt(&config_path_text, "kimi-test").unwrap();
+        assert_eq!(receipt.expected_sha256, "abc123");
+        assert!(native_materialization_receipt(&config_path_text, "other-carrier").is_none());
+
+        fs::remove_file(sidecar_path).unwrap();
     }
 }
