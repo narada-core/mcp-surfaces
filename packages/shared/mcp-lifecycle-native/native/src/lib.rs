@@ -56,7 +56,65 @@ impl Surface {
             Self::Task => TASK_TOOLS,
             Self::Work => WORK_TOOLS,
         };
-        serde_json::from_str(source).expect("checked-in lifecycle catalog must be valid JSON")
+        normalized_tool_catalog(source)
+    }
+}
+
+fn normalized_tool_catalog(source: &str) -> Vec<Value> {
+    let mut tools: Vec<Value> =
+        serde_json::from_str(source).expect("checked-in lifecycle catalog must be valid JSON");
+    for tool in &mut tools {
+        let name = tool
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("lifecycle_tool")
+            .to_string();
+        if let Some(schema) = tool.get_mut("inputSchema") {
+            normalize_input_schema(schema, Some(&name));
+            if let Some(object) = schema.as_object_mut() {
+                object.insert("title".to_string(), json!(format!("{name}.input")));
+                object.insert("additionalProperties".to_string(), Value::Bool(false));
+            }
+        }
+    }
+    tools
+}
+
+fn normalize_input_schema(schema: &mut Value, field: Option<&str>) {
+    let Some(object) = schema.as_object_mut() else {
+        return;
+    };
+    match object.get("type").and_then(Value::as_str) {
+        Some("string") if !object.contains_key("maxLength") && !object.contains_key("enum") => {
+            let name = field.unwrap_or_default().to_ascii_lowercase();
+            let maximum = if name.contains("path") || name.contains("root") || name.contains("file") {
+                4096
+            } else if name.contains("summary") || name.contains("body") || name.contains("context") || name.contains("work") {
+                32768
+            } else {
+                8192
+            };
+            object.insert("maxLength".to_string(), json!(maximum));
+        }
+        Some("array") if !object.contains_key("maxItems") => {
+            object.insert("maxItems".to_string(), json!(500));
+        }
+        _ => {}
+    }
+    if let Some(properties) = object.get_mut("properties").and_then(Value::as_object_mut) {
+        for (name, child) in properties {
+            normalize_input_schema(child, Some(name));
+        }
+    }
+    if let Some(items) = object.get_mut("items") {
+        normalize_input_schema(items, field);
+    }
+    for keyword in ["allOf", "anyOf", "oneOf"] {
+        if let Some(branches) = object.get_mut(keyword).and_then(Value::as_array_mut) {
+            for branch in branches {
+                normalize_input_schema(branch, field);
+            }
+        }
     }
 }
 
@@ -792,6 +850,18 @@ impl LifecycleServer {
                     .get("arguments")
                     .cloned()
                     .unwrap_or_else(|| json!({}));
+                let tool = self
+                    .options
+                    .surface
+                    .tools()
+                    .into_iter()
+                    .find(|tool| tool.get("name").and_then(Value::as_str) == Some(name))
+                    .ok_or_else(|| format!("unknown_tool:{name}"))?;
+                validate_input(
+                    tool.get("inputSchema").unwrap_or(&Value::Null),
+                    &args,
+                    "/arguments",
+                )?;
                 let payload = self.call_tool(name, args)?;
                 let is_error = matches!(payload.get("status").and_then(Value::as_str), Some("blocked") | Some("refused"))
                     || payload.get("error").is_some()
@@ -3790,6 +3860,83 @@ fn validate_result_schema(schema: &Value, value: &Value, path: &str, errors: &mu
         for (index, child) in array.iter().enumerate() { validate_result_schema(items, child, &format!("{path}/{index}"), errors); }
     }
 }
+fn validate_input(schema: &Value, value: &Value, path: &str) -> Result<(), String> {
+    if let Some(expected) = schema.get("type").and_then(Value::as_str) {
+        let valid = match expected {
+            "object" => value.is_object(),
+            "array" => value.is_array(),
+            "string" => value.is_string(),
+            "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+            "number" => value.is_number(),
+            "boolean" => value.is_boolean(),
+            "null" => value.is_null(),
+            _ => true,
+        };
+        if !valid {
+            return Err(format!("input_schema_validation_failed:{path}:type:{expected}"));
+        }
+    }
+    if let Some(allowed) = schema.get("enum").and_then(Value::as_array) {
+        if !allowed.iter().any(|candidate| candidate == value) {
+            return Err(format!("input_schema_validation_failed:{path}:enum"));
+        }
+    }
+    if let Some(text) = value.as_str() {
+        let length = text.chars().count() as u64;
+        if schema.get("minLength").and_then(Value::as_u64).is_some_and(|minimum| length < minimum) {
+            return Err(format!("input_schema_validation_failed:{path}:minLength"));
+        }
+        if schema.get("maxLength").and_then(Value::as_u64).is_some_and(|maximum| length > maximum) {
+            return Err(format!("input_schema_validation_failed:{path}:maxLength"));
+        }
+    }
+    if let Some(array) = value.as_array() {
+        if schema.get("maxItems").and_then(Value::as_u64).is_some_and(|maximum| array.len() as u64 > maximum) {
+            return Err(format!("input_schema_validation_failed:{path}:maxItems"));
+        }
+        if let Some(items) = schema.get("items") {
+            for (index, child) in array.iter().enumerate() {
+                validate_input(items, child, &format!("{path}/{index}"))?;
+            }
+        }
+    }
+    if let Some(object) = value.as_object() {
+        if let Some(required) = schema.get("required").and_then(Value::as_array) {
+            for field in required.iter().filter_map(Value::as_str) {
+                if !object.contains_key(field) {
+                    return Err(format!("input_schema_validation_failed:{path}/{field}:required"));
+                }
+            }
+        }
+        let properties = schema.get("properties").and_then(Value::as_object);
+        if schema.get("additionalProperties").and_then(Value::as_bool) == Some(false) {
+            if let Some(unknown) = object.keys().find(|field| properties.is_none_or(|known| !known.contains_key(*field))) {
+                return Err(format!("input_schema_validation_failed:{path}/{unknown}:additionalProperties"));
+            }
+        }
+        if let Some(properties) = properties {
+            for (field, child_schema) in properties {
+                if let Some(child) = object.get(field) {
+                    validate_input(child_schema, child, &format!("{path}/{field}"))?;
+                }
+            }
+        }
+    }
+    for keyword in ["allOf", "anyOf", "oneOf"] {
+        if let Some(branches) = schema.get(keyword).and_then(Value::as_array) {
+            let matches = branches.iter().filter(|branch| validate_input(branch, value, path).is_ok()).count();
+            let valid = match keyword {
+                "allOf" => matches == branches.len(),
+                "oneOf" => matches == 1,
+                _ => matches > 0,
+            };
+            if !valid {
+                return Err(format!("input_schema_validation_failed:{path}:{keyword}"));
+            }
+        }
+    }
+    Ok(())
+}
 fn required_string(args: &Value, key: &str) -> Result<String, String> {
     string_arg(args, key).ok_or_else(|| format!("{key}_required"))
 }
@@ -4393,6 +4540,60 @@ mod modern_protocol_tests {
         assert_eq!(list["result"]["resultType"], "complete");
         assert_eq!(list["result"]["cacheScope"], "public");
         assert!(list["result"]["ttlMs"].as_u64().unwrap_or_default() > 0);
+    }
+
+    #[test]
+    fn lifecycle_tool_schemas_are_named_closed_and_bounded() {
+        fn assert_bounded(schema: &Value, path: &str) {
+            if schema.get("type").and_then(Value::as_str) == Some("string")
+                && schema.get("enum").is_none()
+            {
+                assert!(schema.get("maxLength").and_then(Value::as_u64).is_some(), "unbounded string: {path}");
+            }
+            if schema.get("type").and_then(Value::as_str) == Some("array") {
+                assert!(schema.get("maxItems").and_then(Value::as_u64).is_some(), "unbounded array: {path}");
+            }
+            if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+                for (name, child) in properties {
+                    assert_bounded(child, &format!("{path}/{name}"));
+                }
+            }
+            if let Some(items) = schema.get("items") {
+                assert_bounded(items, &format!("{path}/*"));
+            }
+            for keyword in ["allOf", "anyOf", "oneOf"] {
+                if let Some(branches) = schema.get(keyword).and_then(Value::as_array) {
+                    for (index, branch) in branches.iter().enumerate() {
+                        assert_bounded(branch, &format!("{path}/{keyword}/{index}"));
+                    }
+                }
+            }
+        }
+        for surface in [Surface::Task, Surface::Work] {
+            for tool in surface.tools() {
+                let name = tool["name"].as_str().expect("tool name");
+                let schema = &tool["inputSchema"];
+                assert_eq!(schema["title"], format!("{name}.input"));
+                assert_eq!(schema["additionalProperties"], false);
+                assert_bounded(schema, name);
+            }
+        }
+    }
+
+    #[test]
+    fn lifecycle_input_contract_is_enforced_before_authority_dispatch() {
+        let mut server = server(Surface::Task);
+        let response = server.handle_request(json!({
+            "jsonrpc":"2.0","id":20,"method":"tools/call",
+            "params":{"name":"task_lifecycle_doctor","arguments":{"detail":"x".repeat(9000)}}
+        })).expect("error response");
+        assert!(response["error"]["message"].as_str().is_some_and(|message| message.contains("input_schema_validation_failed:/arguments/detail:maxLength")));
+
+        let unknown = server.handle_request(json!({
+            "jsonrpc":"2.0","id":21,"method":"tools/call",
+            "params":{"name":"task_lifecycle_doctor","arguments":{"unexpected":true}}
+        })).expect("error response");
+        assert!(unknown["error"]["message"].as_str().is_some_and(|message| message.contains("additionalProperties")));
     }
 
     #[test]
