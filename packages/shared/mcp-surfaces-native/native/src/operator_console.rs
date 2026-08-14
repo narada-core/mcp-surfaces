@@ -1,6 +1,7 @@
 use serde_json::{json, Map, Value};
 use std::env;
 use std::fs;
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -68,11 +69,14 @@ pub fn call(name: &str, args: &Map<String, Value>, site_root: &Path) -> Result<V
 }
 
 fn open(args: &Map<String, Value>, site_root: &Path) -> Result<Value, Value> {
-    let url = args.get("url").and_then(Value::as_str)
-        .map(str::trim).filter(|value| !value.is_empty())
+    let url = args
+        .get("url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
         .map(str::to_string)
-        .or_else(default_console_url)
-        .ok_or_else(|| error("operator_console_native_runtime_unavailable", "operator_console_native_runtime_unavailable:no explicit URL and no native runtime projection"))?;
+        .map(Ok)
+        .unwrap_or_else(|| ensure_local_runtime(site_root))?;
     if !(url.starts_with("http://") || url.starts_with("https://")) || url.len() > 2048 {
         return Err(error(
             "operator_console_overlay_url_invalid",
@@ -272,10 +276,58 @@ fn narada_root(site_root: &Path) -> PathBuf {
         .unwrap_or_else(|| site_root.parent().unwrap_or(site_root).join("src/narada"))
 }
 
-fn default_console_url() -> Option<String> {
-    env::var("NARADA_OPERATOR_CONSOLE_URL")
+fn ensure_local_runtime(site_root: &Path) -> Result<String, Value> {
+    if let Some(url) = env::var("NARADA_OPERATOR_CONSOLE_URL")
         .ok()
         .or_else(|| env::var("NARADA_OPERATOR_ROUTER_URL").ok())
+    {
+        return Ok(url);
+    }
+    let port = env::var("NARADA_OPERATOR_CONSOLE_PORT")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(43117);
+    let address = SocketAddr::from(([127, 0, 0, 1], port));
+    if TcpStream::connect_timeout(&address, Duration::from_millis(250)).is_err() {
+        let executable = env::current_exe().map_err(|cause| {
+            error(
+                "operator_console_runtime_executable_unavailable",
+                &cause.to_string(),
+            )
+        })?;
+        let mut command = Command::new(executable);
+        command
+            .args([
+                "--operator-console-runtime-host",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                &port.to_string(),
+            ])
+            .current_dir(site_root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x0800_0000 | 0x0000_0200);
+        }
+        command
+            .spawn()
+            .map_err(|cause| error("operator_console_runtime_spawn_failed", &cause.to_string()))?;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_err() {
+            if Instant::now() >= deadline {
+                return Err(error(
+                    "operator_console_runtime_readiness_timeout",
+                    "operator_console_runtime_readiness_timeout",
+                ));
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+    Ok(format!("http://127.0.0.1:{port}"))
 }
 
 fn read_json(path: &Path) -> Value {
