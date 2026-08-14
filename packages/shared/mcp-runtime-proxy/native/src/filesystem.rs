@@ -18,6 +18,7 @@ const PROTOCOL_VERSION: &str = "2024-11-05";
 const READ_TIMEOUT_MS: u64 = 5_000;
 const WRITE_TIMEOUT_MS: u64 = 10_000;
 const SEARCH_TIMEOUT_MS: u64 = 60_000;
+const MAX_READ_LINES: i64 = 1_000;
 const MAX_READ_LINE_BYTES: usize = 1024 * 1024;
 const MAX_READ_WINDOW_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SEARCH_CAPTURE_ENTRIES: usize = 10_000;
@@ -791,6 +792,11 @@ fn guidance(state: &State, args: &Value) -> Result<Value, FsError> {
             "sequence": ["Call fs_file_metrics with an explicit directory, pattern, limit, and cache policy.", "Use the files table for path, line_count, byte_count, and file_type.", "Use offset and next_offset to page larger trees."],
             "semantics": {"line_count": "Exact within the configured byte and scan budgets.", "byte_count": "Filesystem byte size from stat metadata.", "scope": "The response declares the allowed root and selected directory."}
         },
+        "range_reads": {
+            "page_size_lines": MAX_READ_LINES,
+            "behavior": "A logical range larger than one page succeeds with a bounded first page.",
+            "sequence": ["Call fs_read_file_range with the complete logical start_line and end_line.", "When has_more is true, call the same tool with continuation.arguments.", "Do not switch to a native filesystem or shell reader to bypass pagination."]
+        },
         "first_use": ["Call fs_doctor before discovery.", "Use bounded reads and searches.", "Preserve structuredContent as authoritative evidence."]
     }))
 }
@@ -859,7 +865,7 @@ fn read_file(state: &State, args: &Value, range: bool) -> Result<Value, FsError>
             "fs_read_file"
         },
     )?;
-    let (offset, limit) = if range {
+    let (offset, requested_limit, limit, requested_end_line) = if range {
         let start = integer(args, "start_line").ok_or_else(|| {
             FsError::new(
                 "start_line_must_be_positive_integer",
@@ -889,24 +895,22 @@ fn read_file(state: &State, args: &Value, range: bool) -> Result<Value, FsError>
             ));
         }
         let requested = end - start + 1;
-        if requested > 1000 {
-            return Err(FsError::new(
-                "fs_read_file_range_limit_exceeds_max",
-                "fs_read_file_range_limit_exceeds_max",
-                json!({"start_line": start, "end_line": end, "requested_limit": requested, "max_limit": 1000, "pagination_required": true, "mutation_started": false}),
-            ));
-        }
-        (start, requested)
+        (start, requested, requested.min(MAX_READ_LINES), Some(end))
     } else {
         let requested = integer(args, "limit").unwrap_or(400).max(1);
-        if requested > 1000 {
+        if requested > MAX_READ_LINES {
             return Err(FsError::new(
                 "fs_read_file_limit_exceeds_max",
                 "fs_read_file_limit_exceeds_max",
-                json!({"offset": integer(args, "offset").unwrap_or(1).max(1), "requested_limit": requested, "max_limit": 1000, "pagination_required": true, "mutation_started": false}),
+                json!({"offset": integer(args, "offset").unwrap_or(1).max(1), "requested_limit": requested, "max_limit": MAX_READ_LINES, "pagination_required": true, "mutation_started": false}),
             ));
         }
-        (integer(args, "offset").unwrap_or(1).max(1), requested)
+        (
+            integer(args, "offset").unwrap_or(1).max(1),
+            requested,
+            requested,
+            None,
+        )
     };
     let timeout = integer(args, "timeout_ms")
         .unwrap_or(READ_TIMEOUT_MS as i64)
@@ -924,6 +928,33 @@ fn read_file(state: &State, args: &Value, range: bool) -> Result<Value, FsError>
         },
     )?;
     let content = window.selected.join("\n");
+    let next_offset = if let Some(requested_end) = requested_end_line {
+        window.next_offset.filter(|next| *next <= requested_end)
+    } else {
+        window.next_offset
+    };
+    let continuation = if range {
+        next_offset
+            .map(|next| {
+                json!({
+                    "tool": "fs_read_file_range",
+                    "arguments": {
+                        "path": path,
+                        "start_line": next,
+                        "end_line": requested_end_line,
+                        "timeout_ms": timeout
+                    }
+                })
+            })
+            .unwrap_or(Value::Null)
+    } else {
+        Value::Null
+    };
+    let served_end_line = if window.selected.is_empty() {
+        Value::Null
+    } else {
+        json!(offset + window.selected.len() as i64 - 1)
+    };
     let (total_lines, total_lines_exact, line_window_complete) = if window.complete {
         (json!(window.total_lines), true, true)
     } else {
@@ -940,17 +971,25 @@ fn read_file(state: &State, args: &Value, range: bool) -> Result<Value, FsError>
         "line_window_complete": line_window_complete,
         "offset": offset,
         "limit": limit,
+        "requested_limit": requested_limit,
+        "requested_start_line": if range { json!(offset) } else { Value::Null },
+        "requested_end_line": requested_end_line,
+        "served_end_line": served_end_line,
         "returned_lines": window.selected.len(),
-        "next_offset": window.next_offset,
+        "next_offset": next_offset,
+        "next_start_line": if range { next_offset.map_or(Value::Null, Value::from) } else { Value::Null },
+        "continuation": continuation,
         "content": content,
         "content_sha256": window.sha256,
         "content_hash_scope": "full_file",
         "hash_source": "live_file_bytes",
         "cache_used": false,
         "content_window_sha256": sha256_bytes(content.as_bytes()),
-        "max_limit": 1000,
-        "limit_adjusted": false,
-        "pagination_required": window.next_offset.is_some(),
+        "max_limit": MAX_READ_LINES,
+        "limit_adjusted": limit != requested_limit,
+        "pagination_required": next_offset.is_some(),
+        "has_more": next_offset.is_some(),
+        "requested_range_complete": if range { next_offset.is_none() } else { true },
         "timeout_ms": timeout
     }))
 }
@@ -3584,7 +3623,7 @@ fn list_tools(mode: &str) -> Vec<Value> {
         ),
         (
             "fs_read_file_range",
-            "Read a text file line range under an allowed root. Lines are 1-based and inclusive.",
+            "Read a logical text-file line range under an allowed root. Lines are 1-based and inclusive; ranges over 1,000 lines return a bounded page with continuation.arguments for the same MCP tool.",
         ),
         (
             "fs_stat",
@@ -3648,7 +3687,7 @@ fn list_tools(mode: &str) -> Vec<Value> {
         match *name {
             "fs_guidance" => { properties.insert("workflow".into(), json!({"type":"string"})); properties.insert("tool".into(), json!({"type":"string"})); }
             "fs_read_file" => { properties.insert("path".into(), json!({"type":"string"})); properties.insert("offset".into(), json!({"type":"integer","minimum":1,"maximum":10_000_000,"default":1})); properties.insert("limit".into(), json!({"type":"integer","minimum":1,"maximum":1_000,"default":400})); properties.insert("timeout_ms".into(), json!({"type":"integer","minimum":1,"maximum":60_000,"default":READ_TIMEOUT_MS})); }
-            "fs_read_file_range" => { properties.insert("path".into(), json!({"type":"string"})); properties.insert("start_line".into(), json!({"type":"integer","minimum":1,"maximum":10_000_000})); properties.insert("end_line".into(), json!({"type":"integer","minimum":1,"maximum":10_000_000})); properties.insert("timeout_ms".into(), json!({"type":"integer","minimum":1,"maximum":60_000,"default":READ_TIMEOUT_MS})); }
+            "fs_read_file_range" => { properties.insert("path".into(), json!({"type":"string"})); properties.insert("start_line".into(), json!({"type":"integer","minimum":1,"maximum":10_000_000,"description":"Inclusive logical start line."})); properties.insert("end_line".into(), json!({"type":"integer","minimum":1,"maximum":10_000_000,"description":"Inclusive logical end line. Requests spanning over 1,000 lines return a bounded page; follow continuation.arguments until has_more is false."})); properties.insert("timeout_ms".into(), json!({"type":"integer","minimum":1,"maximum":60_000,"default":READ_TIMEOUT_MS})); }
             "fs_stat" => { properties.insert("path".into(), json!({"type":"string"})); properties.insert("timeout_ms".into(),json!({"type":"integer","minimum":1,"maximum":300_000,"default":60_000})); }
             "fs_glob_search" => { properties.insert("pattern".into(), json!({"type":"string"})); properties.insert("directory".into(), json!({"type":"string","default":"."})); properties.insert("ignore".into(), json!({"type":"array","items":{"type":"string"}})); properties.insert("offset".into(), json!({"type":"integer","minimum":0,"maximum":10_000_000,"default":0})); properties.insert("limit".into(), json!({"type":"integer","minimum":1,"maximum":500,"default":100})); properties.insert("timeout_ms".into(), json!({"type":"integer","minimum":1,"maximum":300_000,"default":SEARCH_TIMEOUT_MS})); properties.insert("cache_policy".into(), json!({"type":"string","enum":["auto","snapshot","refresh","bypass"],"default":"auto"})); properties.insert("snapshot_id".into(), json!({"type":"string"})); }
             "fs_grep_search" => { properties.insert("pattern".into(), json!({"type":"string"})); properties.insert("path".into(), json!({"type":"string","default":"."})); properties.insert("output_mode".into(), json!({"type":"string","enum":["files_with_matches","count_matches","content"],"default":"files_with_matches"})); properties.insert("ignore".into(), json!({"type":"array","items":{"type":"string"}})); properties.insert("offset".into(), json!({"type":"integer","minimum":0,"maximum":10_000_000,"default":0})); properties.insert("limit".into(), json!({"type":"integer","minimum":1,"maximum":500,"default":80})); properties.insert("timeout_ms".into(), json!({"type":"integer","minimum":1,"maximum":300_000,"default":SEARCH_TIMEOUT_MS})); properties.insert("cache_policy".into(), json!({"type":"string","enum":["auto","snapshot","refresh","bypass"],"default":"auto"})); properties.insert("snapshot_id".into(), json!({"type":"string"})); }
@@ -4616,6 +4655,56 @@ mod tests {
             user_home_anchor_from(|key| values.get(key).cloned()),
             Some(PathBuf::from(r"C:\Users\andrey"))
         );
+    }
+
+    #[test]
+    fn logical_range_reads_page_without_refusal_and_publish_same_tool_continuation() {
+        let root = test_root("logical-range-pagination");
+        let path = root.join("large.txt");
+        let content = (1..=2_505)
+            .map(|line| format!("line-{line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&path, content).unwrap();
+        let state = test_state(&root, "read");
+
+        let first = read_file(
+            &state,
+            &json!({"path":path,"start_line":1,"end_line":3_000}),
+            true,
+        )
+        .expect("a large logical range must return its first bounded page");
+        assert_eq!(first["returned_lines"], 1_000);
+        assert_eq!(first["requested_limit"], 3_000);
+        assert_eq!(first["limit"], 1_000);
+        assert_eq!(first["limit_adjusted"], true);
+        assert_eq!(first["has_more"], true);
+        assert_eq!(first["next_start_line"], 1_001);
+        assert_eq!(first["continuation"]["tool"], "fs_read_file_range");
+        assert_eq!(first["continuation"]["arguments"]["start_line"], 1_001);
+        assert_eq!(first["continuation"]["arguments"]["end_line"], 3_000);
+
+        let second = read_file(&state, &first["continuation"]["arguments"], true)
+            .expect("continuation arguments must be directly reusable");
+        assert_eq!(second["returned_lines"], 1_000);
+        assert_eq!(second["next_start_line"], 2_001);
+
+        let third = read_file(&state, &second["continuation"]["arguments"], true)
+            .expect("the final page must stop cleanly at end of file");
+        assert_eq!(third["returned_lines"], 505);
+        assert_eq!(third["has_more"], false);
+        assert_eq!(third["requested_range_complete"], true);
+        assert!(third["continuation"].is_null());
+
+        let range_tool = list_tools("read")
+            .into_iter()
+            .find(|tool| tool["name"] == "fs_read_file_range")
+            .expect("range tool must be published");
+        assert!(range_tool["description"]
+            .as_str()
+            .unwrap()
+            .contains("continuation.arguments"));
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[cfg(windows)]
