@@ -508,7 +508,7 @@ fn call_tool(state: &mut State, params: &Value) -> Result<Value, FsError> {
         ));
     }
     let value = match name {
-        "fs_guidance" => guidance(args),
+        "fs_guidance" => guidance(state, args),
         "fs_read_file" => read_file(state, args, false),
         "fs_read_file_range" => read_file(state, args, true),
         "fs_stat" => stat_tool(state, args),
@@ -548,7 +548,18 @@ fn is_write_tool(name: &str) -> bool {
 }
 
 fn tool_result(value: Value) -> Value {
-    let text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".to_string());
+    let text = if value.get("content").and_then(Value::as_str).is_some() {
+        serde_json::to_string_pretty(&value)
+    } else {
+        serde_json::to_string(&json!({
+            "schema": value.get("schema"),
+            "status": value.get("status"),
+            "path": value.get("path"),
+            "count": value.get("count"),
+            "returned": value.get("returned")
+        }))
+    }
+    .unwrap_or_else(|_| "{}".to_string());
     json!({"content": [{"type": "text", "text": text, "annotations": {"audience": ["assistant"]}}], "structuredContent": value})
 }
 
@@ -570,7 +581,10 @@ fn add_diagnostic_details(value: Value) -> Value {
     Value::Object(details)
 }
 
-fn guidance(args: &Value) -> Result<Value, FsError> {
+fn guidance(state: &State, args: &Value) -> Result<Value, FsError> {
+    let apply_patch_available = list_tools(&state.mode)
+        .iter()
+        .any(|tool| tool.get("name").and_then(Value::as_str) == Some("fs_apply_patch"));
     Ok(json!({
         "schema": "narada.mcp_surface.guidance.v0",
         "status": "ok",
@@ -585,7 +599,12 @@ fn guidance(args: &Value) -> Result<Value, FsError> {
             "git_boundary": "Use git-mcp for authoritative tracked and ignored state."
         },
         "patch_recovery": {
-            "sequence": ["Choose a stable operation_id.", "Call fs_apply_patch once.", "After timeout call fs_patch_outcome_show.", "Retry only when retry_safe is true."],
+            "apply_patch_available": apply_patch_available,
+            "sequence": if apply_patch_available {
+                json!(["Choose a stable operation_id.", "Call fs_apply_patch once.", "After timeout call fs_patch_outcome_show.", "Retry only when retry_safe is true."])
+            } else {
+                json!(["Use fs_patch_outcome_show only to inspect an operation_id produced by another compatible filesystem surface."])
+            },
             "statuses": {"failed_before_mutation": "Parsing, validation, or planning failed and no mutation started."},
             "read_mode": "fs_patch_outcome_show is available in read mode."
         },
@@ -937,6 +956,8 @@ fn write_file(state: &State, args: &Value) -> Result<Value, FsError> {
         "create_parent_directories": create_parent_directories,
         "before_sha256": before_sha256,
         "after_sha256": after_sha256,
+        "sha256": after_sha256,
+        "content_sha256": after_sha256,
         "timeout_ms": timeout_ms,
     }))
 }
@@ -1010,7 +1031,7 @@ fn str_replace_file(state: &State, args: &Value) -> Result<Value, FsError> {
         json!({"old_length": old.len(), "new_length": new.len(), "before_sha256": before_sha256, "after_sha256": after_sha256}),
     )?;
     Ok(
-        json!({"schema": "local.filesystem.str_replace_file.v1", "status": "replaced", "path": path, "root": root, "relative_path": relative_path(&root, &path), "occurrences": 1, "before_sha256": before_sha256, "after_sha256": after_sha256}),
+        json!({"schema": "local.filesystem.str_replace_file.v1", "status": "replaced", "path": path, "root": root, "relative_path": relative_path(&root, &path), "occurrences": 1, "before_sha256": before_sha256, "after_sha256": after_sha256, "sha256": after_sha256, "content_sha256": after_sha256}),
     )
 }
 
@@ -1135,7 +1156,7 @@ fn replace_range(state: &State, args: &Value) -> Result<Value, FsError> {
         json!({"start_line": start, "end_line": end, "before_sha256": before_sha256, "after_sha256": after_sha256}),
     )?;
     Ok(
-        json!({"schema": "local.filesystem.replace_range.v1", "status": "replaced_range", "path": path, "root": root, "relative_path": relative_path(&root, &path), "start_line": start, "end_line": end, "inserted_lines": replacement_lines.len(), "before_sha256": before_sha256, "after_sha256": after_sha256}),
+        json!({"schema": "local.filesystem.replace_range.v1", "status": "replaced_range", "path": path, "root": root, "relative_path": relative_path(&root, &path), "start_line": start, "end_line": end, "inserted_lines": replacement_lines.len(), "before_sha256": before_sha256, "after_sha256": after_sha256, "sha256": after_sha256, "content_sha256": after_sha256}),
     )
 }
 
@@ -1689,15 +1710,19 @@ fn search_tool(state: &mut State, args: &Value, grep: bool) -> Result<Value, FsE
         .as_bytes(),
     );
     let mut cache_hit = false;
+    let mut snapshot_reused = false;
     let mut cached_snapshot: Option<String> = None;
     let all_matches = if let Some(snapshot) = snapshot_id {
-        state.snapshots.get(snapshot).cloned().ok_or_else(|| {
+        let matches = state.snapshots.get(snapshot).cloned().ok_or_else(|| {
             FsError::new(
                 format!("{operation}_snapshot_not_found"),
                 format!("{operation}_snapshot_not_found: {snapshot}"),
                 json!({"snapshot_id": snapshot}),
             )
-        })?
+        })?;
+        cache_hit = true;
+        snapshot_reused = true;
+        matches
     } else if cache_policy != "bypass" && cache_policy != "refresh" {
         if let Some((id, matches)) = state.cache.get(&cache_key).cloned() {
             cache_hit = true;
@@ -1724,9 +1749,6 @@ fn search_tool(state: &mut State, args: &Value, grep: bool) -> Result<Value, FsE
     } else {
         snapshot_id.map(str::to_string)
     };
-    if cache_policy == "auto" && snapshot_id.is_none() && !cache_hit {
-        cache_hit = true;
-    }
     let page: Vec<String> = all_matches
         .iter()
         .skip(offset)
@@ -1756,6 +1778,7 @@ fn search_tool(state: &mut State, args: &Value, grep: bool) -> Result<Value, FsE
     value.insert("returned".into(), json!(page.len()));
     value.insert("order".into(), json!("ripgrep_traversal"));
     value.insert("cache_hit".into(), json!(cache_hit));
+    value.insert("snapshot_reused".into(), json!(snapshot_reused));
     value.insert("cache_policy".into(), json!(cache_policy));
     value.insert(
         "snapshot_id".into(),
@@ -1881,16 +1904,39 @@ fn run_search_command(
     } else {
         rg_args.push(scope.to_string_lossy().to_string());
     }
-    run_rg(
+    let matches = run_rg(
         &rg_args,
         args.get("timeout_ms")
             .and_then(Value::as_u64)
             .unwrap_or(SEARCH_TIMEOUT_MS),
         operation,
-    )
+    )?;
+    Ok(matches
+        .into_iter()
+        .map(|value| normalize_search_result(&value, grep))
+        .collect())
+}
+
+fn normalize_search_result(value: &str, grep: bool) -> String {
+    if !grep {
+        return value.replace('\\', "/");
+    }
+    if let Some((path, remainder)) = value.split_once('\u{1f}') {
+        return format!("{}\u{1f}{}", path.replace('\\', "/"), remainder);
+    }
+    value.replace('\\', "/")
 }
 
 fn repository_inventory(state: &mut State, args: &Value) -> Result<Value, FsError> {
+    if args.get("directory").and_then(Value::as_str).is_some()
+        && args.get("root").and_then(Value::as_str).is_some()
+    {
+        return Err(FsError::new(
+            "repository_inventory_scope_ambiguous",
+            "repository_inventory_scope_ambiguous",
+            json!({"remediation": "Pass either directory or root, not both."}),
+        ));
+    }
     let include_generated = args
         .get("include_generated")
         .and_then(Value::as_bool)
@@ -1903,6 +1949,11 @@ fn repository_inventory(state: &mut State, args: &Value) -> Result<Value, FsErro
             json!({}),
         )
     })?;
+    if object.get("directory").and_then(Value::as_str).is_none() {
+        if let Some(root) = object.remove("root") {
+            object.insert("directory".into(), root);
+        }
+    }
     object.entry("pattern").or_insert(json!("**/*"));
     if !include_generated {
         let ignores = object.entry("ignore").or_insert(json!([]));
@@ -1945,7 +1996,11 @@ fn repository_inventory(state: &mut State, args: &Value) -> Result<Value, FsErro
     );
     result.insert(
         "directory".into(),
-        json!(args.get("directory").and_then(Value::as_str).unwrap_or(".")),
+        json!(args
+            .get("directory")
+            .and_then(Value::as_str)
+            .or_else(|| args.get("root").and_then(Value::as_str))
+            .unwrap_or(".")),
     );
     result.insert(
         "pattern".into(),
@@ -2243,7 +2298,7 @@ fn list_tools(mode: &str) -> Vec<Value> {
             "fs_stat" => { properties.insert("path".into(), json!({"type":"string"})); }
             "fs_glob_search" => { properties.insert("pattern".into(), json!({"type":"string"})); properties.insert("directory".into(), json!({"type":"string","default":"."})); properties.insert("ignore".into(), json!({"type":"array","items":{"type":"string"}})); properties.insert("offset".into(), json!({"type":"integer","default":0})); properties.insert("limit".into(), json!({"type":"integer","default":100})); properties.insert("timeout_ms".into(), json!({"type":"integer"})); properties.insert("cache_policy".into(), json!({"type":"string","enum":["auto","snapshot","refresh","bypass"],"default":"auto"})); properties.insert("snapshot_id".into(), json!({"type":"string"})); }
             "fs_grep_search" => { properties.insert("pattern".into(), json!({"type":"string"})); properties.insert("path".into(), json!({"type":"string","default":"."})); properties.insert("output_mode".into(), json!({"type":"string","enum":["files_with_matches","count_matches","content"],"default":"files_with_matches"})); properties.insert("ignore".into(), json!({"type":"array","items":{"type":"string"}})); properties.insert("offset".into(), json!({"type":"integer","default":0})); properties.insert("limit".into(), json!({"type":"integer","default":80})); properties.insert("timeout_ms".into(), json!({"type":"integer"})); properties.insert("cache_policy".into(), json!({"type":"string","enum":["auto","snapshot","refresh","bypass"],"default":"auto"})); properties.insert("snapshot_id".into(), json!({"type":"string"})); }
-            "fs_repository_inventory" => { properties.insert("pattern".into(), json!({"type":"string","default":"**/*"})); properties.insert("directory".into(), json!({"type":"string","default":"."})); properties.insert("ignore".into(), json!({"type":"array","items":{"type":"string"}})); properties.insert("include_generated".into(), json!({"type":"boolean","default":false})); properties.insert("offset".into(), json!({"type":"integer","default":0})); properties.insert("limit".into(), json!({"type":"integer","default":100})); properties.insert("timeout_ms".into(), json!({"type":"integer"})); properties.insert("cache_policy".into(), json!({"type":"string","enum":["auto","snapshot","refresh","bypass"],"default":"auto"})); properties.insert("snapshot_id".into(), json!({"type":"string"})); }
+            "fs_repository_inventory" => { properties.insert("pattern".into(), json!({"type":"string","default":"**/*"})); properties.insert("directory".into(), json!({"type":"string","description":"Canonical inventory scope; mutually exclusive with root."})); properties.insert("root".into(), json!({"type":"string","description":"Compatibility alias for directory; mutually exclusive with directory."})); properties.insert("ignore".into(), json!({"type":"array","items":{"type":"string"}})); properties.insert("include_generated".into(), json!({"type":"boolean","default":false})); properties.insert("offset".into(), json!({"type":"integer","default":0})); properties.insert("limit".into(), json!({"type":"integer","default":100})); properties.insert("timeout_ms".into(), json!({"type":"integer"})); properties.insert("cache_policy".into(), json!({"type":"string","enum":["auto","snapshot","refresh","bypass"],"default":"auto"})); properties.insert("snapshot_id".into(), json!({"type":"string"})); }
             "fs_file_metrics" => { properties.insert("pattern".into(), json!({"type":"string","default":"**/*"})); properties.insert("directory".into(), json!({"type":"string","default":"."})); properties.insert("root".into(), json!({"type":"string"})); properties.insert("ignore".into(), json!({"type":"array","items":{"type":"string"}})); properties.insert("exclude".into(), json!({"type":"array","items":{"type":"string"}})); properties.insert("offset".into(), json!({"type":"integer","default":0})); properties.insert("limit".into(), json!({"type":"integer","default":100})); properties.insert("max_bytes_per_file".into(), json!({"type":"integer"})); properties.insert("max_total_scan_bytes".into(), json!({"type":"integer"})); properties.insert("timeout_ms".into(), json!({"type":"integer"})); properties.insert("cache_policy".into(), json!({"type":"string","enum":["auto","snapshot","refresh","bypass"],"default":"auto"})); properties.insert("snapshot_id".into(), json!({"type":"string"})); }
             "fs_patch_outcome_show" => { properties.insert("operation_id".into(), json!({"type":"string"})); }
             "fs_write_file" => {
@@ -2328,6 +2383,13 @@ fn resolve_allowed(
                 json!({"operation": operation}),
             )
         })?;
+    if input.contains('%') {
+        return Err(FsError::new(
+            "path_environment_expansion_not_supported",
+            format!("path_environment_expansion_not_supported: {input}"),
+            json!({"operation": operation, "requested_path": input, "remediation": "Expand environment variables before calling the filesystem surface, or pass an absolute path."}),
+        ));
+    }
     let base = state.allowed_roots.first().cloned().ok_or_else(|| {
         FsError::new(
             "filesystem_mcp_requires_at_least_one_allowed_root",
@@ -2719,6 +2781,27 @@ mod tests {
     use super::*;
     use std::ffi::OsString;
 
+    fn test_state(root: &Path, mode: &str) -> State {
+        State {
+            mode: mode.to_string(),
+            allowed_roots: vec![root.to_path_buf()],
+            root_entries: Vec::new(),
+            output_root: root.to_path_buf(),
+            audit_log_dir: None,
+            cache: HashMap::new(),
+            snapshots: HashMap::new(),
+        }
+    }
+
+    fn test_root(name: &str) -> PathBuf {
+        let root = env::temp_dir().join(format!("narada-fs-{name}-{}", std::process::id()));
+        if root.exists() {
+            fs::remove_dir_all(&root).expect("remove stale exact test root");
+        }
+        fs::create_dir_all(&root).expect("create test root");
+        root
+    }
+
     fn fake_env(entries: &[(&str, &str)]) -> HashMap<String, OsString> {
         entries
             .iter()
@@ -2765,5 +2848,96 @@ mod tests {
             user_home_anchor_from(|key| values.get(key).cloned()),
             Some(PathBuf::from(r"C:\Users\andrey"))
         );
+    }
+
+    #[test]
+    fn repository_inventory_honors_root_alias_and_normalizes_paths() {
+        let root = test_root("inventory-root-alias");
+        let scope = root.join("scope");
+        fs::create_dir_all(&scope).unwrap();
+        fs::write(scope.join("only.txt"), "needle\n").unwrap();
+        fs::write(root.join("outside.txt"), "outside\n").unwrap();
+        let mut state = test_state(&root, "read");
+
+        let result = repository_inventory(
+            &mut state,
+            &json!({"root": scope, "pattern": "**/*", "limit": 10, "cache_policy": "refresh"}),
+        )
+        .unwrap();
+        let paths = result["candidate_source_paths"].as_array().unwrap();
+        assert_eq!(paths.len(), 1);
+        assert!(paths[0].as_str().unwrap().ends_with("/scope/only.txt"));
+        assert!(!paths[0].as_str().unwrap().contains('\\'));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn explicit_snapshot_is_reported_as_reused_cache() {
+        let root = test_root("snapshot-reuse");
+        fs::write(root.join("one.txt"), "one\n").unwrap();
+        let mut state = test_state(&root, "read");
+        let first = search_tool(
+            &mut state,
+            &json!({"directory": root, "pattern": "**/*", "limit": 1, "cache_policy": "refresh"}),
+            false,
+        )
+        .unwrap();
+        assert_eq!(first["cache_hit"], false);
+        let second = search_tool(
+            &mut state,
+            &json!({"directory": root, "pattern": "**/*", "limit": 1, "snapshot_id": first["snapshot_id"]}),
+            false,
+        )
+        .unwrap();
+        assert_eq!(second["cache_hit"], true);
+        assert_eq!(second["snapshot_reused"], true);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn environment_variable_paths_are_refused_before_resolution() {
+        let root = test_root("environment-path");
+        let state = test_state(&root, "read");
+        let error = resolve_allowed(&state, Some("%USERPROFILE%/src"), "fs_stat").unwrap_err();
+        assert_eq!(error.code, "path_environment_expansion_not_supported");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn guidance_does_not_recommend_an_unavailable_patch_producer() {
+        let root = test_root("guidance");
+        let state = test_state(&root, "write");
+        let result = guidance(&state, &json!({"workflow": "safe_edit"})).unwrap();
+        assert_eq!(result["patch_recovery"]["apply_patch_available"], false);
+        assert!(!result["patch_recovery"]["sequence"]
+            .to_string()
+            .contains("Call fs_apply_patch once"));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn mutation_results_expose_canonical_content_hash() {
+        let root = test_root("mutation-hash");
+        let state = test_state(&root, "write");
+        let path = root.join("value.txt");
+        let written = write_file(&state, &json!({"path": path, "content": "before\n"})).unwrap();
+        assert_eq!(written["sha256"], written["after_sha256"]);
+        assert_eq!(written["content_sha256"], written["after_sha256"]);
+        let replaced = str_replace_file(
+            &state,
+            &json!({"path": path, "old": "before", "new": "after", "expected_sha256": written["sha256"]}),
+        )
+        .unwrap();
+        assert_eq!(replaced["sha256"], replaced["after_sha256"]);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn tool_text_is_a_compact_projection_of_structured_content() {
+        let result = tool_result(json!({"schema": "example.v1", "status": "ok", "large": [1,2,3]}));
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.len() < 100);
+        assert!(!text.contains("large"));
+        assert_eq!(result["structuredContent"]["large"][2], 3);
     }
 }
