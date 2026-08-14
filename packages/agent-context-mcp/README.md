@@ -78,10 +78,10 @@ the immutable carrier artifact graph.
   acknowledgement. The caller never supplies step ids, offsets, hashes,
   timestamps, receipts, or completion evidence.
 - `mcp_output_show({ ref, offset?, limit? })`: shared carrier transport readback
-  for outputs from other projected surfaces. `output_ref` is an alias for
-  `ref`; one is required, offset defaults to 0, and limit defaults to 10000 with
-  a maximum of 20000. The orientation operation itself never emits an output
-  reference.
+  for outputs from other projected surfaces. `ref` is the canonical required
+  argument; the runtime retains `output_ref` only as a legacy compatibility
+  alias. Offset defaults to 0, and limit defaults to 10000 with a maximum of
+  20000. The orientation operation itself never emits an output reference.
 
 The default projection exposes exactly one domain operation,
 `agent_orientation_read`, plus shared transport readback. Every orientation

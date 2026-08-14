@@ -240,4 +240,21 @@ mod tests {
         let mut content_length = std::io::Cursor::new([framed, json.to_vec()].concat());
         assert_eq!(read_message(&mut content_length).unwrap().unwrap(), json);
     }
+
+    #[test]
+    fn output_readback_has_one_named_required_reference_contract() {
+        let catalog: Value = serde_json::from_str(CATALOG).expect("catalog must parse");
+        for projection in ["occupant", "admin"] {
+            let tool = catalog["projections"][projection]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|tool| tool["name"] == "mcp_output_show")
+                .unwrap();
+            assert_eq!(tool["inputSchema"]["required"], json!(["ref"]));
+            assert!(tool["inputSchema"].get("anyOf").is_none());
+            assert_eq!(tool["inputSchema"]["properties"]["limit"]["maximum"], 20000);
+            assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+        }
+    }
 }

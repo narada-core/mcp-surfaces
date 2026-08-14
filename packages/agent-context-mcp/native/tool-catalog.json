@@ -54,10 +54,7 @@
               "default": 10000
             }
           },
-          "anyOf": [
-            { "required": ["ref"] },
-            { "required": ["output_ref"] }
-          ],
+          "required": ["ref"],
           "additionalProperties": false
         },
         "annotations": {
@@ -2850,10 +2847,7 @@
               "default": 10000
             }
           },
-          "anyOf": [
-            { "required": ["ref"] },
-            { "required": ["output_ref"] }
-          ],
+          "required": ["ref"],
           "additionalProperties": false
         },
         "annotations": {
