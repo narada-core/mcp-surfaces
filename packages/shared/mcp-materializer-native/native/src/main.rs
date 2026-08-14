@@ -2276,9 +2276,10 @@ fn validate_input(input: &MaterializationInput) -> Result<(), Failure> {
 
 fn validate_protocol_route(carrier: &CarrierInput, server: &ServerInput) -> Result<(), Failure> {
     let carrier_protocol = match carrier.carrier_kind {
-        CarrierKind::Codex | CarrierKind::Kimi | CarrierKind::Opencode => "2024-11-05",
+        CarrierKind::Kimi => "2026-07-28",
+        CarrierKind::Codex | CarrierKind::Opencode => "2024-11-05",
     };
-    let proxy_accepted_client_protocols = ["2024-11-05"];
+    let proxy_accepted_client_protocols = ["2024-11-05", "2026-07-28"];
     let proxy_emitted_server_protocol = carrier_protocol;
     let server_accepted_protocols: &[&str] = if server.name == "mcp-registrar" {
         &["2026-07-28"]
@@ -2427,6 +2428,7 @@ fn emit_json_carrier(carrier: &CarrierInput, field: &str) -> Result<Vec<u8>, Fai
                     "transport": "stdio",
                     "command": server.command,
                     "args": server.args,
+                    "protocolVersion": "2026-07-28",
                 });
                 if let Some(mode) = &server.approval_mode {
                     value["approval_mode"] = Value::String(mode.clone());
@@ -2786,7 +2788,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_legacy_kimi_route_to_modern_only_registrar() {
+    fn accepts_modern_kimi_route_to_modern_only_registrar() {
         let root = tempdir().unwrap();
         let mut input = fixture(root.path());
         input.carriers[0].carrier_id = "kimi-test".into();
@@ -2794,15 +2796,8 @@ mod tests {
         input.carriers[0].servers[0].name = "mcp-registrar".into();
 
         let carrier = &input.carriers[0];
-        let failure = validate_protocol_route(carrier, &carrier.servers[0])
-            .expect_err("legacy Kimi must not route to a modern-only Registrar");
-
-        assert_eq!(failure.code, "materializer_protocol_route_incompatible");
-        assert_eq!(failure.details["carrier_id"], "kimi-test");
-        assert_eq!(failure.details["carrier_protocol"], "2024-11-05");
-        assert_eq!(failure.details["proxy_emitted_server_protocol"], "2024-11-05");
-        assert_eq!(failure.details["server_accepted_protocols"], json!(["2026-07-28"]));
-        assert!(failure.details["translation_adapter"].is_null());
+        validate_protocol_route(carrier, &carrier.servers[0])
+            .expect("modern Kimi route must reach the modern-only Registrar");
     }
 
     #[test]

@@ -213,6 +213,7 @@ fn materializes_every_supported_carrier_kind_without_javascript_runtime_environm
     let kimi: Value = serde_json::from_slice(&fs::read(&paths[1].2).unwrap()).unwrap();
     let kimi_server = &kimi["mcpServers"]["narada-site-test-local-filesystem"];
     assert_eq!(kimi_server["transport"], "stdio");
+    assert_eq!(kimi_server["protocolVersion"], "2026-07-28");
     assert_eq!(kimi_server["env_vars"][0], "NARADA_AGENT_ID");
     assert!(kimi_server.get("enabled").is_none());
 
