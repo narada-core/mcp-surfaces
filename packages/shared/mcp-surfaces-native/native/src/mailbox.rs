@@ -9,6 +9,8 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime, UtcOffset};
 const MAX_FILES: usize = 5_000;
 const MAX_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_ROWS: usize = 500;
+const MAX_SCAN_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_RAW_RESPONSE_BYTES: usize = 64 * 1024;
 const DOMAIN_DB_RELATIVE: &str = ".narada/runtime/mailbox-domain/mailbox-domain.db";
 const DEFAULT_ROOTS: &[&str] = &[".ai/mailboxes", ".ai/synced-mailboxes", "operator-surfaces/mailboxes"];
 const READ_NAMES: &[&str] = &[
@@ -56,16 +58,24 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<V
 
 fn guidance_tool() -> Value { tool("mailbox_guidance","Show model-facing operating guidance for mailbox MCP workflows.",json!({"type":"object","properties":{"workflow":{"type":"string"},"tool":{"type":"string"}},"additionalProperties":false}),true) }
 fn guidance(args: &Map<String, Value>) -> Value { json!({"schema":"narada.mailbox.guidance.v1","status":"ok","surface_id":"mailbox","requested":args,"first_use":["Call mailbox_doctor.","Use bounded list/search/show tools for discovery.","Inspect policy and the exact target before mutation; read back durable state after synchronization, admission, or outbox acknowledgement."]}) }
-fn doctor(root: &Path) -> Value { let scan=scan(root); json!({"schema":"narada.mailbox_mcp.doctor.v1","status":"ok","site_root":root.to_string_lossy(),"roots":scan.roots,"scanned_files":scan.scanned_files,"skipped_non_message_records":scan.skipped,"message_count":scan.messages.len(),"invalid_count":scan.invalid.len(),"invalid_records":scan.invalid,"server_name":"mailbox-mcp"}) }
+fn doctor(root: &Path) -> Value { let scan=scan(root); json!({"schema":"narada.mailbox_mcp.doctor.v1","status":if scan.invalid.is_empty(){"ok"}else{"degraded"},"site_root":root.to_string_lossy(),"roots":scan.roots,"scanned_files":scan.scanned_files,"skipped_non_message_records":scan.skipped,"message_count":scan.messages.len(),"invalid_count":scan.invalid.len(),"invalid_records":scan.invalid,"server_name":"mailbox-mcp"}) }
 struct Scan { roots: Vec<PathBuf>, messages: Vec<Value>, scanned_files: usize, skipped: usize, invalid: Vec<Value> }
 fn scan(root: &Path) -> Scan {
-    let roots = configured_roots(root);
+    let (roots, mut invalid) = configured_roots(root);
     let mut files = Vec::new();
-    let mut invalid = Vec::new();
     for base in &roots { collect_files(base, &mut files, &mut invalid); }
     let mut records = Vec::new();
     let mut skipped = 0;
+    let mut scanned_files = 0;
+    let mut scanned_bytes = 0_u64;
     for path in files.iter().take(MAX_FILES) {
+        let size = fs::metadata(path).map(|value| value.len()).unwrap_or(0);
+        if scanned_bytes.saturating_add(size) > MAX_SCAN_BYTES {
+            invalid.push(json!({"path":path.to_string_lossy(),"reason":"scan_byte_limit_reached","max_bytes":MAX_SCAN_BYTES}));
+            break;
+        }
+        scanned_bytes = scanned_bytes.saturating_add(size);
+        scanned_files += 1;
         match records_from_file(path) {
             Ok(values) => for raw in values {
                 if let Some(message) = normalize_message(&raw, path, root) {
@@ -78,6 +88,10 @@ fn scan(root: &Path) -> Scan {
                         }
                     } else {
                         records.push(message);
+                        if records.len() >= MAX_ROWS {
+                            invalid.push(json!({"path":path.to_string_lossy(),"reason":"scan_record_limit_reached","max_records":MAX_ROWS}));
+                            break;
+                        }
                     }
                 } else {
                     skipped += 1;
@@ -85,23 +99,24 @@ fn scan(root: &Path) -> Scan {
             },
             Err(reason) => invalid.push(json!({"file_path": path.to_string_lossy(), "reason": reason})),
         }
+        if records.len() >= MAX_ROWS { break; }
     }
     records.sort_by(|a, b| b.get("received_at").and_then(Value::as_str).cmp(&a.get("received_at").and_then(Value::as_str)));
     records.truncate(MAX_ROWS);
     Scan {
         roots,
         messages: records,
-        scanned_files: files.len().min(MAX_FILES),
+        scanned_files,
         skipped,
         invalid: invalid.into_iter().take(100).collect(),
     }
 }
-fn configured_roots(root:&Path)->Vec<PathBuf>{ let config=root.join(".ai/mailbox-mcp.json"); if fs::metadata(&config).ok().map(|metadata|metadata.len()<=MAX_BYTES).unwrap_or(false){ if let Ok(text)=fs::read_to_string(&config){ if let Ok(value)=serde_json::from_str::<Value>(&text){ if let Some(values)=value.get("roots").and_then(Value::as_array){let roots=values.iter().filter_map(Value::as_str).filter(|v|!v.trim().is_empty()).map(|v|root.join(v)).filter(|p|is_within(p,root)).collect::<Vec<_>>(); if !roots.is_empty(){return roots;} } } } } DEFAULT_ROOTS.iter().map(|v|root.join(v)).collect() }
-fn collect_files(path:&Path, files:&mut Vec<PathBuf>, invalid:&mut Vec<Value>){ if files.len()>=MAX_FILES{return;} let Ok(meta)=fs::metadata(path)else{return}; if meta.is_file(){if path.extension().and_then(|v|v.to_str()).map(|v|matches!(v.to_ascii_lowercase().as_str(),"json"|"jsonl")).unwrap_or(false){files.push(path.to_path_buf());}return;} if !meta.is_dir(){return;} let Ok(entries)=fs::read_dir(path)else{return;}; for entry in entries.filter_map(Result::ok){if files.len()>=MAX_FILES{invalid.push(json!({"root":path.to_string_lossy(),"reason":"scan_file_limit_reached"}));break;} let name=entry.file_name().to_string_lossy().to_string(); if name=="node_modules"||name==".git"{continue;} collect_files(&entry.path(),files,invalid);} }
-fn records_from_file(path:&Path)->Result<Vec<Value>,String>{let size=fs::metadata(path).map_err(|_|"stat_failed")?.len(); if size>MAX_BYTES{return Err("file_too_large".into());} let text=fs::read_to_string(path).map_err(|_|"read_failed")?.trim_start_matches('\u{feff}').to_string(); if path.extension().and_then(|v|v.to_str())==Some("jsonl"){return Ok(text.lines().filter(|l|!l.trim().is_empty()).filter_map(|l|serde_json::from_str::<Value>(l).ok()).collect());} let value=serde_json::from_str::<Value>(&text).map_err(|_|"invalid_json")?; if let Some(values)=value.as_array(){return Ok(values.clone());} if let Some(values)=value.get("messages").and_then(Value::as_array).or_else(||value.get("value").and_then(Value::as_array)){let mailbox=value.get("mailbox_id").or_else(||value.get("mailboxId")).cloned(); return Ok(values.iter().map(|v|{let mut obj=v.as_object().cloned().unwrap_or_default(); if !obj.contains_key("mailbox_id"){if let Some(id)=mailbox.clone(){obj.insert("mailbox_id".into(),id);}} Value::Object(obj)}).collect());} Ok(vec![value]) }
+fn configured_roots(root:&Path)->(Vec<PathBuf>,Vec<Value>){let config=root.join(".ai/mailbox-mcp.json");if !config.exists(){return(DEFAULT_ROOTS.iter().map(|value|root.join(value)).collect(),Vec::new());}let mut invalid=Vec::new();let Ok(metadata)=fs::metadata(&config)else{return(Vec::new(),vec![json!({"path":config.to_string_lossy(),"reason":"config_stat_failed"})]);};if metadata.len()>MAX_BYTES{return(Vec::new(),vec![json!({"path":config.to_string_lossy(),"reason":"config_too_large"})]);}let Ok(text)=fs::read_to_string(&config)else{return(Vec::new(),vec![json!({"path":config.to_string_lossy(),"reason":"config_read_failed"})]);};let Ok(document)=serde_json::from_str::<Value>(&text)else{return(Vec::new(),vec![json!({"path":config.to_string_lossy(),"reason":"config_invalid_json"})]);};let Some(values)=document.get("roots").and_then(Value::as_array)else{return(Vec::new(),vec![json!({"path":config.to_string_lossy(),"reason":"config_roots_required"})]);};if values.len()>32{return(Vec::new(),vec![json!({"path":config.to_string_lossy(),"reason":"config_root_limit_exceeded"})]);}let mut roots=Vec::new();for value in values{let Some(text)=value.as_str().map(str::trim).filter(|value|!value.is_empty()&&value.chars().count()<=1024)else{invalid.push(json!({"reason":"config_root_invalid"}));continue;};let candidate=PathBuf::from(text);let admitted=if candidate.is_absolute(){candidate}else if candidate.components().any(|component|matches!(component,std::path::Component::ParentDir|std::path::Component::RootDir|std::path::Component::Prefix(_))){invalid.push(json!({"root":text,"reason":"config_root_outside_site"}));continue;}else{root.join(candidate)};if !is_within(&admitted,root){invalid.push(json!({"root":text,"reason":"config_root_outside_site"}));continue;}roots.push(admitted);}if roots.is_empty()&&invalid.is_empty(){invalid.push(json!({"reason":"config_roots_empty"}));}(roots,invalid)}
+fn collect_files(path:&Path, files:&mut Vec<PathBuf>, invalid:&mut Vec<Value>){ if files.len()>=MAX_FILES{return;} let Ok(link_meta)=fs::symlink_metadata(path)else{return};if link_meta.file_type().is_symlink(){invalid.push(json!({"path":path.to_string_lossy(),"reason":"symlink_not_followed"}));return;}let Ok(meta)=fs::metadata(path)else{return}; if meta.is_file(){if path.extension().and_then(|v|v.to_str()).map(|v|matches!(v.to_ascii_lowercase().as_str(),"json"|"jsonl")).unwrap_or(false){files.push(path.to_path_buf());}return;} if !meta.is_dir(){return;} let Ok(entries)=fs::read_dir(path)else{return;}; for entry in entries.filter_map(Result::ok){if files.len()>=MAX_FILES{invalid.push(json!({"root":path.to_string_lossy(),"reason":"scan_file_limit_reached"}));break;} let name=entry.file_name().to_string_lossy().to_string(); if name=="node_modules"||name==".git"{continue;} collect_files(&entry.path(),files,invalid);} }
+fn records_from_file(path:&Path)->Result<Vec<Value>,String>{let size=fs::metadata(path).map_err(|_|"stat_failed")?.len(); if size>MAX_BYTES{return Err("file_too_large".into());} let text=fs::read_to_string(path).map_err(|_|"read_failed")?.trim_start_matches('\u{feff}').to_string(); if path.extension().and_then(|v|v.to_str())==Some("jsonl"){let mut records=Vec::new();for(line_index,line)in text.lines().enumerate(){if line.trim().is_empty(){continue;}records.push(serde_json::from_str::<Value>(line).map_err(|_|format!("invalid_jsonl_line:{}",line_index+1))?);}return Ok(records);} let value=serde_json::from_str::<Value>(&text).map_err(|_|"invalid_json")?; if let Some(values)=value.as_array(){return Ok(values.clone());} if let Some(values)=value.get("messages").and_then(Value::as_array).or_else(||value.get("value").and_then(Value::as_array)){let mailbox=value.get("mailbox_id").or_else(||value.get("mailboxId")).cloned(); return Ok(values.iter().map(|v|{let mut obj=v.as_object().cloned().unwrap_or_default(); if !obj.contains_key("mailbox_id"){if let Some(id)=mailbox.clone(){obj.insert("mailbox_id".into(),id);}} Value::Object(obj)}).collect());} Ok(vec![value]) }
 fn normalize_message(raw: &Value, path: &Path, _root: &Path) -> Option<Value> {
     let o = raw.as_object()?;
-    let id = first_str(o, &["message_id", "messageId", "internetMessageId", "internet_message_id", "id", "entryId"])?;
+    let id = bounded_text(first_str(o, &["message_id", "messageId", "internetMessageId", "internet_message_id", "id", "entryId"]),1024)?;
     let body_object = o.get("body").and_then(Value::as_object);
     let has_shape = [
         "subject", "title", "body_text", "bodyText", "text", "body_html", "bodyHtml",
@@ -122,7 +137,7 @@ fn normalize_message(raw: &Value, path: &Path, _root: &Path) -> Option<Value> {
     let preview = first_str(o, &["preview", "body_preview", "bodyPreview", "snippet"])
         .or_else(|| body.clone())
         .or_else(|| body_html.clone());
-    let mailbox = first_str(o, &["mailbox_id", "mailboxId", "account", "account_id"])
+    let mailbox = bounded_text(first_str(o, &["mailbox_id", "mailboxId", "account", "account_id"]),512)
         .unwrap_or_else(|| path.parent().and_then(|p| p.file_name()).and_then(|v| v.to_str()).unwrap_or("default").to_string());
     let source_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf()).to_string_lossy().to_string();
     let source_path = source_path.strip_prefix("\\\\?\\").unwrap_or(&source_path).to_string();
@@ -130,17 +145,17 @@ fn normalize_message(raw: &Value, path: &Path, _root: &Path) -> Option<Value> {
     Some(json!({
         "message_id": id,
         "mailbox_id": mailbox,
-        "folder": first_str(o, &["folder", "folder_id", "folderId", "mailFolder"]),
-        "thread_id": first_str(o, &["thread_id", "threadId", "conversation_id", "conversationId", "conversationIndex"]),
-        "subject": first_str(o, &["subject", "title"]).unwrap_or_else(|| "(no subject)".into()),
-        "from": o.get("from").or_else(|| o.get("sender")).cloned().unwrap_or(Value::Null),
-        "to": as_array(o.get("to").or_else(|| o.get("toRecipients"))),
-        "cc": as_array(o.get("cc").or_else(|| o.get("ccRecipients"))),
-        "received_at": first_str(o, &["received_at", "receivedAt", "receivedDateTime", "date", "created_at"]),
-        "sent_at": first_str(o, &["sent_at", "sentAt", "sentDateTime"]),
+        "folder": bounded_text(first_str(o, &["folder", "folder_id", "folderId", "mailFolder"]),512),
+        "thread_id": bounded_text(first_str(o, &["thread_id", "threadId", "conversation_id", "conversationId", "conversationIndex"]),1024),
+        "subject": bounded_text(first_str(o, &["subject", "title"]),2048).unwrap_or_else(|| "(no subject)".into()),
+        "from": bounded_projection(o.get("from").or_else(|| o.get("sender")).unwrap_or(&Value::Null),0),
+        "to": bounded_projection(&Value::Array(as_array(o.get("to").or_else(|| o.get("toRecipients")))),0),
+        "cc": bounded_projection(&Value::Array(as_array(o.get("cc").or_else(|| o.get("ccRecipients")))),0),
+        "received_at": normalized_source_timestamp(first_str(o, &["received_at", "receivedAt", "receivedDateTime", "date", "created_at"])),
+        "sent_at": normalized_source_timestamp(first_str(o, &["sent_at", "sentAt", "sentDateTime"])),
         "unread": o.get("unread").or_else(|| o.get("isUnread")).cloned().or_else(|| o.get("isRead").and_then(Value::as_bool).map(|value| json!(!value))),
-        "importance": first_str(o, &["importance", "priority"]),
-        "categories": o.get("categories").and_then(Value::as_array).cloned().unwrap_or_default(),
+        "importance": bounded_text(first_str(o, &["importance", "priority"]),64),
+        "categories": bounded_projection(o.get("categories").unwrap_or(&Value::Array(Vec::new())),0),
         "preview": preview,
         "body_text": body,
         "body_html": body_html,
@@ -151,12 +166,16 @@ fn normalize_message(raw: &Value, path: &Path, _root: &Path) -> Option<Value> {
 }
 
 fn messages(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let mut normalized_args=args.clone();
+    for key in ["since","before"]{if args.get(key).is_some(){normalized_args.insert(key.to_string(),json!(required_timestamp(args,key,&format!("mailbox_{key}_timestamp_required"))?));}}
+    if let(Some(since),Some(before))=(normalized_args.get("since").and_then(Value::as_str),normalized_args.get("before").and_then(Value::as_str)){if since>=before{return Err(error("mailbox_time_range_invalid","mailbox_time_range_invalid"));}}
     let scan = scan(root);
+    let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
     let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(20).clamp(1, 100) as usize;
-    let filtered = scan.messages.into_iter().filter(|value| filter_message(value, args)).collect::<Vec<_>>();
-    let count = filtered.len();
+    let filtered = scan.messages.into_iter().filter(|value| filter_message(value, &normalized_args)).collect::<Vec<_>>();
+    let total_count = filtered.len();
     let include_body = args.get("include_body").and_then(Value::as_bool).unwrap_or(false);
-    let rows = filtered.into_iter().take(limit).map(|value| summarize_message(&value, include_body, false, false)).collect::<Vec<_>>();
+    let rows = filtered.into_iter().skip(offset).take(limit).map(|value| summarize_message(&value, include_body, false, false)).collect::<Vec<_>>();
     Ok(json!({
         "schema": "narada.mailbox_mcp.messages.v1",
         "status": "ok",
@@ -165,11 +184,12 @@ fn messages(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
             "mailbox_id": args.get("mailbox_id").cloned().unwrap_or(Value::Null),
             "folder": args.get("folder").cloned().unwrap_or(Value::Null),
             "unread": args.get("unread").cloned().unwrap_or(Value::Null),
-            "since": args.get("since").cloned().unwrap_or(Value::Null),
-            "before": args.get("before").cloned().unwrap_or(Value::Null),
+            "since": normalized_args.get("since").cloned().unwrap_or(Value::Null),
+            "before": normalized_args.get("before").cloned().unwrap_or(Value::Null),
             "query": args.get("query").cloned().unwrap_or(Value::Null),
         },
-        "count": count,
+        "offset":offset,"limit":limit,"count":rows.len(),"total_count":total_count,
+        "next_offset":if offset+rows.len()<total_count{Some(offset+rows.len())}else{None},
         "messages": rows,
     }))
 }
@@ -204,12 +224,15 @@ fn message_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> 
         value.get("message_id").and_then(Value::as_str) == Some(id.as_str())
             && args.get("mailbox_id").and_then(Value::as_str).map(|mailbox| value.get("mailbox_id").and_then(Value::as_str) == Some(mailbox)).unwrap_or(true)
     );
-    let message = row.as_ref().map(|value| summarize_message(value, true, args.get("include_html").and_then(Value::as_bool).unwrap_or(false), args.get("include_raw").and_then(Value::as_bool).unwrap_or(false)));
+    let include_raw=args.get("include_raw").and_then(Value::as_bool).unwrap_or(false);
+    if include_raw&&row.as_ref().and_then(|value|value.get("raw")).map(|value|serde_json::to_vec(value).map(|bytes|bytes.len()).unwrap_or(MAX_RAW_RESPONSE_BYTES+1)>MAX_RAW_RESPONSE_BYTES).unwrap_or(false){return Err(error("mailbox_raw_payload_too_large","mailbox_raw_payload_too_large: use the bounded normalized projection"));}
+    let message = row.as_ref().map(|value| summarize_message(value, true, args.get("include_html").and_then(Value::as_bool).unwrap_or(false), include_raw));
     Ok(json!({"schema":"narada.mailbox_mcp.message.v1","status":if row.is_some(){"ok"}else{"not_found"},"site_root":root.to_string_lossy(),"message_id":id,"message":message}))
 }
 
 fn thread_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     let id = required(args, "thread_id")?;
+    let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
     let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(50).clamp(1, 100) as usize;
     let include_body = args.get("include_body").and_then(Value::as_bool).unwrap_or(true);
     let mailbox_id = args.get("mailbox_id").and_then(Value::as_str);
@@ -222,11 +245,11 @@ fn thread_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
         let right_time = right.get("received_at").and_then(Value::as_str).or_else(|| right.get("sent_at").and_then(Value::as_str)).unwrap_or("");
         left_time.cmp(right_time)
     });
-    let count = values.len();
-    let messages = values.into_iter().take(limit).map(|value| summarize_message(&value, include_body, false, false)).collect::<Vec<_>>();
-    Ok(json!({"schema":"narada.mailbox_mcp.thread.v1","status":if count > 0{"ok"}else{"not_found"},"site_root":root.to_string_lossy(),"thread_id":id,"count":count,"messages":messages}))
+    let total_count = values.len();
+    let messages = values.into_iter().skip(offset).take(limit).map(|value| summarize_message(&value, include_body, false, false)).collect::<Vec<_>>();
+    Ok(json!({"schema":"narada.mailbox_mcp.thread.v1","status":if total_count > 0{"ok"}else{"not_found"},"site_root":root.to_string_lossy(),"thread_id":id,"offset":offset,"limit":limit,"count":messages.len(),"total_count":total_count,"next_offset":if offset+messages.len()<total_count{Some(offset+messages.len())}else{None},"messages":messages}))
 }
-fn output_show(args:&Map<String,Value>,root:&Path)->Result<Value,Value>{let reference=args.get("ref").or_else(||args.get("output_ref")).and_then(Value::as_str).ok_or_else(||error("output_ref_required","output_ref_required"))?;let id=reference.strip_prefix("mcp_output:").ok_or_else(||error("output_ref_invalid","output_ref_invalid"))?;if id.is_empty()||id.len()>100||!id.chars().all(|c|c.is_ascii_alphanumeric()||c=='-'||c=='_'){return Err(error("output_ref_invalid","output_ref_invalid"));}let path=root.join(".ai/tmp/mcp-outputs/workspace").join(format!("{id}.json"));let value=read_bounded(&path)?;Ok(json!({"schema":"narada.mcp_output_page.v1","status":"ok","ref":reference,"output":value}))}
+fn output_show(args:&Map<String,Value>,root:&Path)->Result<Value,Value>{let ref_value=args.get("ref").and_then(Value::as_str).map(str::trim);let alias_value=args.get("output_ref").and_then(Value::as_str).map(str::trim);if let(Some(left),Some(right))=(ref_value,alias_value){if left!=right{return Err(error("output_show_ref_alias_conflict","output_show_ref_alias_conflict"));}}let reference=ref_value.or(alias_value).ok_or_else(||error("output_ref_required","output_ref_required"))?;let id=reference.strip_prefix("mcp_output:").ok_or_else(||error("output_ref_invalid","output_ref_invalid"))?;if id.is_empty()||id.len()>100||!id.chars().all(|c|c.is_ascii_alphanumeric()||c=='-'||c=='_'){return Err(error("output_ref_invalid","output_ref_invalid"));}let path=root.join(".ai/tmp/mcp-outputs/workspace").join(format!("{id}.json"));let value=read_bounded(&path)?;if value.get("schema").and_then(Value::as_str)!=Some("narada.mcp_output_ref.v1")||value.get("ref").and_then(Value::as_str)!=Some(reference)||value.get("output_id").and_then(Value::as_str)!=Some(id){return Err(error("output_ref_metadata_mismatch","output_ref_metadata_mismatch"));}let full=value.get("full_output").cloned().unwrap_or(Value::Null);let presentation=serde_json::to_string_pretty(&full).unwrap_or_else(|_|full.to_string());let offset=args.get("offset").and_then(Value::as_u64).unwrap_or(0)as usize;let limit=args.get("limit").and_then(Value::as_u64).unwrap_or(4000).clamp(1,10000)as usize;let chars=presentation.chars().collect::<Vec<_>>();let start=offset.min(chars.len());let output_text=chars.iter().skip(start).take(limit).collect::<String>();let end=start+output_text.chars().count();Ok(json!({"schema":"narada.mcp_output_page.v1","status":"ok","ref":reference,"tool_name":value.get("tool_name"),"full_output_char_length":chars.len(),"byte_size":fs::metadata(&path).map(|v|v.len()).unwrap_or(0),"original_truncated":value.get("truncated").and_then(Value::as_bool).unwrap_or(false),"offset":start,"limit":limit,"next_offset":if end<chars.len(){Some(end)}else{None},"output_truncated":end<chars.len(),"output_text":output_text}))}
 fn domain_db_path(root:&Path)->PathBuf{root.join(DOMAIN_DB_RELATIVE)}
 fn open_domain_db(root:&Path)->Result<Option<Connection>,Value>{let path=domain_db_path(root);if !path.exists(){return Ok(None);}Connection::open_with_flags(path,OpenFlags::SQLITE_OPEN_READ_ONLY).map(Some).map_err(|e|error("mailbox_domain_store_open_failed",&e.to_string()))}
 fn open_domain_db_write(root: &Path) -> Result<Connection, Value> {
@@ -362,6 +385,8 @@ fn init_outbox_schema(db: &Connection) -> Result<(), Value> {
 
 fn generation_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     let generation_id = required_bounded(args, "generation_id", "mailbox_generation_id_required", 128)?;
+    let offset = bounded_integer(args.get("offset"), 0, 0, 1_000_000)?;
+    let limit = bounded_integer(args.get("limit"), 100, 1, 100)?;
     let Some(db) = open_domain_db(root)? else {
         let code = format!("mailbox_sync_generation_not_found:{generation_id}");
         return Err(error(&code, &code));
@@ -416,10 +441,10 @@ fn generation_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Valu
         .map_err(|e| error("mailbox_generation_receipt_invalid", &e.to_string()))?
         .unwrap_or(Value::Null);
     let mut statement = db
-        .prepare("SELECT record_id,fact_id,event_kind,message_id,mailbox_id,conversation_id,source_version,application_status FROM mailbox_sync_generation_records WHERE generation_id=? ORDER BY rowid LIMIT 100")
+        .prepare("SELECT record_id,fact_id,event_kind,message_id,mailbox_id,conversation_id,source_version,application_status FROM mailbox_sync_generation_records WHERE generation_id=? ORDER BY rowid LIMIT ? OFFSET ?")
         .map_err(|e| error("mailbox_generation_record_query_failed", &e.to_string()))?;
     let rows = statement
-        .query_map(params![generation_id], |row| {
+        .query_map(params![generation_id,limit,offset], |row| {
             Ok(json!({
                 "record_id":row.get::<_,String>(0)?,
                 "fact_id":row.get::<_,String>(1)?,
@@ -436,6 +461,7 @@ fn generation_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Valu
     for row in rows {
         records.push(row.map_err(|e| error("mailbox_generation_record_row_failed", &e.to_string()))?);
     }
+    let records_len = records.len() as i64;
     Ok(json!({
         "schema":"narada.mailbox.sync_generation.v1",
         "generation":{
@@ -453,8 +479,9 @@ fn generation_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Valu
             "updated_at":updated_at,
             "completed_at":completed_at
         },
-        "records":records,
-        "records_truncated":batch_record_count > 100
+        "offset":offset,"limit":limit,"records":records,
+        "next_offset":if offset+records_len<batch_record_count{Some(offset+records_len)}else{None},
+        "records_truncated":offset+records_len<batch_record_count
     }))
 }
 
@@ -493,6 +520,8 @@ fn message_fact_find(args: &Map<String, Value>, root: &Path) -> Result<Value, Va
             "status":"ok",
             "scope_id":scope_id,
             "message_id":message_id,
+            "fact_id":observation.get("first_fact_id"),
+            "source_event_id":observation.get("event_id"),
             "observation":observation
         }))
     } else {
@@ -1936,8 +1965,8 @@ fn summarize_message(value: &Value, include_body: bool, include_html: bool, incl
 
 fn metadata_only_attachment(value: &Value) -> Value {
     match value {
-        Value::Array(values) => Value::Array(values.iter().map(metadata_only_attachment).collect()),
-        Value::Object(object) => Value::Object(object.iter().filter_map(|(key, nested)| {
+        Value::Array(values) => Value::Array(values.iter().take(100).map(metadata_only_attachment).collect()),
+        Value::Object(object) => Value::Object(object.iter().take(64).filter_map(|(key, nested)| {
             let normalized = key.to_ascii_lowercase();
             if matches!(normalized.as_str(), "contentbytes" | "content_bytes" | "content_base64" | "contentref" | "content_ref" | "content" | "data" | "bytes" | "raw") {
                 None
@@ -1945,9 +1974,14 @@ fn metadata_only_attachment(value: &Value) -> Value {
                 Some((key.clone(), metadata_only_attachment(nested)))
             }
         }).collect()),
+        Value::String(value) => Value::String(value.chars().take(2048).collect()),
         _ => value.clone(),
     }
 }
+
+fn bounded_text(value:Option<String>,max:usize)->Option<String>{value.map(|text|text.chars().take(max).collect())}
+fn normalized_source_timestamp(value:Option<String>)->Option<String>{value.and_then(|text|OffsetDateTime::parse(text.trim(),&Rfc3339).ok().map(|time|iso_millis(time.to_offset(UtcOffset::UTC))))}
+fn bounded_projection(value:&Value,depth:usize)->Value{if depth>=6{return json!({"truncated":true,"reason":"depth_limit"});}match value{Value::String(text)=>Value::String(text.chars().take(2048).collect()),Value::Array(values)=>Value::Array(values.iter().take(64).map(|value|bounded_projection(value,depth+1)).collect()),Value::Object(object)=>Value::Object(object.iter().take(64).map(|(key,value)|(key.chars().take(128).collect(),bounded_projection(value,depth+1))).collect()),_=>value.clone()}}
 
 fn message_key(value: &Value) -> String {
     format!("{}\u{0}{}", value.get("mailbox_id").and_then(Value::as_str).unwrap_or("default"), value.get("message_id").and_then(Value::as_str).unwrap_or(""))
@@ -2112,19 +2146,19 @@ fn error(code:&str,message:&str)->Value{json!({"schema":"narada.mailbox.error.v1
 fn schema(name: &str) -> Value {
     match name {
         "mailbox_messages_list" | "mailbox_search" => json!({"type":"object","properties":{
-            "mailbox_id":{"type":"string"},"folder":{"type":"string"},"unread":{"type":"boolean"},
-            "since":{"type":"string"},"before":{"type":"string"},"query":{"type":"string"},
-            "limit":{"type":"integer","minimum":1,"maximum":100},"include_body":{"type":"boolean"}
+            "mailbox_id":{"type":"string","maxLength":512},"folder":{"type":"string","maxLength":512},"unread":{"type":"boolean"},
+            "since":{"type":"string","maxLength":64,"format":"date-time"},"before":{"type":"string","maxLength":64,"format":"date-time"},"query":{"type":"string","maxLength":4096},
+            "offset":{"type":"integer","minimum":0,"maximum":1000000},"limit":{"type":"integer","minimum":1,"maximum":100},"include_body":{"type":"boolean"}
         },"additionalProperties":false}),
         "mailbox_message_show" => json!({"type":"object","properties":{
-            "message_id":{"type":"string"},"mailbox_id":{"type":"string"},
+            "message_id":{"type":"string","maxLength":1024},"mailbox_id":{"type":"string","maxLength":512},
             "include_html":{"type":"boolean"},"include_raw":{"type":"boolean"}
         },"required":["message_id"],"additionalProperties":false}),
         "mailbox_thread_show" => json!({"type":"object","properties":{
-            "thread_id":{"type":"string"},"mailbox_id":{"type":"string"},
-            "limit":{"type":"integer","minimum":1,"maximum":100},"include_body":{"type":"boolean"}
+            "thread_id":{"type":"string","maxLength":1024},"mailbox_id":{"type":"string","maxLength":512},
+            "offset":{"type":"integer","minimum":0,"maximum":1000000},"limit":{"type":"integer","minimum":1,"maximum":100},"include_body":{"type":"boolean"}
         },"required":["thread_id"],"additionalProperties":false}),
-        "mailbox_generation_show" => json!({"type":"object","properties":{"generation_id":{"type":"string"}},"required":["generation_id"],"additionalProperties":false}),
+        "mailbox_generation_show" => json!({"type":"object","properties":{"generation_id":{"type":"string"},"offset":{"type":"integer","minimum":0,"maximum":1000000},"limit":{"type":"integer","minimum":1,"maximum":100}},"required":["generation_id"],"additionalProperties":false}),
         "mailbox_admission_show" => json!({"type":"object","properties":{"scope_id":{"type":"string"},"fact_id":{"type":"string"}},"required":["scope_id","fact_id"],"additionalProperties":false}),
         "mailbox_fact_show" => json!({"type":"object","properties":{
             "fact_id":{"type":"string"},"scope_id":{"type":"string"},"config_path":{"type":"string"},"include_content":{"type":"boolean","default":false}
@@ -2144,7 +2178,7 @@ fn schema(name: &str) -> Value {
             }}
         },"required":["consumer_id","event_id","receipt"],"additionalProperties":false}),
         "mailbox_sync_generation" => json!({"type":"object","properties":{
-            "idempotency_key":{"type":"string"},"scope_id":{"type":"string"},"config_path":{"type":"string"}
+            "idempotency_key":{"type":"string"},"scope_id":{"type":"string"},"config_path":{"type":"string"},"timeout_ms":{"type":"integer","minimum":100,"maximum":60000}
         },"required":["idempotency_key"],"additionalProperties":false}),
         "mailbox_reconcile_first_observations" => json!({"type":"object","properties":{
             "idempotency_key":{"type":"string"},"generation_id":{"type":"string"},"scope_id":{"type":"string"},
@@ -2154,7 +2188,7 @@ fn schema(name: &str) -> Value {
             "idempotency_key":{"type":"string"},"fact_id":{"type":"string"},"source_event_id":{"type":"string"},
             "scope_id":{"type":"string"},"policy_version":{"type":"string"},"config_path":{"type":"string"}
         },"required":["idempotency_key","fact_id","source_event_id"],"additionalProperties":false}),
-        "mailbox_output_show" => json!({"type":"object","properties":{"ref":{"type":"string"},"output_ref":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":0}},"additionalProperties":false}),
+        "mailbox_output_show" => json!({"type":"object","properties":{"ref":{"type":"string"},"output_ref":{"type":"string"},"offset":{"type":"integer","minimum":0,"maximum":1000000},"limit":{"type":"integer","minimum":1,"maximum":10000}},"additionalProperties":false}),
         _ => json!({"type":"object","additionalProperties":false}),
     }
 }
@@ -2172,7 +2206,7 @@ mod tests {
         fs::write(root.join(".ai/mailboxes/acct/settings.json"), r#"{"id":"settings","enabled":true}"#).expect("settings");
         fs::create_dir_all(root.join(".ai/mailboxes/acct/views/by-thread")).expect("views");
         fs::write(root.join(".ai/mailboxes/acct/views/by-thread/m1.json"), r#"{"id":"m1","subject":"derived view should lose","conversationId":"thread-1","text":"view"}"#).expect("view");
-        let result = messages(&json!({"limit":1,"include_body":false,"since":"2025-01-01"}).as_object().unwrap(), &root).expect("messages");
+        let result = messages(&json!({"limit":1,"include_body":false,"since":"2025-01-01T00:00:00Z"}).as_object().unwrap(), &root).expect("messages");
         assert_eq!(result["count"], 1);
         assert!(result["messages"][0].get("body_text").is_none());
         assert_eq!(result["messages"][0]["subject"], "hello");
@@ -2180,7 +2214,7 @@ mod tests {
         assert_eq!(doctor["skipped_non_message_records"], 1);
         let accounts = accounts(&root).expect("accounts");
         assert_eq!(accounts["accounts"][0]["folders"][0], "Inbox");
-        assert_eq!(accounts["accounts"][0]["latest_message_at"], "2026-01-01T00:00:00Z");
+        assert_eq!(accounts["accounts"][0]["latest_message_at"], "2026-01-01T00:00:00.000Z");
         let show = message_show(&json!({"message_id":"m1"}).as_object().unwrap(), &root).expect("show");
         assert_eq!(show["message"]["body_text"], "world");
         assert_eq!(show["message"]["subject"], "hello");

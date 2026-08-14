@@ -31,6 +31,7 @@ struct GraphConfig {
     base_url: String,
     configured_base_url: Option<String>,
     prefer_immutable_ids: bool,
+    request_timeout_ms: u64,
 }
 
 #[derive(Clone)]
@@ -350,13 +351,14 @@ fn load_scope(args: &Map<String, Value>, site_root: &Path) -> Result<ScopeConfig
             error("mailbox_scope_id_required", "mailbox_scope_id_required")
         }
     })?;
-    normalize_scope(raw, site_root, &site_canonical)
+    normalize_scope(raw, site_root, &site_canonical, args.get("timeout_ms").and_then(Value::as_u64).unwrap_or(20_000).clamp(100,60_000))
 }
 
 fn normalize_scope(
     raw: &Value,
     site_root: &Path,
     site_canonical: &Path,
+    request_timeout_ms: u64,
 ) -> Result<ScopeConfig, Value> {
     let object = raw
         .as_object()
@@ -504,6 +506,7 @@ fn normalize_scope(
                 .get("prefer_immutable_ids")
                 .and_then(Value::as_bool)
                 .unwrap_or(true),
+            request_timeout_ms,
         },
         included_container_refs,
         included_item_kinds,
@@ -1693,7 +1696,7 @@ impl GraphHttpError {
 
 fn graph_get(scope: &ScopeConfig, token: &str, url: &str) -> Result<Value, GraphHttpError> {
     let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(20))
+        .timeout(Duration::from_millis(scope.graph.request_timeout_ms))
         .build();
     let mut request = agent
         .get(url)
