@@ -3907,10 +3907,9 @@ fn call_attached_tool(
                 result
             }
             Err(mut error) => {
-                error.details = child_runtime_diagnostic(
-                    connection,
-                    json!({"method":"tools/call","timeout_ms":outer_timeout}),
-                );
+                let domain_details =
+                    request_error_details(&error.details, "tools/call", outer_timeout);
+                error.details = child_runtime_diagnostic(connection, domain_details);
                 return Err(error);
             }
         }
@@ -4050,6 +4049,13 @@ fn typed_result_summary(result: &Value) -> Value {
         }
     }
     summary
+}
+
+fn request_error_details(details: &Value, method: &str, timeout_ms: u64) -> Value {
+    let mut result = details.as_object().cloned().unwrap_or_default();
+    result.insert("method".to_string(), json!(method));
+    result.insert("timeout_ms".to_string(), json!(timeout_ms));
+    Value::Object(result)
 }
 
 fn child_runtime_diagnostic(connection: &Connection, extra: Value) -> Value {
@@ -4922,7 +4928,10 @@ fn call_tool(name: &str, arguments: Value, state: &mut LoaderState) -> Result<Va
 
 #[cfg(test)]
 mod tests {
-    use super::{child_error_diagnostic, compact_child_result, extract_proxy_child_args};
+    use super::{
+        child_error_diagnostic, compact_child_result, extract_proxy_child_args,
+        request_error_details,
+    };
     use serde_json::json;
 
     #[test]
@@ -4955,6 +4964,10 @@ mod tests {
         assert_eq!(diagnostic.details["child_jsonrpc_code"], -32000);
         assert_eq!(diagnostic.details["child_details"]["actual_head"], "b");
         assert!(diagnostic.details.get("child_error").is_none());
+        let merged = request_error_details(&diagnostic.details, "tools/call", 120_000);
+        assert_eq!(merged["child_details"]["expected_commit"], "a");
+        assert_eq!(merged["method"], "tools/call");
+        assert_eq!(merged["timeout_ms"], 120_000);
     }
 
     #[test]
