@@ -26,6 +26,8 @@ mod local_admin;
 mod mailbox;
 mod mailbox_sync;
 mod operator_surface_authority;
+mod operator_console;
+mod operator_console_runtime;
 mod project_state_authority;
 mod quota_authority;
 mod resident_host;
@@ -77,6 +79,13 @@ fn main() {
     }
     if resident_host::is_host_mode(&arguments) {
         if let Err(error) = resident_host::run(&arguments) {
+            let _ = writeln!(io::stderr(), "{error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if operator_console_runtime::is_host_mode(&arguments) {
+        if let Err(error) = operator_console_runtime::run(&arguments) {
             let _ = writeln!(io::stderr(), "{error}");
             std::process::exit(1);
         }

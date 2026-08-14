@@ -861,7 +861,7 @@ fn run_proxy(args: &[String]) -> Result<(), String> {
         }),
         false,
     );
-    let resolved_child_command = resolve_child_command(&options.child_command);
+    let resolved_child_command = resolve_child_command(&options.child_command)?;
     let mut command = Command::new(&resolved_child_command);
     let child_entry = if options.child_invocation_kind == "native_applet" {
         Some(Path::new(
@@ -2806,94 +2806,53 @@ fn absolute(path: PathBuf) -> PathBuf {
     }
 }
 
-fn resolve_child_command(child_command: &str) -> PathBuf {
+fn resolve_child_command(child_command: &str) -> Result<PathBuf, String> {
     let path = PathBuf::from(child_command);
     if path.is_absolute() {
-        return path;
+        let base = path
+            .file_name()
+            .map(|value| value.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        if matches!(base.as_str(), "node" | "node.exe" | "bun" | "bun.exe") {
+            return Err(format!("native_proxy_interpreter_child_refused:{base}"));
+        }
+        return Ok(path);
     }
     if path.exists() {
-        return absolute(path);
+        return Ok(absolute(path));
     }
 
     let base = path
         .file_name()
         .map(|value| value.to_string_lossy().to_ascii_lowercase())
         .unwrap_or_default();
-    let is_bun = base == "bun" || base == "bun.exe";
-    let is_node = base == "node" || base == "node.exe";
-
-    if is_bun {
-        for candidate in known_bun_paths() {
-            if candidate.is_file() {
-                return candidate;
-            }
-        }
-    }
-
-    if is_node {
-        for candidate in known_node_paths() {
-            if candidate.is_file() {
-                return candidate;
-            }
-        }
+    if matches!(base.as_str(), "node" | "node.exe" | "bun" | "bun.exe") {
+        return Err(format!("native_proxy_interpreter_child_refused:{base}"));
     }
 
     if let Some(found) = executable_on_path(&base) {
-        return found;
+        return Ok(found);
     }
 
-    // Fall back to the original command and let Command::new report the failure.
-    path
+    // Preserve exact non-interpreter external commands; Command::new owns the
+    // final unavailable diagnostic.
+    Ok(path)
 }
 
-fn known_bun_paths() -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    if let Some(home) = env::var_os("USERPROFILE").or_else(|| env::var_os("HOME")) {
-        paths.push(
-            PathBuf::from(&home)
-                .join(".bun")
-                .join("bin")
-                .join("bun.exe"),
-        );
-        paths.push(PathBuf::from(&home).join(".bun").join("bin").join("bun"));
-    }
-    if let Some(bun_install) = env::var_os("BUN_INSTALL") {
-        let root = PathBuf::from(&bun_install);
-        paths.push(root.join("bun.exe"));
-        paths.push(root.join("bun"));
-        paths.push(root.join("bin").join("bun.exe"));
-        paths.push(root.join("bin").join("bun"));
-    }
-    paths
-}
+#[cfg(test)]
+mod native_child_runtime_tests {
+    use super::resolve_child_command;
 
-fn known_node_paths() -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    let exec = env::current_exe().unwrap_or_default();
-    let exec_base = exec
-        .file_name()
-        .map(|value| value.to_string_lossy().to_ascii_lowercase())
-        .unwrap_or_default();
-    if exec_base == "node.exe" || exec_base == "node" {
-        paths.push(exec);
+    #[test]
+    fn refuses_javascript_interpreters_as_native_proxy_children() {
+        for command in ["node", "node.exe", "bun", "bun.exe"] {
+            let error = resolve_child_command(command).expect_err("interpreter must be refused");
+            assert_eq!(
+                error,
+                format!("native_proxy_interpreter_child_refused:{command}")
+            );
+        }
     }
-    if cfg!(windows) {
-        let program_files =
-            env::var_os("PROGRAMFILES").unwrap_or_else(|| "C:\\Program Files".into());
-        let program_files_x86 =
-            env::var_os("PROGRAMFILES(X86)").unwrap_or_else(|| "C:\\Program Files (x86)".into());
-        paths.push(
-            PathBuf::from(&program_files)
-                .join("nodejs")
-                .join("node.exe"),
-        );
-        paths.push(
-            PathBuf::from(&program_files_x86)
-                .join("nodejs")
-                .join("node.exe"),
-        );
-    }
-    paths
 }
 
 fn executable_on_path(command: &str) -> Option<PathBuf> {

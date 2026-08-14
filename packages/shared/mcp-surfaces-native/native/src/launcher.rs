@@ -89,7 +89,8 @@ fn tool(name: &str, description: &str, read_only: bool) -> Value {
             "mcp_scope": {"type":"string", "enum":ADMITTED_SCOPES}, "launch_profile": {"type":"string"},
             "startup_stagger_seconds": {"type":"integer", "minimum":0, "maximum":300},
             "intelligence_provider": {"type":"string"}, "enable_native_shell": {"type":"boolean"},
-            "no_wait_for_enter_before_exec": {"type":"boolean"}
+            "no_wait_for_enter_before_exec": {"type":"boolean"},
+            "orientation_entry_file": {"type":"string"}
         }),
         "launcher_option_matrix" | "launcher_coherence_check" => {
             json!({"registry_path":{"type":"string"}})
@@ -218,16 +219,11 @@ fn plan(
         }
     }
     let profile_override = optional_string(args, "launch_profile");
+    let orientation_entry_file = optional_string(args, "orientation_entry_file");
     let provider = optional_string(args, "intelligence_provider");
-    let mut compatibility_diagnostics = Vec::<Value>::new();
-    if let Some(provider) = provider.as_deref() {
-        compatibility_diagnostics.push(json!({
-            "code":"intelligence_provider_not_projected",
-            "message":"Intelligence provider selection is resolved by current runtime authority and is not an operator-surface runtime-start argument.",
-            "requested":provider
-        }));
-    }
+    let compatibility_diagnostics = Vec::<Value>::new();
     let mut wt_args = Vec::<Value>::new();
+    let mut native_launches = Vec::<Value>::new();
     let mut scope_plan = Vec::<Value>::new();
     let mut startup = Vec::<Value>::new();
     for (index, record) in selected.records.iter().enumerate() {
@@ -235,6 +231,13 @@ fn plan(
             wt_args.push(json!(";"));
         }
         let runtime = runtime_override.as_deref().unwrap_or(&record.runtime);
+        if !runtime.eq_ignore_ascii_case("narada-agent-runtime-server") {
+            return Err(diagnostic(
+                "native_launch_runtime_not_admitted",
+                &format!("native_launch_runtime_not_admitted:{runtime}"),
+                json!({"required_runtime":"narada-agent-runtime-server"}),
+            ));
+        }
         let operator_surface = operator_surface_override
             .as_deref()
             .unwrap_or(&record.operator_surface);
@@ -251,38 +254,57 @@ fn plan(
         } else {
             &record.workspace_root
         };
+        let compiler = std::env::current_exe().map_err(|cause| {
+            diagnostic(
+                "native_launch_compiler_unavailable",
+                &format!("native_launch_compiler_unavailable:{cause}"),
+                json!({}),
+            )
+        })?;
+        let runtime_binary = native_runtime_binary(record);
+        let session_id = format!(
+            "carrier_{}_{}",
+            record
+                .agent
+                .chars()
+                .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+                .collect::<String>(),
+            &uuid::Uuid::new_v4().simple().to_string()[..12]
+        );
         for arg in [
             "new-tab",
             "--title",
             title,
             "-d",
             working_directory,
-            "pnpm",
-            "--dir",
-            &record.dependency_narada_root,
-            "exec",
-            "narada",
-            "operator-surface",
-            "runtime",
-            "start",
-            operator_surface,
+            &path_text(&compiler),
+            "--resident-runtime-host",
+            "--runtime",
+            &path_text(&runtime_binary),
             "--site-root",
             &record.site_root,
-            "--agent",
-            &record.agent,
             "--target-site-id",
             &record.site,
-            "--runtime",
-            runtime,
-            "--exec",
-            "--format",
-            "human",
+            "--identity",
+            &record.agent,
+            "--session",
+            &session_id,
         ] {
             wt_args.push(json!(arg));
         }
-        if !record.workspace_root.is_empty() {
-            wt_args.push(json!("--workspace-root"));
-            wt_args.push(json!(&record.workspace_root));
+        wt_args.push(json!("--authority"));
+        wt_args.push(json!(authority));
+        if !scope.is_empty() {
+            wt_args.push(json!("--mcp-scope"));
+            wt_args.push(json!(scope));
+        }
+        if let Some(entry_file) = orientation_entry_file.as_deref() {
+            wt_args.push(json!("--orientation-entry-file"));
+            wt_args.push(json!(entry_file));
+        }
+        if let Some(provider) = provider.as_deref() {
+            wt_args.push(json!("--intelligence-provider"));
+            wt_args.push(json!(provider));
         }
         if args
             .get("enable_native_shell")
@@ -292,20 +314,18 @@ fn plan(
         {
             wt_args.push(json!("--enable-native-shell"));
         }
-        wt_args.push(json!("--authority"));
-        wt_args.push(json!(authority));
-        if !scope.is_empty() {
-            wt_args.push(json!("--mcp-scope"));
-            wt_args.push(json!(scope));
-        }
-        if !args
-            .get("no_wait_for_enter_before_exec")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-            && !runtime.eq_ignore_ascii_case("narada-agent-runtime-server")
-        {
-            wt_args.push(json!("--wait"));
-        }
+        native_launches.push(json!({
+            "schema":"narada.native_launch_compilation.v1", "status":"compiled",
+            "compiler":path_text(&compiler), "runtime":path_text(&runtime_binary),
+            "runtime_exists":runtime_binary.is_file(), "operator_surface":operator_surface,
+            "identity":record.agent, "carrier_session_id":session_id,
+            "site_id":record.site, "site_root":record.site_root,
+            "workspace_root":working_directory, "authority":authority, "mcp_scope":scope,
+            "orientation_entry_file":orientation_entry_file,
+            "orientation_required":orientation_entry_file.is_some(),
+            "intelligence_provider":provider,
+            "native_shell_enabled":args.get("enable_native_shell").and_then(Value::as_bool).unwrap_or(false) || record.enable_native_shell
+        }));
         scope_plan.push(json!({"agent":record.agent,"requested":scope,"requested_loci":scope_loci(scope),"registry_default":record.mcp_scope}));
         startup.push(json!({"agent":record.agent,"site":record.site,"role":record.role,"registry_profile":if record.profile.is_empty(){Value::Null}else{json!(&record.profile)},"launch_profile":if profile.is_empty(){Value::Null}else{json!(profile)},"start_after_seconds":index * stagger,"diagnostics":if record.profile.is_empty(){json!(["registry_profile_missing"])}else{json!([])}}));
     }
@@ -322,7 +342,7 @@ fn plan(
         .collect();
     Ok(json!({
         "schema":"narada.workspace_launch.dry_run.v1","status":"planned","count":selected.records.len(),"windows_terminal_invoked":false,
-        "registry_paths":selected.registry_paths,"wt_args":wt_args,"command_contract":"narada.operator_surface.runtime_start.v1","compatibility_diagnostics":compatibility_diagnostics,"mcp_scope_plan":{"admitted_scopes":ADMITTED_SCOPES,"agents":scope_plan},"records":selected.records,
+        "registry_paths":selected.registry_paths,"wt_args":wt_args,"command_contract":"narada.native_launch_compilation.v1","native_launches":native_launches,"compatibility_diagnostics":compatibility_diagnostics,"mcp_scope_plan":{"admitted_scopes":ADMITTED_SCOPES,"agents":scope_plan},"records":selected.records,
         "startup_profile_plan":{"schema":"narada.launcher.profile_startup_plan.v1","execution_posture":"planned_not_started_by_mcp","selected_count":startup.len(),"stagger_seconds":stagger,"profile_count":profiles.len(),"profiles":profiles,"entries":startup,"diagnostics":[]}
     }))
 }
@@ -845,6 +865,24 @@ fn join_path(root: &str, child: &str) -> String {
 fn path_text(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
+
+fn native_runtime_binary(record: &AgentRecord) -> PathBuf {
+    if let Some(path) = std::env::var_os("NARADA_AGENT_RUNTIME_SERVER_NATIVE") {
+        return PathBuf::from(path);
+    }
+    let executable = if cfg!(windows) {
+        "narada-agent-runtime-server-rust.exe"
+    } else {
+        "narada-agent-runtime-server-rust"
+    };
+    PathBuf::from(&record.dependency_narada_root)
+        .join("packages")
+        .join("agent-runtime-server")
+        .join("native")
+        .join("target")
+        .join("release")
+        .join(executable)
+}
 fn site_aliases(record: &AgentRecord) -> Vec<String> {
     let prefix = record.agent.split('.').next().unwrap_or(&record.agent);
     vec![
@@ -1105,20 +1143,22 @@ mod tests {
             .filter_map(Value::as_str)
             .collect();
 
-        assert!(argv.windows(2).any(|window| window == ["pnpm", "--dir"]));
-        assert!(argv.windows(5).any(|window| {
-            window
-                == [
-                    "narada",
-                    "operator-surface",
-                    "runtime",
-                    "start",
-                    "agent-cli",
-                ]
-        }));
+        assert!(argv.iter().any(|value| *value == "--resident-runtime-host"));
+        assert!(argv.iter().any(
+            |value| value.ends_with("narada-agent-runtime-server-rust.exe")
+                || value.ends_with("narada-agent-runtime-server-rust")
+        ));
+        assert!(!argv
+            .iter()
+            .any(|value| matches!(*value, "pnpm" | "node" | "bun")));
+        assert_eq!(
+            result["command_contract"],
+            "narada.native_launch_compilation.v1"
+        );
+        assert_eq!(result["native_launches"][0]["status"], "compiled");
         assert!(argv
             .windows(2)
-            .any(|window| window == ["--target-site-id", "site"]));
+            .any(|window| window == ["--identity", "site.architect"]));
         assert!(argv
             .windows(2)
             .any(|window| window == ["--authority", "auto"]));

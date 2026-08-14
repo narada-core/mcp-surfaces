@@ -79,6 +79,9 @@ const GRAPH_MAIL: &[(&str, bool)] = &[
 ];
 
 pub fn list_tools(surface_id: &str) -> Vec<Value> {
+    if surface_id == "operator-console-overlay" {
+        return crate::operator_console::list_tools();
+    }
     let mut tools = vec![guidance(surface_id)];
     for (name, read_only) in entries(surface_id) {
         tools.push(if surface_id == "graph-mail" {
@@ -140,6 +143,9 @@ pub fn call_tool(
     args: &Map<String, Value>,
     root: &Path,
 ) -> Result<Value, Value> {
+    if surface_id == "operator-console-overlay" {
+        return crate::operator_console::call(name, args, root);
+    }
     if name.ends_with("_guidance") {
         return Ok(if surface_id == "graph-mail" {
             graph_mail_guidance(args)
