@@ -13,6 +13,7 @@ const DB_RELATIVE: &str = ".ai/task-lifecycle.db";
 const MAX_TEXT_BYTES: u64 = 512_000;
 const MAX_TEST_OUTPUT_BYTES: usize = 64 * 1024;
 const TEST_TIMEOUT: Duration = Duration::from_secs(120);
+const MAX_PROOF_REQUESTS: usize = 500;
 const READ_TOOLS: &[&str] = &[
     "site_loop_doctor", "site_docs_list", "site_docs_show", "site_test_list",
     "site_loop_config_validate", "site_loop_operator_affordances", "site_loop_status",
@@ -107,6 +108,7 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<V
         "site_loop_attention_list" => attention_list(args, root),
         "site_loop_attention_show" => attention_show(args, root),
         "site_loop_output_show" => output_show(args, root),
+        "site_loop_proof_run" => proof_run(args, root),
         "site_test_run" => test_run(args, root),
         "site_loop_attention_ack" => attention_ack(args, root),
         "site_loop_control_set" => control_set(args, root),
@@ -149,6 +151,61 @@ fn mutation_schema(name: &str) -> Value {
 
 fn config_path(root: &Path) -> PathBuf { root.join(".narada").join("capabilities").join("site-loop-config.json") }
 fn db_path(root: &Path) -> PathBuf { root.join(DB_RELATIVE) }
+fn proof_request_dir(root: &Path) -> PathBuf { root.join(".ai").join("runtime").join("resident-production-proof-requests") }
+
+fn safe_record_id(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 256 && value.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+}
+
+fn write_json_atomically(path: &Path, value: &Value) -> Result<(), Value> {
+    let parent = path.parent().ok_or_else(|| error("site_loop_record_path_invalid", "record path has no parent"))?;
+    fs::create_dir_all(parent).map_err(|e| error("site_loop_record_directory_failed", &e.to_string()))?;
+    let temporary = parent.join(format!(".{}.{}.tmp", path.file_name().and_then(|v| v.to_str()).unwrap_or("record"), uuid::Uuid::new_v4()));
+    let bytes = serde_json::to_vec_pretty(value).map_err(|e| error("site_loop_record_serialize_failed", &e.to_string()))?;
+    fs::write(&temporary, bytes).map_err(|e| error("site_loop_record_write_failed", &e.to_string()))?;
+    fs::rename(&temporary, path).map_err(|e| { let _ = fs::remove_file(&temporary); error("site_loop_record_promote_failed", &e.to_string()) })
+}
+
+fn proof_requests(root: &Path) -> Result<Vec<Value>, Value> {
+    let directory = proof_request_dir(root);
+    if !directory.exists() { return Ok(Vec::new()); }
+    let mut paths = fs::read_dir(&directory).map_err(|e| error("proof_request_list_failed", &e.to_string()))?
+        .filter_map(Result::ok).map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|v| v.to_str()) == Some("json"))
+        .collect::<Vec<_>>();
+    paths.sort();
+    if paths.len() > MAX_PROOF_REQUESTS { paths.drain(..paths.len() - MAX_PROOF_REQUESTS); }
+    let mut requests = Vec::new();
+    for path in paths {
+        let metadata = fs::metadata(&path).map_err(|e| error("proof_request_read_failed", &e.to_string()))?;
+        if metadata.len() > MAX_TEXT_BYTES { continue; }
+        let text = fs::read_to_string(&path).map_err(|e| error("proof_request_read_failed", &e.to_string()))?;
+        if let Ok(mut packet) = serde_json::from_str::<Value>(&text) {
+            if let Some(object) = packet.as_object_mut() { object.insert("path".into(), json!(path.to_string_lossy())); }
+            requests.push(packet);
+        }
+    }
+    requests.sort_by(|left, right| left.get("requested_at").and_then(Value::as_str).cmp(&right.get("requested_at").and_then(Value::as_str)));
+    Ok(requests)
+}
+
+fn proof_run(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    if args.get("proof_kind").and_then(Value::as_str) != Some("resident_production") { return Err(error("unknown_proof_kind", "proof_kind must be resident_production")); }
+    if args.get("wait_for_completion").and_then(Value::as_bool).unwrap_or(false) { return Err(error("proof_run_wait_not_yet_native", "use bounded start mode and poll site_loop_proof_status")); }
+    if let Some(existing) = proof_requests(root)?.into_iter().find(|value| matches!(value.get("status").and_then(Value::as_str), Some("queued" | "running"))) {
+        return Ok(json!({"schema":"narada.site_loop.resident_e2e.v1","status":"started","mode":"live_unattended_start_only","request":existing,"reused":true,"next":{"tool":"site_loop_proof_status","arguments":{}}}));
+    }
+    let config = load_config(root)?.ok_or_else(|| error("site_loop_config_missing", "site-loop config is required"))?;
+    let object = config.as_object().ok_or_else(|| error("site_loop_config_invalid", "site-loop config must be an object"))?;
+    let requested_at = now_iso();
+    let request_id = format!("resident_proof_request_{}_{}", requested_at.chars().filter(|ch| ch.is_ascii_digit()).collect::<String>(), &uuid::Uuid::new_v4().simple().to_string()[..8]);
+    let fixture_id = format!("resident-e2e-{}", uuid::Uuid::new_v4().simple());
+    if !safe_record_id(&request_id) || !safe_record_id(&fixture_id) { return Err(error("proof_request_id_invalid", "generated proof request identifier is invalid")); }
+    let packet = json!({"schema":"narada.site_loop.resident_proof_request.v1","site_id":object.get("site_id").cloned().unwrap_or(Value::Null),"loop_id":object.get("loop_id").cloned().unwrap_or(Value::Null),"request_id":request_id,"fixture_id":fixture_id,"title":"Resident production proof","summary":"Controlled resident production proof.","timeout_ms":args.get("timeout_ms").and_then(Value::as_u64).unwrap_or(120000),"poll_ms":args.get("poll_ms").and_then(Value::as_u64).unwrap_or(5000),"status":"queued","requested_at":requested_at,"finished_at":Value::Null,"result":Value::Null});
+    let path = proof_request_dir(root).join(format!("{request_id}.json"));
+    write_json_atomically(&path, &packet)?;
+    Ok(json!({"schema":"narada.site_loop.resident_e2e.v1","status":"started","mode":"live_unattended_start_only","request_id":request_id,"request_path":path.to_string_lossy(),"request_status":"queued","reused":false,"next":{"tool":"site_loop_proof_status","arguments":{}}}))
+}
 
 fn open_db(root: &Path) -> Result<Option<Connection>, Value> {
     let path = db_path(root);
@@ -600,7 +657,9 @@ fn operating_status(root: &Path) -> Result<Value, Value> {
 fn proof_status(root: &Path) -> Result<Value, Value> {
     let config = load_config(root)?;
     let proof = config.as_ref().and_then(Value::as_object).and_then(|v|v.get("production_proof")).cloned().unwrap_or_else(|| json!({}));
-    Ok(json!({"schema":"narada.site_loop.proof_status.v1","status":"ok","production_proof":proof,"freshness":"not_probed_by_native_read_slice","execution":"not_run"}))
+    let requests = proof_requests(root)?;
+    let latest = requests.last().cloned().unwrap_or(Value::Null);
+    Ok(json!({"schema":"narada.site_loop.proof_status.v1","status":"ok","production_proof":proof,"request_count":requests.len(),"latest_request":latest,"execution":if requests.is_empty(){"not_run"}else{"recorded"}}))
 }
 
 fn readiness(root: &Path) -> Result<Value, Value> {
@@ -648,6 +707,14 @@ mod tests {
         fs::write(config_path(&root), r#"{"schema":"narada.site_loop.config.v2","loop_id":"site.loop","site_id":"test","display_name":"Test","resident":{},"scheduler":{},"policy":{},"persistence":{}}"#).expect("config");
         assert_eq!(config_validate(&root).expect("validation")["valid"], true);
         assert_eq!(call_tool("site_loop_run_once", &Map::new(), &root).expect_err("boundary")["status"], "unavailable");
+        let started = call_tool("site_loop_proof_run", &json_map(json!({"proof_kind":"resident_production"})), &root).expect("proof request");
+        assert_eq!(started["status"], "started");
+        assert_eq!(started["request_status"], "queued");
+        let reused = call_tool("site_loop_proof_run", &json_map(json!({"proof_kind":"resident_production"})), &root).expect("reused proof request");
+        assert_eq!(reused["reused"], true);
+        let proof = call_tool("site_loop_proof_status", &Map::new(), &root).expect("proof status");
+        assert_eq!(proof["request_count"], 1);
+        assert_eq!(proof["latest_request"]["status"], "queued");
         fs::remove_dir_all(root).expect("cleanup");
     }
 
