@@ -1559,7 +1559,10 @@ fn carrier_diff(contract: &Value, args: &Value) -> Result<Value, String> {
         native_materialization_receipt(config_path, &carrier_id),
     ) {
         let current_sha256 = sha256_text(current_content);
-        if current_sha256 == receipt.expected_sha256 {
+        if receipt.matches(
+            plan["kind"].as_str().unwrap_or(""),
+            current_content.as_bytes(),
+        ) {
             let mut unchanged = current_servers.keys().cloned().collect::<Vec<_>>();
             unchanged.sort();
             return Ok(json!({
@@ -1574,6 +1577,7 @@ fn carrier_diff(contract: &Value, args: &Value) -> Result<Value, String> {
                 "change_scopes":[],
                 "explanation_code":"carrier_projection_matches_native_materialization_receipt",
                 "comparison_authority":"native_materialization_receipt",
+                "comparison_scope":receipt.scope,
                 "generation_sidecar_path":receipt.sidecar_path,
                 "generated_sha256":receipt.expected_sha256,
                 "current_sha256":current_sha256,
@@ -1659,6 +1663,21 @@ fn carrier_diff(contract: &Value, args: &Value) -> Result<Value, String> {
 struct NativeMaterializationReceipt {
     sidecar_path: String,
     expected_sha256: String,
+    scope: String,
+    selectors: Vec<String>,
+}
+
+impl NativeMaterializationReceipt {
+    fn matches(&self, kind: &str, content: &[u8]) -> bool {
+        if self.scope == "whole_document" {
+            return format!("{:x}", Sha256::digest(content)) == self.expected_sha256;
+        }
+        describe_config(kind, content, &self.selectors)
+            .ok()
+            .is_some_and(|description| {
+                description.managed_projection.sha256 == self.expected_sha256
+            })
+    }
 }
 
 fn native_materialization_receipt(
@@ -1669,23 +1688,36 @@ fn native_materialization_receipt(
     let sidecar: Value = serde_json::from_str(&fs::read_to_string(&sidecar_path).ok()?).ok()?;
     if sidecar.get("carrier_id").and_then(Value::as_str) != Some(carrier_id)
         || sidecar
-            .pointer("/managed_projection/scope")
-            .and_then(Value::as_str)
-            != Some("whole_document")
-        || sidecar
             .get("config_path")
             .and_then(Value::as_str)
             .is_none_or(|declared| comparable_path(declared) != comparable_path(config_path))
     {
         return None;
     }
-    let expected_sha256 = sidecar
-        .pointer("/config_artifact/bytes_sha256")
+    let scope = sidecar
+        .pointer("/managed_projection/scope")
         .and_then(Value::as_str)?
         .to_string();
+    let expected_sha256 = sidecar
+        .pointer(if scope == "whole_document" {
+            "/config_artifact/bytes_sha256"
+        } else {
+            "/managed_projection/sha256"
+        })
+        .and_then(Value::as_str)?
+        .to_string();
+    let selectors = sidecar
+        .pointer("/managed_projection/selectors")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|selector| selector.as_str().map(str::to_string))
+        .collect::<Option<Vec<_>>>()?;
     Some(NativeMaterializationReceipt {
         sidecar_path,
         expected_sha256,
+        scope,
+        selectors,
     })
 }
 
@@ -4792,7 +4824,7 @@ mod tests {
                 "carrier_id":"kimi-test",
                 "config_path":config_path_text,
                 "config_artifact":{"bytes_sha256":"abc123"},
-                "managed_projection":{"scope":"whole_document"}
+                "managed_projection":{"scope":"whole_document","selectors":[]}
             }))
             .unwrap(),
         )
@@ -4800,6 +4832,7 @@ mod tests {
 
         let receipt = native_materialization_receipt(&config_path_text, "kimi-test").unwrap();
         assert_eq!(receipt.expected_sha256, "abc123");
+        assert_eq!(receipt.scope, "whole_document");
         assert!(native_materialization_receipt(&config_path_text, "other-carrier").is_none());
 
         fs::remove_file(sidecar_path).unwrap();
