@@ -3,7 +3,7 @@
   "artifact_role": "site_capability_surface_registry_not_mcp_client_config",
   "site_id": "mcp-surfaces",
   "generated_by": "mcp-registrar",
-  "generated_at": "2026-08-14T07:08:31.5963937Z",
+  "generated_at": "2026-08-14T16:24:36.0374031Z",
   "generation_policy": {
     "source": ".ai/mcp + registrar surface catalog",
     "mode": "enabled_surface_tool_authority",
@@ -1718,7 +1718,7 @@
                 "env": []
               },
               "injection_scope": "local_site",
-              "default_injection": "disabled",
+              "default_injection": "enabled",
               "runtime_requirements": [],
               "authority_requirements": [
                 "scope.local_site"
@@ -1752,6 +1752,7 @@
             }
           }
         },
+        "default_injection": "enabled",
         "lifecycle": {
           "mode": "replayable",
           "reason": "Git state is external to the process and every operation carries its own repository context."
@@ -1763,23 +1764,23 @@
       "runtime_binding": {
         "runtime_kind": "rust-stdio",
         "proxy_implementation": "native",
-        "entrypoint": "C:/Users/andrey/src/mcp-surfaces/packages/shared/mcp-runtime-proxy/dist/native/versions/277de935d87bf569cd2e3adffe2eb4d8350deedc1a319470b9db8b0abed21b98/narada-mcp-runtime.exe",
+        "entrypoint": "C:/Users/andrey/src/mcp-surfaces/packages/shared/mcp-runtime-proxy/dist/native/versions/7cdb6d03c12c7a3566c8b57639616a871aaa89f01b05afcec6f58ae9088b8531/narada-mcp-runtime.exe",
         "owner_site_id": "mcp-surfaces",
         "transport": {
           "type": "stdio",
-          "command": "C:/Users/andrey/src/mcp-surfaces/packages/shared/mcp-runtime-proxy/dist/native/versions/277de935d87bf569cd2e3adffe2eb4d8350deedc1a319470b9db8b0abed21b98/narada-mcp-runtime.exe",
+          "command": "C:/Users/andrey/src/mcp-surfaces/packages/shared/mcp-runtime-proxy/dist/native/versions/7cdb6d03c12c7a3566c8b57639616a871aaa89f01b05afcec6f58ae9088b8531/narada-mcp-runtime.exe",
           "args": [
             "proxy",
             "--surface-id",
             "git",
             "--child-command",
-            "C:/Users/andrey/src/mcp-surfaces/packages/shared/mcp-runtime-proxy/dist/native/versions/277de935d87bf569cd2e3adffe2eb4d8350deedc1a319470b9db8b0abed21b98/narada-mcp-runtime.exe",
+            "C:/Users/andrey/src/mcp-surfaces/packages/shared/mcp-runtime-proxy/dist/native/versions/7cdb6d03c12c7a3566c8b57639616a871aaa89f01b05afcec6f58ae9088b8531/narada-mcp-runtime.exe",
             "--artifact-manifest",
             "C:/Users/andrey/src/mcp-surfaces/.ai/runtime/workspace-artifact-manifest.json",
             "--runtime-contract-version",
             "8",
             "--entrypoint",
-            "C:/Users/andrey/src/mcp-surfaces/packages/shared/mcp-runtime-proxy/dist/native/versions/277de935d87bf569cd2e3adffe2eb4d8350deedc1a319470b9db8b0abed21b98/narada-mcp-runtime.exe",
+            "C:/Users/andrey/src/mcp-surfaces/packages/shared/mcp-runtime-proxy/dist/native/versions/7cdb6d03c12c7a3566c8b57639616a871aaa89f01b05afcec6f58ae9088b8531/narada-mcp-runtime.exe",
             "--child-invocation-kind",
             "native_applet",
             "--child-applet",
