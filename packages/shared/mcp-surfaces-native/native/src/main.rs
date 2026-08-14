@@ -33,6 +33,7 @@ mod site_inbox;
 mod site_loop;
 mod site_lifecycle_authority;
 mod site_registry_authority;
+mod speech_authority;
 mod sop;
 mod sop_authority;
 mod sop_engine;
@@ -84,6 +85,7 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let options = parse_options(env::args().skip(1).collect())?;
+    let _speech_shutdown = (options.surface_id == "speech").then(speech_authority::shutdown_guard);
     for (key, value) in &options.environment {
         env::set_var(key, value);
     }
@@ -374,6 +376,12 @@ fn handle_request(request: &Value, options: &Options) -> Option<Value> {
                     .map(|value| modern_result(value, options))
             }
             method
+                if options.surface_id == "speech"
+                    && matches!(method,"prompts/list"|"prompts/get"|"completion/complete"|"logging/setLevel") =>
+            {
+                speech_authority::auxiliary(method,&params).map(|value|modern_result(value,options))
+            }
+            method
                 if matches!(
                     options.surface_id.as_str(),
                     "artifacts" | "nars-session" | "quota-meter"
@@ -409,7 +417,6 @@ fn handle_request(request: &Value, options: &Options) -> Option<Value> {
                     "browser-control"
                         | "operator-console-overlay"
                         | "cloudflare-carrier"
-                        | "speech"
                         | "graph-mail"
                 ) && matches!(
                     method,
@@ -496,6 +503,12 @@ fn handle_request(request: &Value, options: &Options) -> Option<Value> {
                 worker_delegation::auxiliary(method, &params)
             }
             method
+                if options.surface_id == "speech"
+                    && matches!(method,"prompts/list"|"prompts/get"|"completion/complete"|"logging/setLevel") =>
+            {
+                speech_authority::auxiliary(method,&params)
+            }
+            method
                 if matches!(
                     options.surface_id.as_str(),
                     "artifacts" | "nars-session" | "quota-meter"
@@ -530,7 +543,6 @@ fn handle_request(request: &Value, options: &Options) -> Option<Value> {
                     "browser-control"
                         | "operator-console-overlay"
                         | "cloudflare-carrier"
-                        | "speech"
                         | "graph-mail"
                 ) && matches!(
                     method,
@@ -729,7 +741,8 @@ fn raw_list_tools(surface_id: &str) -> Vec<Value> {
         "epistemic-graph" => epistemic_graph::list_tools(),
         "mailbox" => mailbox::list_tools(),
         "scheduler" => scheduler::list_tools(),
-        "browser-control" | "operator-console-overlay" | "cloudflare-carrier" | "speech" | "graph-mail" => host_contracts::list_tools(surface_id),
+        "speech" => speech_authority::list_tools(),
+        "browser-control" | "operator-console-overlay" | "cloudflare-carrier" | "graph-mail" => host_contracts::list_tools(surface_id),
         "catalog-observation" => vec![
             guidance_tool("catalog-observation"),
             tool("catalog_observation_observe", "Observe a provider model catalog through an installed Narada-owned observation port. Without that port, return a typed unavailable result rather than inferred catalog data.", json!({
@@ -880,6 +893,7 @@ fn call_tool(
         }
         ("mailbox", name) => mailbox::call_tool(name, &args, &options.site_root),
         ("epistemic-graph", name) => epistemic_graph::call_tool(name, &args, &options.site_root),
+        ("speech", name) => speech_authority::call_tool(name, &args, &options.site_root),
         ("graph-mail", name)
             if graph_mail_authority::enabled() && graph_mail_authority::supports(name) =>
         {
@@ -889,7 +903,6 @@ fn call_tool(
         ("browser-control", name)
         | ("operator-console-overlay", name)
         | ("cloudflare-carrier", name)
-        | ("speech", name)
         | ("graph-mail", name) => {
             host_contracts::call_tool(surface_id, name, &args, &options.site_root)
         }

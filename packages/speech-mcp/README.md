@@ -8,6 +8,8 @@ pnpm --filter @narada-core/speech-mcp test
 
 Host-level speech MCP surface for text-to-speech, bounded microphone capture, transcript-returning remote transcription, prompt-response workflows, and bounded local listen sessions.
 
+The admitted runtime authority is the shared native Rust executable. It owns provider-registry resolution, Windows SAPI, guarded OpenAI TTS/transcription, capture-adapter processes, listen-session cancellation, path confinement, timeouts, and credential non-disclosure. Node/Bun profiles resolve to the same Rust authority; the TypeScript package remains development/reference source and is not an admitted runtime fallback.
+
 ## Tools
 
 - `speech_speak` speaks text through Windows SAPI or OpenAI TTS.
@@ -15,12 +17,12 @@ Host-level speech MCP surface for text-to-speech, bounded microphone capture, tr
 - `speech_capture_transcribe` captures bounded microphone audio or reads an input WAV and returns a first-class transcript result through the registry-resolved transcription provider.
 - `speech_prompt_capture_response` speaks a prompt, captures a bounded spoken response, and returns a transcript or `no_response`.
 - `speech_listen_status` reports adapter readiness, policy, audio cue posture, and active listen sessions.
-- `speech_listen_start` starts a bounded local voice-intent listen session. Providers are `local_sapi` by default or `remote_transcription` when policy admits remote audio egress.
+- `speech_listen_start` starts a bounded local voice-intent listen session using the registry-selected transcription provider; OpenAI transcription additionally requires admitted remote audio egress.
 - `speech_listen_stop` stops one active listen session or all active listen sessions.
 
 ## Provider Contract
 
-Speech provider ids, models, voices, adapters, credentials, and capability defaults are loaded from the explicit v2 provider registry passed with `--provider-registry-path` or `NARADA_PROVIDER_REGISTRY_PATH`. The registrar supplies the package registry at `config/provider-registry.v2.json`; its TTS and transcription defaults are local SAPI.
+Speech provider ids, models, voices, adapters, credentials, and capability defaults are loaded from the explicit v2 provider registry passed with `--provider-registry-path` or `NARADA_SPEECH_PROVIDER_REGISTRY_PATH` (`NARADA_PROVIDER_REGISTRY_PATH` remains accepted). The registrar supplies the package registry at `config/provider-registry.v2.json`; its TTS and transcription defaults are local SAPI.
 
 `speech_speak` can also retain generated speech as a WAV file for NARS artifact projection. Pass `output_path` to choose the retained file path, or `retain_audio: true` to retain to a temporary WAV path. Explicit `output_path` values are admitted only under the OS temp directory, `NARADA_SITE_ROOT`, `NARADA_WORKSPACE_ROOT`, or `NARADA_SPEECH_OUTPUT_ROOT`. Retention is additive: the tool still performs host-side audible playback, and the returned `retained_audio.path` can be registered as a NARS `audio` artifact by the caller.
 
@@ -54,4 +56,4 @@ The default host lock path is under the OS temp directory as `speech-mcp-audible
 
 Disable the default with `--no-announce-speaker`, `NARADA_SPEECH_ANNOUNCE_SPEAKER=false`, or per call with `announce_speaker: false`. `speech_listen_status` reports the effective default as `policy.announce_speaker_default`.
 
-Announcement audio is cached as WAV files and reused by cache key. The key includes provider, prefix text, and the same voice settings used for the message: SAPI voice/rate or OpenAI voice/model/speed. Override the cache root with `--announcement-cache-dir` or `NARADA_SPEECH_ANNOUNCEMENT_CACHE_DIR`.
+The native authority synthesizes the announcement and message as one serialized utterance. It does not maintain a separate announcement-audio cache.

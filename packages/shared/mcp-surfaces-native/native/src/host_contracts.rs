@@ -39,15 +39,6 @@ const CLOUDFLARE: &[(&str, bool)] = &[
     ("cloudflare_doctor", true),
     ("cloudflare_carrier_health", true),
 ];
-const SPEECH: &[(&str, bool)] = &[
-    ("speech_speak", false),
-    ("speech_voices", true),
-    ("speech_listen_status", true),
-    ("speech_capture_transcribe", false),
-    ("speech_prompt_capture_response", false),
-    ("speech_listen_start", false),
-    ("speech_listen_stop", false),
-];
 const SCHEDULER: &[(&str, bool)] = &[
     ("scheduler_runtime_status", true),
     ("scheduler_task_list", true),
@@ -188,15 +179,6 @@ pub fn call_tool(
             Ok(cloudflare_session_status(args, root))
         }
         ("cloudflare-carrier", "cloudflare_health") => cloudflare_health(args, root),
-        ("speech", "speech_listen_status") => Ok(
-            json!({"schema":"narada.speech.listen_status.v1","status":"not_active","active_sessions":[],"native_read_only":true}),
-        ),
-        ("speech", "speech_voices") => Err(boundary(
-            surface_id,
-            name,
-            "speech_provider_authority_not_enabled_in_native_slice",
-            "Use the registry-resolved speech adapter.",
-        )),
         ("scheduler", "scheduler_runtime_status") => Ok(
             json!({"schema":"narada.scheduler.runtime_status.v1","status":"authority_boundary","implementation":"rust-native-contract","native_task_scheduler":false,"native_read_only":true}),
         ),
@@ -222,7 +204,6 @@ fn entries(surface_id: &str) -> &'static [(&'static str, bool)] {
         "browser-control" => BROWSER,
         "operator-console-overlay" => OPERATOR,
         "cloudflare-carrier" => CLOUDFLARE,
-        "speech" => SPEECH,
         "scheduler" => SCHEDULER,
         "graph-mail" => GRAPH_MAIL,
         _ => &[],
