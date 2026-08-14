@@ -1,5 +1,6 @@
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use crate::authority::{AuthorityAdapter, StdioAuthorityAdapter};
 use std::path::{Path, PathBuf};
 use time::OffsetDateTime;
@@ -64,7 +65,7 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<V
 }
 
 fn guidance_tool() -> Value { tool("surface_feedback_guidance", "Show model-facing operating guidance for surface feedback workflows.", json!({"type":"object","properties":{"workflow":{"type":"string"},"tool":{"type":"string"}},"additionalProperties":false}), true) }
-fn submit_schema() -> Value { json!({"type":"object","properties":{"surface_id":{"type":"string","minLength":1},"submitter_site_id":{"type":"string","minLength":1},"submitter_principal":{"type":"string","minLength":1},"kind":{"type":"string","enum":FEEDBACK_KINDS},"summary":{"type":"string","minLength":1},"details":{"type":"string"}},"required":["surface_id","submitter_site_id","submitter_principal","kind","summary"],"additionalProperties":false}) }
+fn submit_schema() -> Value { json!({"type":"object","properties":{"surface_id":{"type":"string","minLength":1},"submitter_site_id":{"type":"string","minLength":1,"description":"Defaults to server-bound NARADA_SITE_ID."},"submitter_principal":{"type":"string","minLength":1,"description":"Defaults to server-bound NARADA_AGENT_ID."},"kind":{"type":"string","enum":FEEDBACK_KINDS},"summary":{"type":"string","minLength":1},"details":{"type":"string"},"idempotency_key":{"type":"string","minLength":1,"description":"Stable retry key; reuse with different content is refused."}},"required":["surface_id","kind","summary"],"additionalProperties":false}) }
 fn update_status_schema() -> Value { json!({"type":"object","properties":{"feedback_id":{"type":"string","minLength":1},"status":{"type":"string","enum":FEEDBACK_STATUSES},"resolution_note":{"type":"string","minLength":1},"task_ref":{"type":"string"},"task_status":{"type":"string"}},"required":["feedback_id","status","resolution_note"],"additionalProperties":false}) }
 fn update_status_batch_schema() -> Value { json!({"type":"object","properties":{"updates":{"type":"array","minItems":1,"maxItems":MAX_IMPORT_IDS,"items":update_status_schema()}},"required":["updates"],"additionalProperties":false}) }
 fn convert_to_task_schema() -> Value { json!({"type":"object","properties":{"feedback_id":{"type":"string","minLength":1},"task_title":{"type":"string","minLength":1},"resolution_note":{"type":"string","minLength":1}},"required":["feedback_id"],"additionalProperties":false}) }
@@ -102,18 +103,23 @@ fn authority() -> Result<(String, String, Vec<String>), Value> {
 
 fn feedback_submit(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     let surface_id = required_arg(args, "surface_id", "feedback_requires_surface_id")?;
-    let submitter_site_id = required_arg(args, "submitter_site_id", "feedback_requires_submitter_site_id")?;
-    let submitter_principal = required_arg(args, "submitter_principal", "feedback_requires_submitter_principal")?;
+    let submitter_site_id = args.get("submitter_site_id").and_then(Value::as_str).map(str::trim).filter(|v|!v.is_empty()).map(ToOwned::to_owned).or_else(||std::env::var("NARADA_SITE_ID").ok().filter(|v|!v.trim().is_empty())).ok_or_else(||error("feedback_requires_submitter_site_id","feedback_requires_submitter_site_id"))?;
+    let submitter_principal = args.get("submitter_principal").and_then(Value::as_str).map(str::trim).filter(|v|!v.is_empty()).map(ToOwned::to_owned).or_else(||std::env::var("NARADA_AGENT_ID").ok().filter(|v|!v.trim().is_empty())).unwrap_or_else(||format!("surface-feedback@{submitter_site_id}"));
     let kind = required_arg(args, "kind", "feedback_requires_kind")?;
     if !FEEDBACK_KINDS.contains(&kind.as_str()) { return Err(error("feedback_invalid_kind", "feedback_invalid_kind")); }
     let summary = required_arg(args, "summary", "feedback_requires_summary")?;
     let details = args.get("details").and_then(Value::as_str).unwrap_or("").to_string();
-    let id = format!("sfb_{}", &Uuid::new_v4().to_string()[..12]);
+    let idempotency_key = args.get("idempotency_key").and_then(Value::as_str).map(str::trim).filter(|v|!v.is_empty());
+    let id = idempotency_key.map(|key| { let digest=Sha256::digest(format!("{submitter_site_id}\0{submitter_principal}\0{key}").as_bytes()); format!("sfb_{:x}",digest)[..16].to_string() }).unwrap_or_else(||format!("sfb_{}",&Uuid::new_v4().to_string()[..12]));
     let now = now_iso();
     let db = open_db_rw(root)?;
+    if let Some(existing)=db.query_row("SELECT surface_id,submitter_site_id,submitter_principal,kind,summary,details,created_at FROM feedback_entries WHERE feedback_id=?1",params![id],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,String>(3)?,row.get::<_,String>(4)?,row.get::<_,String>(5)?,row.get::<_,String>(6)?))).optional().map_err(|e|error("feedback_query_failed",&e.to_string()))? {
+        if existing.0!=surface_id||existing.1!=submitter_site_id||existing.2!=submitter_principal||existing.3!=kind||existing.4!=summary||existing.5!=details { return Err(error("feedback_idempotency_conflict","feedback_idempotency_conflict")); }
+        return Ok(json!({"schema":"narada.surface_feedback.submit.v1","status":"submitted","feedback_id":id,"surface_id":surface_id,"submitter_site_id":submitter_site_id,"kind":kind,"summary":summary,"created_at":existing.6,"native_write":true,"idempotency_replay":true}));
+    }
     db.execute("INSERT INTO feedback_entries (feedback_id,surface_id,submitter_site_id,submitter_principal,kind,summary,details,status,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,'submitted',?8,?8)", params![id, surface_id, submitter_site_id, submitter_principal, kind, summary, details, now]).map_err(|e| error("feedback_submit_failed", &e.to_string()))?;
     let _ = db.execute("INSERT INTO feedback_events (event_id,feedback_id,event_type,actor_principal,status,note,details_json,created_at) VALUES (?1,?2,'submitted',?3,'submitted',?4,?5,?6)", params![format!("sfb_evt_{}", Uuid::new_v4()), id, submitter_principal, summary, json!({"submitter_site_id":submitter_site_id,"surface_id":surface_id,"kind":kind}).to_string(), now]);
-    Ok(json!({"schema":"narada.surface_feedback.submit.v1","status":"submitted","feedback_id":id,"surface_id":surface_id,"submitter_site_id":submitter_site_id,"kind":kind,"summary":summary,"created_at":now,"native_write":true}))
+    Ok(json!({"schema":"narada.surface_feedback.submit.v1","status":"submitted","feedback_id":id,"surface_id":surface_id,"submitter_site_id":submitter_site_id,"kind":kind,"summary":summary,"created_at":now,"native_write":true,"idempotency_replay":false}))
 }
 
 fn feedback_update_status(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
@@ -470,9 +476,10 @@ mod tests {
         let find = |name: &str| tools.iter().find(|tool| tool["name"] == name).expect("tool");
         let submit = find("surface_feedback_submit");
         assert_eq!(submit["inputSchema"]["additionalProperties"], false);
-        for field in ["surface_id", "submitter_site_id", "submitter_principal", "kind", "summary", "details"] {
+        for field in ["surface_id", "submitter_site_id", "submitter_principal", "kind", "summary", "details", "idempotency_key"] {
             assert!(submit["inputSchema"]["properties"].get(field).is_some(), "missing {field}");
         }
+        assert_eq!(submit["inputSchema"]["required"], json!(["surface_id","kind","summary"]));
         assert_eq!(find("surface_feedback_update_status")["inputSchema"]["required"], json!(["feedback_id","status","resolution_note"]));
         assert!(find("surface_feedback_update_status_batch")["inputSchema"]["properties"]["updates"].is_object());
         assert!(find("surface_feedback_convert_to_task")["inputSchema"]["properties"]["feedback_id"].is_object());
@@ -498,6 +505,12 @@ mod tests {
         assert_eq!(doctor["capabilities"]["read_scopes"]["authority_visible"]["available"], false);
         let submitted = call_tool("surface_feedback_submit", &json!({"surface_id":"site-loop","submitter_site_id":"site-a","submitter_principal":"agent-a","kind":"observation","summary":"native write"}).as_object().unwrap(), &root).expect("submit");
         assert_eq!(submitted["status"], "submitted");
+        let retry_args=json!({"surface_id":"site-loop","submitter_site_id":"site-a","submitter_principal":"agent-a","kind":"observation","summary":"retry safe","idempotency_key":"retry-1"});
+        let first=call_tool("surface_feedback_submit",retry_args.as_object().unwrap(),&root).expect("first");
+        let replay=call_tool("surface_feedback_submit",retry_args.as_object().unwrap(),&root).expect("replay");
+        assert_eq!(first["feedback_id"],replay["feedback_id"]); assert_eq!(replay["idempotency_replay"],true);
+        let conflict=call_tool("surface_feedback_submit",&json!({"surface_id":"site-loop","submitter_site_id":"site-a","submitter_principal":"agent-a","kind":"bug","summary":"different","idempotency_key":"retry-1"}).as_object().unwrap(),&root).expect_err("conflict");
+        assert_eq!(conflict["code"],"feedback_idempotency_conflict");
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 

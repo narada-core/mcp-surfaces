@@ -19,7 +19,7 @@ Provides a single durable feedback channel for MCP surfaces. Agents across all N
 
 | Tool | Description |
 |------|-------------|
-| `surface_feedback_submit` | Submit feedback (surface, declared submitter site, principal, kind, summary, details) |
+| `surface_feedback_submit` | Submit feedback; site/principal default from server authority, and an optional `idempotency_key` makes retries replay-safe with conflict refusal |
 | `surface_feedback_convert_to_task` | Create and link one canonical feedback entry through task-lifecycle using server-bound User Site handoff authority; returns the next lifecycle action but does not execute the task |
 | `surface_feedback_list` | List entries with an explicit read scope and bounded metadata filters |
 | `surface_feedback_actionable_queue` | Read submitted and acknowledged (unprocessed) feedback with an explicit read scope; selection occurs before pagination and the response reports included statuses plus excluded-status counts |

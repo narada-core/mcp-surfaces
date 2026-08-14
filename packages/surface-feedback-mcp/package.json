@@ -21,7 +21,7 @@
   "scripts": {
     "build": "tsc -b",
     "typecheck": "tsc -b --pretty false",
-    "test": "pnpm run test:bun",
+    "test": "cargo test --locked --manifest-path ../shared/mcp-surfaces-native/native/Cargo.toml surface_feedback",
     "test:bun": "pnpm --filter @narada-core/task-lifecycle-mcp build && pnpm build && bun dist/test/protocol-smoke.test.js && bun dist/test/surface-feedback-mcp.test.js && bun dist/test/task-lifecycle-client.test.js && bun dist/test/surface-feedback-task-lifecycle-integration.test.js && bun dist/test/site-fabric-feedback-e2e.test.js",
     "test:node": "pnpm --filter @narada-core/task-lifecycle-mcp build && pnpm build && node dist/test/protocol-smoke.test.js && node dist/test/surface-feedback-mcp.test.js && node dist/test/task-lifecycle-client.test.js && node dist/test/surface-feedback-task-lifecycle-integration.test.js && node --disable-warning=ExperimentalWarning dist/test/site-fabric-feedback-e2e.test.js"
   },
