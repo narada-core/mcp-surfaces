@@ -27,6 +27,7 @@ mod simple_surfaces;
 mod site_coherence;
 mod site_inbox;
 mod site_loop;
+mod site_lifecycle_authority;
 mod site_registry_authority;
 mod sop;
 mod sop_authority;

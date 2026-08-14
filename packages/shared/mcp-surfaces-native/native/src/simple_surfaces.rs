@@ -1,6 +1,7 @@
 use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 use crate::operator_surface_authority;
+use crate::site_lifecycle_authority;
 use crate::site_registry_authority;
 
 const SITE_LIFECYCLE_COMMANDS: &[(&str, &str, bool, bool, bool)] = &[
@@ -249,15 +250,31 @@ fn call_site_lifecycle(name: &str, args: &Map<String, Value>, root: &Path) -> Re
         "site_verify_role" => return operator_surface_authority::verify_role(args, root),
         "site_observe_runtime" => return operator_surface_authority::observe_runtime(args, root),
         "site_bind_runtime" => return operator_surface_authority::bind_runtime(args, root),
+        "site_list" => {
+            let listed = site_registry_authority::call("site_registry_list", &Map::new())?;
+            let sites = listed["sites"].as_array().cloned().unwrap_or_default().into_iter().map(|site| json!({"siteId":site["site_id"],"variant":site["variant"],"substrate":site["substrate"],"health":"unknown","lastCycle":null,"failures":0})).collect::<Vec<_>>();
+            return Ok(json!({"status":"success","sites":sites,"paging":{"count":listed["count"],"returned":listed["returned"],"has_more":listed["has_more"],"next_offset":listed["next_offset"]}}));
+        }
+        "site_show" => {
+            let site_id = require_string(args, "site_id")?;
+            let shown = site_registry_authority::call("site_registry_show", &serde_json::from_value(json!({"reference":site_id})).unwrap())?;
+            if shown["status"] != "success" { return Ok(json!({"status":"error","error":format!("Site not found: {site_id}"),"refusals":shown["refusals"]})); }
+            let site=&shown["site"];
+            return Ok(json!({"status":"success","site":{"siteId":site["site_id"],"variant":site["variant"],"siteRoot":site["site_root"],"substrate":site["substrate"],"aimJson":site["aim_json"],"controlEndpoint":site["control_endpoint"],"lastSeenAt":site["last_seen_at"],"createdAt":site["created_at"],"health":null}}));
+        }
+        "site_lifecycle_kinds" => return Ok(site_lifecycle_authority::kinds()),
+        "site_lifecycle_preflight" => return site_lifecycle_authority::preflight(args),
+        "site_relation_list" => return site_lifecycle_authority::relation_list(args, root),
+        "site_relation_validate" => return site_lifecycle_authority::relation_validate(args, root),
+        "site_authority_preflight" => return site_lifecycle_authority::authority_preflight(args, root),
         _ => {}
     }
     let spec = SITE_LIFECYCLE_COMMANDS
         .iter()
         .find(|(tool, _, _, _, _)| *tool == name)
         .ok_or_else(|| diagnostic("unknown_tool", &format!("unknown_tool:{name}")))?;
-    if matches!(name, "site_show" | "site_doctor") {
+    if name == "site_doctor" {
         require_string(args, "site_id")?;
-        require_string(args, "site_root")?;
     }
     if name == "site_init" {
         require_string(args, "site_id")?;
@@ -274,7 +291,7 @@ fn call_site_lifecycle(name: &str, args: &Map<String, Value>, root: &Path) -> Re
         require_string(args, "kind")?;
     }
     let mutation = !spec.2;
-    let (result, resolution_status) = if matches!(name, "site_show" | "site_doctor") {
+    let (result, resolution_status) = if name == "site_doctor" {
         let evidence = site_resolution_evidence(args, root);
         let status = evidence
             .get("status")
@@ -564,16 +581,18 @@ fn lifecycle_input_schema(name: &str) -> Value {
     let mut properties = Map::new();
     properties.insert(
         "site_id".to_string(),
-        json!({"type":"string","description":"Canonical Site identifier."}),
+        json!({"type":"string","minLength":1,"maxLength":512,"description":"Canonical Site identifier."}),
     );
-    properties.insert("site_root".to_string(), json!({"type":"string","description":"Explicit workspace root or its .narada authority root."}));
+    properties.insert("site_root".to_string(), json!({"type":"string","minLength":1,"maxLength":4096,"description":"Explicit workspace root or its .narada authority root."}));
+    properties.insert("root".to_string(), json!({"type":"string","minLength":1,"maxLength":4096}));
+    properties.insert("cwd".to_string(), json!({"type":"string","minLength":1,"maxLength":4096}));
     properties.insert(
         "kind".to_string(),
-        json!({"type":"string","description":"Lifecycle kind or preflight selector."}),
+        json!({"type":"string","minLength":1,"maxLength":128,"description":"Lifecycle kind or preflight selector."}),
     );
     properties.insert(
         "substrate".to_string(),
-        json!({"type":"string","description":"Requested Site substrate."}),
+        json!({"type":"string","minLength":1,"maxLength":128,"description":"Requested Site substrate."}),
     );
     properties.insert(
         "authority_basis".to_string(),
@@ -584,8 +603,15 @@ fn lifecycle_input_schema(name: &str) -> Value {
         "dry_run".to_string(),
         json!({"type":"boolean","description":"Return a plan without mutation."}),
     );
+    properties.insert("source_site".to_string(),json!({"type":"string","minLength":1,"maxLength":4096}));
+    properties.insert("target_site".to_string(),json!({"type":"string","minLength":1,"maxLength":4096}));
+    properties.insert("authority_mode".to_string(),json!({"type":"string","minLength":1,"maxLength":128}));
+    properties.insert("mutation_family".to_string(),json!({"type":"string","enum":["task_lifecycle","inbox","publication","secret","site"]}));
+    properties.insert("status".to_string(),json!({"type":"string","minLength":1,"maxLength":128}));
+    properties.insert("limit".to_string(),json!({"type":"integer","minimum":1,"maximum":500,"default":20}));
     let required: Vec<&str> = match name {
-        "site_lifecycle_doctor" | "site_show" | "site_doctor" => vec!["site_id", "site_root"],
+        "site_lifecycle_doctor" => vec!["site_id", "site_root"],
+        "site_show" | "site_doctor" => vec!["site_id"],
         "site_init" => vec!["site_id", "site_root", "substrate", "authority_basis"],
         _ => Vec::new(),
     };

@@ -1782,6 +1782,18 @@ function runSiteLifecycleAuthorityParity() {
   const root = mkdtempSync(join(tmpdir(), 'narada-site-lifecycle-authority-'));
   try {
     mkdirSync(join(root, '.narada'), { recursive: true });
+    mkdirSync(join(root, '.ai'), { recursive: true });
+    writeFileSync(join(root, 'config.json'), JSON.stringify({ site_id: 'fixture' }), 'utf8');
+    writeFileSync(join(root, '.ai', 'site-relation-registry.json'), JSON.stringify({ registry_kind: 'site_relation_registry', registry_version: 1, relations: [
+      { relation_id: 'rel-a', relation_kind: 'subscribes_to', source_site_ref: 'fixture', target_site_ref: 'upstream', authority_effect: 'influence_only', admitted_material: [], evidence_refs: [], lineage_event_refs: [], reciprocal_required: true, reciprocal_relation_id: null, status: 'active', created_by: 'fixture', created_at: '2026-08-14T00:00:00Z', superseded_by: null, superseded_at: null, rejection_reason: null },
+      { relation_id: 'rel-b', relation_kind: 'publishes_to', source_site_ref: 'upstream', target_site_ref: 'fixture', authority_effect: 'influence_only', admitted_material: [], evidence_refs: [], lineage_event_refs: [], reciprocal_required: false, reciprocal_relation_id: null, status: 'active', created_by: 'fixture', created_at: '2026-08-14T00:00:00Z', superseded_by: null, superseded_at: null, rejection_reason: null },
+    ] }), 'utf8');
+    const userSiteRoot = join(root, 'user-site');
+    mkdirSync(userSiteRoot, { recursive: true });
+    const registry = new DatabaseSync(join(userSiteRoot, 'registry.db'));
+    registry.exec('CREATE TABLE site_registry(site_id TEXT PRIMARY KEY,variant TEXT NOT NULL,site_root TEXT NOT NULL,substrate TEXT NOT NULL,aim_json TEXT,control_endpoint TEXT,last_seen_at TEXT,created_at TEXT NOT NULL,lifecycle_status TEXT NOT NULL,observation_status TEXT NOT NULL,sources_json TEXT NOT NULL,aliases_json TEXT NOT NULL,revision INTEGER NOT NULL,updated_at TEXT NOT NULL,retired_at TEXT,retire_reason TEXT); CREATE TABLE registry_management_audit(event_id TEXT PRIMARY KEY,site_id TEXT NOT NULL,operation TEXT NOT NULL,actor TEXT NOT NULL,reason TEXT,occurred_at TEXT NOT NULL,before_json TEXT,after_json TEXT,status TEXT NOT NULL);');
+    registry.prepare('INSERT INTO site_registry VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run('fixture', 'native', root, 'windows', null, null, null, '2026-01-01T00:00:00Z', 'active', 'present', '[]', '[]', 1, '2026-08-14T00:00:00Z', null, null);
+    registry.close();
     const authority = { kind: 'operator_request', summary: 'native authority verifier' };
     const admission = { site_id: 'fixture', site_root: root, role: 'builder', agent_kind: 'codex_cli', by: 'operator', execute: true, authority_basis: authority };
     const binding = { site_root: root, identity: 'fixture.builder', runtime_locus: 'user-pc', handle: 'codex-thread:fixture', observed_handle: 'codex-thread:fixture', execute: true, authority_basis: authority };
@@ -1798,8 +1810,17 @@ function runSiteLifecycleAuthorityParity() {
       { jsonrpc: '2.0', id: 10, method: 'tools/call', params: { name: 'site_verify_role', arguments: { site_id: 'fixture', site_root: root } } },
       { jsonrpc: '2.0', id: 11, method: 'tools/call', params: { name: 'site_observe_runtime', arguments: { site_id: 'fixture', site_root: root } } },
       { jsonrpc: '2.0', id: 12, method: 'tools/call', params: { name: 'site_admit_role', arguments: { ...admission, agent_kind: 'kimi_cli' } } },
+      { jsonrpc: '2.0', id: 13, method: 'tools/call', params: { name: 'site_list', arguments: {} } },
+      { jsonrpc: '2.0', id: 14, method: 'tools/call', params: { name: 'site_show', arguments: { site_id: 'fixture' } } },
+      { jsonrpc: '2.0', id: 15, method: 'tools/call', params: { name: 'site_lifecycle_kinds', arguments: {} } },
+      { jsonrpc: '2.0', id: 16, method: 'tools/call', params: { name: 'site_lifecycle_preflight', arguments: { kind: 'archive', source_site: 'fixture', authority_mode: 'retired_non_authority' } } },
+      { jsonrpc: '2.0', id: 17, method: 'tools/call', params: { name: 'site_lifecycle_preflight', arguments: { kind: 'clone' } } },
+      { jsonrpc: '2.0', id: 18, method: 'tools/call', params: { name: 'site_relation_list', arguments: { kind: 'subscribes_to', limit: 1 } } },
+      { jsonrpc: '2.0', id: 19, method: 'tools/call', params: { name: 'site_relation_validate', arguments: {} } },
+      { jsonrpc: '2.0', id: 20, method: 'tools/call', params: { name: 'site_authority_preflight', arguments: { mutation_family: 'site' } } },
+      { jsonrpc: '2.0', id: 21, method: 'tools/call', params: { name: 'site_relation_list', arguments: { cwd: tmpdir() } } },
     ];
-    const responses = runMailbox(executable, ['--surface-id', 'site-lifecycle', '--site-root', root], requests, root);
+    const responses = runMailbox(executable, ['--surface-id', 'site-lifecycle', '--site-root', root], requests, root, { ...process.env, NARADA_USER_SITE_ROOT: userSiteRoot });
     const tools = responses.find((response) => response.id === 1)?.result?.tools ?? [];
     for (const name of ['site_admit_role', 'site_verify_role', 'site_observe_runtime', 'site_bind_runtime']) {
       const tool = tools.find((candidate) => candidate.name === name);
@@ -1812,10 +1833,14 @@ function runSiteLifecycleAuthorityParity() {
     if (mailboxStructured(responses, 8, 'rust').status !== 'admitted' || mailboxStructured(responses, 9, 'rust').status !== 'reused') throw new Error('site_lifecycle.native_binding_replay_invalid');
     if (mailboxStructured(responses, 10, 'rust').identities?.[0]?.runtime_bound !== true || mailboxStructured(responses, 11, 'rust').binding_count !== 1) throw new Error('site_lifecycle.native_readback_invalid');
     if (!responses.find((response) => response.id === 12)?.error) throw new Error('site_lifecycle.native_identity_conflict_not_refused');
+    if (mailboxStructured(responses, 13, 'rust').sites?.[0]?.siteId !== 'fixture' || mailboxStructured(responses, 14, 'rust').site?.siteRoot !== root) throw new Error('site_lifecycle.native_registry_reads_invalid');
+    if (mailboxStructured(responses, 15, 'rust').kinds?.length !== 7 || mailboxStructured(responses, 16, 'rust').status !== 'ready' || mailboxStructured(responses, 17, 'rust').status !== 'blocked') throw new Error('site_lifecycle.native_transformation_catalog_invalid');
+    if (mailboxStructured(responses, 18, 'rust').relations?.[0]?.relation_id !== 'rel-a' || mailboxStructured(responses, 19, 'rust').valid !== true) throw new Error('site_lifecycle.native_relation_authority_invalid');
+    if (mailboxStructured(responses, 20, 'rust').locus_state !== 'authority_locus' || !responses.find((response) => response.id === 21)?.error) throw new Error('site_lifecycle.native_mutation_preflight_or_root_bound_invalid');
     const identities = JSON.parse(readFileSync(join(root, '.narada', 'operator-surfaces', 'identities.json'), 'utf8'));
     const bindings = JSON.parse(readFileSync(join(root, '.narada', 'operator-surfaces', 'runtime-bindings.json'), 'utf8'));
     if (identities.identities?.length !== 1 || bindings.bindings?.length !== 1) throw new Error('site_lifecycle.native_artifact_readback_invalid');
-    return { status: 'passed', verified: ['four_authority_tools', 'closed_bounded_schemas', 'empty', 'execute_authority_gate', 'admission_replay_conflict', 'binding_evidence_replay', 'readback', 'artifact_compatibility'] };
+    return { status: 'passed', verified: ['four_authority_tools', 'registry_list_show', 'transformation_kinds_preflight', 'relation_list_validate', 'mutation_authority_preflight', 'root_confinement', 'closed_bounded_schemas', 'empty', 'execute_authority_gate', 'admission_replay_conflict', 'binding_evidence_replay', 'readback', 'artifact_compatibility'] };
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
