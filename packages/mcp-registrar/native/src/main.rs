@@ -80,6 +80,12 @@ fn dispatch(request: &Value) -> Value {
             ) {
                 let mut guidance = if name == "registrar_guidance" {
                     contract["guidance"].clone()
+                } else if name == "registrar_surface_list" {
+                    let args = request
+                        .pointer("/params/arguments")
+                        .cloned()
+                        .unwrap_or_else(|| json!({}));
+                    surface_list(&contract, &args)
                 } else if name == "registrar_site_list" {
                     site_list(&contract)
                 } else {
@@ -777,6 +783,11 @@ fn rebind_native_registrar(contract: &mut Value) -> Result<(), String> {
         },
     )
     .ok_or("native_registrar_artifact_unavailable")?;
+    repair_native_contract(contract, &declared, &current);
+    Ok(())
+}
+
+fn repair_native_contract(contract: &mut Value, declared: &str, current: &str) {
     if declared != current {
         replace_value_string(contract, &declared, &current);
         replace_value_string(
@@ -785,7 +796,73 @@ fn rebind_native_registrar(contract: &mut Value) -> Result<(), String> {
             &current.replace('/', "\\"),
         );
     }
-    Ok(())
+    replace_value_string(
+        &mut contract["guidance"],
+        "pnpm materialize:carrier",
+        "cargo native-release",
+    );
+    if let Some(tools) = contract.get_mut("tools").and_then(Value::as_array_mut) {
+        if let Some(tool) = tools
+            .iter_mut()
+            .find(|tool| tool["name"] == "registrar_surface_list")
+        {
+            tool["inputSchema"] = json!({"type":"object","properties":{"compact":{"type":"boolean","default":true,"description":"Return identity and summary fields; set false for full descriptors."},"limit":{"type":"integer","minimum":1,"maximum":200,"default":50},"offset":{"type":"integer","minimum":0,"maximum":10000,"default":0}},"additionalProperties":false});
+        }
+    }
+    if let Some(plans) = contract
+        .pointer_mut("/read_models/registrar_carrier_validation_plans")
+        .and_then(Value::as_object_mut)
+    {
+        for plan in plans.values_mut() {
+            for server in plan
+                .get_mut("servers")
+                .and_then(Value::as_array_mut)
+                .into_iter()
+                .flatten()
+            {
+                if server["surface_id"] == "mcp-registrar" {
+                    server["entrypoint"] = json!(current);
+                }
+            }
+        }
+    }
+}
+
+fn surface_list(contract: &Value, args: &Value) -> Value {
+    let items = contract
+        .pointer("/read_models/registrar_surface_list/items")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let total = items.len();
+    let offset = args
+        .get("offset")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        .min(10_000) as usize;
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(50)
+        .clamp(1, 200) as usize;
+    let compact = args.get("compact").and_then(Value::as_bool).unwrap_or(true);
+    let page = items
+        .into_iter()
+        .skip(offset)
+        .take(limit + 1)
+        .collect::<Vec<_>>();
+    let has_more = page.len() > limit;
+    let projected = page.into_iter().take(limit).map(|surface| {
+        if !compact { return surface; }
+        json!({
+            "id":surface["id"],"package":surface["package"],"kind":surface["kind"],
+            "injection_scope":surface["injection_scope"],"restart_owner":surface["restart_owner"],
+            "descriptor_source":surface["descriptor_source"],
+            "tool_count":surface["tools"].as_array().map_or(0, Vec::len),
+            "projection_count":surface["projections"].as_array().map_or(0, Vec::len)
+        })
+    }).collect::<Vec<_>>();
+    json!({"schema":"narada.registrar.surface_list.v1","status":"ok","items":projected,"returned":projected.len(),"total":total,"offset":offset,"limit":limit,"has_more":has_more,"next_offset":if has_more{json!(offset + limit)}else{Value::Null},"compact":compact})
 }
 fn registrar_sync(contract: &Value, args: &Value) -> Result<Value, String> {
     let target = required_argument(args, "target", "registrar_requires_target")?;
@@ -1789,13 +1866,34 @@ fn site_list(contract: &Value) -> Value {
         return fallback_site_list(fallback, &registry_path, "registry_file_missing");
     }
     match read_site_registry(&registry_path, fallback) {
-        Ok(items) => json!({
-            "items": items,
-            "count": items.len(),
-            "catalog_source": "user_site_site_registry",
-            "registry_path": path_text(&registry_path),
-            "compatibility_fallback_used": false
-        }),
+        Ok(mut items) => {
+            for site in &mut items {
+                let root = PathBuf::from(site["root"].as_str().unwrap_or(""));
+                let fallback = site["site_id"].as_str().unwrap_or("");
+                let site_id = canonical_site_id(&root, fallback);
+                match scan_site_surfaces(contract, &root, &site_id) {
+                    Ok(surfaces) => {
+                        let surface_count = surfaces.len();
+                        site["surfaces"] = json!(surfaces);
+                        site["surface_count"] = json!(surface_count);
+                        site["surfaces_status"] = json!("current");
+                    }
+                    Err(message) => {
+                        site["surfaces"] = json!([]);
+                        site["surface_count"] = json!(0);
+                        site["surfaces_status"] = json!("unavailable");
+                        site["surfaces_error"] = json!(message);
+                    }
+                }
+            }
+            json!({
+                "items": items,
+                "count": items.len(),
+                "catalog_source": "user_site_site_registry",
+                "registry_path": path_text(&registry_path),
+                "compatibility_fallback_used": false
+            })
+        }
         Err(message) => fallback_site_list(fallback, &registry_path, &message),
     }
 }
@@ -2004,10 +2102,16 @@ fn site_surfaces(contract: &Value, args: &Value) -> Result<Value, String> {
         return Err(format!("registrar_unknown_site:{requested}"));
     };
     let root = PathBuf::from(site["root"].as_str().unwrap_or(""));
+    let found = scan_site_surfaces(contract, &root, &site_id)?;
+    let count = found.len();
+    Ok(json!({"site_id":site_id,"surfaces":found,"count":count}))
+}
+
+fn scan_site_surfaces(contract: &Value, root: &Path, site_id: &str) -> Result<Vec<String>, String> {
     let control_root = site_mcp_control_root(&root);
     let config_dir = control_root.join(".ai").join("mcp");
     if !config_dir.exists() {
-        return Ok(json!({"site_id":site_id,"surfaces":[],"count":0}));
+        return Ok(Vec::new());
     }
     let surface_ids = contract["read_models"]["registrar_surface_list"]["items"]
         .as_array()
@@ -2018,7 +2122,7 @@ fn site_surfaces(contract: &Value, args: &Value) -> Result<Value, String> {
     let prefix = if site_id == "andrey-user" {
         "narada-site-andrey-user".to_string()
     } else if site_id.starts_with("narada-") {
-        site_id.clone()
+        site_id.to_string()
     } else {
         format!("narada-{site_id}")
     };
@@ -2044,7 +2148,7 @@ fn site_surfaces(contract: &Value, args: &Value) -> Result<Value, String> {
             }
         }
     }
-    Ok(json!({"site_id":site_id,"surfaces":found,"count":found.len()}))
+    Ok(found)
 }
 
 fn canonical_site_id(root: &Path, fallback: &str) -> String {
@@ -4544,5 +4648,58 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing native mapping for {surface_id}"));
             assert_eq!(artifact, executable, "{surface_id}");
         }
+    }
+
+    #[test]
+    fn native_contract_repairs_guidance_schema_and_validation_entrypoint() {
+        let mut contract = embedded_contract();
+        let declared = contract["runtime_bindings"]["registrar_entrypoint"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let current = "C:/native/narada-mcp-registrar.exe";
+        repair_native_contract(&mut contract, &declared, current);
+        assert!(!contract["guidance"]
+            .to_string()
+            .contains("pnpm materialize:carrier"));
+        assert!(contract["guidance"]
+            .to_string()
+            .contains("cargo native-release"));
+        let list_tool = contract["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "registrar_surface_list")
+            .unwrap();
+        assert_eq!(
+            list_tool["inputSchema"]["properties"]["compact"]["default"],
+            true
+        );
+        for plan in contract["read_models"]["registrar_carrier_validation_plans"]
+            .as_object()
+            .unwrap()
+            .values()
+        {
+            for server in plan["servers"].as_array().into_iter().flatten() {
+                if server["surface_id"] == "mcp-registrar" {
+                    assert_eq!(server["entrypoint"], current);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn surface_inventory_is_compact_and_paginated_by_default() {
+        let contract = embedded_contract();
+        let first = surface_list(&contract, &json!({"limit":1}));
+        let second = surface_list(&contract, &json!({"limit":1,"offset":1}));
+        assert_eq!(first["compact"], true);
+        assert_eq!(first["returned"], 1);
+        assert_eq!(first["has_more"], true);
+        assert_eq!(first["next_offset"], 1);
+        assert!(first["items"][0].get("descriptor").is_none());
+        assert_ne!(first["items"][0]["id"], second["items"][0]["id"]);
+        let full = surface_list(&contract, &json!({"limit":1,"compact":false}));
+        assert!(full["items"][0].get("descriptor").is_some());
     }
 }
