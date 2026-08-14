@@ -250,9 +250,7 @@ fn handle_request(
         .get("method")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let Some(id) = request.get("id").cloned() else {
-        return None;
-    };
+    let id = request.get("id").cloned()?;
     let params = request.get("params").unwrap_or(&Value::Null);
     let result = match method {
         "initialize" => Ok(
@@ -396,7 +394,7 @@ fn tool_input_schema(name: &str) -> Value {
             json!({"properties": {"working_directory": working_directory, "allowed_paths": paths, "base_state": {"type": "object", "additionalProperties": false, "properties": {"head": {"type": ["string", "null"]}, "index_digest": {"type": ["string", "null"]}}}}, "required": ["allowed_paths"]})
         }
         "git_workflow_record" => {
-            json!({"properties": {"workflow_id": {"type": "string"}, "scope_label": {"type": "string"}, "summary": {}, "repositories": {"type": "array", "items": {"type": "object"}, "minItems": 1}}, "required": ["repositories"]})
+            json!({"properties": {"workflow_id": {"type": "string"}, "scope_label": {"type": "string"}, "summary": {"type":"object","additionalProperties":true,"maxProperties":64}, "repositories": {"type": "array", "items": {"type": "object", "additionalProperties":false,"properties":{"working_directory":working_directory,"label":{"type":"string"},"staged_paths":{"type":"array","items":path},"committed_sha":{"type":["string","null"]},"pushed":{"type":"boolean"},"push_status":{"type":"string","enum":["pushed","not_attempted","failed","not_pushable"]},"push_reason":{"type":["string","null"]},"unrelated_dirty_paths_left":{"type":"array","items":path}},"required":["working_directory"]}, "minItems": 1}}, "required": ["scope_label","repositories"]})
         }
         "git_add" | "git_unstage" => {
             json!({"properties": {"working_directory": working_directory, "paths": paths, "work_scope_ref": work_scope}, "required": ["paths"]})
@@ -437,7 +435,174 @@ fn tool_input_schema(name: &str) -> Value {
     let mut object = schema;
     object["type"] = json!("object");
     object["additionalProperties"] = json!(false);
+    object["title"] = json!(format!("{name}.input"));
+    object["maxProperties"] = json!(64);
+    bound_schema(&mut object, Some(name));
     object
+}
+
+fn bound_schema(schema: &mut Value, field: Option<&str>) {
+    let Some(object) = schema.as_object_mut() else {
+        return;
+    };
+    match object.get("type").and_then(Value::as_str) {
+        Some("string") if !object.contains_key("maxLength") && !object.contains_key("enum") => {
+            let maximum = if field.unwrap_or_default().contains("path")
+                || field == Some("working_directory")
+            {
+                4096
+            } else {
+                8192
+            };
+            object.insert("maxLength".into(), json!(maximum));
+        }
+        Some("array") if !object.contains_key("maxItems") => {
+            object.insert("maxItems".into(), json!(256));
+        }
+        Some("object") if !object.contains_key("maxProperties") => {
+            object.insert("maxProperties".into(), json!(256));
+        }
+        _ => {}
+    }
+    if object
+        .get("type")
+        .and_then(Value::as_array)
+        .is_some_and(|types| types.iter().any(|kind| kind == "string"))
+        && !object.contains_key("maxLength")
+    {
+        object.insert("maxLength".into(), json!(8192));
+    }
+    if let Some(properties) = object.get_mut("properties").and_then(Value::as_object_mut) {
+        for (name, child) in properties {
+            bound_schema(child, Some(name));
+        }
+    }
+    if let Some(items) = object.get_mut("items") {
+        bound_schema(items, field);
+    }
+}
+
+fn validate_tool_arguments(schema: &Value, value: &Value, path: &str) -> Result<(), GitError> {
+    let invalid = |reason: String| {
+        GitError::new(
+            "git_invalid_arguments",
+            format!("git_invalid_arguments:{path}:{reason}"),
+            json!({"path":path,"reason":reason}),
+        )
+    };
+    if schema.get("type") == Some(&json!("object")) && !value.is_object() {
+        return Err(invalid("expected_object".into()));
+    }
+    if schema.get("type") == Some(&json!("array")) && !value.is_array() {
+        return Err(invalid("expected_array".into()));
+    }
+    if schema.get("type") == Some(&json!("string")) && !value.is_string() {
+        return Err(invalid("expected_string".into()));
+    }
+    if schema.get("type") == Some(&json!("integer"))
+        && value.as_i64().is_none()
+        && value.as_u64().is_none()
+    {
+        return Err(invalid("expected_integer".into()));
+    }
+    if let Some(text) = value.as_str() {
+        if schema
+            .get("maxLength")
+            .and_then(Value::as_u64)
+            .is_some_and(|max| text.len() > max as usize)
+        {
+            return Err(invalid("maxLength".into()));
+        }
+        if schema
+            .get("enum")
+            .and_then(Value::as_array)
+            .is_some_and(|values| !values.iter().any(|candidate| candidate == value))
+        {
+            return Err(invalid("enum".into()));
+        }
+    }
+    if let Some(array) = value.as_array() {
+        if schema
+            .get("minItems")
+            .and_then(Value::as_u64)
+            .is_some_and(|min| array.len() < min as usize)
+        {
+            return Err(invalid("minItems".into()));
+        }
+        if schema
+            .get("maxItems")
+            .and_then(Value::as_u64)
+            .is_some_and(|max| array.len() > max as usize)
+        {
+            return Err(invalid("maxItems".into()));
+        }
+        if let Some(items) = schema.get("items") {
+            for (index, item) in array.iter().enumerate() {
+                validate_tool_arguments(items, item, &format!("{path}[{index}]"))?;
+            }
+        }
+    }
+    if let Some(number) = value.as_i64() {
+        if schema
+            .get("minimum")
+            .and_then(Value::as_i64)
+            .is_some_and(|min| number < min)
+        {
+            return Err(invalid("minimum".into()));
+        }
+        if schema
+            .get("maximum")
+            .and_then(Value::as_i64)
+            .is_some_and(|max| number > max)
+        {
+            return Err(invalid("maximum".into()));
+        }
+    }
+    if let Some(object) = value.as_object() {
+        let properties = schema.get("properties").and_then(Value::as_object);
+        if schema.get("additionalProperties") == Some(&json!(false)) {
+            for key in object.keys() {
+                if !properties.is_some_and(|known| known.contains_key(key)) {
+                    return Err(invalid(format!("unknown_field:{key}")));
+                }
+            }
+        }
+        for required in schema
+            .get("required")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            if !object.contains_key(required) {
+                return Err(invalid(format!("required:{required}")));
+            }
+        }
+        if let Some(properties) = properties {
+            for (key, child) in object {
+                if let Some(child_schema) = properties.get(key) {
+                    validate_tool_arguments(child_schema, child, &format!("{path}.{key}"))?;
+                }
+            }
+        }
+    }
+    if let Some(alternatives) = schema.get("anyOf").and_then(Value::as_array) {
+        let matched = alternatives.iter().any(|alternative| {
+            alternative
+                .get("required")
+                .and_then(Value::as_array)
+                .is_some_and(|required| {
+                    required
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .all(|field| value.get(field).is_some())
+                })
+        });
+        if !matched {
+            return Err(invalid("anyOf".into()));
+        }
+    }
+    Ok(())
 }
 
 fn prompt_get(params: &Value) -> Result<Value, GitError> {
@@ -466,7 +631,33 @@ fn call_tool(
         .get("name")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let args = params.get("arguments").unwrap_or(&Value::Null);
+    let args_value = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let args = &args_value;
+    if let Some(params) = params.as_object() {
+        for key in params.keys() {
+            if !matches!(key.as_str(), "name" | "arguments" | "_meta") {
+                return Err(GitError::new(
+                    "git_invalid_call",
+                    format!("git_invalid_call:unknown_field:{key}"),
+                    json!({"field":key}),
+                ));
+            }
+        }
+    }
+    let definition = list_tools()
+        .into_iter()
+        .find(|tool| tool["name"] == name)
+        .ok_or_else(|| {
+            GitError::new(
+                "git_mcp_unknown_tool",
+                format!("git_mcp_unknown_tool:{name}"),
+                json!({"tool_name":name}),
+            )
+        })?;
+    validate_tool_arguments(&definition["inputSchema"], args, "$args")?;
     let payload = match name {
         "git_guidance" => guidance(args),
         "git_policy_inspect" => Ok(policy(state)),
@@ -2317,6 +2508,46 @@ mod tests {
             .find(|tool| tool["name"] == "git_show")
             .unwrap();
         assert_eq!(show["inputSchema"]["required"], json!(["commit"]));
+    }
+
+    fn assert_bounded(schema: &Value) {
+        match schema.get("type").and_then(Value::as_str) {
+            Some("object") => {
+                assert!(schema
+                    .get("maxProperties")
+                    .and_then(Value::as_u64)
+                    .is_some());
+                if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+                    for child in properties.values() {
+                        assert_bounded(child);
+                    }
+                }
+            }
+            Some("array") => {
+                assert!(schema.get("maxItems").and_then(Value::as_u64).is_some());
+                if let Some(items) = schema.get("items") {
+                    assert_bounded(items);
+                }
+            }
+            Some("string") if schema.get("enum").is_none() => {
+                assert!(schema.get("maxLength").and_then(Value::as_u64).is_some());
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn every_tool_schema_is_named_bounded_and_rejects_unknown_input() {
+        for tool in list_tools() {
+            let name = tool["name"].as_str().unwrap();
+            let schema = &tool["inputSchema"];
+            assert_eq!(schema["title"], format!("{name}.input"));
+            assert_bounded(schema);
+            let failure =
+                validate_tool_arguments(schema, &json!({"unexpected":true}), "$args").unwrap_err();
+            assert_eq!(failure.code, "git_invalid_arguments");
+            assert_eq!(failure.details["reason"], "unknown_field:unexpected");
+        }
     }
 
     #[test]

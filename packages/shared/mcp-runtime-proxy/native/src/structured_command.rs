@@ -447,9 +447,7 @@ fn handle_request(
         .get("method")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let Some(id) = request.get("id").cloned() else {
-        return None;
-    };
+    let id = request.get("id").cloned()?;
     let params = request.get("params").unwrap_or(&Value::Null);
     let result = match method {
         "initialize" => Ok(initialize(request)),
@@ -575,7 +573,7 @@ fn call_tool(
             json!({"tool_name": name}),
         )),
     }?;
-    Ok(tool_result(state, payload, name)?)
+    tool_result(state, payload, name)
 }
 
 fn guidance(args: &Value) -> Result<Value, StructuredError> {
@@ -1232,6 +1230,7 @@ fn infer_expected_cost(test_scope: &str) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execution_payload(
     command: &str,
     args: &[String],
