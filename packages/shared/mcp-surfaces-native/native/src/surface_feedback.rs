@@ -20,11 +20,11 @@ pub fn list_tools() -> Vec<Value> {
         tool("surface_feedback_actionable_queue", "Return a bounded actionable feedback queue using an explicit read scope.", list_schema(true), true),
         tool("surface_feedback_show", "Show one feedback entry using an explicit read scope.", json!({"type":"object","properties":{"feedback_id":{"type":"string"},"scope":{"type":"string","enum":READ_SCOPES}},"required":["feedback_id","scope"],"additionalProperties":false}), true),
         tool("surface_feedback_stats", "Return bounded feedback counts by surface, kind, and status.", json!({"type":"object","properties":{"surface_id":{"type":"string"},"scope":{"type":"string","enum":READ_SCOPES}},"required":["scope"],"additionalProperties":false}), true),
-        tool("surface_feedback_submit", "Submit feedback through the owning surface-feedback authority.", json!({"type":"object","additionalProperties":true}), false),
-        tool("surface_feedback_update_status", "Update feedback status through the owning authority.", json!({"type":"object","additionalProperties":true}), false),
-        tool("surface_feedback_update_status_batch", "Update multiple feedback entries through the owning authority.", json!({"type":"object","additionalProperties":true}), false),
-        tool("surface_feedback_convert_to_task", "Create a task handoff through the owning authority.", json!({"type":"object","additionalProperties":true}), false),
-        tool("surface_feedback_import", "Import feedback through the owning authority.", json!({"type":"object","additionalProperties":true}), false),
+        tool("surface_feedback_submit", "Submit feedback through the owning surface-feedback authority.", submit_schema(), false),
+        tool("surface_feedback_update_status", "Update feedback status through the owning authority.", update_status_schema(), false),
+        tool("surface_feedback_update_status_batch", "Update multiple feedback entries through the owning authority.", update_status_batch_schema(), false),
+        tool("surface_feedback_convert_to_task", "Create a task handoff through the owning authority.", convert_to_task_schema(), false),
+        tool("surface_feedback_import", "Import feedback through the owning authority.", import_schema(), false),
     ]
 }
 
@@ -64,6 +64,11 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<V
 }
 
 fn guidance_tool() -> Value { tool("surface_feedback_guidance", "Show model-facing operating guidance for surface feedback workflows.", json!({"type":"object","properties":{"workflow":{"type":"string"},"tool":{"type":"string"}},"additionalProperties":false}), true) }
+fn submit_schema() -> Value { json!({"type":"object","properties":{"surface_id":{"type":"string","minLength":1},"submitter_site_id":{"type":"string","minLength":1},"submitter_principal":{"type":"string","minLength":1},"kind":{"type":"string","enum":FEEDBACK_KINDS},"summary":{"type":"string","minLength":1},"details":{"type":"string"}},"required":["surface_id","submitter_site_id","submitter_principal","kind","summary"],"additionalProperties":false}) }
+fn update_status_schema() -> Value { json!({"type":"object","properties":{"feedback_id":{"type":"string","minLength":1},"status":{"type":"string","enum":FEEDBACK_STATUSES},"resolution_note":{"type":"string","minLength":1},"task_ref":{"type":"string"},"task_status":{"type":"string"}},"required":["feedback_id","status","resolution_note"],"additionalProperties":false}) }
+fn update_status_batch_schema() -> Value { json!({"type":"object","properties":{"updates":{"type":"array","minItems":1,"maxItems":MAX_IMPORT_IDS,"items":update_status_schema()}},"required":["updates"],"additionalProperties":false}) }
+fn convert_to_task_schema() -> Value { json!({"type":"object","properties":{"feedback_id":{"type":"string","minLength":1},"task_title":{"type":"string","minLength":1},"resolution_note":{"type":"string","minLength":1}},"required":["feedback_id"],"additionalProperties":false}) }
+fn import_schema() -> Value { json!({"type":"object","properties":{"source_feedback_root":{"type":"string","minLength":1},"source_db_path":{"type":"string","minLength":1},"feedback_ids":{"type":"array","minItems":1,"maxItems":MAX_IMPORT_IDS,"items":{"type":"string","minLength":1}}},"required":["feedback_ids"],"oneOf":[{"required":["source_feedback_root"]},{"required":["source_db_path"]}],"additionalProperties":false}) }
 fn guidance(args: &Map<String, Value>) -> Value { json!({"schema":"narada.mcp_surface.guidance.v0","status":"ok","surface_id":"surface-feedback","guidance_tool":"surface_feedback_guidance","purpose":"Inspect bounded feedback evidence with explicit read scope.","requested":{"workflow":args.get("workflow").cloned().unwrap_or(Value::Null),"tool":args.get("tool").cloned().unwrap_or(Value::Null)},"first_use":["Call surface_feedback_doctor first.","Choose a server-bound read scope explicitly.","Use list or actionable_queue for bounded discovery, then show before mutation.","Task conversion remains owner-authorized."],"boundaries":["The native slice reads and writes only the configured feedback SQLite store.","It does not create tasks or execute them; task conversion remains with the task-lifecycle authority.","Authority and provenance scopes remain server-bound."]}) }
 
 fn feedback_path(root: &Path) -> std::path::PathBuf { root.join(".feedback/surface-feedback.db") }
@@ -446,6 +451,21 @@ fn tool(name: &str, description: &str, input_schema: Value, read_only: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn mutation_tools_advertise_named_closed_schemas() {
+        let tools = list_tools();
+        let find = |name: &str| tools.iter().find(|tool| tool["name"] == name).expect("tool");
+        let submit = find("surface_feedback_submit");
+        assert_eq!(submit["inputSchema"]["additionalProperties"], false);
+        for field in ["surface_id", "submitter_site_id", "submitter_principal", "kind", "summary", "details"] {
+            assert!(submit["inputSchema"]["properties"].get(field).is_some(), "missing {field}");
+        }
+        assert_eq!(find("surface_feedback_update_status")["inputSchema"]["required"], json!(["feedback_id","status","resolution_note"]));
+        assert!(find("surface_feedback_update_status_batch")["inputSchema"]["properties"]["updates"].is_object());
+        assert!(find("surface_feedback_convert_to_task")["inputSchema"]["properties"]["feedback_id"].is_object());
+        assert!(find("surface_feedback_import")["inputSchema"]["properties"]["feedback_ids"].is_object());
+    }
+
     #[test]
     fn native_feedback_reads_are_bounded_and_mutations_refuse() {
         let root = std::env::temp_dir().join(format!("narada-feedback-{}", uuid::Uuid::new_v4()));
