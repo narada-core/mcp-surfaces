@@ -26,6 +26,7 @@ mod local_admin;
 mod mailbox;
 mod mailbox_sync;
 mod operator_surface_authority;
+mod operator_console;
 mod project_state_authority;
 mod quota_authority;
 mod resident_host;
