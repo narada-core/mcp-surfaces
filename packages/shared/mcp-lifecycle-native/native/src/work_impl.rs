@@ -715,9 +715,12 @@ fn native_work_processing_context(
     let ticket = native_work_ticket(server, &ticket_id)?;
     let triggering = server
         .query_one(
-            "select event_id,topic,aggregate_revision,event_type,schema_version,
-                    causation_id,idempotency_key,payload_json,created_at
-               from work_outbox where event_id=?1",
+            "select outbox.event_id,outbox.topic,outbox.aggregate_revision,
+                    event.event_type,outbox.schema_version,outbox.causation_id,
+                    outbox.idempotency_key,outbox.payload_json,outbox.created_at
+               from work_outbox outbox
+               join work_lifecycle_events event on event.event_id=outbox.event_id
+              where outbox.event_id=?1",
             params![&event_id],
         )?
         .or_else(|| {

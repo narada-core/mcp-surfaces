@@ -17,6 +17,7 @@
     "test:refusal": "node --import tsx scripts/refusal-native.ts",
     "test:restart": "node --import tsx scripts/restart-native.ts",
     "test:not-ready": "node --import tsx scripts/not-ready-native.ts",
+    "test:protocol": "node scripts/verify-native-protocol.mjs",
     "benchmark:native": "node --import tsx scripts/benchmark-native.ts"
   },
   "naradaRuntimeArtifacts": {
