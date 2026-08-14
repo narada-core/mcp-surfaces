@@ -129,7 +129,6 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<V
         "site_test_run" => test_run(args, root),
         "site_loop_attention_ack" => attention_ack(args, root),
         "site_loop_control_set" => control_set(args, root),
-        name if MUTATING_TOOLS.contains(&name) => Err(authority_boundary(name)),
         _ => Err(error("unknown_tool", &format!("unknown_tool:{name}"))),
     }
 }
@@ -139,7 +138,7 @@ fn guidance_tool() -> Value {
 }
 
 fn guidance(args: &Map<String, Value>) -> Value {
-    json!({"schema":"narada.mcp_surface.guidance.v0","status":"ok","surface_id":"site-loop","guidance_tool":"site_loop_guidance","purpose":"Inspect site-loop configuration, status, proof, and recovery posture.","requested":{"workflow":args.get("workflow").cloned().unwrap_or(Value::Null),"tool":args.get("tool").cloned().unwrap_or(Value::Null)},"first_use":["Call site_loop_doctor first.","Use site_loop_unified_status and site_loop_health before recovery.","Use site_loop_proof_status/readiness/coherence to distinguish freshness from coherence.","Use site_test_list before site_test_run; only exact configured selectors execute.","Keep scheduler, resident carrier, and task-lifecycle mutations with their owning authorities."],"boundaries":["The native surface owns configured test execution plus durable attention acknowledgement and loop control.","Configured tests execute directly without shell interpolation and return bounded output.","Resident launch, proof, recovery drill, and production loop execution remain explicit authority boundaries."]})
+    json!({"schema":"narada.mcp_surface.guidance.v0","status":"ok","surface_id":"site-loop","guidance_tool":"site_loop_guidance","purpose":"Inspect and operate the native Site Loop coordinator.","requested":{"workflow":args.get("workflow").cloned().unwrap_or(Value::Null),"tool":args.get("tool").cloned().unwrap_or(Value::Null)},"first_use":["Call site_loop_doctor first.","Use site_loop_unified_status and site_loop_health before recovery.","Use site_loop_proof_status/readiness/coherence to distinguish freshness from coherence.","Use site_test_list before site_test_run; only exact configured selectors execute.","Use dry_run for synchronous MCP planning; production cycles belong to the native supervisor entrypoint."],"boundaries":["Rust owns resident launch/hosting, proof, recovery, directive coordination, SOP scheduling, inbox-to-task composition, attention, control, and run persistence.","Configured tests execute directly without shell interpolation and return bounded output.","The MCP method does not start long-running production cycles; the scheduler invokes the same executable with --site-loop-supervise-native."]})
 }
 
 fn mutation_description(name: &str) -> &'static str {
@@ -851,7 +850,7 @@ fn load_config(root: &Path) -> Result<Option<Value>, Value> {
 fn doctor(root: &Path) -> Result<Value, Value> {
     let config = load_config(root)?;
     let object = config.as_ref().and_then(Value::as_object).cloned().unwrap_or_default();
-    Ok(json!({"schema":"narada.site_loop.doctor.v1","status":"ok","site_root":root.to_string_lossy(),"config_path":config_path(root).to_string_lossy(),"config_status":if config.is_some(){"loaded"}else{"missing"},"config_schema":object.get("schema").cloned().unwrap_or(Value::Null),"site_id":object.get("site_id").cloned().unwrap_or(Value::Null),"loop_id":object.get("loop_id").cloned().unwrap_or(Value::Null),"resident_agent_id":object.get("resident").and_then(Value::as_object).and_then(|v|v.get("agent_id")).cloned().unwrap_or(Value::Null),"native_adapter":"local_authority","native_operations":["configured_test_run","attention_ack","control_set"],"delegated_operations":["proof_run","recovery_drill","production_run_once"],"server_name":SERVER_NAME}))
+    Ok(json!({"schema":"narada.site_loop.doctor.v1","status":"ok","site_root":root.to_string_lossy(),"config_path":config_path(root).to_string_lossy(),"config_status":if config.is_some(){"loaded"}else{"missing"},"config_schema":object.get("schema").cloned().unwrap_or(Value::Null),"site_id":object.get("site_id").cloned().unwrap_or(Value::Null),"loop_id":object.get("loop_id").cloned().unwrap_or(Value::Null),"resident_agent_id":object.get("resident").and_then(Value::as_object).and_then(|v|v.get("agent_id")).cloned().unwrap_or(Value::Null),"native_adapter":"complete_local_authority","native_operations":["configured_test_run","attention_ack","control_set","resident_status","resident_launch","resident_host","proof_run","recovery_drill","directive_dispatch","directive_reconciliation","scheduled_sop_emission","inbox_task_bridge","run_once","production_supervisor"],"delegated_operations":[],"supervisor_entrypoint":{"executable":std::env::current_exe().ok().map(|path|path.to_string_lossy().to_string()),"args":["--site-loop-supervise-native","--site-root",root.to_string_lossy()]},"server_name":SERVER_NAME}))
 }
 
 fn config_validate(root: &Path) -> Result<Value, Value> {
@@ -1028,7 +1027,7 @@ fn coherence(root: &Path) -> Result<Value, Value> {
     Ok(json!({"schema":"narada.site_loop.coherence.v1","status":if ready{"ok"}else{"attention"},"blockers":blockers,"readiness":readiness}))
 }
 
-fn affordances() -> Value { json!({"schema":"narada.site_loop.operator_affordances.v1","status":"ok","actions":[{"id":"inspect_status","tool":"site_loop_unified_status","read_only":true},{"id":"inspect_health","tool":"site_loop_health","read_only":true},{"id":"inspect_recovery","tool":"site_loop_recovery_plan","read_only":true},{"id":"run_controlled_mutation","tool":"site_loop_run_once","read_only":false,"authority":"site_loop_owner"}]}) }
+fn affordances() -> Value { let executable=std::env::current_exe().ok().map(|path|path.to_string_lossy().to_string()); json!({"schema":"narada.site_loop.operator_affordances.v1","status":"ok","actions":[{"id":"inspect_status","tool":"site_loop_unified_status","read_only":true},{"id":"inspect_health","tool":"site_loop_health","read_only":true},{"id":"inspect_recovery","tool":"site_loop_recovery_plan","read_only":true},{"id":"run_controlled_mutation","tool":"site_loop_run_once","read_only":false,"authority":"site_loop_test_authority"},{"id":"start_native_supervisor","authority":"scheduler","command":{"executable":executable,"args":["--site-loop-supervise-native","--site-root","<site-root>"],"shell":false,"console_window":"hidden"}}]}) }
 
 fn output_schema() -> Value { json!({"type":"object","properties":{"ref":{"type":"string"},"output_ref":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":0}},"additionalProperties":false}) }
 
@@ -1049,7 +1048,6 @@ fn output_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     Ok(json!({"schema":"narada.mcp_output_page.v1","status":"ok","ref":reference,"tool_name":record.get("tool_name"),"full_output_char_length":chars.len(),"byte_size":text.len(),"offset":start,"limit":limit,"next_offset":if end<chars.len(){json!(end)}else{Value::Null},"output_truncated":end<chars.len(),"output_text":chunk}))
 }
 
-fn authority_boundary(name: &str) -> Value { json!({"schema":"narada.site_loop.authority_boundary.v1","status":"unavailable","tool_name":name,"reason":"site_loop_mutation_not_enabled_in_native_read_slice","remediation":"Use the configured Site Loop authority for scheduler, resident, proof, control, and run mutations."}) }
 fn error(code: &str, message: &str) -> Value { json!({"schema":"narada.site_loop.error.v1","code":code,"message":message}) }
 fn tool(name: &str, description: &str, input_schema: Value, read_only: bool) -> Value { json!({"name":name,"description":description,"annotations":{"title":name,"readOnlyHint":read_only,"destructiveHint":!read_only,"idempotentHint":read_only,"openWorldHint":true},"inputSchema":input_schema,"outputSchema":{"type":"object","additionalProperties":true}}) }
 
