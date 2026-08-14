@@ -10,6 +10,10 @@ use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 
 const CONTRACT: &[u8] = include_bytes!("../tool-catalog.json.gz");
+const LEGACY_PROTOCOL_VERSION: &str = "2025-03-26";
+const MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
+const MAX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_HEADER_BYTES: usize = 64 * 1024;
 
 fn main() {
     if let Err(error) = run() {
@@ -43,14 +47,53 @@ fn run() -> Result<(), String> {
     Ok(())
 }
 
+fn decode_contract() -> Result<Value, String> {
+    let mut decoder = flate2::read::GzDecoder::new(CONTRACT);
+    let mut bytes = Vec::new();
+    decoder
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    serde_json::from_slice(&bytes).map_err(|error| error.to_string())
+}
+
 fn dispatch(request: &Value) -> Value {
     let id = request.get("id").cloned().unwrap_or(Value::Null);
-    let mut contract: Value = match flate2::read::GzDecoder::new(CONTRACT)
-        .bytes()
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())
-        .and_then(|bytes| serde_json::from_slice(&bytes).map_err(|e| e.to_string()))
-    {
+    let method = request.get("method").and_then(Value::as_str).unwrap_or("");
+    let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
+    let protocol_marker = params.pointer("/_meta/io.modelcontextprotocol~1protocolVersion");
+    if protocol_marker.is_some_and(|value| value.as_str() != Some(MODERN_PROTOCOL_VERSION)) {
+        return error(id, "protocol_version_unsupported".into());
+    }
+    let modern = protocol_marker.is_some();
+    if modern {
+        let meta = params.get("_meta").and_then(Value::as_object);
+        if meta
+            .and_then(|value| value.get("io.modelcontextprotocol/clientInfo"))
+            .and_then(Value::as_object)
+            .is_none()
+            || meta
+                .and_then(|value| value.get("io.modelcontextprotocol/clientCapabilities"))
+                .and_then(Value::as_object)
+                .is_none()
+        {
+            return error(id, "modern_metadata_required".into());
+        }
+    }
+    if modern && method == "initialize" {
+        return error(id, "initialize_removed".into());
+    }
+    if modern && method == "server/discover" {
+        return json!({"jsonrpc":"2.0","id":id,"result":{"resultType":"complete","supportedVersions":[MODERN_PROTOCOL_VERSION],"capabilities":{"tools":{}},"serverInfo":{"name":"mcp-registrar","version":"0.1.0"},"_meta":{"io.modelcontextprotocol/serverInfo":{"name":"mcp-registrar","version":"0.1.0"}}}});
+    }
+    if method == "initialize" {
+        let requested = request
+            .pointer("/params/protocolVersion")
+            .and_then(Value::as_str);
+        if !matches!(requested, Some("2024-11-05" | "2025-03-26")) {
+            return error(id, "protocol_version_unsupported".into());
+        }
+    }
+    let mut contract: Value = match decode_contract() {
         Ok(v) => v,
         Err(e) => return error(id, format!("mcp_registrar_native_contract_invalid:{e}")),
     };
@@ -61,9 +104,15 @@ fn dispatch(request: &Value) -> Value {
     if let Err(e) = rebind_native_registrar(&mut contract) {
         return error(id, format!("mcp_registrar_native_contract_invalid:{e}"));
     }
-    match request.get("method").and_then(Value::as_str).unwrap_or("") {
+    normalize_tool_schemas(&mut contract);
+    if method == "tools/call" {
+        if let Err(message) = validate_tool_call(&contract, &params) {
+            return error(id, message);
+        }
+    }
+    let mut response = match method {
         "initialize" => {
-            json!({"jsonrpc":"2.0","id":id,"result":{"protocolVersion":request.pointer("/params/protocolVersion").cloned().unwrap_or_else(||json!("2024-11-05")),"capabilities":{"tools":{}},"serverInfo":{"name":"mcp-registrar","version":"0.1.0"}}})
+            json!({"jsonrpc":"2.0","id":id,"result":{"protocolVersion":LEGACY_PROTOCOL_VERSION,"capabilities":{"tools":{}},"serverInfo":{"name":"mcp-registrar","version":"0.1.0"}}})
         }
         "tools/list" => json!({"jsonrpc":"2.0","id":id,"result":{"tools":contract["tools"]}}),
         "tools/call" => {
@@ -255,7 +304,15 @@ fn dispatch(request: &Value) -> Value {
             }
         }
         method => error(id, format!("unsupported_mcp_method:{method}")),
+    };
+    if modern {
+        if let Some(result) = response.get_mut("result").and_then(Value::as_object_mut) {
+            result.insert("resultType".into(), json!("complete"));
+            result.insert("cacheScope".into(), json!("private"));
+            result.insert("ttlMs".into(), json!(0));
+        }
     }
+    response
 }
 
 fn extend_epistemic_catalog(contract: &mut Value) {
@@ -799,7 +856,7 @@ fn rebind_native_registrar(contract: &mut Value) -> Result<(), String> {
 
 fn repair_native_contract(contract: &mut Value, declared: &str, current: &str) {
     if declared != current {
-        replace_value_string(contract, &declared, &current);
+        replace_value_string(contract, declared, current);
         replace_value_string(
             contract,
             &declared.replace('/', "\\"),
@@ -1133,6 +1190,7 @@ fn read_payload_revision(root: &Path, reference: &str) -> Result<Value, String> 
     Ok(record)
 }
 
+#[allow(clippy::drop_non_drop)]
 fn check_registry_conformance(
     contract: &Value,
     site: &Value,
@@ -2106,6 +2164,7 @@ fn fallback_site_list(fallback: &Value, path: &Path, error_message: &str) -> Val
     })
 }
 
+#[allow(clippy::let_and_return)]
 fn read_site_registry(path: &Path, fallback: &Value) -> Result<Vec<Value>, String> {
     let connection = rusqlite::Connection::open_with_flags(
         path,
@@ -2307,7 +2366,7 @@ fn site_surfaces(contract: &Value, args: &Value) -> Result<Value, String> {
 }
 
 fn scan_site_surfaces(contract: &Value, root: &Path, site_id: &str) -> Result<Vec<String>, String> {
-    let control_root = site_mcp_control_root(&root);
+    let control_root = site_mcp_control_root(root);
     let config_dir = control_root.join(".ai").join("mcp");
     if !config_dir.exists() {
         return Ok(Vec::new());
@@ -3735,7 +3794,7 @@ fn select_projection<'a>(
             .filter(|projection| {
                 projection["runtime_requirements"]
                     .as_array()
-                    .map_or(true, Vec::is_empty)
+                    .is_none_or(Vec::is_empty)
             })
             .collect::<Vec<_>>();
         if neutral.len() == 1 {
@@ -4748,28 +4807,212 @@ fn unique<'a>(values: impl Iterator<Item = &'a str>) -> Vec<String> {
     }
     result
 }
+
+fn normalize_tool_schemas(contract: &mut Value) {
+    let Some(tools) = contract.get_mut("tools").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for tool in tools {
+        let name = tool
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("registrar_tool")
+            .to_string();
+        let Some(schema) = tool.get_mut("inputSchema") else {
+            continue;
+        };
+        normalize_schema(schema, Some(&name));
+        if let Some(object) = schema.as_object_mut() {
+            object.insert("title".into(), json!(format!("{name}.input")));
+            object.insert("additionalProperties".into(), json!(false));
+            object.entry("maxProperties").or_insert(json!(64));
+        }
+    }
+}
+
+fn normalize_schema(schema: &mut Value, field: Option<&str>) {
+    let Some(object) = schema.as_object_mut() else {
+        return;
+    };
+    match object.get("type").and_then(Value::as_str) {
+        Some("string") if !object.contains_key("maxLength") && !object.contains_key("enum") => {
+            let field = field.unwrap_or_default().to_ascii_lowercase();
+            let maximum = if field.contains("path") || field.contains("root") {
+                4096
+            } else {
+                8192
+            };
+            object.insert("maxLength".into(), json!(maximum));
+        }
+        Some("array") if !object.contains_key("maxItems") => {
+            object.insert("maxItems".into(), json!(256));
+        }
+        Some("object") if !object.contains_key("maxProperties") => {
+            object.insert("maxProperties".into(), json!(256));
+        }
+        _ => {}
+    }
+    if let Some(properties) = object.get_mut("properties").and_then(Value::as_object_mut) {
+        for (name, child) in properties {
+            normalize_schema(child, Some(name));
+        }
+    }
+    if let Some(items) = object.get_mut("items") {
+        normalize_schema(items, field);
+    }
+}
+
+fn validate_tool_call(contract: &Value, params: &Value) -> Result<(), String> {
+    let object = params
+        .as_object()
+        .ok_or("invalid_tool_call_params:expected_object")?;
+    for key in object.keys() {
+        if !matches!(key.as_str(), "name" | "arguments" | "_meta") {
+            return Err(format!("invalid_tool_call_params:unknown_field:{key}"));
+        }
+    }
+    let name = object
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or("invalid_tool_call_params:name_required")?;
+    let tool = contract["tools"]
+        .as_array()
+        .and_then(|tools| tools.iter().find(|tool| tool["name"] == name))
+        .ok_or_else(|| format!("unknown_tool:{name}"))?;
+    let arguments = object
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    validate_schema(&tool["inputSchema"], &arguments, "$args")
+}
+
+fn validate_schema(schema: &Value, value: &Value, path: &str) -> Result<(), String> {
+    if let Some(expected) = schema.get("type").and_then(Value::as_str) {
+        let matches = match expected {
+            "object" => value.is_object(),
+            "array" => value.is_array(),
+            "string" => value.is_string(),
+            "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+            "number" => value.is_number(),
+            "boolean" => value.is_boolean(),
+            _ => true,
+        };
+        if !matches {
+            return Err(format!("invalid_tool_arguments:{path}:expected_{expected}"));
+        }
+    }
+    if let Some(text) = value.as_str() {
+        if schema
+            .get("maxLength")
+            .and_then(Value::as_u64)
+            .is_some_and(|max| text.len() > max as usize)
+        {
+            return Err(format!("invalid_tool_arguments:{path}:maxLength"));
+        }
+        if schema
+            .get("enum")
+            .and_then(Value::as_array)
+            .is_some_and(|values| !values.iter().any(|candidate| candidate == value))
+        {
+            return Err(format!("invalid_tool_arguments:{path}:enum"));
+        }
+    }
+    if let Some(array) = value.as_array() {
+        if schema
+            .get("maxItems")
+            .and_then(Value::as_u64)
+            .is_some_and(|max| array.len() > max as usize)
+        {
+            return Err(format!("invalid_tool_arguments:{path}:maxItems"));
+        }
+        if let Some(items) = schema.get("items") {
+            for (index, item) in array.iter().enumerate() {
+                validate_schema(items, item, &format!("{path}[{index}]"))?;
+            }
+        }
+    }
+    if let Some(object) = value.as_object() {
+        if schema
+            .get("maxProperties")
+            .and_then(Value::as_u64)
+            .is_some_and(|max| object.len() > max as usize)
+        {
+            return Err(format!("invalid_tool_arguments:{path}:maxProperties"));
+        }
+        let properties = schema.get("properties").and_then(Value::as_object);
+        if schema.get("additionalProperties") == Some(&json!(false)) {
+            for key in object.keys() {
+                if !properties.is_some_and(|known| known.contains_key(key)) {
+                    return Err(format!("invalid_tool_arguments:{path}:unknown_field:{key}"));
+                }
+            }
+        }
+        for required in schema
+            .get("required")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            if !object.contains_key(required) {
+                return Err(format!("invalid_tool_arguments:{path}:required:{required}"));
+            }
+        }
+        if let Some(properties) = properties {
+            for (key, child) in object {
+                if let Some(child_schema) = properties.get(key) {
+                    validate_schema(child_schema, child, &format!("{path}.{key}"))?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn error(id: Value, message: String) -> Value {
     json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":message}})
 }
 
-fn read_message<R: BufRead>(input: &mut R) -> Result<Option<Value>, String> {
-    let mut first = String::new();
-    if input.read_line(&mut first).map_err(|e| e.to_string())? == 0 {
+fn read_line_bounded<R: BufRead>(input: &mut R, maximum: usize) -> Result<Option<String>, String> {
+    let mut bytes = Vec::new();
+    let count = input
+        .take((maximum + 1) as u64)
+        .read_until(b'\n', &mut bytes)
+        .map_err(|error| error.to_string())?;
+    if count == 0 {
         return Ok(None);
     }
+    if bytes.len() > maximum || !bytes.ends_with(b"\n") {
+        return Err("mcp_line_exceeds_byte_limit".into());
+    }
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|_| "mcp_line_invalid_utf8".into())
+}
+
+fn read_message<R: BufRead>(input: &mut R) -> Result<Option<Value>, String> {
+    let Some(first) = read_line_bounded(input, MAX_MESSAGE_BYTES)? else {
+        return Ok(None);
+    };
     if first.to_ascii_lowercase().starts_with("content-length:") {
         let length = first
             .split_once(':')
             .and_then(|(_, v)| v.trim().parse::<usize>().ok())
             .ok_or("invalid_content_length")?;
+        if length > MAX_MESSAGE_BYTES {
+            return Err("mcp_body_exceeds_byte_limit".into());
+        }
+        let mut header_bytes = first.len();
         loop {
-            let mut line = String::new();
-            input.read_line(&mut line).map_err(|e| e.to_string())?;
+            let Some(line) = read_line_bounded(input, MAX_HEADER_BYTES)? else {
+                return Err("unexpected_eof_in_headers".into());
+            };
+            header_bytes += line.len();
+            if header_bytes > MAX_HEADER_BYTES {
+                return Err("mcp_headers_exceed_byte_limit".into());
+            }
             if line == "\r\n" || line == "\n" {
                 break;
-            }
-            if line.is_empty() {
-                return Err("unexpected_eof_in_headers".into());
             }
         }
         let mut body = vec![0; length];
@@ -4778,6 +5021,9 @@ fn read_message<R: BufRead>(input: &mut R) -> Result<Option<Value>, String> {
             .map(Some)
             .map_err(|e| e.to_string())
     } else {
+        if first.len() > MAX_MESSAGE_BYTES {
+            return Err("mcp_body_exceeds_byte_limit".into());
+        }
         serde_json::from_str(first.trim())
             .map(Some)
             .map_err(|e| e.to_string())
@@ -4789,11 +5035,7 @@ mod tests {
     use super::*;
 
     fn embedded_contract() -> Value {
-        let bytes = flate2::read::GzDecoder::new(CONTRACT)
-            .bytes()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        serde_json::from_slice(&bytes).unwrap()
+        decode_contract().unwrap()
     }
 
     #[test]
@@ -4931,6 +5173,75 @@ mod tests {
         );
         let full = carrier_list(&contract, &json!({"limit":1,"compact":false}));
         assert!(full["items"][0].get("site_bindings").is_some());
+    }
+
+    #[test]
+    fn every_public_schema_is_named_closed_bounded_and_enforced() {
+        let mut contract = embedded_contract();
+        extend_epistemic_catalog(&mut contract);
+        let declared = contract["runtime_bindings"]["registrar_entrypoint"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        repair_native_contract(
+            &mut contract,
+            &declared,
+            "C:/native/narada-mcp-registrar.exe",
+        );
+        normalize_tool_schemas(&mut contract);
+        for tool in contract["tools"].as_array().unwrap() {
+            let name = tool["name"].as_str().unwrap();
+            let schema = &tool["inputSchema"];
+            assert_eq!(schema["title"], format!("{name}.input"));
+            assert_eq!(schema["additionalProperties"], false);
+            assert!(schema["maxProperties"].as_u64().is_some());
+            let failure = validate_tool_call(
+                &contract,
+                &json!({"name":name,"arguments":{"unexpected":true}}),
+            )
+            .unwrap_err();
+            assert!(
+                failure.contains("unknown_field:unexpected"),
+                "{name}: {failure}"
+            );
+        }
+    }
+
+    #[test]
+    fn protocol_versions_are_honest_and_modern_requests_are_self_describing() {
+        let unsupported = dispatch(
+            &json!({"id":1,"method":"initialize","params":{"protocolVersion":"2099-01-01"}}),
+        );
+        assert_eq!(
+            unsupported["error"]["message"],
+            "protocol_version_unsupported"
+        );
+        let incomplete = dispatch(
+            &json!({"id":3,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":MODERN_PROTOCOL_VERSION}}}),
+        );
+        assert_eq!(incomplete["error"]["message"], "modern_metadata_required");
+        let modern = dispatch(
+            &json!({"id":4,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":MODERN_PROTOCOL_VERSION,"io.modelcontextprotocol/clientInfo":{"name":"test","version":"1"},"io.modelcontextprotocol/clientCapabilities":{}}}}),
+        );
+        assert_eq!(
+            modern["result"]["supportedVersions"][0],
+            MODERN_PROTOCOL_VERSION
+        );
+        assert_eq!(modern["result"]["resultType"], "complete");
+    }
+
+    #[test]
+    fn wire_reader_refuses_oversized_messages_before_allocation() {
+        let framed = format!("Content-Length: {}\r\n\r\n", MAX_MESSAGE_BYTES + 1);
+        assert_eq!(
+            read_message(&mut std::io::Cursor::new(framed)).unwrap_err(),
+            "mcp_body_exceeds_byte_limit"
+        );
+        let jsonl = format!("{}\n", "x".repeat(MAX_MESSAGE_BYTES + 1));
+        assert_eq!(
+            read_message(&mut std::io::Cursor::new(jsonl)).unwrap_err(),
+            "mcp_line_exceeds_byte_limit"
+        );
     }
 
     #[test]

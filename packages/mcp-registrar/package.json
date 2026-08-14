@@ -8,9 +8,9 @@
     "build": "tsc -b",
     "build:postcompile": "pnpm run build:native",
     "build:native": "tsx scripts/build-native.ts",
-    "test:native:contract": "pnpm build && pnpm run build:native && node dist/test/native-contract.test.js",
+    "test:native:contract": "cargo test --locked --manifest-path native/Cargo.toml",
     "typecheck": "tsc -b --pretty false",
-    "test": "pnpm run test:native:contract"
+    "test": "cargo test --locked --manifest-path native/Cargo.toml"
   },
   "naradaRuntimeArtifacts": {
     "win32": ["./dist/native/current.json", "./dist/native/versions/*"],

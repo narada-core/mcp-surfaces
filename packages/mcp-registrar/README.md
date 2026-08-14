@@ -3,7 +3,7 @@
 ## Verification
 
 ```powershell
-pnpm --filter @narada-core/mcp-registrar test
+cargo test --locked --manifest-path packages/mcp-registrar/native/Cargo.toml
 ```
 
 Native Rust MCP surface registrar for binding/unbinding surfaces across Narada sites and carriers (opencode, Kimi, Codex).
@@ -187,6 +187,6 @@ commands.
 ## Quick Start
 
 ```
-pnpm --filter @narada-core/mcp-registrar test
+cargo test --locked --manifest-path packages/mcp-registrar/native/Cargo.toml
 pnpm test:registrar:kimi-contract
 ```
