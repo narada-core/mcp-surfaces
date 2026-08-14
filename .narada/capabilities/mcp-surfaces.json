@@ -1,171 +1,1928 @@
 {
   "schema": "narada.site.capabilities.mcp_surfaces.v1",
+  "artifact_role": "site_capability_surface_registry_not_mcp_client_config",
   "site_id": "mcp-surfaces",
-  "generated_by": "tools/mcp-fabric/generate-mcp-surface-registry.mjs",
-  "generated_at": "2026-06-09T03:30:28.891Z",
+  "generated_by": "mcp-registrar",
+  "generated_at": "2026-08-14T03:00:18.8426664Z",
   "generation_policy": {
-    "source": ".ai/mcp",
-    "mode": "conservative_transport_authority",
-    "note": "This registry binds live MCP client configs to Site authority. It may declare narrowly inferred read-only startup/lifecycle tools; all other tools remain unlisted until explicitly classified."
+    "source": ".ai/mcp + registrar surface catalog",
+    "mode": "enabled_surface_tool_authority",
+    "note": "Every tool exposed by an enabled MCP surface is declared for action admission. The MCP surface remains responsible for command policy and mutation enforcement."
   },
   "surfaces": [
     {
-      "surface_id": "agent-context-mcp.local",
-      "display_name": "mcp-surfaces-agent-context",
-      "server_name": "mcp-surfaces-agent-context",
+      "surface_id": "narada-mcp-surfaces-git.local",
+      "surface_projection": {
+        "surface_id": "git",
+        "projection_id": "default",
+        "injection_scope": "local_site",
+        "runtime_requirements": [],
+        "exposed_tools": [
+          "git_guidance",
+          "git_policy_inspect",
+          "git_status",
+          "git_fetch",
+          "git_rebase",
+          "git_rebase_continue",
+          "git_rebase_abort",
+          "git_merge",
+          "git_merge_continue",
+          "git_merge_abort",
+          "git_sync_status",
+          "git_branch_list",
+          "git_output_show",
+          "git_changed_summary",
+          "git_repositories_summary",
+          "git_workflow_record",
+          "git_diff",
+          "git_log",
+          "git_show",
+          "git_begin_work_scope",
+          "git_end_work_scope",
+          "git_add",
+          "git_unstage",
+          "git_commit_paths",
+          "git_reconcile_index",
+          "git_commit",
+          "git_push",
+          "git_branch_create",
+          "git_branch_switch",
+          "git_branch_rename",
+          "git_branch_delete",
+          "git_branch_delete_remote",
+          "git_branch_set_upstream",
+          "git_branch_unset_upstream"
+        ],
+        "execution": {
+          "adapter": "stdio",
+          "tenancy": "session_isolated",
+          "replacement": "manual"
+        },
+        "descriptor_digest": "616349d29ef6068fd0fe417916894486feca74359209f3c1379bb1c276d5b8c9",
+        "tool_contract_digest": "03451be68f5d64c12476a52a57d4c11fc22410d3e92a3f07c3fada5971bfe600",
+        "surface_descriptor": {
+          "schema_version": "2.0",
+          "source": "native",
+          "surface_id": "git",
+          "surface_version": "0.1.0",
+          "package": "@narada-core/git-mcp",
+          "guidance_tool": "git_guidance",
+          "tools": [
+            {
+              "name": "git_guidance",
+              "description": "Show model-facing operating guidance for git MCP workflows.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "workflow": {
+                    "type": "string",
+                    "description": "Optional workflow name or area to focus guidance on."
+                  },
+                  "tool": {
+                    "type": "string",
+                    "description": "Optional tool name for tool-specific guidance."
+                  }
+                },
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "annotations": {
+                "title": "git_guidance",
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false
+              },
+              "effect": {
+                "class": "read",
+                "idempotency": "replayable",
+                "confirmation": "never"
+              }
+            },
+            {
+              "name": "git_policy_inspect",
+              "description": "Inspect the policy governing Git MCP operations.",
+              "input_schema": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "annotations": {
+                "title": "git_policy_inspect",
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false
+              },
+              "effect": {
+                "class": "read",
+                "idempotency": "replayable",
+                "confirmation": "never"
+              }
+            },
+            {
+              "name": "git_status",
+              "description": "Inspect branch, upstream, remotes, and bounded dirty-state summaries. Supports explicit work-scope, path-scoped, staged-only, and summary queries.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "working_directory": {
+                    "type": "string",
+                    "description": "Repository directory under an allowed root. Omitted selects the first allowed root; an explicit relative value resolves against the MCP process current directory; prefer an absolute path when the target matters."
+                  },
+                  "work_scope_ref": {
+                    "type": "string",
+                    "description": "Optional short-lived work-scope reference issued by git_begin_work_scope."
+                  },
+                  "pathspec": {
+                    "type": "string",
+                    "description": "Optional single path prefix or Git pathspec to inspect."
+                  },
+                  "pathspecs": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Optional path prefixes or Git pathspecs to inspect."
+                  },
+                  "staged_only": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Return only paths with staged index changes."
+                  },
+                  "include_untracked": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Include untracked paths in the result; defaults to true for compatibility."
+                  },
+                  "format": {
+                    "type": "string",
+                    "enum": [
+                      "full",
+                      "paths",
+                      "summary"
+                    ],
+                    "default": "full",
+                    "description": "full returns entries, paths returns bounded matching paths, summary returns counts and branch state."
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "annotations": {
+                "title": "git_status",
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false
+              },
+              "effect": {
+                "class": "read",
+                "idempotency": "replayable",
+                "confirmation": "never"
+              }
+            },
+            {
+              "name": "git_fetch",
+              "description": "Fetch one explicit branch from one configured remote without tags or arbitrary refspecs.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "working_directory": {
+                    "type": "string",
+                    "description": "Repository directory under an allowed root. Omitted selects the first allowed root; an explicit relative value resolves against the MCP process current directory; prefer an absolute path when the target matters."
+                  },
+                  "remote": {
+                    "type": "string",
+                    "description": "Configured remote name."
+                  },
+                  "branch": {
+                    "type": "string",
+                    "description": "Explicit remote branch name."
+                  },
+                  "scope_label": {
+                    "type": "string",
+                    "description": "Optional caller-supplied audit label for this mutation."
+                  }
+                },
+                "required": [
+                  "remote",
+                  "branch"
+                ],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "annotations": {
+                "title": "git_fetch",
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": false
+              },
+              "effect": {
+                "class": "local_write",
+                "idempotency": "non_idempotent",
+                "confirmation": "policy"
+              }
+            },
+            {
+              "name": "git_rebase",
+              "description": "Rebase onto one explicit commit-ish with governed dirty-worktree checks and structured conflict recovery.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "working_directory": {
+                    "type": "string",
+                    "description": "Repository directory under an allowed root. Omitted selects the first allowed root; an explicit relative value resolves against the MCP process current directory; prefer an absolute path when the target matters."
+                  },
+                  "onto": {
+                    "type": "string",
+                    "description": "Explicit branch, tag, or commit to rebase onto."
+                  },
+                  "work_scope_ref": {
+                    "type": "string",
+                    "description": "Required exclusive repository-topology scope issued by git_begin_work_scope with scope_kind=repository_topology."
+                  },
+                  "autostash": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Required for tracked dirty worktrees; untracked files are always refused."
+                  },
+                  "scope_label": {
+                    "type": "string",
+                    "description": "Optional caller-supplied audit label for this mutation."
+                  }
+                },
+                "required": [
+                  "onto",
+                  "work_scope_ref"
+                ],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "annotations": {
+                "title": "git_rebase",
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": false
+              },
+              "effect": {
+                "class": "local_write",
+                "idempotency": "non_idempotent",
+                "confirmation": "policy"
+              }
+            },
+            {
+              "name": "git_rebase_continue",
+              "description": "Continue an in-progress rebase after all conflict paths have been resolved and staged.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "working_directory": {
+                    "type": "string",
+                    "description": "Repository directory under an allowed root. Omitted selects the first allowed root; an explicit relative value resolves against the MCP process current directory; prefer an absolute path when the target matters."
+                  },
+                  "scope_label": {
+                    "type": "string",
+                    "description": "Optional caller-supplied audit label for this mutation."
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "annotations": {
+                "title": "git_rebase_continue",
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": false
+              },
+              "effect": {
+                "class": "local_write",
+                "idempotency": "non_idempotent",
+                "confirmation": "policy"
+              }
+            },
+            {
+              "name": "git_rebase_abort",
+              "description": "Abort an in-progress rebase and read back the restored repository state.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "working_directory": {
+                    "type": "string",
+                    "description": "Repository directory under an allowed root. Omitted selects the first allowed root; an explicit relative value resolves against the MCP process current directory; prefer an absolute path when the target matters."
+                  },
+                  "scope_label": {
+                    "type": "string",
+                    "description": "Optional caller-supplied audit label for this mutation."
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "annotations": {
+                "title": "git_rebase_abort",
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": false
+              },
+              "effect": {
+                "class": "local_write",
+                "idempotency": "non_idempotent",
+                "confirmation": "policy"
+              }
+            },
+            {
+              "name": "git_merge",
+              "description": "Merge one explicit commit-ish with governed dirty-worktree checks and structured conflict recovery.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "working_directory": {
+                    "type": "string",
+                    "description": "Repository directory under an allowed root. Omitted selects the first allowed root; an explicit relative value resolves against the MCP process current directory; prefer an absolute path when the target matters."
+                  },
+                  "target": {
+                    "type": "string",
+                    "description": "Explicit branch, tag, or commit to merge."
+                  },
+                  "work_scope_ref": {
+                    "type": "string",
+                    "description": "Required exclusive repository-topology scope issued by git_begin_work_scope with scope_kind=repository_topology."
+                  },
+                  "autostash": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Required for tracked dirty worktrees; untracked files are always refused."
+                  },
+                  "scope_label": {
+                    "type": "string",
+                    "description": "Optional caller-supplied audit label for this mutation."
+                  }
+                },
+                "required": [
+                  "target",
+                  "work_scope_ref"
+                ],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "annotations": {
+                "title": "git_merge",
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": false
+              },
+              "effect": {
+                "class": "local_write",
+                "idempotency": "non_idempotent",
+                "confirmation": "policy"
+              }
+            },
+            {
+              "name": "git_merge_continue",
+              "description": "Complete an in-progress merge after all conflict paths have been resolved and staged.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "working_directory": {
+                    "type": "string",
+                    "description": "Repository directory under an allowed root. Omitted selects the first allowed root; an explicit relative value resolves against the MCP process current directory; prefer an absolute path when the target matters."
+                  },
+                  "scope_label": {
+                    "type": "string",
+                    "description": "Optional caller-supplied audit label for this mutation."
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "annotations": {
+                "title": "git_merge_continue",
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": false
+              },
+              "effect": {
+                "class": "local_write",
+                "idempotency": "non_idempotent",
+                "confirmation": "policy"
+              }
+            },
+            {
+              "name": "git_merge_abort",
+              "description": "Abort an in-progress merge and read back the restored repository state.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "working_directory": {
+                    "type": "string",
+                    "description": "Repository directory under an allowed root. Omitted selects the first allowed root; an explicit relative value resolves against the MCP process current directory; prefer an absolute path when the target matters."
+                  },
+                  "scope_label": {
+                    "type": "string",
+                    "description": "Optional caller-supplied audit label for this mutation."
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "annotations": {
+                "title": "git_merge_abort",
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": false
+              },
+              "effect": {
+                "class": "local_write",
+                "idempotency": "non_idempotent",
+                "confirmation": "policy"
+              }
+            },
+            {
+              "name": "git_sync_status",
+              "description": "Inspect whether a rebase or merge is in progress, including conflict paths and governed recovery actions.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "working_directory": {
+                    "type": "string",
+                    "description": "Repository directory under an allowed root. Omitted selects the first allowed root; an explicit relative value resolves against the MCP process current directory; prefer an absolute path when the target matters."
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "annotations": {
+                "title": "git_sync_status",
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false
+              },
+              "effect": {
+                "class": "local_write",
+                "idempotency": "non_idempotent",
+                "confirmation": "policy"
+              }
+            },
+            {
+              "name": "git_branch_list",
+              "description": "List local and/or remote branches with object ids, current-branch state, and upstream metadata.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "working_directory": {
+                    "type": "string",
+                    "description": "Repository directory under an allowed root. Omitted selects the first allowed root; an explicit relative value resolves against the MCP process current directory; prefer an absolute path when the target matters."
+                  },
+                  "scope": {
+                    "type": "string",
+                    "enum": [
+                      "local",
+                      "remote",
+                      "all"
+                    ],
+                    "default": "all"
+                  },
+                  "limit": {
+                    "type": "integer",
+                    "default": 100,
+                    "minimum": 1,
+                    "maximum": 500
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "annotations": {
+                "title": "git_branch_list",
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false
+              },
+              "effect": {
+                "class": "read",
+                "idempotency": "replayable",
+                "confirmation": "never"
+              }
+            },
+            {
+              "name": "git_output_show",
+              "description": "Read a materialized Git MCP output_ref produced when a large structured result exceeds inline transport limits. Use the original git_diff next_offset inside the materialized result for diff paging; output_show offset pages the materialized JSON wrapper.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "ref": {
+                    "type": "string",
+                    "description": "Materialized output ref, e.g. mcp_output:<id>. Alias: output_ref."
+                  },
+                  "output_ref": {
+                    "type": "string",
+                    "description": "Alias for ref."
+                  },
+                  "offset": {
+                    "type": "integer",
+                    "default": 0,
+                    "description": "Character offset into the materialized JSON output."
+                  },
+                  "limit": {
+                    "type": "integer",
+                    "default": 10000,
+                    "minimum": 1,
+                    "maximum": 20000,
+                    "description": "Maximum output characters to return; the transport hard-caps this value."
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "annotations": {
+                "title": "git_output_show",
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false
+              },
+              "effect": {
+                "class": "read",
+                "idempotency": "replayable",
+                "confirmation": "never"
+              }
+            },
+            {
+              "name": "git_changed_summary",
+              "description": "Return a compact dirty-state summary: tracked changed paths, untracked counts grouped by top-level directory, and optional pathspec/expected-path relevance matches. Does not include file diffs.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "working_directory": {
+                    "type": "string",
+                    "description": "Repository directory under an allowed root. Defaults to the first allowed root."
+                  },
+                  "pathspec": {
+                    "type": "string",
+                    "description": "Optional single pathspec/prefix to highlight as relevant."
+                  },
+                  "pathspecs": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Optional pathspec/prefix list to highlight as relevant."
+                  },
+                  "expected_paths": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Optional expected dirty paths or prefixes for ownership/task relevance."
+                  },
+                  "untracked_sample_limit": {
+                    "type": "integer",
+                    "default": 20,
+                    "description": "Maximum untracked path samples to include across groups."
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "annotations": {
+                "title": "git_changed_summary",
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false
+              },
+              "effect": {
+                "class": "read",
+                "idempotency": "replayable",
+                "confirmation": "never"
+              }
+            },
+            {
+              "name": "git_repositories_summary",
+              "description": "Summarize multiple repositories for multi-repo handoff and publication checks, including dirty paths, latest commit, remotes, and push readiness.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "working_directories": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Repository directories under allowed roots. Omit a single working_directory to select the first allowed root; explicit relative directories use the MCP process current directory."
+                  },
+                  "scope_label": {
+                    "type": "string",
+                    "description": "Optional caller-supplied label for the workflow being summarized."
+                  },
+                  "expected_paths_by_repository": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "description": "Optional map from working directory or repository root to paths expected to be dirty for this workflow."
+                  }
+                },
+                "required": [
+                  "working_directories"
+                ],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "annotations": {
+                "title": "git_repositories_summary",
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false
+              },
+              "effect": {
+                "class": "read",
+                "idempotency": "replayable",
+                "confirmation": "never"
+              }
+            },
+            {
+              "name": "git_workflow_record",
+              "description": "Record the final status of a multi-repository stage/commit/push workflow for handoff. Requires git-mcp mode=write.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "workflow_id": {
+                    "type": "string",
+                    "description": "Optional caller-supplied stable workflow id."
+                  },
+                  "scope_label": {
+                    "type": "string",
+                    "description": "Required caller-supplied workflow label."
+                  },
+                  "summary": {
+                    "type": "string",
+                    "description": "Optional concise workflow summary."
+                  },
+                  "repositories": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "working_directory": {
+                          "type": "string",
+                          "description": "Repository directory under an allowed root. Omitted selects the first allowed root; an explicit relative value resolves against the MCP process current directory; prefer an absolute path when the target matters."
+                        },
+                        "staged_paths": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "committed_sha": {
+                          "type": "string"
+                        },
+                        "pushed": {
+                          "type": "boolean"
+                        },
+                        "push_status": {
+                          "type": "string",
+                          "enum": [
+                            "pushed",
+                            "not_attempted",
+                            "failed",
+                            "not_pushable"
+                          ]
+                        },
+                        "push_reason": {
+                          "type": "string"
+                        },
+                        "unrelated_dirty_paths_left": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      "required": [
+                        "working_directory"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": [
+                  "scope_label",
+                  "repositories"
+                ],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "annotations": {
+                "title": "git_workflow_record",
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": false
+              },
+              "effect": {
+                "class": "local_write",
+                "idempotency": "non_idempotent",
+                "confirmation": "policy"
+              }
+            },
+            {
+              "name": "git_diff",
+              "description": "Show a paged Git diff for working tree, staged changes, or one commit; optionally include bounded untracked-file patches for working-tree review.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "working_directory": {
+                    "type": "string",
+                    "description": "Repository directory under an allowed root. Omitted selects the first allowed root; an explicit relative value resolves against the MCP process current directory; prefer an absolute path when the target matters."
+                  },
+                  "scope": {
+                    "type": "string",
+                    "enum": [
+                      "working",
+                      "staged",
+                      "commit"
+                    ],
+                    "default": "working"
+                  },
+                  "pathspec": {
+                    "type": "string",
+                    "description": "Optional single Git pathspec. Use pathspecs for multiple paths."
+                  },
+                  "pathspecs": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Optional Git pathspec list for multi-path diffs."
+                  },
+                  "commit": {
+                    "type": "string",
+                    "description": "Required when scope is commit."
+                  },
+                  "offset": {
+                    "type": "integer",
+                    "default": 0,
+                    "description": "Character offset into the complete diff. Use next_offset from the prior result to continue."
+                  },
+                  "limit": {
+                    "type": "integer",
+                    "default": 4000,
+                    "description": "Maximum diff characters to return in this page."
+                  },
+                  "include_untracked": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "When scope=working, append bounded patches for untracked files matched by pathspec."
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "annotations": {
+                "title": "git_diff",
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false
+              },
+              "effect": {
+                "class": "read",
+                "idempotency": "replayable",
+                "confirmation": "never"
+              }
+            },
+            {
+              "name": "git_log",
+              "description": "List recent commits, optionally limited to one path.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "working_directory": {
+                    "type": "string",
+                    "description": "Repository directory under an allowed root. Omitted selects the first allowed root; an explicit relative value resolves against the MCP process current directory; prefer an absolute path when the target matters."
+                  },
+                  "limit": {
+                    "type": "integer",
+                    "default": 20
+                  },
+                  "pathspec": {
+                    "type": "string",
+                    "description": "Optional Git pathspec."
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "annotations": {
+                "title": "git_log",
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false
+              },
+              "effect": {
+                "class": "read",
+                "idempotency": "replayable",
+                "confirmation": "never"
+              }
+            },
+            {
+              "name": "git_show",
+              "description": "Show one commit with metadata and optional patch.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "working_directory": {
+                    "type": "string",
+                    "description": "Repository directory under an allowed root. Omitted selects the first allowed root; an explicit relative value resolves against the MCP process current directory; prefer an absolute path when the target matters."
+                  },
+                  "commit": {
+                    "type": "string"
+                  },
+                  "pathspec": {
+                    "type": "string",
+                    "description": "Optional Git pathspec."
+                  },
+                  "include_patch": {
+                    "type": "boolean",
+                    "default": true
+                  }
+                },
+                "required": [
+                  "commit"
+                ],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "annotations": {
+                "title": "git_show",
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false
+              },
+              "effect": {
+                "class": "read",
+                "idempotency": "replayable",
+                "confirmation": "never"
+              }
+            },
+            {
+              "name": "git_begin_work_scope",
+              "description": "Acquire a durable cooperative lease for explicit paths or exclusive repository topology. Topology leases conflict with every live lease and detect out-of-band repository drift before mutation.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "working_directory": {
+                    "type": "string",
+                    "description": "Repository directory under an allowed root. Omitted selects the first allowed root; an explicit relative value resolves against the MCP process current directory; prefer an absolute path when the target matters."
+                  },
+                  "owner_id": {
+                    "type": "string",
+                    "description": "Stable caller or agent identity that owns and must release the lease."
+                  },
+                  "scope_kind": {
+                    "type": "string",
+                    "enum": [
+                      "paths",
+                      "repository_topology"
+                    ],
+                    "default": "paths",
+                    "description": "Lease explicit paths, or exclusively lease branch/ref topology."
+                  },
+                  "allowed_paths": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Required for paths scope; forbidden for repository_topology."
+                  },
+                  "base_state": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "description": "Optional caller-supplied base state; supplied fields must match."
+                  }
+                },
+                "required": [
+                  "owner_id"
+                ],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "annotations": {
+                "title": "git_begin_work_scope",
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false
+              },
+              "effect": {
+                "class": "local_write",
+                "idempotency": "non_idempotent",
+                "confirmation": "policy"
+              }
+            },
+            {
+              "name": "git_end_work_scope",
+              "description": "Release a durable cooperative work-scope lease. The owner identity must match the lease.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "working_directory": {
+                    "type": "string",
+                    "description": "Repository directory under an allowed root. Omitted selects the first allowed root; an explicit relative value resolves against the MCP process current directory; prefer an absolute path when the target matters."
+                  },
+                  "owner_id": {
+                    "type": "string",
+                    "description": "Owner identity supplied when the lease was acquired."
+                  },
+                  "work_scope_ref": {
+                    "type": "string",
+                    "description": "Work-scope reference to release."
+                  }
+                },
+                "required": [
+                  "owner_id",
+                  "work_scope_ref"
+                ],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "annotations": {
+                "title": "git_end_work_scope",
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": false
+              },
+              "effect": {
+                "class": "local_write",
+                "idempotency": "non_idempotent",
+                "confirmation": "policy"
+              }
+            },
+            {
+              "name": "git_add",
+              "description": "Preflight ignored paths, then stage explicit files or directories under a required durable work-scope lease and return a narrower index-scope reference for commit.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "working_directory": {
+                    "type": "string",
+                    "description": "Repository directory under an allowed root. Omitted selects the first allowed root; an explicit relative value resolves against the MCP process current directory; prefer an absolute path when the target matters."
+                  },
+                  "paths": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Explicit file paths to stage."
+                  },
+                  "work_scope_ref": {
+                    "type": "string",
+                    "description": "Required durable work-scope reference issued by git_begin_work_scope."
+                  },
+                  "scope_label": {
+                    "type": "string",
+                    "description": "Optional caller-supplied audit label for this mutation."
+                  }
+                },
+                "required": [
+                  "paths",
+                  "work_scope_ref"
+                ],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "annotations": {
+                "title": "git_add",
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": false
+              },
+              "effect": {
+                "class": "local_write",
+                "idempotency": "non_idempotent",
+                "confirmation": "policy"
+              }
+            },
+            {
+              "name": "git_unstage",
+              "description": "Unstage explicit file paths under a required durable work-scope lease without modifying the working tree.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "working_directory": {
+                    "type": "string",
+                    "description": "Repository directory under an allowed root. Omitted selects the first allowed root; an explicit relative value resolves against the MCP process current directory; prefer an absolute path when the target matters."
+                  },
+                  "paths": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Explicit file paths to unstage."
+                  },
+                  "work_scope_ref": {
+                    "type": "string",
+                    "description": "Required durable work-scope reference covering every path."
+                  },
+                  "scope_label": {
+                    "type": "string",
+                    "description": "Optional caller-supplied audit label for this mutation."
+                  }
+                },
+                "required": [
+                  "paths",
+                  "work_scope_ref"
+                ],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "annotations": {
+                "title": "git_unstage",
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": false
+              },
+              "effect": {
+                "class": "local_write",
+                "idempotency": "non_idempotent",
+                "confirmation": "policy"
+              }
+            },
+            {
+              "name": "git_commit_paths",
+              "description": "Commit explicit leased paths through a dedicated temporary index. Concurrent HEAD movement is refused and shared-index reconciliation uses Git index.lock.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "working_directory": {
+                    "type": "string",
+                    "description": "Repository directory under an allowed root. Omitted selects the first allowed root; an explicit relative value resolves against the MCP process current directory; prefer an absolute path when the target matters."
+                  },
+                  "paths": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Exact files or directories to commit without staging them in the shared index."
+                  },
+                  "message": {
+                    "type": "string"
+                  },
+                  "body": {
+                    "type": "string"
+                  },
+                  "work_scope_ref": {
+                    "type": "string",
+                    "description": "Required durable work-scope reference covering every committed path."
+                  },
+                  "scope_label": {
+                    "type": "string",
+                    "description": "Optional caller-supplied audit label for this mutation."
+                  }
+                },
+                "required": [
+                  "paths",
+                  "message",
+                  "work_scope_ref"
+                ],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "annotations": {
+                "title": "git_commit_paths",
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": false
+              },
+              "effect": {
+                "class": "local_write",
+                "idempotency": "non_idempotent",
+                "confirmation": "policy"
+              }
+            },
+            {
+              "name": "git_reconcile_index",
+              "description": "Retry a durable post-commit shared-index reconciliation while holding Git index.lock.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "working_directory": {
+                    "type": "string",
+                    "description": "Repository directory under an allowed root. Omitted selects the first allowed root; an explicit relative value resolves against the MCP process current directory; prefer an absolute path when the target matters."
+                  },
+                  "reconciliation_ref": {
+                    "type": "string",
+                    "description": "Durable reconciliation reference returned by git_commit_paths."
+                  },
+                  "work_scope_ref": {
+                    "type": "string",
+                    "description": "Original durable work-scope reference recorded with the pending reconciliation."
+                  }
+                },
+                "required": [
+                  "reconciliation_ref",
+                  "work_scope_ref"
+                ],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "annotations": {
+                "title": "git_reconcile_index",
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": false
+              },
+              "effect": {
+                "class": "local_write",
+                "idempotency": "non_idempotent",
+                "confirmation": "policy"
+              }
+            },
+            {
+              "name": "git_commit",
+              "description": "Create a commit from already staged changes under a required durable work-scope lease.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "working_directory": {
+                    "type": "string",
+                    "description": "Repository directory under an allowed root. Omitted selects the first allowed root; an explicit relative value resolves against the MCP process current directory; prefer an absolute path when the target matters."
+                  },
+                  "message": {
+                    "type": "string"
+                  },
+                  "body": {
+                    "type": "string"
+                  },
+                  "work_scope_ref": {
+                    "type": "string",
+                    "description": "Required durable work-scope reference covering every staged path."
+                  },
+                  "index_scope_ref": {
+                    "type": "string",
+                    "description": "Optional short-lived exact-index reference returned by git_add."
+                  },
+                  "scope_label": {
+                    "type": "string",
+                    "description": "Optional caller-supplied audit label for this mutation."
+                  },
+                  "expected_staged_paths": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Exact staged display paths required before mutation."
+                  }
+                },
+                "required": [
+                  "message",
+                  "work_scope_ref"
+                ],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "annotations": {
+                "title": "git_commit",
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": false
+              },
+              "effect": {
+                "class": "local_write",
+                "idempotency": "non_idempotent",
+                "confirmation": "policy"
+              }
+            },
+            {
+              "name": "git_push",
+              "description": "Push the current branch or an explicit remote and branch. An expected commit ref verifies HEAD before publication; force push is not supported.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "working_directory": {
+                    "type": "string",
+                    "description": "Repository directory under an allowed root. Omitted selects the first allowed root; an explicit relative value resolves against the MCP process current directory; prefer an absolute path when the target matters."
+                  },
+                  "remote": {
+                    "type": "string"
+                  },
+                  "branch": {
+                    "type": "string"
+                  },
+                  "expected_commit": {
+                    "type": "string",
+                    "description": "Optional commit SHA or commit_ref returned by git_commit; push refuses if HEAD differs."
+                  },
+                  "work_scope_ref": {
+                    "type": "string",
+                    "description": "Required exclusive repository-topology scope issued by git_begin_work_scope with scope_kind=repository_topology."
+                  },
+                  "scope_label": {
+                    "type": "string",
+                    "description": "Optional caller-supplied audit label for this mutation."
+                  }
+                },
+                "required": [
+                  "work_scope_ref"
+                ],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "annotations": {
+                "title": "git_push",
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": false
+              },
+              "effect": {
+                "class": "local_write",
+                "idempotency": "non_idempotent",
+                "confirmation": "policy"
+              }
+            },
+            {
+              "name": "git_branch_create",
+              "description": "Create a local branch from HEAD or an explicit start point under an exclusive topology scope.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "working_directory": {
+                    "type": "string",
+                    "description": "Repository directory under an allowed root. Omitted selects the first allowed root; an explicit relative value resolves against the MCP process current directory; prefer an absolute path when the target matters."
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "start_point": {
+                    "type": "string",
+                    "description": "Optional commit, branch, or tag; defaults to HEAD."
+                  },
+                  "work_scope_ref": {
+                    "type": "string",
+                    "description": "Required exclusive repository-topology scope issued by git_begin_work_scope with scope_kind=repository_topology."
+                  },
+                  "scope_label": {
+                    "type": "string",
+                    "description": "Optional caller-supplied audit label for this mutation."
+                  }
+                },
+                "required": [
+                  "name",
+                  "work_scope_ref"
+                ],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "annotations": {
+                "title": "git_branch_create",
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": false
+              },
+              "effect": {
+                "class": "local_write",
+                "idempotency": "non_idempotent",
+                "confirmation": "policy"
+              }
+            },
+            {
+              "name": "git_branch_switch",
+              "description": "Switch to an existing local branch under an exclusive topology scope without discarding changes.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "working_directory": {
+                    "type": "string",
+                    "description": "Repository directory under an allowed root. Omitted selects the first allowed root; an explicit relative value resolves against the MCP process current directory; prefer an absolute path when the target matters."
+                  },
+                  "branch": {
+                    "type": "string"
+                  },
+                  "work_scope_ref": {
+                    "type": "string",
+                    "description": "Required exclusive repository-topology scope issued by git_begin_work_scope with scope_kind=repository_topology."
+                  },
+                  "scope_label": {
+                    "type": "string",
+                    "description": "Optional caller-supplied audit label for this mutation."
+                  }
+                },
+                "required": [
+                  "branch",
+                  "work_scope_ref"
+                ],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "annotations": {
+                "title": "git_branch_switch",
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": false
+              },
+              "effect": {
+                "class": "local_write",
+                "idempotency": "non_idempotent",
+                "confirmation": "policy"
+              }
+            },
+            {
+              "name": "git_branch_rename",
+              "description": "Rename an existing local branch under an exclusive topology scope.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "working_directory": {
+                    "type": "string",
+                    "description": "Repository directory under an allowed root. Omitted selects the first allowed root; an explicit relative value resolves against the MCP process current directory; prefer an absolute path when the target matters."
+                  },
+                  "old_name": {
+                    "type": "string"
+                  },
+                  "new_name": {
+                    "type": "string"
+                  },
+                  "work_scope_ref": {
+                    "type": "string",
+                    "description": "Required exclusive repository-topology scope issued by git_begin_work_scope with scope_kind=repository_topology."
+                  },
+                  "scope_label": {
+                    "type": "string",
+                    "description": "Optional caller-supplied audit label for this mutation."
+                  }
+                },
+                "required": [
+                  "old_name",
+                  "new_name",
+                  "work_scope_ref"
+                ],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "annotations": {
+                "title": "git_branch_rename",
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": false
+              },
+              "effect": {
+                "class": "local_write",
+                "idempotency": "non_idempotent",
+                "confirmation": "policy"
+              }
+            },
+            {
+              "name": "git_branch_delete",
+              "description": "Delete a merged local branch under an exclusive topology scope; force deletion is not supported.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "working_directory": {
+                    "type": "string",
+                    "description": "Repository directory under an allowed root. Omitted selects the first allowed root; an explicit relative value resolves against the MCP process current directory; prefer an absolute path when the target matters."
+                  },
+                  "branch": {
+                    "type": "string"
+                  },
+                  "base": {
+                    "type": "string",
+                    "description": "Commit, branch, or tag used for the merged-only safety check; defaults to the current branch."
+                  },
+                  "work_scope_ref": {
+                    "type": "string",
+                    "description": "Required exclusive repository-topology scope issued by git_begin_work_scope with scope_kind=repository_topology."
+                  },
+                  "scope_label": {
+                    "type": "string",
+                    "description": "Optional caller-supplied audit label for this mutation."
+                  }
+                },
+                "required": [
+                  "branch",
+                  "work_scope_ref"
+                ],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "annotations": {
+                "title": "git_branch_delete",
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": false
+              },
+              "effect": {
+                "class": "local_write",
+                "idempotency": "non_idempotent",
+                "confirmation": "policy"
+              }
+            },
+            {
+              "name": "git_branch_delete_remote",
+              "description": "Delete a merged remote branch under an exclusive topology scope; force deletion is not supported.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "working_directory": {
+                    "type": "string",
+                    "description": "Repository directory under an allowed root. Omitted selects the first allowed root; an explicit relative value resolves against the MCP process current directory; prefer an absolute path when the target matters."
+                  },
+                  "remote": {
+                    "type": "string"
+                  },
+                  "branch": {
+                    "type": "string"
+                  },
+                  "base": {
+                    "type": "string",
+                    "description": "Local commit, branch, or tag used for the merged-only safety check."
+                  },
+                  "work_scope_ref": {
+                    "type": "string",
+                    "description": "Required exclusive repository-topology scope issued by git_begin_work_scope with scope_kind=repository_topology."
+                  },
+                  "scope_label": {
+                    "type": "string",
+                    "description": "Optional caller-supplied audit label for this mutation."
+                  }
+                },
+                "required": [
+                  "remote",
+                  "branch",
+                  "base",
+                  "work_scope_ref"
+                ],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "annotations": {
+                "title": "git_branch_delete_remote",
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": false
+              },
+              "effect": {
+                "class": "local_write",
+                "idempotency": "non_idempotent",
+                "confirmation": "policy"
+              }
+            },
+            {
+              "name": "git_branch_set_upstream",
+              "description": "Set a local branch upstream under an exclusive topology scope.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "working_directory": {
+                    "type": "string",
+                    "description": "Repository directory under an allowed root. Omitted selects the first allowed root; an explicit relative value resolves against the MCP process current directory; prefer an absolute path when the target matters."
+                  },
+                  "local_branch": {
+                    "type": "string",
+                    "description": "Local branch; defaults to the current branch."
+                  },
+                  "remote": {
+                    "type": "string"
+                  },
+                  "remote_branch": {
+                    "type": "string",
+                    "description": "Remote branch; defaults to local_branch."
+                  },
+                  "work_scope_ref": {
+                    "type": "string",
+                    "description": "Required exclusive repository-topology scope issued by git_begin_work_scope with scope_kind=repository_topology."
+                  },
+                  "scope_label": {
+                    "type": "string",
+                    "description": "Optional caller-supplied audit label for this mutation."
+                  }
+                },
+                "required": [
+                  "remote",
+                  "work_scope_ref"
+                ],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "annotations": {
+                "title": "git_branch_set_upstream",
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": false
+              },
+              "effect": {
+                "class": "local_write",
+                "idempotency": "non_idempotent",
+                "confirmation": "policy"
+              }
+            },
+            {
+              "name": "git_branch_unset_upstream",
+              "description": "Remove upstream configuration under an exclusive topology scope.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "working_directory": {
+                    "type": "string",
+                    "description": "Repository directory under an allowed root. Omitted selects the first allowed root; an explicit relative value resolves against the MCP process current directory; prefer an absolute path when the target matters."
+                  },
+                  "local_branch": {
+                    "type": "string",
+                    "description": "Local branch; defaults to the current branch."
+                  },
+                  "work_scope_ref": {
+                    "type": "string",
+                    "description": "Required exclusive repository-topology scope issued by git_begin_work_scope with scope_kind=repository_topology."
+                  },
+                  "scope_label": {
+                    "type": "string",
+                    "description": "Optional caller-supplied audit label for this mutation."
+                  }
+                },
+                "required": [
+                  "work_scope_ref"
+                ],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "annotations": {
+                "title": "git_branch_unset_upstream",
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": false
+              },
+              "effect": {
+                "class": "local_write",
+                "idempotency": "non_idempotent",
+                "confirmation": "policy"
+              }
+            }
+          ],
+          "projections": [
+            {
+              "id": "default",
+              "transport": {
+                "kind": "stdio",
+                "command": "node",
+                "args": [
+                  "{mcp_surfaces_root}/git-mcp/dist/src/main.js",
+                  "--allowed-root",
+                  "{workspace_root}",
+                  "--mode",
+                  "write"
+                ],
+                "env": []
+              },
+              "injection_scope": "local_site",
+              "default_injection": "disabled",
+              "runtime_requirements": [],
+              "authority_requirements": [
+                "scope.local_site"
+              ],
+              "lifecycle": {
+                "mode": "replayable",
+                "reason": "Git state is external to the process and every operation carries its own repository context."
+              }
+            }
+          ],
+          "metadata": {
+            "lifecycle_readback": {
+              "authority": "mcp-loader",
+              "availability": "loader-managed",
+              "discovery": {
+                "tool_name": "mcp_loader_connection_inventory",
+                "arguments": {},
+                "select": {
+                  "field": "surface_id",
+                  "equals": "git",
+                  "result_field": "connection_id"
+                }
+              },
+              "status": {
+                "tool_name": "mcp_loader_surface_status",
+                "arguments": {
+                  "connection_id": "{connection_id}"
+                },
+                "connection_id_from": "discovery.selected.connection_id"
+              }
+            }
+          }
+        },
+        "lifecycle": {
+          "mode": "replayable",
+          "reason": "Git state is external to the process and every operation carries its own repository context."
+        }
+      },
+      "surface_type": "mcp_surface",
+      "display_name": "narada-mcp-surfaces-git",
+      "server_name": "narada-mcp-surfaces-git",
+      "runtime_binding": {
+        "runtime_kind": "rust-stdio",
+        "proxy_implementation": "native",
+        "entrypoint": "C:/Users/andrey/src/mcp-surfaces/packages/shared/mcp-runtime-proxy/dist/native/versions/d92e55ac39b975d308e373e2175ed6d5ed2dba587d848ce44a7781f0a7514610/narada-mcp-runtime.exe",
+        "owner_site_id": "mcp-surfaces",
+        "transport": {
+          "type": "stdio",
+          "command": "C:/Users/andrey/src/mcp-surfaces/packages/shared/mcp-runtime-proxy/dist/native/versions/d92e55ac39b975d308e373e2175ed6d5ed2dba587d848ce44a7781f0a7514610/narada-mcp-runtime.exe",
+          "args": [
+            "proxy",
+            "--surface-id",
+            "git",
+            "--child-command",
+            "C:/Users/andrey/src/mcp-surfaces/packages/shared/mcp-runtime-proxy/dist/native/versions/d92e55ac39b975d308e373e2175ed6d5ed2dba587d848ce44a7781f0a7514610/narada-mcp-runtime.exe",
+            "--artifact-manifest",
+            "C:/Users/andrey/src/mcp-surfaces/.ai/runtime/workspace-artifact-manifest.json",
+            "--runtime-contract-version",
+            "8",
+            "--entrypoint",
+            "C:/Users/andrey/src/mcp-surfaces/packages/shared/mcp-runtime-proxy/dist/native/versions/d92e55ac39b975d308e373e2175ed6d5ed2dba587d848ce44a7781f0a7514610/narada-mcp-runtime.exe",
+            "--child-invocation-kind",
+            "native_applet",
+            "--child-applet",
+            "git",
+            "--",
+            "--allowed-root",
+            "C:\\Users\\andrey\\src\\mcp-surfaces",
+            "--mode",
+            "write"
+          ]
+        }
+      },
       "authority_boundary": {
-        "posture": "generated_conservative_transport_registry",
+        "posture": "registrar_generated_runtime_surface_registry",
         "grants_tool_authority": true,
-        "granted_tool_authority_kind": "read_only_declared_startup_or_lifecycle_contract"
+        "granted_tool_authority_kind": "declared_enabled_mcp_surface_tools",
+        "source": "site_mcp_fabric_and_registrar_catalog"
       },
       "client_config": {
-        "generated_path": ".ai/mcp/mcp-surfaces-agent-context-mcp.json",
-        "generated_file": "mcp-surfaces-agent-context-mcp.json"
+        "generated_path": ".ai/mcp/narada-mcp-surfaces-git-mcp.json",
+        "generated_file": "narada-mcp-surfaces-git-mcp.json"
       },
       "tool_contract": {
+        "exposed_tools": [
+          "git_guidance",
+          "git_policy_inspect",
+          "git_status",
+          "git_fetch",
+          "git_rebase",
+          "git_rebase_continue",
+          "git_rebase_abort",
+          "git_merge",
+          "git_merge_continue",
+          "git_merge_abort",
+          "git_sync_status",
+          "git_branch_list",
+          "git_output_show",
+          "git_changed_summary",
+          "git_repositories_summary",
+          "git_workflow_record",
+          "git_diff",
+          "git_log",
+          "git_show",
+          "git_begin_work_scope",
+          "git_end_work_scope",
+          "git_add",
+          "git_unstage",
+          "git_commit_paths",
+          "git_reconcile_index",
+          "git_commit",
+          "git_push",
+          "git_branch_create",
+          "git_branch_switch",
+          "git_branch_rename",
+          "git_branch_delete",
+          "git_branch_delete_remote",
+          "git_branch_set_upstream",
+          "git_branch_unset_upstream"
+        ],
+        "semantic_operations": [],
+        "deprecated_aliases": {},
         "read_only_tools": [
-          "agent_context_doctor",
-          "agent_context_whoami",
-          "agent_context_hydrate_current",
-          "agent_context_startup_sequence",
-          "agent_context_rehydrate",
-          "agent_context_list_sessions",
-          "agent_context_tool_surface_readiness",
-          "mcp_output_show"
+          "git_guidance",
+          "git_policy_inspect",
+          "git_status",
+          "git_sync_status",
+          "git_branch_list",
+          "git_output_show",
+          "git_changed_summary",
+          "git_repositories_summary",
+          "git_diff",
+          "git_log",
+          "git_show",
+          "git_begin_work_scope",
+          "git_end_work_scope",
+          "git_reconcile_index"
         ],
         "mutating_tools": [
-          "agent_context_start_session",
-          "agent_context_checkpoint"
+          "git_fetch",
+          "git_rebase",
+          "git_rebase_continue",
+          "git_rebase_abort",
+          "git_merge",
+          "git_merge_continue",
+          "git_merge_abort",
+          "git_workflow_record",
+          "git_add",
+          "git_unstage",
+          "git_commit_paths",
+          "git_commit",
+          "git_push",
+          "git_branch_create",
+          "git_branch_switch",
+          "git_branch_rename",
+          "git_branch_delete",
+          "git_branch_delete_remote",
+          "git_branch_set_upstream",
+          "git_branch_unset_upstream"
         ],
         "refused_tools": []
       },
-      "registered_live_tools": []
-    },
-    {
-      "surface_id": "filesystem-mcp.local",
-      "display_name": "mcp-surfaces-filesystem",
-      "server_name": "mcp-surfaces-filesystem",
-      "authority_boundary": {
-        "posture": "generated_conservative_transport_registry",
-        "grants_tool_authority": true,
-        "granted_tool_authority_kind": "read_only_declared_filesystem_contract"
-      },
-      "client_config": {
-        "generated_path": ".ai/mcp/mcp-surfaces-filesystem-mcp.json",
-        "generated_file": "mcp-surfaces-filesystem-mcp.json"
-      },
-      "tool_contract": {
-        "read_only_tools": [
-          "fs_read_file",
-          "fs_read_file_range",
-          "fs_stat",
-          "fs_glob_search",
-          "fs_grep_search",
-          "fs_doctor"
-        ],
-        "mutating_tools": [],
-        "refused_tools": []
-      },
-      "registered_live_tools": []
-    },
-    {
-      "surface_id": "shell-mcp.local",
-      "display_name": "mcp-surfaces-shell",
-      "server_name": "mcp-surfaces-shell",
-      "authority_boundary": {
-        "posture": "generated_conservative_transport_registry",
-        "grants_tool_authority": false,
-        "granted_tool_authority_kind": "none"
-      },
-      "client_config": {
-        "generated_path": ".ai/mcp/mcp-surfaces-shell-mcp.json",
-        "generated_file": "mcp-surfaces-shell-mcp.json"
-      },
-      "tool_contract": {
-        "read_only_tools": [],
-        "mutating_tools": [],
-        "refused_tools": []
-      },
-      "registered_live_tools": []
-    },
-    {
-      "surface_id": "inbox-mcp.local",
-      "display_name": "mcp-surfaces-inbox",
-      "server_name": "mcp-surfaces-inbox",
-      "authority_boundary": {
-        "posture": "generated_conservative_transport_registry",
-        "grants_tool_authority": true,
-        "granted_tool_authority_kind": "declared_inbox_contract"
-      },
-      "client_config": {
-        "generated_path": ".ai/mcp/mcp-surfaces-inbox-mcp.json",
-        "generated_file": "mcp-surfaces-inbox-mcp.json"
-      },
-      "tool_contract": {
-        "read_only_tools": [
-          "inbox_doctor",
-          "inbox_list",
-          "inbox_show",
-          "inbox_audit",
-          "inbox_next",
-          "capa_queue"
-        ],
-        "mutating_tools": [
-          "inbox_submit",
-          "inbox_acknowledge",
-          "inbox_dismiss",
-          "inbox_promote_capa"
-        ],
-        "refused_tools": []
-      },
-      "registered_live_tools": []
-    },
-    {
-      "surface_id": "task-lifecycle-mcp.local",
-      "display_name": "mcp-surfaces-task-lifecycle",
-      "server_name": "mcp-surfaces-task-lifecycle",
-      "authority_boundary": {
-        "posture": "generated_conservative_transport_registry",
-        "grants_tool_authority": true,
-        "granted_tool_authority_kind": "read_only_declared_startup_or_lifecycle_contract"
-      },
-      "client_config": {
-        "generated_path": ".ai/mcp/mcp-surfaces-task-lifecycle-mcp.json",
-        "generated_file": "mcp-surfaces-task-lifecycle-mcp.json"
-      },
-      "tool_contract": {
-        "read_only_tools": [
-          "task_lifecycle_audit",
-          "task_lifecycle_inspect",
-          "task_lifecycle_list",
-          "task_lifecycle_next",
-          "task_lifecycle_obligations",
-          "task_lifecycle_roster",
-          "task_lifecycle_show"
-        ],
-        "mutating_tools": [
-          "task_lifecycle_admit_evidence",
-          "task_lifecycle_bridge_poll",
-          "task_lifecycle_chapter_add_task",
-          "task_lifecycle_claim",
-          "task_lifecycle_close",
-          "task_lifecycle_continue",
-          "task_lifecycle_create",
-          "task_lifecycle_defer",
-          "task_lifecycle_disposition_closeout",
-          "task_lifecycle_finish",
-          "task_lifecycle_prove_criteria",
-          "task_lifecycle_reopen",
-          "task_lifecycle_review",
-          "task_lifecycle_roster_admit",
-          "task_lifecycle_run_tests",
-          "task_lifecycle_set_routing",
-          "task_lifecycle_submit_observation",
-          "task_lifecycle_unclaim"
-        ],
-        "refused_tools": []
-      },
-      "registered_live_tools": []
+      "registered_live_tools": [
+        "git_guidance",
+        "git_policy_inspect",
+        "git_status",
+        "git_fetch",
+        "git_rebase",
+        "git_rebase_continue",
+        "git_rebase_abort",
+        "git_merge",
+        "git_merge_continue",
+        "git_merge_abort",
+        "git_sync_status",
+        "git_branch_list",
+        "git_output_show",
+        "git_changed_summary",
+        "git_repositories_summary",
+        "git_workflow_record",
+        "git_diff",
+        "git_log",
+        "git_show",
+        "git_begin_work_scope",
+        "git_end_work_scope",
+        "git_add",
+        "git_unstage",
+        "git_commit_paths",
+        "git_reconcile_index",
+        "git_commit",
+        "git_push",
+        "git_branch_create",
+        "git_branch_switch",
+        "git_branch_rename",
+        "git_branch_delete",
+        "git_branch_delete_remote",
+        "git_branch_set_upstream",
+        "git_branch_unset_upstream"
+      ],
+      "catalog_surface_id": "git",
+      "evidence": {
+        "source": "site_mcp_fabric",
+        "path": ".ai/mcp/narada-mcp-surfaces-git-mcp.json",
+        "projection_kind": "site_fabric"
+      }
     }
   ]
 }

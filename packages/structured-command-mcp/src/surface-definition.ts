@@ -14,7 +14,7 @@ export function surfaceDefinition(): DefinedSurface {
     default_effect: 'command',
     projections: [{
       id: 'default',
-      transport: { kind: 'stdio', command: 'node', args: ["--allowed-root","{workspace_root}","--allow-command","node","--allow-command","pnpm","--allow-command","npm"], env: [] },
+      transport: { kind: 'stdio', command: 'node', args: ["--allowed-root","{workspace_root}","--allow-command","node","--allow-command","pnpm","--allow-command","npm","--allow-command","cargo"], env: [] },
       injection_scope: 'local_site',
       default_injection: 'disabled',
       runtime_requirements: [],
