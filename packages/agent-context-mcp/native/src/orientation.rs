@@ -82,44 +82,56 @@ fn orientation_unavailable(reason: &str) -> Value {
     })
 }
 
-#[cfg(test)]
-mod ergonomics_tests {
-    use super::*;
-
-    #[test]
-    fn missing_carrier_entry_evidence_is_a_bounded_recoverable_result() {
-        let result = orientation_unavailable("agent_context_exact_admission_receipt_required");
-        assert_eq!(result["status"], "blocked");
-        assert_eq!(result["ordinary_work_gate"], "not_established");
-        assert_eq!(result["recovery"]["owner"], "carrier_session_launcher");
-        assert_eq!(result["retry_safe"], true);
-    }
-}
-
 struct Evidence {
     admission: Value,
     delivery: Value,
     manifest_id: String,
 }
 fn evidence(context: &Context, args: &Value) -> Result<Evidence, String> {
-    let inherited = env::var("NARADA_CARRIER_SESSION_ADMISSION_RECEIPT")
+    let admission = admission(context, args)?;
+    let manifest_supplied = args
+        .get("manifest_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty());
+    let manifest_inherited = env::var("NARADA_ORIENTATION_MANIFEST_ID")
         .ok()
-        .filter(|v| !v.trim().is_empty())
-        .map(|raw| {
-            serde_json::from_str::<Value>(&raw)
-                .map_err(|error| format!("agent_context_admission_receipt_env_invalid:{error}"))
-        })
-        .transpose()?;
-    let supplied = args
-        .get("admission_receipt")
-        .filter(|v| !v.is_null())
-        .cloned();
-    if supplied.is_some() && inherited.is_some() && supplied != inherited {
-        return Err("agent_context_conflicting_admission_receipts".into());
+        .filter(|value| !value.trim().is_empty());
+    if manifest_supplied.is_some()
+        && manifest_inherited
+            .as_deref()
+            .is_some_and(|value| Some(value) != manifest_supplied)
+    {
+        return Err("agent_context_conflicting_orientation_manifest_ids".into());
     }
-    let admission = supplied
-        .or(inherited)
-        .ok_or("agent_context_exact_admission_receipt_required")?;
+    let manifest_id = manifest_supplied
+        .map(str::to_string)
+        .or(manifest_inherited)
+        .ok_or("agent_context_exact_orientation_manifest_id_required")?;
+    let delivery = exact_json(
+        args,
+        "delivery_receipt",
+        "NARADA_ORIENTATION_DELIVERY_RECEIPT",
+        "agent_context_exact_orientation_delivery_receipt_required",
+    )?;
+    if delivery.get("schema").and_then(Value::as_str)
+        != Some("narada.carrier_session.orientation_delivery_receipt.v1")
+    {
+        return Err("agent_context_orientation_delivery_receipt_invalid:schema_mismatch".into());
+    }
+    Ok(Evidence {
+        admission,
+        delivery,
+        manifest_id,
+    })
+}
+
+fn admission(context: &Context, args: &Value) -> Result<Value, String> {
+    let admission = exact_json(
+        args,
+        "admission_receipt",
+        "NARADA_CARRIER_SESSION_ADMISSION_RECEIPT",
+        "agent_context_exact_admission_receipt_required",
+    )?;
     if admission.get("schema").and_then(Value::as_str)
         != Some("narada.carrier_session.admission_receipt.v0")
         || admission.get("decision").and_then(Value::as_str) != Some("admitted")
@@ -161,24 +173,7 @@ fn evidence(context: &Context, args: &Value) -> Result<Evidence, String> {
             return Err("agent_context_admission_session_mismatch".into());
         }
     }
-    let manifest_id = env::var("NARADA_ORIENTATION_MANIFEST_ID")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .ok_or("agent_context_exact_orientation_manifest_id_required")?;
-    let delivery = parse_env_json(
-        "NARADA_ORIENTATION_DELIVERY_RECEIPT",
-        "agent_context_exact_orientation_delivery_receipt_required",
-    )?;
-    if delivery.get("schema").and_then(Value::as_str)
-        != Some("narada.carrier_session.orientation_delivery_receipt.v1")
-    {
-        return Err("agent_context_orientation_delivery_receipt_invalid:schema_mismatch".into());
-    }
-    Ok(Evidence {
-        admission,
-        delivery,
-        manifest_id,
-    })
+    Ok(admission)
 }
 
 pub fn whoami(context: &Context, args: &Value) -> Result<Value, String> {
@@ -189,8 +184,7 @@ pub fn whoami(context: &Context, args: &Value) -> Result<Value, String> {
             json!({"schema":"narada.agent_context.identity_resolution.v1","status":"blocked","reason":"agent_context_exact_admission_receipt_required","rejected_fallbacks":["latest_checkpoint","latest_start_event","identity_name_inference"]}),
         );
     }
-    let evidence = evidence(context, args)?;
-    let admission = &evidence.admission;
+    let admission = admission(context, args)?;
     let identity = admission
         .pointer("/agent_identity/local_agent_id")
         .and_then(Value::as_str)
@@ -227,12 +221,17 @@ pub fn acknowledge_tool(context: &Context, args: &Value) -> Result<Value, String
     let packet = entry_packet(context, &evidence)?;
     acknowledge(context, &evidence, &packet)
 }
-fn parse_env_json(name: &str, missing: &str) -> Result<Value, String> {
-    let raw = env::var(name)
+fn exact_json(args: &Value, field: &str, variable: &str, missing: &str) -> Result<Value, String> {
+    let supplied = args.get(field).filter(|value| !value.is_null()).cloned();
+    let inherited = env::var(variable)
         .ok()
-        .filter(|v| !v.trim().is_empty())
-        .ok_or(missing)?;
-    serde_json::from_str(&raw).map_err(|e| format!("{missing}:{e}"))
+        .filter(|value| !value.trim().is_empty())
+        .map(|raw| serde_json::from_str(&raw).map_err(|error| format!("{missing}:{error}")))
+        .transpose()?;
+    if supplied.is_some() && inherited.is_some() && supplied != inherited {
+        return Err(format!("agent_context_conflicting_{field}s"));
+    }
+    supplied.or(inherited).ok_or_else(|| missing.to_string())
 }
 
 fn entry_packet(context: &Context, evidence: &Evidence) -> Result<Value, String> {
@@ -692,6 +691,7 @@ fn acknowledge(context: &Context, evidence: &Evidence, packet: &Value) -> Result
     let receipt = evidence.delivery["receipt_id"].as_str().unwrap_or("");
     if let Some(existing) = db.query_row("SELECT acknowledgement_json FROM orientation_acknowledgements WHERE delivery_receipt_ref=?1 LIMIT 1", [receipt], |row| row.get::<_,String>(0)).optional().map_err(db_error)? {
         let acknowledgement: Value = serde_json::from_str(&existing).map_err(|error| error.to_string())?;
+        project_acknowledgement(context, &acknowledgement)?;
         return Ok(json!({"schema":"narada.agent_context.orientation_acknowledgement_record.v1","status":"already_acknowledged","source_mutation":false,"local_persistence":true,"ordinary_work_gate":"open","acknowledgement":acknowledgement}));
     }
     let mut statement = db.prepare("SELECT completion_json FROM orientation_required_read_completions WHERE delivery_receipt_ref=?1 ORDER BY completed_at ASC,step_id ASC").map_err(db_error)?;
@@ -900,4 +900,18 @@ fn admin_read(
 }
 fn db_error(error: rusqlite::Error) -> String {
     format!("agent_context_db_error:{error}")
+}
+
+#[cfg(test)]
+mod ergonomics_tests {
+    use super::*;
+
+    #[test]
+    fn missing_carrier_entry_evidence_is_a_bounded_recoverable_result() {
+        let result = orientation_unavailable("agent_context_exact_admission_receipt_required");
+        assert_eq!(result["status"], "blocked");
+        assert_eq!(result["ordinary_work_gate"], "not_established");
+        assert_eq!(result["recovery"]["owner"], "carrier_session_launcher");
+        assert_eq!(result["retry_safe"], true);
+    }
 }

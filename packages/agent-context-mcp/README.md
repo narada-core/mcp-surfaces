@@ -42,6 +42,8 @@ This is a native Rust surface. Registrar-generated carrier bindings launch an
 immutable `narada-agent-context-mcp` artifact through the native runtime proxy;
 Node and Bun are not runtime dependencies.
 
+The Rust executable owns and enforces its public tool contract. Its native
+build no longer regenerates that contract from the legacy TypeScript surface.
 The server uses a site root and these environment variables when present:
 
 - `NARADA_AGENT_ID`
@@ -78,10 +80,9 @@ the immutable carrier artifact graph.
   acknowledgement. The caller never supplies step ids, offsets, hashes,
   timestamps, receipts, or completion evidence.
 - `mcp_output_show({ ref, offset?, limit? })`: shared carrier transport readback
-  for outputs from other projected surfaces. `ref` is the canonical required
-  argument; the runtime retains `output_ref` only as a legacy compatibility
-  alias. Offset defaults to 0, and limit defaults to 10000 with a maximum of
-  20000. The orientation operation itself never emits an output reference.
+  for outputs from other projected surfaces. `ref` is the required argument.
+  Offset defaults to 0, and limit defaults to 10000 with a maximum of 20000.
+  The orientation operation itself never emits an output reference.
 
 The default projection exposes exactly one domain operation,
 `agent_orientation_read`, plus shared transport readback. Every orientation
@@ -181,6 +182,8 @@ Narada-projected MCP effects; native carrier capabilities require their own
 launch policy and are not falsely claimed by this test.
 
 ```powershell
-pnpm --filter @narada-core/agent-context-mcp test
-pnpm --filter @narada-core/agent-context-mcp run test:node
+cargo test --locked --manifest-path packages/agent-context-mcp/native/Cargo.toml
 ```
+
+The package's TypeScript suites cover the retained compatibility
+implementation; they are not the native contract oracle.

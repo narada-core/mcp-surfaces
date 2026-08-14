@@ -9,7 +9,6 @@ use uuid::Uuid;
 const MIGRATION_001: &str = include_str!("../../migrations/001-agent-context-materializations.sql");
 const MIGRATION_002: &str = include_str!("../../migrations/002-agent-events.sql");
 const MIGRATION_003: &str = include_str!("../migrations/003-agent-context-compatibility.sql");
-const NATIVE_CONTRACT: &str = include_str!("../tool-catalog.json");
 
 pub struct Context {
     pub site_root: PathBuf,
@@ -60,6 +59,10 @@ impl Context {
         ensure_checkpoint_tables(&db)?;
         Ok(db)
     }
+
+    pub(crate) fn prepare(&self) -> Result<(), String> {
+        self.open_db().map(drop)
+    }
 }
 
 fn ensure_agent_start_event_columns(db: &Connection) -> Result<(), String> {
@@ -97,36 +100,24 @@ fn ensure_agent_start_event_columns(db: &Connection) -> Result<(), String> {
 pub fn call_tool(
     context: &Context,
     projection: &str,
-    params_value: &Value,
+    name: &str,
+    args: &Value,
 ) -> Result<Value, String> {
-    let name = params_value
-        .get("name")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let args = params_value
-        .get("arguments")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
-    if projection != "admin" && !matches!(name, "agent_orientation_read" | "mcp_output_show") {
-        return Err(format!(
-            "agent_context_tool_not_exposed_in_{projection}_projection:{name}"
-        ));
-    }
     match name {
         "agent_context_doctor" => doctor(context),
-        "agent_context_guidance" => guidance(&args),
-        "agent_context_whoami" => crate::orientation::whoami(context, &args),
-        "agent_context_hydrate_current" => hydrate_current(context, &args),
-        "agent_orientation_read" => crate::orientation::read(context, projection, &args),
-        "agent_orientation_acknowledge" => crate::orientation::acknowledge_tool(context, &args),
-        "agent_context_startup_sequence" => crate::orientation::startup(context, &args),
-        "mcp_output_show" => output_show(context, &args),
-        "agent_context_checkpoint" => checkpoint(context, &args),
-        "agent_context_rehydrate" => rehydrate(context, &args),
-        "agent_context_continuation_export" => continuation_export(context, &args),
-        "agent_context_continuation_read" => continuation_read(context, &args),
-        "agent_context_list_sessions" => list_sessions(context, &args),
-        "agent_context_start_session" => start_session(context, &args),
+        "agent_context_guidance" => guidance(args),
+        "agent_context_whoami" => crate::orientation::whoami(context, args),
+        "agent_context_hydrate_current" => hydrate_current(context, args),
+        "agent_orientation_read" => crate::orientation::read(context, projection, args),
+        "agent_orientation_acknowledge" => crate::orientation::acknowledge_tool(context, args),
+        "agent_context_startup_sequence" => crate::orientation::startup(context, args),
+        "mcp_output_show" => output_show(context, args),
+        "agent_context_checkpoint" => checkpoint(context, args),
+        "agent_context_rehydrate" => rehydrate(context, args),
+        "agent_context_continuation_export" => continuation_export(context, args),
+        "agent_context_continuation_read" => continuation_read(context, args),
+        "agent_context_list_sessions" => list_sessions(context, args),
+        "agent_context_start_session" => start_session(context, args),
         _ => Err(format!("agent_context_native_tool_not_implemented:{name}")),
     }
 }
@@ -346,6 +337,11 @@ fn list_sessions(context: &Context, args: &Value) -> Result<Value, String> {
         .and_then(Value::as_i64)
         .unwrap_or(100)
         .clamp(1, 500) as usize;
+    let offset = args
+        .get("offset")
+        .and_then(Value::as_i64)
+        .unwrap_or(0)
+        .clamp(0, 10_000) as usize;
     let mut stmt=db.prepare("SELECT event_id,identity_id,runtime,created_at,status,resume_command,bootstrap_artifact_uri FROM agent_start_events ORDER BY created_at DESC,event_id DESC").map_err(db_error)?;
     let rows = stmt
         .query_map([], |row| {
@@ -363,7 +359,13 @@ fn list_sessions(context: &Context, args: &Value) -> Result<Value, String> {
     let now = Utc::now();
     let generated = now.to_rfc3339_opts(SecondsFormat::Millis, true);
     let mut sessions = Vec::new();
+    let mut matched = 0usize;
+    let mut scanned = 0usize;
     for row in rows {
+        scanned += 1;
+        if scanned > 10_000 {
+            return Err("agent_context_session_scan_limit_reached:narrow the filters".into());
+        }
         let (event_id, agent, runtime, created, status, resume, bootstrap) =
             row.map_err(db_error)?;
         if identity.is_some_and(|v| v != agent)
@@ -377,13 +379,21 @@ fn list_sessions(context: &Context, args: &Value) -> Result<Value, String> {
         {
             continue;
         }
+        if matched < offset {
+            matched += 1;
+            continue;
+        }
         let seconds = chrono::DateTime::parse_from_rfc3339(&created)
             .ok()
             .map(|start| (now.timestamp() - start.timestamp()).max(0));
         sessions.push(json!({"event_id":event_id,"identity":agent,"substrate":runtime,"runtime":runtime,"status":status,"created_at":created,"resume_command":resume,"bootstrap_artifact_uri":bootstrap,"duration_estimate":{"seconds":seconds,"basis":"elapsed_since_start_no_end_event","as_of":generated}}));
-        if sessions.len() == limit {
+        if sessions.len() > limit {
             break;
         }
+    }
+    let has_more = sessions.len() > limit;
+    if has_more {
+        sessions.pop();
     }
     let mut latest = serde_json::Map::new();
     for session in &sessions {
@@ -394,7 +404,7 @@ fn list_sessions(context: &Context, args: &Value) -> Result<Value, String> {
         }
     }
     Ok(
-        json!({"status":"ok","schema":"narada.agent_context.sessions.v0","authority":"agent_context_sqlite","generated_at":generated,"filters":{"identity":args.get("identity").cloned().unwrap_or(Value::Null),"date_from":args.get("date_from").cloned().unwrap_or(Value::Null),"date_to":args.get("date_to").cloned().unwrap_or(Value::Null),"substrate":args.get("substrate").cloned().unwrap_or(Value::Null),"limit":limit},"session_count":sessions.len(),"sessions":sessions,"latest_session_per_identity":latest,"duration_estimate_note":"agent_start_events has no end timestamp; duration is elapsed time from created_at to generated_at."}),
+        json!({"status":"ok","schema":"narada.agent_context.sessions.v0","authority":"agent_context_sqlite","generated_at":generated,"filters":{"identity":args.get("identity").cloned().unwrap_or(Value::Null),"date_from":args.get("date_from").cloned().unwrap_or(Value::Null),"date_to":args.get("date_to").cloned().unwrap_or(Value::Null),"substrate":args.get("substrate").cloned().unwrap_or(Value::Null)},"offset":offset,"limit":limit,"returned":sessions.len(),"scanned":scanned,"has_more":has_more,"next_offset":if has_more{Some(offset+sessions.len())}else{None},"session_count":sessions.len(),"sessions":sessions,"latest_session_per_identity":latest,"duration_estimate_note":"agent_start_events has no end timestamp; duration is elapsed time from created_at to generated_at."}),
     )
 }
 fn parse_date_filter(value: Option<&Value>, field: &str) -> Result<Option<String>, String> {
@@ -419,14 +429,44 @@ pub fn protocol_request(
                 return Ok(json!({"resources":[]}));
             }
             let directory = context.site_root.join(".ai/tmp/mcp-outputs/workspace");
+            let offset = params
+                .get("cursor")
+                .and_then(Value::as_str)
+                .unwrap_or("0")
+                .parse::<usize>()
+                .map_err(|_| "output_resource_cursor_invalid")?;
+            if offset > 10_000 {
+                return Err("output_resource_cursor_invalid".into());
+            }
             let mut resources = if directory.exists() {
-                fs::read_dir(directory).map_err(|e|format!("output_resource_list_failed:{e}"))?.filter_map(Result::ok).filter_map(|entry|{let name=entry.file_name().to_string_lossy().to_string();let id=name.strip_suffix(".json")?;let reference=format!("mcp_output:{id}");Some(json!({"uri":format!("mcp-output:{}",percent_encode(&reference)),"name":reference,"title":reference,"description":"Materialized MCP output ref.","mimeType":"application/json"}))}).collect::<Vec<_>>()
+                let mut values = Vec::new();
+                for entry in fs::read_dir(directory)
+                    .map_err(|e| format!("output_resource_list_failed:{e}"))?
+                {
+                    let entry = entry.map_err(|e| format!("output_resource_list_failed:{e}"))?;
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    let Some(id) = name.strip_suffix(".json") else {
+                        continue;
+                    };
+                    values.push(json!({"uri":format!("mcp-output:{}",percent_encode(&format!("mcp_output:{id}"))),"name":format!("mcp_output:{id}"),"title":format!("mcp_output:{id}"),"description":"Materialized MCP output ref.","mimeType":"application/json"}));
+                    if values.len() > 10_000 {
+                        return Err("output_resource_scan_limit_reached".into());
+                    }
+                }
+                values
             } else {
                 vec![]
             };
             resources.sort_by_key(|v| v["name"].as_str().unwrap_or("").to_string());
+            let page = resources
+                .iter()
+                .skip(offset)
+                .take(100)
+                .cloned()
+                .collect::<Vec<_>>();
+            let has_more = offset + page.len() < resources.len();
             Ok(
-                json!({"resources":resources,"offset":0,"limit":100,"next_offset":null,"nextCursor":null,"has_more":false}),
+                json!({"resources":page,"offset":offset,"limit":100,"returned":page.len(),"next_offset":if has_more{Some(offset+page.len())}else{None},"nextCursor":if has_more{Some((offset+page.len()).to_string())}else{None},"has_more":has_more}),
             )
         }
         "resources/read" => {
@@ -464,12 +504,7 @@ pub fn protocol_request(
                 .and_then(Value::as_str)
                 .unwrap_or("");
             let values = if argument == "name" {
-                let contract: Value =
-                    serde_json::from_str(NATIVE_CONTRACT).map_err(|e| e.to_string())?;
-                contract
-                    .pointer(&format!("/projections/{projection}"))
-                    .and_then(Value::as_array)
-                    .unwrap_or(&vec![])
+                crate::contract::tools(projection)?
                     .iter()
                     .filter_map(|v| v.get("name").and_then(Value::as_str))
                     .take(100)
@@ -612,6 +647,14 @@ fn output_show(context: &Context, args: &Value) -> Result<Value, String> {
     let path = context
         .site_root
         .join(format!(".ai/tmp/mcp-outputs/workspace/{output_id}.json"));
+    let metadata =
+        fs::symlink_metadata(&path).map_err(|_| format!("output_ref_not_found: {reference}"))?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!("output_ref_symlink_refused: {reference}"));
+    }
+    if metadata.len() > 10 * 1024 * 1024 {
+        return Err(format!("output_ref_too_large: {reference}"));
+    }
     let bytes = fs::read(&path).map_err(|_| format!("output_ref_not_found: {reference}"))?;
     let record: Value =
         serde_json::from_slice(&bytes).map_err(|e| format!("output_ref_invalid_json: {e}"))?;
@@ -675,12 +718,7 @@ fn sort_json(value: &Value) -> Value {
 }
 
 fn guidance(args: &Value) -> Result<Value, String> {
-    let contract: Value = serde_json::from_str(NATIVE_CONTRACT)
-        .map_err(|e| format!("agent_context_native_contract_invalid:{e}"))?;
-    let mut result = contract
-        .get("guidance")
-        .cloned()
-        .ok_or("agent_context_native_guidance_missing")?;
+    let mut result = crate::contract::guidance()?;
     let requested = json!({
         "workflow": args.get("workflow").and_then(Value::as_str).filter(|v|!v.trim().is_empty()).map(str::trim),
         "tool": args.get("tool").and_then(Value::as_str).filter(|v|!v.trim().is_empty()).map(str::trim)
@@ -922,8 +960,11 @@ fn continuation_export(context: &Context, args: &Value) -> Result<Value, String>
         &agent_id,
         checkpoint["checkpoint_id"].as_str().unwrap_or(""),
     )?;
-    let artifact_path = context.site_root.join(relative.replace('/', "\\"));
+    let artifact_path = context.site_root.join(&relative);
     let markdown = render_continuation(&agent_id, &checkpoint, continuation);
+    if markdown.len() > 256 * 1024 {
+        return Err("continuation_export_too_large".into());
+    }
     if let Some(parent) = artifact_path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("continuation_export_write_failed:{e}"))?;
     }
@@ -1007,12 +1048,30 @@ fn continuation_read(context: &Context, args: &Value) -> Result<Value, String> {
         .get("path")
         .and_then(Value::as_str)
         .ok_or("continuation_ref_path_must_be_site_relative")?;
-    let artifact_path = context.site_root.join(path.replace('/', "\\"));
-    let result = fs::read_to_string(&artifact_path);
+    let artifact_path = context.site_root.join(path);
+    let result = (|| {
+        let metadata = fs::symlink_metadata(&artifact_path)?;
+        if metadata.file_type().is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "continuation artifact symlinks are refused",
+            ));
+        }
+        if metadata.len() > 256 * 1024 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "continuation artifact exceeds 256 KiB",
+            ));
+        }
+        fs::read_to_string(&artifact_path)
+    })();
     match result {
         Ok(markdown)=>{
             let expected=checkpoint.pointer("/continuation/content_hash").and_then(Value::as_str);
-            if expected.is_some_and(|hash|!markdown.contains("<!-- narada.continuation.handoff.v1 -->")||!markdown.contains(&format!("<!-- narada.continuation.content-hash: {hash} -->"))){base.as_object_mut().unwrap().extend(json!({"continuation_ref":reference,"status":"stale","reason":"continuation_artifact_content_hash_mismatch","artifact":{"path":path,"verified":false}}).as_object().unwrap().clone())}else{base.as_object_mut().unwrap().extend(json!({"continuation_ref":reference,"status":"ok","artifact":{"path":path,"sha256":reference["sha256"],"created_at":reference["created_at"],"bytes":markdown.len(),"verified":true,"markdown":markdown}}).as_object().unwrap().clone())}
+            use sha2::{Digest, Sha256};
+            let actual_sha256=format!("{:x}",Sha256::digest(markdown.as_bytes()));
+            let reference_matches=reference.get("sha256").and_then(Value::as_str)==Some(actual_sha256.as_str());
+            if !reference_matches || expected.is_some_and(|hash|!markdown.contains("<!-- narada.continuation.handoff.v1 -->")||!markdown.contains(&format!("<!-- narada.continuation.content-hash: {hash} -->"))){base.as_object_mut().unwrap().extend(json!({"continuation_ref":reference,"status":"stale","reason":if reference_matches{"continuation_artifact_content_hash_mismatch"}else{"continuation_artifact_sha256_mismatch"},"artifact":{"path":path,"verified":false,"actual_sha256":actual_sha256}}).as_object().unwrap().clone())}else{base.as_object_mut().unwrap().extend(json!({"continuation_ref":reference,"status":"ok","artifact":{"path":path,"sha256":reference["sha256"],"created_at":reference["created_at"],"bytes":markdown.len(),"verified":true,"markdown":markdown}}).as_object().unwrap().clone())}
         }
         Err(error)=>base.as_object_mut().unwrap().extend(json!({"status":"stale","reason":format!("continuation_ref_unreadable: {error}"),"artifact":{"path":path,"verified":false}}).as_object().unwrap().clone()),
     }
@@ -1046,8 +1105,8 @@ fn continuation_export_path(
         .split('/')
         .filter(|p| !p.is_empty() && *p != ".")
         .collect::<Vec<_>>();
-    if parts.iter().any(|p| *p == "..")
-        || parts.get(0) != Some(&".ai")
+    if parts.contains(&"..")
+        || parts.first() != Some(&".ai")
         || parts.get(1) != Some(&"continuations")
     {
         return Err("continuation_export_path_outside_export_root".into());
@@ -1251,6 +1310,13 @@ fn normalize_continuation(
         return Err("continuation_resume_mode_invalid".into());
     }
     let mut canonical = json!({"schema":"narada.continuation.v1","continuation_id":value.get("continuation_id").and_then(Value::as_str).map(str::to_string).unwrap_or_else(||id("cont")),"objective":objective,"current_state":current_state,"completed_work":array(value,"completed_work"),"decisions":array(value,"decisions"),"evidence_refs":array(value,"evidence_refs"),"open_blockers":array(value,"open_blockers"),"next_action":field_or_null(value,"next_action"),"canonical_sources":array(value,"canonical_sources"),"constraints":array(value,"constraints"),"resume_mode":resume,"source_checkpoint_ref":format!("agent_context_checkpoint:{checkpoint_id}"),"created_at":value.get("created_at").cloned().unwrap_or_else(||Value::String(checkpoint_at.into()))});
+    if serde_json::to_vec(&canonical)
+        .map_err(|error| error.to_string())?
+        .len()
+        > 64 * 1024
+    {
+        return Err("continuation_too_large".into());
+    }
     let mut content = canonical.clone();
     content
         .as_object_mut()

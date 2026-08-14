@@ -3,7 +3,6 @@ import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { publishImmutableNativeArtifacts, resolveNativeArtifact } from '@narada-core/mcp-runtime-proxy/native-artifact';
-import './emit-native-tool-catalog.js';
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const nativeRoot = join(packageRoot, 'native');

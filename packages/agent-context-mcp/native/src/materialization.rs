@@ -50,7 +50,7 @@ pub fn compile(
         exact_checkpoint,
         portable_continuation,
     )?;
-    entries.sort_by(|left, right| projection_key(left).cmp(&projection_key(right)));
+    entries.sort_by_key(projection_key);
     let residuals = entries.iter().filter(|entry| {
         entry.get("projection_status").and_then(Value::as_str) != Some("available")
     }).map(|entry| {
