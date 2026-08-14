@@ -189,6 +189,107 @@ pub fn run(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+pub fn run_background(args: &[String]) -> Result<(), String> {
+    let request_path = argument_value(args, "--request")
+        .ok_or_else(|| "structured_command_background_request_required".to_string())?;
+    let expected_sha256 = argument_value(args, "--sha256")
+        .ok_or_else(|| "structured_command_background_sha256_required".to_string())?;
+    let bytes = fs::read(&request_path)
+        .map_err(|error| format!("structured_command_background_request_read_failed:{error}"))?;
+    if hex::encode(Sha256::digest(&bytes)) != expected_sha256 {
+        return Err("structured_command_background_request_integrity_mismatch".to_string());
+    }
+    let request: Value = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("structured_command_background_request_invalid:{error}"))?;
+    if request.get("schema").and_then(Value::as_str)
+        != Some("narada.structured_command.background_request.v1")
+    {
+        return Err("structured_command_background_request_schema_invalid".to_string());
+    }
+    let command = request
+        .get("command")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "structured_command_background_command_required".to_string())?;
+    let command_args = value_strings(request.get("args"));
+    let cwd = PathBuf::from(
+        request
+            .get("working_directory")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "structured_command_background_cwd_required".to_string())?,
+    );
+    let timeout_ms = request
+        .get("timeout_ms")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "structured_command_background_timeout_required".to_string())?;
+    let max_output_bytes = request
+        .get("max_output_bytes")
+        .and_then(Value::as_u64)
+        .unwrap_or(DEFAULT_MAX_OUTPUT_BYTES as u64)
+        .clamp(1, MAX_OUTPUT_BYTES as u64) as usize;
+    let storage_root = PathBuf::from(
+        request
+            .get("storage_root")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "structured_command_background_storage_root_required".to_string())?,
+    );
+    let execution_ref = request
+        .get("execution_ref")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "structured_command_background_execution_ref_required".to_string())?;
+    let state = State {
+        allowed_roots: vec![cwd.clone()],
+        allowed_commands: vec![],
+        allowed_prefixes: vec![],
+        blocked_commands: vec![],
+        max_timeout_ms: timeout_ms,
+        max_output_bytes,
+        audit_log_dir: request
+            .get("audit_log_dir")
+            .and_then(Value::as_str)
+            .map(PathBuf::from),
+        site_root: cwd.clone(),
+        storage_root,
+        env: env::vars().collect(),
+    };
+    let result = run_process(
+        command,
+        &command_args,
+        &cwd,
+        timeout_ms,
+        max_output_bytes,
+        None,
+        &state.env,
+    );
+    let payload = execution_payload(
+        command,
+        &command_args,
+        &cwd,
+        request
+            .get("started_at")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        timeout_ms,
+        request
+            .get("execution_posture")
+            .cloned()
+            .unwrap_or_else(|| json!({})),
+        result,
+        "background",
+        false,
+        request.get("input_ref").cloned().unwrap_or(Value::Null),
+    );
+    audit(&state, &payload);
+    update_execution_record(&state, execution_ref, &payload).map_err(|error| error.message)?;
+    let _ = fs::remove_file(request_path);
+    Ok(())
+}
+
+fn argument_value(args: &[String], name: &str) -> Option<String> {
+    args.windows(2)
+        .find(|pair| pair[0] == name)
+        .map(|pair| pair[1].clone())
+}
+
 enum Event {
     Request(Value, bool),
     Response(Value, bool, String),
@@ -392,16 +493,34 @@ fn initialize(request: &Value) -> Value {
 
 fn list_tools() -> Vec<Value> {
     vec![
-        tool("structured_command_guidance", "Guidance for argv-only structured command execution.", json!({"type": "object", "additionalProperties": true}), true),
+        tool("structured_command_guidance", "Guidance for argv-only structured command execution.", json!({"type": "object", "properties": {"workflow": {"type": "string"}, "tool": {"type": "string"}}, "additionalProperties": false}), true),
         tool("structured_command_execution_policy_inspect", "Inspect the policy governing structured command execution.", json!({"type": "object", "additionalProperties": false}), true),
-        tool("structured_command_output_show", "Read a materialized structured-command output ref with offset/limit paging.", json!({"type": "object", "properties": {"ref": {"type": "string"}, "output_ref": {"type": "string"}, "offset": {"type": "integer"}, "limit": {"type": "integer"}}, "additionalProperties": false}), true),
-        tool("structured_command_execute", "Execute a structured argv command under allowed-root and command policy. Synchronous execution is bounded.", json!({"type": "object", "properties": {"input_ref": {"type": "string"}, "execution_ref": {"type": "string"}, "command": {"type": "string"}, "args": {"type": "array", "items": {"type": "string"}}, "working_directory": {"type": "string"}, "timeout_ms": {"type": "integer"}, "wait_for_completion": {"type": "boolean"}, "test_scope": {"type": "string"}, "expected_cost": {"type": "string"}, "stdout_offset": {"type": "integer"}, "stderr_offset": {"type": "integer"}, "stdout_limit": {"type": "integer"}, "stderr_limit": {"type": "integer"}}, "required": ["command"]}), false),
-        tool("structured_command_start", "Start a durable asynchronous structured argv command and return an execution_ref.", json!({"type": "object", "properties": {"input_ref": {"type": "string"}, "command": {"type": "string"}, "args": {"type": "array", "items": {"type": "string"}}, "working_directory": {"type": "string"}, "timeout_ms": {"type": "integer"}, "test_scope": {"type": "string"}, "expected_cost": {"type": "string"}}, "required": ["command"]}), false),
-        tool("structured_command_execution_show", "Read one durable structured command execution by execution_ref.", json!({"type": "object", "properties": {"execution_ref": {"type": "string"}, "stdout_offset": {"type": "integer"}, "stderr_offset": {"type": "integer"}, "stdout_limit": {"type": "integer"}, "stderr_limit": {"type": "integer"}}, "required": ["execution_ref"], "additionalProperties": false}), true),
+        tool("structured_command_output_show", "Read a materialized structured-command output ref with offset/limit paging.", json!({"type": "object", "properties": {"ref": {"type": "string"}, "output_ref": {"type": "string"}, "offset": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 20000}}, "oneOf": [{"required":["ref"]},{"required":["output_ref"]}], "additionalProperties": false}), true),
+        tool("structured_command_execute", "Execute a structured argv command under allowed-root and command policy, or read an existing execution_ref. Supply exactly one of command, input_ref, or execution_ref.", execution_schema(true), false),
+        tool("structured_command_start", "Start a durable detached native command and return an execution_ref immediately. Supply command or input_ref.", execution_schema(false), false),
+        tool("structured_command_execution_show", "Read one durable structured command execution by execution_ref.", json!({"type": "object", "properties": {"execution_ref": {"type": "string", "minLength": 1}, "stdout_offset": {"type": "integer", "minimum": 0}, "stderr_offset": {"type": "integer", "minimum": 0}, "stdout_limit": {"type": "integer", "minimum": 1, "maximum": 20000}, "stderr_limit": {"type": "integer", "minimum": 1, "maximum": 20000}}, "required": ["execution_ref"], "additionalProperties": false}), true),
         tool("structured_command_powershell_parse_check", "Parse-check an allowed-root PowerShell script without admitting arbitrary execution.", json!({"type": "object", "properties": {"path": {"type": "string"}, "working_directory": {"type": "string"}, "timeout_ms": {"type": "integer"}}, "required": ["path"], "additionalProperties": false}), true),
-        tool("structured_command_input_create", "Create a scoped structured command input ref.", json!({"type": "object", "properties": {"input_id": {"type": "string"}, "command": {"type": "string"}, "args": {"type": "array", "items": {"type": "string"}}, "working_directory": {"type": "string"}, "timeout_ms": {"type": "integer"}, "wait_for_completion": {"type": "boolean"}, "test_scope": {"type": "string"}, "expected_cost": {"type": "string"}}, "required": ["command"]}), false),
-        tool("structured_command_elevated_window_execute", "On Windows, launch a policy-approved command in a visible elevated UAC window.", json!({"type": "object", "properties": {"command": {"type": "string"}, "args": {"type": "array", "items": {"type": "string"}}, "working_directory": {"type": "string"}, "confirm_elevation": {"type": "boolean"}, "wait": {"type": "boolean"}, "dry_run": {"type": "boolean"}}, "required": ["command", "working_directory"]}), false),
+        tool("structured_command_input_create", "Create a scoped structured command input ref.", json!({"type": "object", "properties": {"input_id": {"type": "string"}, "command": {"type": "string", "minLength": 1}, "args": {"type": "array", "items": {"type": "string"}}, "working_directory": {"type": "string"}, "timeout_ms": {"type": "integer", "minimum": 1}, "wait_for_completion": {"type": "boolean"}, "test_scope": {"type": "string"}, "expected_cost": {"type": "string"}}, "required": ["command"], "additionalProperties": false}), false),
+        tool("structured_command_elevated_window_execute", "On Windows, launch a policy-approved command in a visible elevated UAC window. Execution requires confirm_elevation=true.", json!({"type": "object", "properties": {"command": {"type": "string", "minLength": 1}, "args": {"type": "array", "items": {"type": "string"}}, "working_directory": {"type": "string", "minLength": 1}, "confirm_elevation": {"type": "boolean"}, "wait": {"type": "boolean"}, "dry_run": {"type": "boolean"}, "timeout_ms":{"type":"integer","minimum":1}}, "required": ["command", "working_directory"], "additionalProperties": false}), false),
     ]
+}
+
+fn execution_schema(allow_execution_ref: bool) -> Value {
+    let mut properties = json!({"input_ref": {"type": "string", "minLength": 1}, "command": {"type": "string", "minLength": 1}, "args": {"type": "array", "items": {"type": "string"}}, "working_directory": {"type": "string"}, "timeout_ms": {"type": "integer", "minimum": 1}, "wait_for_completion": {"type": "boolean"}, "test_scope": {"type": "string"}, "expected_cost": {"type": "string"}, "stdout_offset": {"type": "integer", "minimum": 0}, "stderr_offset": {"type": "integer", "minimum": 0}, "stdout_limit": {"type": "integer", "minimum": 1, "maximum": 20000}, "stderr_limit": {"type": "integer", "minimum": 1, "maximum": 20000}}).as_object().unwrap().clone();
+    if allow_execution_ref {
+        properties.insert(
+            "execution_ref".to_string(),
+            json!({"type": "string", "minLength": 1}),
+        );
+    }
+    let mut alternatives = vec![
+        json!({"required": ["command"]}),
+        json!({"required": ["input_ref"]}),
+    ];
+    if allow_execution_ref {
+        alternatives.push(json!({"required": ["execution_ref"]}));
+    }
+    json!({"type": "object", "properties": properties, "oneOf": alternatives, "additionalProperties": false})
 }
 
 fn tool(name: &str, description: &str, schema: Value, read_only: bool) -> Value {
@@ -441,19 +560,15 @@ fn call_tool(
     let payload = match name {
         "structured_command_guidance" => guidance(args),
         "structured_command_execution_policy_inspect" => Ok(policy_payload(state)),
-        "structured_command_execute" => execute(state, args, cancellation),
-        "structured_command_execution_show" => execute(state, args, cancellation),
+        "structured_command_execute" => execute(state, args, cancellation, false),
+        "structured_command_execution_show" => show_execution(state, args),
         "structured_command_input_create" => create_input_record(state, args),
         "structured_command_output_show" => output_show(state, args),
         "structured_command_powershell_parse_check" => {
             powershell_parse_check(state, args, cancellation)
         }
-        "structured_command_start" => Err(StructuredError::new(
-            "structured_command_background_not_available",
-            "structured_command_background_not_available",
-            json!({"remediation": "Use the JavaScript structured-command surface for durable background execution."}),
-        )),
-        "structured_command_elevated_window_execute" => elevated_refusal(args),
+        "structured_command_start" => execute(state, args, cancellation, true),
+        "structured_command_elevated_window_execute" => elevated_execute(state, args, cancellation),
         _ => Err(StructuredError::new(
             "structured_command_unknown_tool",
             format!("structured_command_unknown_tool:{name}"),
@@ -465,7 +580,7 @@ fn call_tool(
 
 fn guidance(args: &Value) -> Result<Value, StructuredError> {
     Ok(
-        json!({"schema": "narada.mcp_surface.guidance.v0", "status": "ok", "surface_id": "structured-command", "guidance_tool": "structured_command_guidance", "purpose": "Bounded argv-only process execution under explicit command and root policy.", "requested": {"workflow": args.get("workflow"), "tool": args.get("tool")}, "safety": ["Inspect policy before execution.", "Pass command arguments as an array; no shell interpolation is performed.", "Retain structuredContent as the authoritative execution record."]}),
+        json!({"schema": "narada.mcp_surface.guidance.v0", "status": "ok", "surface_id": "structured-command", "guidance_tool": "structured_command_guidance", "purpose": "Bounded argv-only process execution under explicit command and root policy.", "requested": {"workflow": args.get("workflow"), "tool": args.get("tool")}, "safety": ["Inspect policy before execution.", "Pass command arguments as an array; no shell interpolation is performed.", "Retain structuredContent as the authoritative execution record.", "Use structured_command_start for long work; it returns a durable execution_ref immediately. Poll structured_command_execution_show for terminal status."]}),
     )
 }
 
@@ -541,19 +656,32 @@ fn powershell_parse_check(
     )
 }
 
-fn elevated_refusal(args: &Value) -> Result<Value, StructuredError> {
+fn elevated_execute(
+    state: &State,
+    args: &Value,
+    cancellation: Option<Arc<AtomicBool>>,
+) -> Result<Value, StructuredError> {
     let object = args.as_object().cloned().unwrap_or_default();
     let command = object
         .get("command")
         .and_then(Value::as_str)
         .unwrap_or_default();
     let command_args = value_strings(object.get("args"));
-    let cwd = object
-        .get("working_directory")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
+    let cwd = resolve_path(
+        object
+            .get("working_directory")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        &state.allowed_roots[0],
+    );
+    let decision = decide(state, command, &command_args, &cwd);
+    if decision.get("status").and_then(Value::as_str) != Some("allowed") {
+        return Ok(
+            json!({"schema":"narada.structured_command.elevated_window_result.v0","status":"refused","executed":false,"command":command,"args":command_args,"working_directory":cwd.to_string_lossy(),"decision":decision,"refusal_reasons":decision.get("reasons").cloned().unwrap_or_else(||json!([]))}),
+        );
+    }
     let wait = object.get("wait").and_then(Value::as_bool).unwrap_or(false);
-    let script = format!("$ErrorActionPreference = 'Stop'; $p = Start-Process -FilePath {} -ArgumentList {} -WorkingDirectory {} -Verb RunAs -WindowStyle Normal -PassThru; {}", ps_single_quote(command), ps_array_literal(&command_args), ps_single_quote(cwd), if wait { "if ($p) { $p.WaitForExit(); exit $p.ExitCode }" } else { "if ($p) { Write-Output (\"started_pid=\" + $p.Id) }" });
+    let script = format!("$ErrorActionPreference = 'Stop'; $p = Start-Process -FilePath {} -ArgumentList {} -WorkingDirectory {} -Verb RunAs -WindowStyle Normal -PassThru; {}", ps_single_quote(command), ps_array_literal(&command_args), ps_single_quote(&cwd.to_string_lossy()), if wait { "if ($p) { $p.WaitForExit(); exit $p.ExitCode }" } else { "if ($p) { Write-Output (\"started_pid=\" + $p.Id) }" });
     let broker = json!({"command": "powershell.exe", "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], "script": script});
     let dry_run = object
         .get("dry_run")
@@ -561,11 +689,37 @@ fn elevated_refusal(args: &Value) -> Result<Value, StructuredError> {
         .unwrap_or(false);
     if dry_run {
         return Ok(
-            json!({"schema": "narada.structured_command.elevated_window_result.v0", "status": "planned", "executed": false, "command": command, "args": command_args, "working_directory": cwd, "wait": wait, "broker": broker, "note": "Native Rust exposes the broker plan but does not launch a privileged process."}),
+            json!({"schema": "narada.structured_command.elevated_window_result.v0", "status": "planned", "executed": false, "command": command, "args": command_args, "working_directory": cwd.to_string_lossy(), "wait": wait, "decision":decision,"broker": broker}),
         );
     }
+    if object.get("confirm_elevation").and_then(Value::as_bool) != Some(true) {
+        return Ok(
+            json!({"schema":"narada.structured_command.elevated_window_result.v0","status":"refused","executed":false,"command":command,"args":command_args,"working_directory":cwd.to_string_lossy(),"wait":wait,"decision":decision,"refusal_reasons":["confirm_elevation_required"],"remediation_hints":["Retry with confirm_elevation=true only when a visible Windows UAC prompt is intended."],"broker":broker}),
+        );
+    }
+    let timeout_ms = object
+        .get("timeout_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or(if wait { state.max_timeout_ms } else { 60_000 })
+        .clamp(1, state.max_timeout_ms);
+    let result = run_process(
+        "powershell.exe",
+        &[
+            "-NoProfile".into(),
+            "-NonInteractive".into(),
+            "-ExecutionPolicy".into(),
+            "Bypass".into(),
+            "-Command".into(),
+            script,
+        ],
+        &cwd,
+        timeout_ms,
+        state.max_output_bytes,
+        cancellation,
+        &state.env,
+    );
     Ok(
-        json!({"schema": "narada.structured_command.elevated_window_result.v0", "status": "refused", "executed": false, "command": command, "args": command_args, "working_directory": cwd, "wait": wait, "refusal_reasons": ["native_elevation_not_enabled"], "remediation_hints": ["Use the JavaScript structured-command surface for confirmed Windows UAC execution."], "broker": broker}),
+        json!({"schema":"narada.structured_command.elevated_window_result.v0","status":if result.cancelled{"cancelled"}else if result.timed_out{"timed_out"}else if result.exit_code==Some(0){"started"}else{"failed"},"executed":true,"command":command,"args":command_args,"working_directory":cwd.to_string_lossy(),"wait":wait,"decision":decision,"timeout_ms":timeout_ms,"exit_code":result.exit_code,"stdout":result.stdout,"stderr":result.stderr,"stdout_truncated":result.stdout_truncated,"stderr_truncated":result.stderr_truncated,"timed_out":result.timed_out,"cancelled":result.cancelled,"broker":broker}),
     )
 }
 
@@ -737,6 +891,17 @@ fn read_execution_record(state: &State, reference: &str) -> Result<Value, Struct
 
 fn create_input_record(state: &State, args: &Value) -> Result<Value, StructuredError> {
     let object = args.as_object().cloned().unwrap_or_default();
+    let command = object
+        .get("command")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            StructuredError::new(
+                "structured_command_command_required",
+                "structured_command_command_required",
+                json!({}),
+            )
+        })?;
     let id = object
         .get("input_id")
         .and_then(Value::as_str)
@@ -754,7 +919,7 @@ fn create_input_record(state: &State, args: &Value) -> Result<Value, StructuredE
         ));
     }
     let input = json!({
-        "command": object.get("command").and_then(Value::as_str).unwrap_or_default(),
+        "command": command,
         "args": object.get("args").and_then(Value::as_array).map(|values| values.iter().map(|value| value.as_str().unwrap_or_default()).collect::<Vec<_>>()).unwrap_or_default(),
         "working_directory": object.get("working_directory"),
         "timeout_ms": object.get("timeout_ms"),
@@ -805,15 +970,33 @@ fn execute(
     state: &State,
     args: &Value,
     cancellation: Option<Arc<AtomicBool>>,
+    force_background: bool,
 ) -> Result<Value, StructuredError> {
     let args_object = args.as_object().cloned().unwrap_or_default();
-    if let Some(reference) = args_object.get("execution_ref").and_then(Value::as_str) {
-        let payload = read_execution_record(state, reference)?;
-        return Ok(page_execution(
-            &payload,
-            &args_object,
-            Some(reference.to_string()),
+    let selectors = ["command", "input_ref", "execution_ref"]
+        .iter()
+        .filter(|name| {
+            args_object
+                .get(**name)
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.is_empty())
+        })
+        .copied()
+        .collect::<Vec<_>>();
+    let valid = selectors.len() == 1 && (!force_background || selectors[0] != "execution_ref");
+    if !valid {
+        return Err(StructuredError::new(
+            "structured_command_execution_selector_invalid",
+            "structured_command_execution_selector_invalid",
+            json!({"provided":selectors,"required":"Supply exactly one of command or input_ref; structured_command_execute also accepts execution_ref."}),
         ));
+    }
+    if args_object
+        .get("execution_ref")
+        .and_then(Value::as_str)
+        .is_some()
+    {
+        return show_execution(state, args);
     }
     let effective_args =
         if let Some(reference) = args_object.get("input_ref").and_then(Value::as_str) {
@@ -869,18 +1052,25 @@ fn execute(
             json!({"schema": "narada.structured_command.execution_result.v0", "status": "refused", "decision": decision, "refusal_reasons": reasons, "remediation_hints": decision.get("remediation_hints").cloned().unwrap_or_else(|| json!([])), "mcp_fallbacks": [], "command": command, "args": command_args, "working_directory": working_directory.to_string_lossy(), "execution_posture": posture, "test_scope": test_scope, "expected_cost": expected_cost, "executed": false}),
         );
     }
-    if args_object
-        .get("wait_for_completion")
-        .and_then(Value::as_bool)
-        == Some(false)
-    {
-        return Ok(
-            json!({"schema": "narada.structured_command.execution_result.v0", "status": "refused", "executed": false, "decision": decision, "refusal_reasons": ["background_execution_not_implemented_in_native_slice"], "remediation_hints": ["Use the JavaScript structured-command surface for durable background execution while the native slice is expanded."], "mcp_fallbacks": [], "command": command, "args": command_args, "working_directory": working_directory.to_string_lossy(), "execution_posture": posture, "test_scope": test_scope, "expected_cost": expected_cost}),
+    let background = force_background
+        || args_object
+            .get("wait_for_completion")
+            .and_then(Value::as_bool)
+            == Some(false);
+    if background {
+        return start_background(
+            state,
+            &command,
+            &command_args,
+            &working_directory,
+            timeout_ms,
+            posture,
+            args_object.get("input_ref").cloned().unwrap_or(Value::Null),
         );
     }
     if timeout_ms > MAX_SYNCHRONOUS_TIMEOUT_MS {
         return Ok(
-            json!({"schema": "narada.structured_command.execution_result.v0", "status": "refused", "executed": false, "decision": decision, "refusal_reasons": ["synchronous_timeout_exceeds_reliable_bound"], "remediation_hints": [format!("Use the JavaScript structured-command surface for commands requiring more than {MAX_SYNCHRONOUS_TIMEOUT_MS}ms while the native slice is expanded.")], "mcp_fallbacks": [], "command": command, "args": command_args, "working_directory": working_directory.to_string_lossy(), "timeout_ms": timeout_ms, "max_synchronous_timeout_ms": MAX_SYNCHRONOUS_TIMEOUT_MS}),
+            json!({"schema": "narada.structured_command.execution_result.v0", "status": "refused", "executed": false, "decision": decision, "refusal_reasons": ["synchronous_timeout_exceeds_reliable_bound"], "remediation_hints": [format!("Use structured_command_start for commands requiring more than {MAX_SYNCHRONOUS_TIMEOUT_MS}ms, then poll structured_command_execution_show.")], "mcp_fallbacks": [], "command": command, "args": command_args, "working_directory": working_directory.to_string_lossy(), "timeout_ms": timeout_ms, "max_synchronous_timeout_ms": MAX_SYNCHRONOUS_TIMEOUT_MS}),
         );
     }
     let started_at = now_rfc3339();
@@ -908,6 +1098,112 @@ fn execute(
     audit(state, &payload);
     let reference = create_execution_record(state, &payload)?;
     Ok(page_execution(&payload, &args_object, Some(reference)))
+}
+
+fn show_execution(state: &State, args: &Value) -> Result<Value, StructuredError> {
+    let object = args.as_object().cloned().unwrap_or_default();
+    let reference = object
+        .get("execution_ref")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            StructuredError::new(
+                "structured_command_execution_ref_required",
+                "structured_command_execution_ref_required",
+                json!({}),
+            )
+        })?;
+    let payload = read_execution_record(state, reference)?;
+    Ok(page_execution(
+        &payload,
+        &object,
+        Some(reference.to_string()),
+    ))
+}
+
+fn start_background(
+    state: &State,
+    command: &str,
+    args: &[String],
+    cwd: &Path,
+    timeout_ms: u64,
+    posture: Value,
+    input_ref: Value,
+) -> Result<Value, StructuredError> {
+    let started_at = now_rfc3339();
+    let pending = json!({
+        "schema":"narada.structured_command.execution_result.v0","status":"running","executed":true,
+        "command":command,"args":args,"working_directory":cwd.to_string_lossy(),"started_at":started_at,
+        "finished_at":Value::Null,"timeout_ms":timeout_ms,"execution_posture":posture,
+        "test_scope":posture.get("test_scope").and_then(Value::as_str).unwrap_or("unknown"),
+        "expected_cost":posture.get("expected_cost").and_then(Value::as_str).unwrap_or("unknown"),
+        "execution_mode":"background","wait_for_completion":false,"pending":true,"exit_code":Value::Null,
+        "stdout":"","stderr":"","stdout_truncated":false,"stderr_truncated":false,
+        "timed_out":false,"cancelled":false,"input_ref":input_ref,
+    });
+    let execution_ref = create_execution_record(state, &pending)?;
+    let execution_id = parse_ref(&execution_ref, "execution")?;
+    let request_path = state
+        .storage_root
+        .join("background")
+        .join(format!("{execution_id}.json"));
+    let request = json!({
+        "schema":"narada.structured_command.background_request.v1","execution_ref":execution_ref,
+        "command":command,"args":args,"working_directory":cwd.to_string_lossy(),"timeout_ms":timeout_ms,
+        "max_output_bytes":state.max_output_bytes,"storage_root":state.storage_root.to_string_lossy(),
+        "audit_log_dir":state.audit_log_dir.as_ref().map(|path| path.to_string_lossy().to_string()),
+        "started_at":started_at,"execution_posture":posture,"input_ref":input_ref,
+    });
+    write_json_record(&request_path, &request)?;
+    let bytes = fs::read(&request_path).map_err(|error| {
+        StructuredError::new(
+            "structured_command_background_request_read_failed",
+            error.to_string(),
+            json!({"path":request_path.to_string_lossy()}),
+        )
+    })?;
+    let digest = hex::encode(Sha256::digest(&bytes));
+    let executable = env::current_exe().map_err(|error| {
+        StructuredError::new(
+            "structured_command_background_executable_unavailable",
+            error.to_string(),
+            json!({}),
+        )
+    })?;
+    let mut runner = Command::new(executable);
+    runner
+        .args([
+            "structured-command-background",
+            "--request",
+            &request_path.to_string_lossy(),
+            "--sha256",
+            &digest,
+        ])
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    apply_headless_process_posture(&mut runner);
+    match runner.spawn() {
+        Ok(child) => Ok(page_execution(&pending, &Map::new(), Some(execution_ref))
+            .as_object()
+            .cloned()
+            .map(|mut value| {
+                value.insert("runner_pid".to_string(), json!(child.id()));
+                Value::Object(value)
+            })
+            .unwrap_or(pending)),
+        Err(error) => {
+            let failed = json!({"schema":"narada.structured_command.execution_result.v0","status":"failed","executed":false,"pending":false,"command":command,"args":args,"working_directory":cwd.to_string_lossy(),"started_at":started_at,"finished_at":now_rfc3339(),"timeout_ms":timeout_ms,"execution_mode":"background","wait_for_completion":false,"error":"background_runner_spawn_failed","stderr":error.to_string(),"stdout":"","exit_code":Value::Null,"timed_out":false,"cancelled":false});
+            update_execution_record(state, &execution_ref, &failed)?;
+            let _ = fs::remove_file(request_path);
+            Err(StructuredError::new(
+                "structured_command_background_spawn_failed",
+                error.to_string(),
+                json!({"execution_ref":execution_ref}),
+            ))
+        }
+    }
 }
 
 fn infer_test_scope(command: &str, args: &[String]) -> &'static str {
@@ -1654,6 +1950,118 @@ fn now_rfc3339() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_tools_publish_closed_alternative_aware_schemas() {
+        let tools = list_tools();
+        for name in [
+            "structured_command_execute",
+            "structured_command_start",
+            "structured_command_input_create",
+        ] {
+            let tool = tools
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .expect("tool");
+            assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+        }
+        let execute = tools
+            .iter()
+            .find(|tool| tool["name"] == "structured_command_execute")
+            .expect("execute");
+        assert_eq!(
+            execute["inputSchema"]["oneOf"].as_array().map(Vec::len),
+            Some(3)
+        );
+        let start = tools
+            .iter()
+            .find(|tool| tool["name"] == "structured_command_start")
+            .expect("start");
+        assert_eq!(
+            start["inputSchema"]["oneOf"].as_array().map(Vec::len),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn execution_selector_refuses_ambiguous_calls() {
+        let root = env::temp_dir();
+        let state = State {
+            allowed_roots: vec![root.clone()],
+            allowed_commands: vec![],
+            allowed_prefixes: vec![],
+            blocked_commands: vec![],
+            max_timeout_ms: 10_000,
+            max_output_bytes: 4096,
+            audit_log_dir: None,
+            site_root: root.clone(),
+            storage_root: root,
+            env: env::vars().collect(),
+        };
+        let error = execute(
+            &state,
+            &json!({"command":"cargo","input_ref":"structured_command_input:fixture01"}),
+            None,
+            false,
+        )
+        .expect_err("ambiguous selector");
+        assert_eq!(error.code, "structured_command_execution_selector_invalid");
+        let error = execute(
+            &state,
+            &json!({"execution_ref":"structured_command_execution:fixture01"}),
+            None,
+            true,
+        )
+        .expect_err("start cannot read");
+        assert_eq!(error.code, "structured_command_execution_selector_invalid");
+    }
+
+    #[test]
+    fn background_runner_completes_durable_execution_record() {
+        let root = env::temp_dir().join(format!(
+            "narada-structured-command-background-{}",
+            unique_id("test")
+        ));
+        fs::create_dir_all(&root).expect("root");
+        let state = State {
+            allowed_roots: vec![root.clone()],
+            allowed_commands: vec![],
+            allowed_prefixes: vec![],
+            blocked_commands: vec![],
+            max_timeout_ms: 10_000,
+            max_output_bytes: 4096,
+            audit_log_dir: None,
+            site_root: root.clone(),
+            storage_root: root.clone(),
+            env: env::vars().collect(),
+        };
+        let pending = json!({"schema":"narada.structured_command.execution_result.v0","status":"running","executed":true,"pending":true,"stdout":"","stderr":""});
+        let execution_ref = create_execution_record(&state, &pending).expect("execution");
+        let request_path = root.join("background-request.json");
+        let request = json!({
+            "schema":"narada.structured_command.background_request.v1","execution_ref":execution_ref,
+            "command":"cargo","args":["--version"],"working_directory":root.to_string_lossy(),
+            "timeout_ms":10_000,"max_output_bytes":4096,"storage_root":root.to_string_lossy(),
+            "audit_log_dir":Value::Null,"started_at":now_rfc3339(),
+            "execution_posture":{"test_scope":"focused","expected_cost":"low"},"input_ref":Value::Null,
+        });
+        write_json_record(&request_path, &request).expect("request");
+        let digest = hex::encode(Sha256::digest(fs::read(&request_path).expect("bytes")));
+        run_background(&[
+            "--request".into(),
+            request_path.to_string_lossy().to_string(),
+            "--sha256".into(),
+            digest,
+        ])
+        .expect("background runner");
+        let completed = read_execution_record(&state, &execution_ref).expect("completed");
+        assert_eq!(completed["status"], "ok");
+        assert_eq!(completed["pending"], false);
+        assert!(completed["stdout"]
+            .as_str()
+            .is_some_and(|stdout| stdout.starts_with("cargo ")));
+        fs::remove_dir_all(root).expect("cleanup");
+    }
 
     #[test]
     fn pnpm_corepack_shim_resolves_without_shell_or_terminal() {

@@ -668,6 +668,7 @@ fn main() {
         Some("filesystem") => filesystem::run(&args[1..]),
         Some("git") => git::run(&args[1..]),
         Some("structured-command") => structured_command::run(&args[1..]),
+        Some("structured-command-background") => structured_command::run_background(&args[1..]),
         Some(other) => Err(format!("narada_mcp_runtime_unknown_applet:{other}")),
         None => Err("narada_mcp_runtime_applet_required".to_string()),
     };

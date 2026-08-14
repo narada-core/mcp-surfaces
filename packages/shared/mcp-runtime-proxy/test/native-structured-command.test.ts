@@ -119,6 +119,25 @@ try {
   assert.equal(shownResponses[0]?.result?.structuredContent?.page_source, 'persisted_execution');
   assert.equal(shownResponses[0]?.result?.structuredContent?.stdout, 'input-ref-ok');
 
+  const startedResponses = await run(root, [
+    { jsonrpc: '2.0', id: 17, method: 'tools/call', params: { name: 'structured_command_start', arguments: { command: 'node', args: ['-e', 'setTimeout(() => process.stdout.write("background-ok"), 100)'], working_directory: root, timeout_ms: 5000 } } },
+  ], auditLogDir);
+  const backgroundRef = startedResponses[0]?.result?.structuredContent?.execution_ref;
+  assert.equal(startedResponses[0]?.result?.structuredContent?.status, 'running');
+  assert.match(String(backgroundRef), /^structured_command_execution:/);
+  let background: JsonRecord | undefined;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const polled = await run(root, [
+      { jsonrpc: '2.0', id: 18, method: 'tools/call', params: { name: 'structured_command_execution_show', arguments: { execution_ref: backgroundRef } } },
+    ], auditLogDir);
+    background = polled[0]?.result?.structuredContent;
+    if (background?.status !== 'running') break;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+  }
+  assert.equal(background?.status, 'ok');
+  assert.equal(background?.stdout, 'background-ok');
+  assert.equal(background?.execution_mode, 'background');
+
   const largeResponses = await run(root, [
     { jsonrpc: '2.0', id: 13, method: 'tools/call', params: { name: 'structured_command_execute', arguments: { command: 'node', args: ['-e', 'process.stdout.write("x".repeat(6500))'], working_directory: root, stdout_limit: 4000 } } },
   ], auditLogDir);
