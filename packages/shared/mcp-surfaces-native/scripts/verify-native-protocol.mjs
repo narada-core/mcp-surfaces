@@ -2659,6 +2659,8 @@ function runNarsSessionParity() {
 function runSchedulerParity() {
   const workspaceRoot = resolve(packageRoot, '..', '..', '..');
   const rustRoot = mkdtempSync(join(tmpdir(), 'narada-scheduler-native-proof-'));
+  const hostTaskName = `NaradaNativeAudit-${process.pid}-${Date.now()}`;
+  let hostTaskCreated = false;
   try {
     const rustArgs = ['--surface-id', 'scheduler', '--site-root', rustRoot];
     const defaultSupervisor = join(process.env.USERPROFILE ?? '', 'src', 'narada', 'packages', 'process-launch-posture', 'native', 'target', 'release', 'narada-process-supervisor.exe');
@@ -2727,6 +2729,24 @@ function runSchedulerParity() {
       const responses = runMailbox(executable, rustArgs, [{ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } }], workspaceRoot, schedulerEnv);
       return mailboxStructured(responses, id, 'rust');
     };
+    if (process.platform === 'win32') {
+      const ping = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'PING.EXE');
+      const created = callScheduler(5, 'scheduler_task_create', {
+        task_name: hostTaskName, command: ping, arguments: '-n 20 127.0.0.1', schedule: 'daily', start_time: '23:59',
+        execution_time_limit_seconds: 60, multiple_instances: 'ignore_new', implementation_id: rustStatus.implementation_id,
+      });
+      if (created.status !== 'created' || created.console_window_policy !== 'native_create_no_window') throw new Error('scheduler.native_task_create_invalid');
+      hostTaskCreated = true;
+      if (callScheduler(6, 'scheduler_task_show', { task_name: hostTaskName }).task_definition?.hidden !== true) throw new Error('scheduler.native_task_show_invalid');
+      if (callScheduler(7, 'scheduler_task_disable', { task_name: hostTaskName, implementation_id: rustStatus.implementation_id }).status !== 'disabled') throw new Error('scheduler.native_task_disable_invalid');
+      if (callScheduler(8, 'scheduler_task_enable', { task_name: hostTaskName, implementation_id: rustStatus.implementation_id }).status !== 'enabled') throw new Error('scheduler.native_task_enable_invalid');
+      if (callScheduler(9, 'scheduler_task_update_action', { task_name: hostTaskName, command: ping, arguments: '-n 20 127.0.0.1', execution_time_limit_seconds: 60, implementation_id: rustStatus.implementation_id }).status !== 'updated') throw new Error('scheduler.native_task_update_invalid');
+      if (callScheduler(23, 'scheduler_task_run', { task_name: hostTaskName, implementation_id: rustStatus.implementation_id }).status !== 'started') throw new Error('scheduler.native_task_run_invalid');
+      if (callScheduler(24, 'scheduler_task_stop', { task_name: hostTaskName, implementation_id: rustStatus.implementation_id }).status !== 'stopped') throw new Error('scheduler.native_task_stop_invalid');
+      if (callScheduler(25, 'scheduler_task_history', { task_name: hostTaskName, limit: 1 }).count !== 1) throw new Error('scheduler.native_task_history_invalid');
+      if (callScheduler(26, 'scheduler_task_delete', { task_name: hostTaskName, implementation_id: rustStatus.implementation_id }).status !== 'deleted') throw new Error('scheduler.native_task_delete_invalid');
+      hostTaskCreated = false;
+    }
     const admittedSop = callScheduler(10, 'scheduler_activation_admit_sop', {
       activation_id: rustClaim.activation_id, consumer_id: 'native-parity-dispatcher', lease_token: rustClaim.lease_token,
       sop_run_id: 'native-parity-run', receipt_id: 'native-parity-admit', receipt: { status: 'accepted' }, implementation_id: rustStatus.implementation_id,
@@ -2767,8 +2787,9 @@ function runSchedulerParity() {
     for (const [index, tool] of rustTools.entries()) {
       if (!invalidResponses.find((response) => response.id === 1000 + index)?.error) throw new Error('scheduler.invalid_input_not_refused:' + tool.name);
     }
-    return { status: 'passed', implementation: 'rust-native', verified: ['all_tool_schemas_named_closed_bounded', 'all_tools_invalid_input', 'runtime_status', 'bounded_task_list', 'task_update_action_dry_run', 'activation_prepare', 'binding_upsert_show_list_pause_resume_retire', 'event_admit_show', 'activation_list_claim_admit_resolve_fail_unblock'] };
+    return { status: 'passed', implementation: 'rust-native', verified: ['all_tool_schemas_named_closed_bounded', 'all_tools_invalid_input', 'runtime_status', 'bounded_task_list', 'task_create_show_disable_enable_update_run_stop_history_delete', 'task_update_action_dry_run', 'activation_prepare', 'binding_upsert_show_list_pause_resume_retire', 'event_admit_show', 'activation_list_claim_admit_resolve_fail_unblock'] };
   } finally {
+    if (hostTaskCreated && process.platform === 'win32') spawnSync('schtasks.exe', ['/delete', '/tn', hostTaskName, '/f'], { stdio: 'ignore', windowsHide: true, timeout: 10000 });
     rmSync(rustRoot, { recursive: true, force: true });
   }
 }
