@@ -191,7 +191,18 @@ pub(crate) fn derive_input(options: DeriveOptions) -> Result<MaterializationInpu
                 ambient_bindings.push(entry);
             }
         }
-        for surface_id in &site.surface_ids {
+        let explicitly_selected = site.surface_ids.iter().cloned().collect::<BTreeSet<_>>();
+        let mut selected = explicitly_selected.clone();
+        for surface in surfaces {
+            if surface
+                .pointer("/surface_projection/default_injection")
+                .and_then(Value::as_str)
+                == Some("enabled")
+            {
+                selected.insert(required_string(surface, "catalog_surface_id")?);
+            }
+        }
+        for surface_id in &selected {
             let surface = by_id.get(surface_id).ok_or_else(|| {
                 Failure::new(
                     "materializer_declared_surface_missing",
@@ -199,7 +210,11 @@ pub(crate) fn derive_input(options: DeriveOptions) -> Result<MaterializationInpu
                 )
             })?;
             let source_server_key = required_string(surface, "server_name")?;
-            let server_name = surface_id.clone();
+            let server_name = if explicitly_selected.contains(surface_id) {
+                surface_id.clone()
+            } else {
+                source_server_key.clone()
+            };
             let binding_id = surface
                 .get("binding_id")
                 .and_then(Value::as_str)

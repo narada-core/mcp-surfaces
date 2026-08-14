@@ -5032,6 +5032,26 @@ mod tests {
     }
 
     #[test]
+    fn embedded_git_surface_is_injected_into_site_bound_sessions() {
+        let contract = embedded_contract();
+        let git = contract
+            .pointer("/read_models/registrar_surface_list/items")
+            .and_then(Value::as_array)
+            .and_then(|items| items.iter().find(|item| item["id"] == "git"))
+            .expect("git surface");
+        let projection = git["projections"]
+            .as_array()
+            .and_then(|items| items.iter().find(|item| item["id"] == "default"))
+            .expect("git runtime projection");
+        let descriptor_projection = git["descriptor"]["projections"]
+            .as_array()
+            .and_then(|items| items.iter().find(|item| item["id"] == "default"))
+            .expect("git descriptor projection");
+        assert_eq!(projection["default_injection"], "enabled");
+        assert_eq!(descriptor_projection["default_injection"], "enabled");
+    }
+
+    #[test]
     fn duplicate_native_contract_records_are_rejected() {
         let mut contract = embedded_contract();
         let duplicate = contract["tools"][0].clone();
