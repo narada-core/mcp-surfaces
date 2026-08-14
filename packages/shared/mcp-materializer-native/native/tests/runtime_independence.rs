@@ -263,7 +263,6 @@ fn derives_all_carriers_from_declared_site_capabilities_without_javascript() {
     let surface_ids = [
         "agent-context",
         "local-filesystem",
-        "mcp-registrar",
         "mcp-loader",
         "task-lifecycle",
         "surface-feedback",
@@ -444,7 +443,7 @@ fn derives_all_carriers_from_declared_site_capabilities_without_javascript() {
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(result["carrier_count"], 3);
     let codex = fs::read_to_string(home.join(".codex/config.toml")).unwrap();
-    assert_eq!(codex.matches("[mcp_servers.").count(), 6);
+    assert_eq!(codex.matches("[mcp_servers.").count(), 5);
     assert!(!codex.contains(".tools."));
     for surface_id in surface_ids {
         assert!(codex.contains(&format!("[mcp_servers.{surface_id}]")));

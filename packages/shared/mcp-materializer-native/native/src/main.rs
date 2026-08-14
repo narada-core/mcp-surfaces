@@ -2267,10 +2267,45 @@ fn validate_input(input: &MaterializationInput) -> Result<(), Failure> {
                     server.name.clone(),
                 ));
             }
+            validate_protocol_route(carrier, server)?;
             validate_proxy_launch(input, carrier, server)?;
         }
     }
     Ok(())
+}
+
+fn validate_protocol_route(carrier: &CarrierInput, server: &ServerInput) -> Result<(), Failure> {
+    let carrier_protocol = match carrier.carrier_kind {
+        CarrierKind::Codex | CarrierKind::Kimi | CarrierKind::Opencode => "2024-11-05",
+    };
+    let proxy_accepted_client_protocols = ["2024-11-05"];
+    let proxy_emitted_server_protocol = carrier_protocol;
+    let server_accepted_protocols: &[&str] = if server.name == "mcp-registrar" {
+        &["2026-07-28"]
+    } else {
+        &["2024-11-05", "2025-03-26", "2026-07-28"]
+    };
+    let translation_adapter: Option<&str> = None;
+    let valid = proxy_accepted_client_protocols.contains(&carrier_protocol)
+        && server_accepted_protocols.contains(&proxy_emitted_server_protocol);
+    if valid {
+        return Ok(());
+    }
+    Err(Failure::new(
+        "materializer_protocol_route_incompatible",
+        format!("{}:{}", carrier.carrier_id, server.name),
+    )
+    .with_details(json!({
+        "carrier_id":carrier.carrier_id,
+        "carrier_kind":carrier.carrier_kind,
+        "server_name":server.name,
+        "carrier_protocol":carrier_protocol,
+        "proxy_accepted_client_protocols":proxy_accepted_client_protocols,
+        "proxy_emitted_server_protocol":proxy_emitted_server_protocol,
+        "server_accepted_protocols":server_accepted_protocols,
+        "translation_adapter":translation_adapter,
+        "invariant":"carrier_protocol must be accepted by proxy; proxy-emitted protocol must be accepted by server; a version-changing edge requires an explicitly admitted translation adapter"
+    })))
 }
 
 fn validate_proxy_launch(
@@ -2748,6 +2783,26 @@ mod tests {
                 }],
             }],
         }
+    }
+
+    #[test]
+    fn rejects_legacy_kimi_route_to_modern_only_registrar() {
+        let root = tempdir().unwrap();
+        let mut input = fixture(root.path());
+        input.carriers[0].carrier_id = "kimi-test".into();
+        input.carriers[0].carrier_kind = CarrierKind::Kimi;
+        input.carriers[0].servers[0].name = "mcp-registrar".into();
+
+        let carrier = &input.carriers[0];
+        let failure = validate_protocol_route(carrier, &carrier.servers[0])
+            .expect_err("legacy Kimi must not route to a modern-only Registrar");
+
+        assert_eq!(failure.code, "materializer_protocol_route_incompatible");
+        assert_eq!(failure.details["carrier_id"], "kimi-test");
+        assert_eq!(failure.details["carrier_protocol"], "2024-11-05");
+        assert_eq!(failure.details["proxy_emitted_server_protocol"], "2024-11-05");
+        assert_eq!(failure.details["server_accepted_protocols"], json!(["2026-07-28"]));
+        assert!(failure.details["translation_adapter"].is_null());
     }
 
     #[test]
