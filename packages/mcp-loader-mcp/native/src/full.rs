@@ -2243,6 +2243,7 @@ fn list_tools() -> Vec<Value> {
         tool_definition("mcp_loader_tool_discovery_manifest","Return canonical semantic tool names for an attached surface and flag generated aliases as non-authoritative. Compact names are the default; exact schemas and runtime metadata are opt-in.",json!({"connection_id":{"type":"string"},"compact":{"type":"boolean","default":true},"include_runtime_metadata":{"type":"boolean","default":false}}),&["connection_id"],true,false),
         tool_definition("mcp_loader_call_tool","Call a tool on an attached MCP surface. Results are bounded by default and include a typed summary; set include_runtime_metadata=true when lifecycle/freshness evidence is needed on this call.",json!({"connection_id":{"type":"string"},"tool_name":{"type":"string"},"arguments":{"type":"object"},"include_runtime_metadata":{"type":"boolean"}}),&["connection_id","tool_name"],false,false),
         tool_definition("mcp_loader_call_surface_tool","Call a tool through a stable logical surface handle. Results are bounded by default and include a typed summary; set include_runtime_metadata=true for lifecycle/freshness evidence.",json!({"surface_handle":{"type":"string"},"tool_name":{"type":"string"},"arguments":{"type":"object"},"include_runtime_metadata":{"type":"boolean"}}),&["surface_handle","tool_name"],false,false),
+        tool_definition("mcp_loader_call_binding_tool","Atomically resume or reopen an admitted binding and call one child tool. Use this for workflows that must survive loader-client reconnects without threading a process-local handle.",json!({"site_root":{"type":"string"},"binding_id":{"type":"string"},"surface_id":{"type":"string"},"runtime_kind":{"type":"string"},"tool_name":{"type":"string"},"arguments":{"type":"object"},"include_runtime_metadata":{"type":"boolean","default":false}}),&["site_root","binding_id","tool_name"],false,false),
         tool_definition("mcp_loader_read_result","Read a bounded page from a materialized proxied child result. The ref is bound to the same Site authority as the connection.",json!({"connection_id":{"type":"string"},"ref":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":20000},"timeout_ms":{"type":"integer","minimum":1,"maximum":15000}}),&["connection_id","ref"],true,false),
         tool_definition("mcp_loader_detach","Detach and terminate an attached MCP surface.",json!({"connection_id":{"type":"string"}}),&["connection_id"],false,true),
         tool_definition("mcp_loader_surface_restart","Replace an attached MCP surface child process with a freshly initialized connection using the same site, surface, entrypoint, and args; this does not restart the agent session.",json!({"connection_id":{"type":"string"},"reason":{"type":"string"}}),&["connection_id"],false,true),
@@ -2441,7 +2442,7 @@ fn guidance_result(arguments: &JsonObject, state: &LoaderState) -> Value {
             "Call mcp_loader_connection_inventory before attachment when recovering from capacity errors or an earlier interrupted session.",
             "Call mcp_loader_process_ownership when reconciling child processes after an interrupted attach; it reports only this loader run's direct children and safe known-connection cleanup actions.",
             "Call mcp_loader_list_site_surfaces and mcp_loader_site_fabric_diagnostics for the explicit Site root.",
-            "Use mcp_loader_resume_or_open_surface with canonical binding_id for retryable workflows; use raw attach_surface only for low-level connection diagnostics.",
+            "Use mcp_loader_call_binding_tool with canonical binding_id for reconnect-safe calls; use resume_or_open only when several calls deliberately share one child handle.",
             "Inspect surface_projection.execution before attachment. mcp-loader accepts stdio projections only; surface_factory projections belong to the PC Site surface runtime.",
             "Use mcp_loader_list_tools or mcp_loader_tool_discovery_manifest after attachment; the child tools/list response owns exact tool schemas.",
             "Call mcp_loader_runtime_observation with connection_id and carrier_kind to obtain the V2 normalized observation.",
@@ -2454,7 +2455,7 @@ fn guidance_result(arguments: &JsonObject, state: &LoaderState) -> Value {
             {"step":"recover","guidance":"For a stale or transport-closed child, inspect inventory or status, then call mcp_loader_surface_restart."},
             {"step":"reconcile_processes","guidance":"Use mcp_loader_process_ownership to distinguish loader-owned direct children from unobserved host processes."},
             {"step":"resolve_site","guidance":"Use mcp_loader_list_site_surfaces and mcp_loader_site_fabric_diagnostics against the same explicit Site root."},
-            {"step":"attach","guidance":"Use mcp_loader_resume_or_open_surface with canonical binding_id for retryable workflows. It reuses a live handle in this loader process and reopens after loader restart."},
+            {"step":"attach","guidance":"Prefer mcp_loader_call_binding_tool for each reconnect-safe call. It resumes or reopens the admitted binding and invokes the child atomically; no process-local handle must be retained."},
             {"step":"discover","guidance":"Use compact mcp_loader_list_tools by default; request include_runtime_metadata only when lifecycle or freshness evidence is material."},
             {"step":"observe_live","guidance":"Use mcp_loader_site_tool_inventory_check to compare declared tools with fresh child tools/list responses."},
             {"step":"observe_runtime","guidance":"Call mcp_loader_runtime_observation after attachment."},
@@ -4485,6 +4486,39 @@ fn call_surface_handle_tool(
     call_attached_tool(&delegated, state)
 }
 
+fn call_binding_tool(
+    arguments: &JsonObject,
+    state: &mut LoaderState,
+) -> Result<Value, Diagnostic> {
+    let opened = resume_or_open_surface(arguments, state)?;
+    let handle = opened
+        .get("surface_handle")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Diagnostic::new("surface_handle_missing", "surface_handle_missing_after_resume_or_open"))?;
+    let mut delegated = Map::new();
+    delegated.insert("surface_handle".into(), json!(handle));
+    delegated.insert(
+        "tool_name".into(),
+        arguments.get("tool_name").cloned().unwrap_or(Value::Null),
+    );
+    delegated.insert(
+        "arguments".into(),
+        arguments.get("arguments").cloned().unwrap_or_else(|| json!({})),
+    );
+    if let Some(value) = arguments.get("include_runtime_metadata") {
+        delegated.insert("include_runtime_metadata".into(), value.clone());
+    }
+    let mut result = call_surface_handle_tool(&delegated, state)?;
+    result["binding_resolution"] = json!({
+        "status": opened.get("status").cloned().unwrap_or_else(|| json!("opened")),
+        "binding_id": arguments.get("binding_id").cloned().unwrap_or(Value::Null),
+        "surface_handle": handle,
+        "handle_scope": "loader_process",
+        "caller_must_retain_handle": false
+    });
+    Ok(result)
+}
+
 fn render_result(result: &Value) -> String {
     let schema = result
         .get("schema")
@@ -5181,6 +5215,7 @@ fn call_tool(name: &str, arguments: Value, state: &mut LoaderState) -> Result<Va
         "mcp_loader_tool_discovery_manifest" => tool_discovery_manifest(&object, state),
         "mcp_loader_call_tool" => call_attached_tool(&object, state),
         "mcp_loader_call_surface_tool" => call_surface_handle_tool(&object, state),
+        "mcp_loader_call_binding_tool" => call_binding_tool(&object, state),
         "mcp_loader_read_result" => read_loader_result(&object, state),
         "mcp_loader_detach" => detach_connection(&object, state),
         "mcp_loader_surface_restart" => restart_connection(&object, state),
@@ -5213,6 +5248,10 @@ mod tests {
         assert!(
             find("mcp_loader_resume_or_open_surface")["inputSchema"]["properties"]["binding_id"]
                 .is_object()
+        );
+        assert_eq!(
+            find("mcp_loader_call_binding_tool")["inputSchema"]["required"],
+            json!(["site_root", "binding_id", "tool_name"])
         );
         for name in [
             "mcp_loader_list_site_surfaces",

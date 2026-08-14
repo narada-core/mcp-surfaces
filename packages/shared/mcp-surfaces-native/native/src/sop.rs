@@ -239,7 +239,7 @@ fn run_list(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
         if !RUN_STATUSES.contains(&status) { return Err(json!({"schema":"narada.sop_mcp.error.v1","code":"sop_run_status_unsupported","message":format!("sop_run_status_unsupported:{status}"),"details":{"status":status,"allowed":RUN_STATUSES}})); }
         conditions.push("status = ?"); values.push(status.to_string());
     }
-    if args.get("include_terminal").and_then(Value::as_bool) != Some(true) { conditions.push("status NOT IN ('completed','failed','cancelled')"); }
+    if args.get("include_terminal").and_then(Value::as_bool) == Some(false) { conditions.push("status NOT IN ('completed','failed','cancelled')"); }
     if !conditions.is_empty() { sql.push_str(" WHERE "); sql.push_str(&conditions.join(" AND ")); }
     sql.push_str(" ORDER BY created_at DESC LIMIT ?");
     values.push(limit.to_string());
@@ -514,15 +514,18 @@ mod tests {
     }
 
     #[test]
-    fn native_sop_run_list_reads_nonterminal_summaries() {
+    fn native_sop_run_list_rediscovers_terminal_runs_by_default() {
         let root = std::env::temp_dir().join(format!("narada-sop-runs-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(root.join(".sop")).expect("root");
         let connection = Connection::open(db_path(&root)).expect("db");
         connection.execute_batch("CREATE TABLE sop_runs (run_id TEXT, sop_id TEXT, sop_version INTEGER, sop_title TEXT, status TEXT, occurrence_key TEXT, parent_run_id TEXT, parent_step_id TEXT, created_at TEXT, updated_at TEXT, completed_at TEXT); INSERT INTO sop_runs VALUES ('run-1','demo',1,'Demo','running','occ-1',NULL,NULL,'2026-01-01','2026-01-01',NULL); INSERT INTO sop_runs VALUES ('run-2','demo',1,'Demo','completed','occ-2',NULL,NULL,'2026-01-02','2026-01-02','2026-01-02');").expect("schema");
         drop(connection);
         let list = run_list(&json!({"limit":10}).as_object().unwrap(), &root).expect("list");
-        assert_eq!(list["count"], 1);
-        assert_eq!(list["items"][0]["run_id"], "run-1");
+        assert_eq!(list["count"], 2);
+        assert_eq!(list["items"][0]["run_id"], "run-2");
+        let active = run_list(&json!({"limit":10,"include_terminal":false}).as_object().unwrap(), &root).expect("active list");
+        assert_eq!(active["count"], 1);
+        assert_eq!(active["items"][0]["run_id"], "run-1");
         let invalid = run_list(&json!({"status":"unknown"}).as_object().unwrap(), &root).expect_err("status validation");
         assert_eq!(invalid["code"], "sop_run_status_unsupported");
         fs::remove_dir_all(root).expect("cleanup");
