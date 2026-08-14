@@ -16,7 +16,7 @@ export function surfaceDefinition(): DefinedSurface {
       id: 'default',
       transport: { kind: 'stdio', command: 'node', args: ["--allowed-root","{workspace_root}","--mode","write"], env: [] },
       injection_scope: 'local_site',
-      default_injection: 'all_site_bound_sessions',
+      default_injection: 'enabled',
       runtime_requirements: [],
       authority_requirements: ['scope.local_site'],
       lifecycle: { mode: 'replayable', reason: "Git state is external to the process and every operation carries its own repository context." },

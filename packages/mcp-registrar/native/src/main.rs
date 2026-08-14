@@ -2906,7 +2906,7 @@ fn shared_surface_ids_for_binding(contract: &Value, binding: &Value, site: &Valu
                     .flatten()
                     .any(|projection| {
                         projection["injection_scope"] == "local_site"
-                            && projection["default_injection"] == "all_site_bound_sessions"
+                            && projection["default_injection"] == "enabled"
                     });
             if automatic && !ids.iter().any(|value| value == id) {
                 ids.push(id.into())
@@ -3257,7 +3257,7 @@ fn site_mcp_fabric_validate(contract: &Value, args: &Value) -> Result<Value, Str
             .flatten()
             .find(|projection| {
                 projection["injection_scope"] == "local_site"
-                    && projection["default_injection"] == "all_site_bound_sessions"
+                    && projection["default_injection"] == "enabled"
             });
         let Some(projection) = required else { continue };
         if present.contains(id) || (id == "task-lifecycle" && present.contains("work-lifecycle")) {
