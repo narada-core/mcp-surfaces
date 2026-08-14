@@ -35,7 +35,7 @@ Builds during review are permitted. Carrier materialization and restart are defe
 | surface-feedback | re-audit | Prior named-schema and workflow repair; completion audit pending | pending | prior commits | pending |
 | epistemic-graph | re-audit | Prior multi-pass ergonomics repair; completion audit pending | pending | prior commits | pending |
 | sop | pre-restart complete | Named closed mutation schemas; one-call claim-and-advance; lease recovery metadata | focused Rust 12/12; full release 121/121 | `4ea4762` | pending |
-| operator-routing | queued | pending | pending | pending | pending |
+| operator-routing | pre-restart complete | Restored typed role-admission/runtime-binding handoffs; closed and bounded every argument; exposed authority contract in doctor; stable request ids now provide durable idempotent replay and conflict refusal | focused Rust 1/1 covering persistence, handoffs, schemas, retry/conflict; real native stdio covers doctor, both handoffs, fallback-disabled, invalid input, replay/conflict, durable readback | `dd3afdd` | pending |
 | site-inbox | queued | pending | pending | pending | pending |
 | task-lifecycle | re-audit | Prior schema preparation, recurrence, and ergonomics repair; completion audit pending | pending | prior commits | pending |
 | site-lifecycle | queued | pending | pending | pending | pending |
