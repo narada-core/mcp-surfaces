@@ -31,7 +31,7 @@ Builds during review are permitted. Carrier materialization and restart are defe
 | catalog-observation | pre-restart complete | Contract-only posture is explicit; unavailable result preserves requested access mode; precise invalid-field diagnostics; standalone verifier no longer requires workspace JS package | Rust focused 3/3; real stdio legacy/2026 discovery, guidance, unavailable, invalid instant/mode, credential non-disclosure | `4a84399` | pending |
 | git | re-audit | Prior ergonomics repair; completion audit pending | pending | prior commits | pending |
 | calendar | re-audit | Prior native Graph authority repair; completion audit pending | pending | prior commits | pending |
-| site-loop | queued | pending | pending | pending | pending |
+| site-loop | in progress | Native durable attention/control authority and allowlisted test execution implemented; test output is bounded and terminal UI inheritance removed. Proof, recovery drill, and loop execution still require a faithful native coordinator over their existing resident/scheduler/task authorities. | focused Rust 4/4; real native stdio config/docs/test-list/status/configured-test execution | `61d48e0`, `7b2c1fe` | pending |
 | surface-feedback | re-audit | Prior named-schema and workflow repair; completion audit pending | pending | prior commits | pending |
 | epistemic-graph | re-audit | Prior multi-pass ergonomics repair; completion audit pending | pending | prior commits | pending |
 | sop | pre-restart complete | Named closed mutation schemas; one-call claim-and-advance; lease recovery metadata | focused Rust 12/12; full release 121/121 | `4ea4762` | pending |
