@@ -77,9 +77,19 @@ fn read_request(stream: &mut TcpStream) -> String {
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
+    let mut request = Vec::new();
     let mut buffer = [0u8; 2048];
-    let count = stream.read(&mut buffer).unwrap_or(0);
-    String::from_utf8_lossy(&buffer[..count]).to_string()
+    while request.len() < 16 * 1024 {
+        let count = stream.read(&mut buffer).unwrap_or(0);
+        if count == 0 {
+            break;
+        }
+        request.extend_from_slice(&buffer[..count]);
+        if request.windows(4).any(|window| window == b"\r\n\r\n") {
+            break;
+        }
+    }
+    String::from_utf8_lossy(&request).to_string()
 }
 fn mock_kimi(count: usize) -> (String, thread::JoinHandle<Vec<String>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -208,6 +218,6 @@ if($Action -eq 'stop'){if(Test-Path -LiteralPath $PidPath){$target=[int](Get-Con
     assert_eq!(requests.len(), 2);
     assert!(requests.iter().all(|request| request
         .to_ascii_lowercase()
-        .contains("authorization: bearer test-token")));
+        .contains("authorization: bearer test-token")), "captured requests: {requests:?}");
     fs::remove_dir_all(root).unwrap();
 }
