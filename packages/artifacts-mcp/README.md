@@ -1,11 +1,14 @@
 # @narada-core/artifacts-mcp
 
-NARS session artifact MCP surface for model-facing artifact workflows.
+NARS session artifact MCP surface for model-facing artifact workflows. Every
+runtime profile selects the native Rust authority; Node and Bun are
+unavailable for this surface.
 
-The surface is a thin client over the current NARS artifact API. It does not
-read local files itself and does not maintain a second artifact store. NARS
-remains authoritative for source path admission, artifact ids, content-type
-policy, metadata, and content serving.
+The surface is a thin client over the current NARS artifact API and does not
+maintain a second artifact store. It verifies that registration sources are
+real files under the bound Site root before forwarding their canonical paths.
+NARS remains authoritative for artifact ids, content-type policy, metadata,
+event publication, and content serving.
 
 ## Tools
 
@@ -13,7 +16,7 @@ policy, metadata, and content serving.
 - `artifacts_doctor` - reports whether the NARS base URL and session id are configured.
 - `artifact_register_file` - registers a local file with NARS and returns a
   renderable `artifact_ref` message part.
-- `artifact_list` - reads the current session artifact index.
+- `artifact_list` - reads a bounded page of the current session artifact index.
 - `artifact_read` - reads one artifact metadata record and returns its message part.
 - `artifact_present` - asks NARS to append and broadcast a structured
   `assistant_message` event containing the artifact reference.
@@ -22,10 +25,13 @@ policy, metadata, and content serving.
 
 ## Configuration
 
-Configure either CLI flags or environment variables:
+The process launcher binds the endpoint and session. Tool callers cannot
+override the endpoint, and cannot select a different session when the process
+has a bound session. Configure the native process with environment variables:
 
 ```powershell
-artifacts-mcp --nars-base-url http://127.0.0.1:52944 --session-id carrier_...
+$env:NARADA_NARS_BASE_URL = 'http://127.0.0.1:52944'
+$env:NARADA_SESSION_ID = 'carrier_...'
 ```
 
 When `--nars-base-url` is omitted, the surface can discover the endpoint from
@@ -39,6 +45,10 @@ Equivalent environment variables:
 
 `NARADA_CARRIER_SESSION_ID` is still accepted as a compatibility fallback, but
 new launch/runtime wiring should prefer `NARADA_SESSION_ID`.
+
+Registration and presentation require an `idempotency_key`. A retry returns
+the original artifact or presentation event; reuse with different content is
+refused.
 
 ## Projection Contract
 
@@ -79,5 +89,5 @@ intended for recovery or bridging code that already has trusted metadata.
 ## Verification
 
 ```powershell
-pnpm --filter @narada-core/artifacts-mcp test
+cargo test --locked --manifest-path packages/shared/mcp-surfaces-native/native/Cargo.toml artifact
 ```

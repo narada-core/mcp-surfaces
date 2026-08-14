@@ -15,13 +15,14 @@ pub fn register(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> 
             "Configure the owning NARS runtime endpoint and retry.",
         )
     })?;
-    let source_path = required(args, "path").or_else(|_| required(args, "source_path"))?;
+    let source_path = admitted_source_path(root, &required(args, "path")?)?;
     let kind = normalized_kind(args)?;
     let render_hint = normalized_render_hint(args)?;
     let mut body = Map::new();
-    body.insert("source_path".into(), json!(source_path));
+    body.insert("source_path".into(), json!(source_path.to_string_lossy()));
     body.insert("kind".into(), json!(kind));
     body.insert("render_hint".into(), json!(render_hint.clone()));
+    body.insert("idempotency_key".into(), json!(required(args, "idempotency_key")?));
     for (from, to) in [
         ("title", "title"),
         ("content_type", "content_type"),
@@ -41,6 +42,7 @@ pub fn register(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> 
     Ok(json!({
         "schema":"narada.artifacts.register_file.v1",
         "status":"registered",
+        "idempotent_replay":response.get("idempotent_replay").cloned().unwrap_or(json!(false)),
         "artifact":artifact,
         "artifact_url":format!("{base}{}/{}", artifact_path(&session_id), encode_component(artifact_id)),
         "content_url":format!("{base}{}/{}/content", artifact_path(&session_id), encode_component(artifact_id)),
@@ -56,7 +58,7 @@ pub fn list(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
         return super::artifact_list(args, root);
     };
     let response = request(&base, &artifact_path(&session_id), "GET", None)?;
-    Ok(json!({"schema":"narada.artifacts.list.v1","status":"ok","session_id":session_id,"index":response}))
+    super::artifact_list_projection(&session_id,&response,args,None)
 }
 
 pub fn read(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
@@ -96,6 +98,7 @@ pub fn present(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
         }
     }
     body.insert("render_hint".into(), json!(normalized_render_hint(args)?));
+    body.insert("request_id".into(), json!(required(args, "idempotency_key")?));
     let path = format!("{}/{}/message", artifact_path(&session_id), encode_component(&artifact_id));
     let response = request(&base, &path, "POST", Some(&Value::Object(body)))?;
     let artifact = response.get("artifact").cloned().unwrap_or(Value::Null);
@@ -103,6 +106,7 @@ pub fn present(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     Ok(json!({
         "schema":"narada.artifacts.present.v1",
         "status":"presented",
+        "idempotent_replay":response.get("idempotent_replay").cloned().unwrap_or(json!(false)),
         "artifact":artifact,
         "event":response.get("event").cloned().unwrap_or(Value::Null),
         "message_part":message,
@@ -112,17 +116,11 @@ pub fn present(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
 }
 
 fn endpoint(args: &Map<String, Value>, root: &Path) -> Result<Option<(String, String)>, Value> {
-    let session_id = match super::current_session_id(args) {
+    let session_id = match super::current_session_id(args)? {
         Some(value) => value,
         None => return Ok(None),
     };
-    let configured = args
-        .get("nars_base_url")
-        .or_else(|| args.get("narsBaseUrl"))
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .map(str::to_string)
-        .or_else(|| std::env::var("NARADA_NARS_BASE_URL").ok().filter(|value| !value.trim().is_empty()))
+    let configured = std::env::var("NARADA_NARS_BASE_URL").ok().filter(|value| !value.trim().is_empty())
         .or_else(|| std::env::var("NARADA_AGENT_RUNTIME_SERVER_URL").ok().filter(|value| !value.trim().is_empty()))
         .or_else(|| std::env::var("NARADA_RUNTIME_SERVER_URL").ok().filter(|value| !value.trim().is_empty()));
     let base = if let Some(value) = configured {
@@ -179,8 +177,10 @@ fn required(args: &Map<String, Value>, key: &str) -> Result<String, Value> {
 
 fn normalized_kind(args: &Map<String, Value>) -> Result<String, Value> {
     let value = required(args, "kind")?.to_ascii_lowercase();
-    if ["html", "markdown", "json", "text", "image", "binary"].contains(&value.as_str()) { Ok(value) } else { Err(super::error("artifact_kind_invalid", "artifact_kind_invalid")) }
+    if ["html", "markdown", "json", "text", "image", "audio"].contains(&value.as_str()) { Ok(value) } else { Err(super::error("artifact_kind_invalid", "artifact_kind_invalid")) }
 }
+
+fn admitted_source_path(root:&Path,value:&str)->Result<std::path::PathBuf,Value>{let candidate=Path::new(value);let candidate=if candidate.is_absolute(){candidate.to_path_buf()}else{root.join(candidate)};let canonical=candidate.canonicalize().map_err(|_|super::error("artifact_source_file_not_found","artifact_source_file_not_found"))?;let admitted=root.canonicalize().map_err(|_|super::error("artifact_site_root_unavailable","artifact_site_root_unavailable"))?;if !canonical.is_file(){return Err(super::error("artifact_source_not_file","artifact_source_not_file"));}if !canonical.starts_with(&admitted){return Err(super::error("artifact_source_outside_site_root","artifact_source_outside_site_root"));}Ok(canonical)}
 
 fn normalized_render_hint(args: &Map<String, Value>) -> Result<String, Value> {
     let value = args.get("render_hint").and_then(Value::as_str).unwrap_or("inline").trim().to_ascii_lowercase();
