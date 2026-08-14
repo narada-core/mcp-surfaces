@@ -1019,6 +1019,19 @@ fn run_proxy(args: &[String]) -> Result<(), String> {
                     );
                     continue;
                 }
+                if let Some(response) = registrar_carrier_compatibility_response(
+                    options.surface_id.as_deref(),
+                    &message.value,
+                ) {
+                    write_wire(&mut stdout, &response, message.framed)?;
+                    continue;
+                }
+                if registrar_carrier_compatibility_notification(
+                    options.surface_id.as_deref(),
+                    &message.value,
+                ) {
+                    continue;
+                }
                 if let Some((id, method)) = request_identity(&message.value) {
                     if method == "initialize" || method == "tools/list" {
                         record_startup_event(
@@ -2841,7 +2854,11 @@ fn resolve_child_command(child_command: &str) -> Result<PathBuf, String> {
 
 #[cfg(test)]
 mod native_child_runtime_tests {
-    use super::resolve_child_command;
+    use super::{
+        registrar_carrier_compatibility_notification, registrar_carrier_compatibility_response,
+        resolve_child_command,
+    };
+    use serde_json::json;
 
     #[test]
     fn refuses_javascript_interpreters_as_native_proxy_children() {
@@ -2853,6 +2870,85 @@ mod native_child_runtime_tests {
             );
         }
     }
+
+    #[test]
+    fn registrar_compatibility_synthesizes_only_the_naked_initialize_pair() {
+        let initialize = json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "initialize",
+            "params": {}
+        });
+        let response = registrar_carrier_compatibility_response(Some("mcp-registrar"), &initialize)
+            .expect("naked initialize must be synthesized at the carrier edge");
+        assert_eq!(response["result"]["protocolVersion"], "2026-07-28");
+        assert_eq!(response["result"]["resultType"], "complete");
+        assert!(registrar_carrier_compatibility_notification(
+            Some("mcp-registrar"),
+            &json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })
+        ));
+    }
+
+    #[test]
+    fn registrar_compatibility_does_not_mask_modern_initialize_or_other_surfaces() {
+        let modern = json!({
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "initialize",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientInfo": { "name": "test", "version": "1" },
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                }
+            }
+        });
+        assert!(registrar_carrier_compatibility_response(Some("mcp-registrar"), &modern).is_none());
+        assert!(registrar_carrier_compatibility_response(
+            Some("git"),
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 9,
+                "method": "initialize",
+                "params": {}
+            })
+        )
+        .is_none());
+    }
+}
+
+/// The strict native registrar speaks the no-handshake 2026 protocol.  Naked
+/// Codex still emits the transport-era initialize pair before its ordinary
+/// requests.  Keep that compatibility at the carrier edge only: the registrar
+/// remains strict, and a modern request still receives the protocol's explicit
+/// initialize_removed response.
+fn registrar_carrier_compatibility_response(
+    surface_id: Option<&str>,
+    request: &Value,
+) -> Option<Value> {
+    if surface_id != Some("mcp-registrar")
+        || protocol::is_modern_request(request)
+        || request.get("method").and_then(Value::as_str) != Some("initialize")
+    {
+        return None;
+    }
+    Some(json!({
+        "jsonrpc": "2.0",
+        "id": request.get("id").cloned().unwrap_or(Value::Null),
+        "result": {
+            "resultType": "complete",
+            "protocolVersion": protocol::MODERN_PROTOCOL_VERSION,
+            "capabilities": { "tools": {} },
+            "serverInfo": { "name": "mcp-registrar", "version": "0.1.0" },
+            "_meta": { "io.modelcontextprotocol/serverInfo": { "name": "mcp-registrar", "version": "0.1.0" } }
+        }
+    }))
+}
+
+fn registrar_carrier_compatibility_notification(surface_id: Option<&str>, request: &Value) -> bool {
+    surface_id == Some("mcp-registrar")
+        && !protocol::is_modern_request(request)
+        && request.get("method").and_then(Value::as_str) == Some("notifications/initialized")
 }
 
 fn executable_on_path(command: &str) -> Option<PathBuf> {
