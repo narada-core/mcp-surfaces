@@ -4,6 +4,12 @@ Read-only Cloudflare-carrier MCP surface for bounded product, session, health,
 and continuity readback. It does not silently deploy, mutate a Worker, or
 convert connectivity into Site authority.
 
+The admitted runtime authority is the shared native Rust executable
+`narada-mcp-surfaces --surface-id cloudflare-carrier --native-authority`.
+TypeScript remains a descriptor and parity oracle; native profiles do not use
+it as a runtime fallback. Session, health, projection-registry, and worker
+coordinates are server-bound rather than caller-supplied.
+
 ## Tools
 
 - `cloudflare_carrier_guidance`
@@ -31,8 +37,9 @@ proper or the admitted carrier.
 ## Verification
 
 ```powershell
-pnpm --filter @narada-core/cloudflare-carrier-mcp test
+cargo test --locked --manifest-path packages/shared/mcp-surfaces-native/native/Cargo.toml cloudflare_carrier_authority
+cargo test --locked --manifest-path packages/shared/mcp-surfaces-native/native/Cargo.toml --test cloudflare_carrier_protocol
 ```
 
-The default suite covers protocol and Site-fabric tests. The live Cloudflare
-test is opt-in and records `not_run` when live authority is absent.
+The Rust protocol test uses bounded loopback carrier and projection fixtures.
+External live authority remains a post-materialization verification boundary.

@@ -12,6 +12,7 @@ use uuid::Uuid;
 mod authority;
 mod browser_control_authority;
 mod calendar;
+mod cloudflare_carrier_authority;
 mod delegated_task;
 mod epistemic_graph;
 mod graph_authority;
@@ -420,11 +421,15 @@ fn handle_request(request: &Value, options: &Options) -> Option<Value> {
                 browser_control_authority::auxiliary(method, &params).map(|value| modern_result(value, options))
             }
             method
+                if options.surface_id == "cloudflare-carrier"
+                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+            {
+                cloudflare_carrier_authority::auxiliary(method, &params).map(|value| modern_result(value, options))
+            }
+            method
                 if matches!(
                     options.surface_id.as_str(),
-                    "operator-console-overlay"
-                        | "cloudflare-carrier"
-                        | "graph-mail"
+                    "operator-console-overlay" | "graph-mail"
                 ) && matches!(
                     method,
                     "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel"
@@ -551,11 +556,15 @@ fn handle_request(request: &Value, options: &Options) -> Option<Value> {
                 browser_control_authority::auxiliary(method, &params)
             }
             method
+                if options.surface_id == "cloudflare-carrier"
+                    && matches!(method, "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel") =>
+            {
+                cloudflare_carrier_authority::auxiliary(method, &params)
+            }
+            method
                 if matches!(
                     options.surface_id.as_str(),
-                    "operator-console-overlay"
-                        | "cloudflare-carrier"
-                        | "graph-mail"
+                    "operator-console-overlay" | "graph-mail"
                 ) && matches!(
                     method,
                     "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel"
@@ -755,7 +764,8 @@ fn raw_list_tools(surface_id: &str) -> Vec<Value> {
         "scheduler" => scheduler::list_tools(),
         "speech" => speech_authority::list_tools(),
         "browser-control" => browser_control_authority::list_tools(),
-        "operator-console-overlay" | "cloudflare-carrier" | "graph-mail" => host_contracts::list_tools(surface_id),
+        "cloudflare-carrier" => cloudflare_carrier_authority::list_tools(),
+        "operator-console-overlay" | "graph-mail" => host_contracts::list_tools(surface_id),
         "catalog-observation" => vec![
             guidance_tool("catalog-observation"),
             tool("catalog_observation_observe", "Observe a provider model catalog through an installed Narada-owned observation port. Without that port, return a typed unavailable result rather than inferred catalog data.", json!({
@@ -908,6 +918,7 @@ fn call_tool(
         ("epistemic-graph", name) => epistemic_graph::call_tool(name, &args, &options.site_root),
         ("speech", name) => speech_authority::call_tool(name, &args, &options.site_root),
         ("browser-control", name) => browser_control_authority::call_tool(name, &args, &options.site_root),
+        ("cloudflare-carrier", name) => cloudflare_carrier_authority::call_tool(name, &args, &options.site_root),
         ("graph-mail", name)
             if graph_mail_authority::enabled() && graph_mail_authority::supports(name) =>
         {
@@ -915,7 +926,6 @@ fn call_tool(
         }
         ("scheduler", name) => scheduler::call_tool(name, &args, &options.site_root),
         ("operator-console-overlay", name)
-        | ("cloudflare-carrier", name)
         | ("graph-mail", name) => {
             host_contracts::call_tool(surface_id, name, &args, &options.site_root)
         }
