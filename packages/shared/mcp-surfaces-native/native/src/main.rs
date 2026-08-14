@@ -21,6 +21,7 @@ mod mailbox;
 mod mailbox_sync;
 mod operator_surface_authority;
 mod project_state_authority;
+mod quota_authority;
 mod resident_host;
 mod runtime_introspection;
 mod scheduler;
@@ -53,6 +54,13 @@ struct Options {
 
 fn main() {
     let arguments = env::args().skip(1).collect::<Vec<_>>();
+    if quota_authority::is_query_mode(&arguments) {
+        if let Err(error) = quota_authority::run_query_mode(&arguments) {
+            let _ = writeln!(io::stderr(), "{error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if site_loop::is_supervisor_mode(&arguments) {
         if let Err(error) = site_loop::run_supervisor(&arguments) {
             let _ = writeln!(io::stderr(), "{error}");

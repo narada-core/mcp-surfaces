@@ -4,7 +4,6 @@ use std::env;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
@@ -12,6 +11,7 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 mod nars_authority;
 #[path = "artifact_authority.rs"]
 mod artifact_authority;
+use crate::quota_authority;
 
 const MAX_BYTES: usize = 256_000;
 const MAX_SESSIONS: usize = 100;
@@ -73,7 +73,8 @@ fn nars_tools() -> Vec<Value> {
     ]
 }
 fn quota_tools() -> Vec<Value> {
-    vec![guidance("quota_meter_guidance"), tool("quota_meter_glide_status", "Inspect quota provider posture without launching provider login.", json!({"type":"object","properties":{"providers":{"type":"string"}},"additionalProperties":false}), true), tool("quota_meter_overlay_status", "Inspect local quota overlay pid and position state.", json!({"type":"object","additionalProperties":false}), true), tool("quota_meter_overlay_start", "Start the quota overlay through its owning runtime authority.", json!({"type":"object","additionalProperties":true}), false), tool("quota_meter_overlay_stop", "Stop the quota overlay through its owning runtime authority.", json!({"type":"object","additionalProperties":true}), false)]
+    let providers=json!({"type":"string","enum":["all","codex","kimi","codex,kimi","kimi,codex"],"default":"all"});
+    vec![guidance("quota_meter_guidance"), tool("quota_meter_glide_status", "Read current quota windows and glide factors through native provider authorities without launching login.", json!({"type":"object","properties":{"providers":providers,"timeout_ms":{"type":"integer","minimum":100,"maximum":60000,"default":15000}},"additionalProperties":false}), true), tool("quota_meter_overlay_status", "Inspect the quota overlay process and bounded persisted telemetry.", json!({"type":"object","additionalProperties":false}), true), tool("quota_meter_overlay_start", "Idempotently start the native-refresh quota overlay.", json!({"type":"object","properties":{"providers":providers,"refresh_seconds":{"type":"integer","minimum":5,"maximum":3600,"default":60}},"additionalProperties":false}), false), tool("quota_meter_overlay_stop", "Idempotently stop the quota-meter-owned overlay.", json!({"type":"object","additionalProperties":false}), false)]
 }
 
 fn artifacts_call(name: &str, args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
@@ -420,80 +421,7 @@ fn authority_summary(record: &Value) -> Value {
     })
 }
 
-fn quota_call(name: &str, _args: &Map<String, Value>, root: &Path) -> Result<Value, Value> { match name { "quota_meter_guidance" => Ok(guidance_result("quota-meter", _args)), "quota_meter_overlay_status" => Ok(quota_status(root)), "quota_meter_glide_status" => Err(authority_boundary("quota-meter", name, "quota_provider_read_authority_not_enabled_in_native_slice", "Use the quota-meter provider adapter without passing credentials through MCP.")), "quota_meter_overlay_start" | "quota_meter_overlay_stop" => Err(authority_boundary("quota-meter", name, "quota_overlay_process_authority_not_enabled_in_native_slice", "Use the owning quota-meter process authority.")), _ => Err(error("unknown_tool", &format!("unknown_tool:{name}"))), } }
-fn quota_status(root: &Path) -> Value {
-    let base = quota_state_root(root);
-    quota_status_at(&base)
-}
-
-fn quota_status_at(base: &Path) -> Value {
-    let pid_path = base.join("overlay.pid");
-    let position_path = base.join("overlay-position.json");
-    let pid = fs::read_to_string(&pid_path).ok().and_then(|value| value.trim().parse::<u32>().ok()).filter(|value| *value > 0);
-    let running = pid.map(quota_process_alive).unwrap_or(false);
-    json!({
-        "schema":"narada.quota_meter.overlay_status.v1",
-        "status":if running { "running" } else if pid.is_some() { "stale" } else { "stopped" },
-        "running":running,
-        "pid":pid,
-        "pid_path":pid_path.to_string_lossy(),
-        "position_path":position_path.to_string_lossy(),
-        "position":quota_position(&position_path),
-    })
-}
-
-fn quota_state_root(root: &Path) -> PathBuf {
-    if let Ok(value) = env::var("QUOTA_METER_STATE_ROOT") {
-        if !value.trim().is_empty() { return PathBuf::from(value); }
-    }
-    let base = env::var("LOCALAPPDATA")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| env::var("TEMP").ok().filter(|value| !value.trim().is_empty()))
-        .or_else(|| env::var("TMP").ok().filter(|value| !value.trim().is_empty()))
-        .unwrap_or_else(|| root.to_string_lossy().to_string());
-    PathBuf::from(base).join("quota-meter")
-}
-
-fn quota_position(path: &Path) -> Value {
-    let Ok(value) = read_bounded_json(path) else { return Value::Null; };
-    let Some(object) = value.as_object() else { return Value::Null; };
-    json!({
-        "left":object.get("left").cloned().unwrap_or(Value::Null),
-        "top":object.get("top").cloned().unwrap_or(Value::Null),
-        "updated_at":object.get("updatedAt").cloned().unwrap_or(Value::Null),
-    })
-}
-
-fn quota_process_alive(pid: u32) -> bool {
-    #[cfg(windows)]
-    {
-        let filter = format!("PID eq {pid}");
-        let needle = format!("\"{pid}\"");
-        return Command::new("tasklist")
-            .args(["/FI", filter.as_str(), "/FO", "CSV", "/NH"])
-            .output()
-            .ok()
-            .filter(|output| output.status.success())
-            .and_then(|output| String::from_utf8(output.stdout).ok())
-            .map(|output| output.contains(&needle))
-            .unwrap_or(false);
-    }
-    #[cfg(unix)]
-    {
-        return Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false);
-    }
-    #[cfg(not(any(windows, unix)))]
-    {
-        let _ = pid;
-        false
-    }
-}
-
+fn quota_call(name: &str, args: &Map<String, Value>, root: &Path) -> Result<Value, Value> { match name { "quota_meter_guidance" => Ok(quota_authority::guidance(root)), "quota_meter_glide_status" => quota_authority::glide_status(args), "quota_meter_overlay_status" => Ok(quota_authority::overlay_status(root)), "quota_meter_overlay_start" => quota_authority::overlay_start(args,root), "quota_meter_overlay_stop" => quota_authority::overlay_stop(root), _ => Err(error("unknown_tool", &format!("unknown_tool:{name}"))), } }
 fn session_roots(root: &Path) -> Vec<PathBuf> { let control=if root.file_name().and_then(|v|v.to_str()).map(|v|v.eq_ignore_ascii_case(".narada")).unwrap_or(false){root.to_path_buf()}else{root.join(".narada")}; vec![control.join("crew/nars-sessions"),root.join("crew/nars-sessions")] }
 fn session_index_paths(root: &Path, id: &str) -> Vec<PathBuf> { session_roots(root).into_iter().map(|base|base.join(id).join("session-index-record.json")).collect() }
 fn read_bounded_json(path: &Path) -> Result<Value, Value> { let size=fs::metadata(path).map_err(|_|error("record_not_found","record_not_found"))?.len(); if size>MAX_BYTES as u64{return Err(error("record_too_large","record_too_large"));} let text=fs::read_to_string(path).map_err(|_|error("record_read_failed","record_read_failed"))?; serde_json::from_str(&text).map_err(|_|error("record_invalid_json","record_invalid_json")) }
@@ -523,21 +451,6 @@ mod tests {
         let read = artifact_read(&Map::from_iter([(String::from("session_id"), json!("session-1")), (String::from("artifact_id"), json!("artifact-1"))]), &root).expect("read");
         assert_eq!(read["artifact"]["title"], "Read me");
         assert_eq!(read["message_part"]["type"], "artifact_ref");
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn quota_status_projects_position_without_process_authority() {
-        let suffix = SystemTime::now().duration_since(UNIX_EPOCH).expect("clock").as_nanos();
-        let root = std::env::temp_dir().join(format!("narada-quota-status-{suffix}"));
-        fs::create_dir_all(&root).expect("directory");
-        fs::write(root.join("overlay-position.json"), r#"{"left":42,"top":24,"updatedAt":"2026-08-09T00:00:00Z"}"#).expect("position");
-        let response = quota_status_at(&root);
-        assert_eq!(response["schema"], "narada.quota_meter.overlay_status.v1");
-        assert_eq!(response["status"], "stopped");
-        assert_eq!(response["running"], false);
-        assert_eq!(response["position"]["left"], 42);
-        assert_eq!(response["position"]["updated_at"], "2026-08-09T00:00:00Z");
         let _ = fs::remove_dir_all(root);
     }
 

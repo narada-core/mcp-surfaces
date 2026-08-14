@@ -1,14 +1,8 @@
 # @narada-core/quota-meter-mcp
 
-## Verification
-
-```powershell
-pnpm --filter @narada-core/quota-meter-mcp test
-```
-
-Host-level MCP surface for the local `quota-meter` CLI. It reads current
-Codex/Kimi glide status and manages the transparent desktop overlay without
-handling provider credentials itself.
+Host-level native Rust MCP surface for Codex/Kimi quota posture and the
+transparent desktop overlay. Provider credentials remain owned by the native
+provider clients and are never returned through MCP.
 
 ## Tools
 
@@ -26,17 +20,19 @@ configured local state root.
 
 ## Configuration
 
-By default the surface targets `<src-root>\quota-meter` on Windows. Set
-`QUOTA_METER_ROOT` when the checkout is elsewhere. `QUOTA_METER_NODE` can
-override the Node executable, and `QUOTA_METER_STATE_ROOT` can override the
-overlay PID/position directory. Native `codex login` and `kimi login` remain
-the authentication mechanisms; the surface never reads or returns tokens.
-On Windows, the surface also restores the standard `windir` environment value
-from `SystemRoot` when it is missing so the WPF overlay font subsystem can
-initialize correctly.
+The Rust authority talks to `codex app-server` over stdio and to the Kimi usage
+endpoint over bounded HTTPS. Native `codex login` and `kimi login` remain the
+authentication mechanisms. It does not launch an interactive login.
+
+The Windows overlay remains a WPF PowerShell host, but it refreshes by invoking
+the already-running native surface executable in quota-query mode; Node and Bun
+are not in the operational path. By default the script is found at
+`<src-root>\quota-meter\src\overlay.ps1`. Set `QUOTA_METER_ROOT` or
+`QUOTA_METER_OVERLAY_SCRIPT` when it is elsewhere, and
+`QUOTA_METER_STATE_ROOT` to relocate bounded PID/position/telemetry state.
 
 ## Quick start
 
-```text
-pnpm --filter @narada-core/quota-meter-mcp test
+```powershell
+cargo test --locked --manifest-path packages/shared/mcp-surfaces-native/native/Cargo.toml quota_meter
 ```
