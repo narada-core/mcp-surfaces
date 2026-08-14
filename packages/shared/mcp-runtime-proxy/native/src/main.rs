@@ -1,7 +1,6 @@
 use narada_mcp_materialization_contract::{
-    canonical_json_sha256, describe_config, generation_fingerprint,
-    AMBIGUOUS_GENERATION_SCHEMA, CONTRACT_VERSION, GENERATION_SCHEMA,
-    LEGACY_GENERATION_SCHEMA,
+    canonical_json_sha256, describe_config, generation_fingerprint, AMBIGUOUS_GENERATION_SCHEMA,
+    CONTRACT_VERSION, GENERATION_SCHEMA, LEGACY_GENERATION_SCHEMA,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -1791,17 +1790,18 @@ fn verify_fingerprint(value: Option<&Value>, code: &str, reason: &str) -> Result
 }
 
 fn preflight_generation_bundle(generation: &Value, sidecar: &Path) -> Result<(), Refusal> {
-    let stale = |reason: &str, details: Value| {
-        refusal("materialization_generation_stale", reason, details)
-    };
+    let stale =
+        |reason: &str, details: Value| refusal("materialization_generation_stale", reason, details);
     let required = |field: &'static str| {
         generation
             .get(field)
             .and_then(Value::as_str)
-            .ok_or_else(|| stale(
-                "The materialization generation has an incomplete bundle chain.",
-                json!({"field":field,"admission_state":"integrity_refused"}),
-            ))
+            .ok_or_else(|| {
+                stale(
+                    "The materialization generation has an incomplete bundle chain.",
+                    json!({"field":field,"admission_state":"integrity_refused"}),
+                )
+            })
     };
     let bundle_id = required("bundle_id")?;
     let expected_fingerprint = required("bundle_fingerprint")?;
@@ -1812,11 +1812,9 @@ fn preflight_generation_bundle(generation: &Value, sidecar: &Path) -> Result<(),
             json!({"error":error,"bundle_path":bundle_path,"admission_state":"integrity_refused"}),
         )
     })?;
-    if bundle.get("schema").and_then(Value::as_str)
-        != Some("narada.carrier_generation_bundle.v1")
+    if bundle.get("schema").and_then(Value::as_str) != Some("narada.carrier_generation_bundle.v1")
         || bundle.get("bundle_id").and_then(Value::as_str) != Some(bundle_id)
-        || bundle.get("bundle_fingerprint").and_then(Value::as_str)
-            != Some(expected_fingerprint)
+        || bundle.get("bundle_fingerprint").and_then(Value::as_str) != Some(expected_fingerprint)
     {
         return Err(stale(
             "The carrier bundle identity does not match the generation.",
@@ -1874,8 +1872,7 @@ fn preflight_generation_bundle(generation: &Value, sidecar: &Path) -> Result<(),
     if pointer.get("schema").and_then(Value::as_str)
         != Some("narada.carrier_generation_bundle_pointer.v1")
         || pointer.get("bundle_id").and_then(Value::as_str) != Some(bundle_id)
-        || pointer.get("bundle_fingerprint").and_then(Value::as_str)
-            != Some(expected_fingerprint)
+        || pointer.get("bundle_fingerprint").and_then(Value::as_str) != Some(expected_fingerprint)
         || pointer
             .get("bundle_path")
             .and_then(Value::as_str)
@@ -1893,8 +1890,7 @@ fn preflight_generation_bundle(generation: &Value, sidecar: &Path) -> Result<(),
             json!({"error":error,"artifact_build_set_path":build_set_path,"admission_state":"integrity_refused"}),
         )
     })?;
-    if build_set.get("schema").and_then(Value::as_str)
-        != Some("narada.artifact_build_set.v1")
+    if build_set.get("schema").and_then(Value::as_str) != Some("narada.artifact_build_set.v1")
         || build_set.get("build_set_digest").and_then(Value::as_str)
             != generation
                 .get("artifact_build_set_fingerprint")
@@ -2143,7 +2139,9 @@ fn preflight_materialization(
                 .get("runtime_profile_kind")
                 .and_then(Value::as_str)
         || plan.get("plan_fingerprint").and_then(Value::as_str) != Some(expected_plan_fingerprint)
-        || generation.get("launch_catalog_fingerprint").and_then(Value::as_str)
+        || generation
+            .get("launch_catalog_fingerprint")
+            .and_then(Value::as_str)
             != Some(expected_plan_fingerprint)
         || runtime_plan_fingerprint(&plan).as_deref() != Some(expected_plan_fingerprint)
     {
@@ -2259,7 +2257,13 @@ fn preflight_materialization(
 
 fn preflight_refusal(options: &Options, mut refusal: Refusal) -> Result<(), String> {
     let mut details = refusal.details.as_object().cloned().unwrap_or_default();
-    details.insert("remediation".to_string(), Value::String("Run cargo native-release from mcp-surfaces, then restart the carrier session.".to_string()));
+    details.insert(
+        "remediation".to_string(),
+        Value::String(
+            "Run cargo native-release from mcp-surfaces, then restart the carrier session."
+                .to_string(),
+        ),
+    );
     details.insert("recovery".to_string(), recovery(options, &refusal));
     refusal.details = Value::Object(details);
     eprintln!(
