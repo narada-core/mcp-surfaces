@@ -379,7 +379,65 @@ fn list_tools() -> Vec<Value> {
 }
 
 fn tool(name: &str, description: &str, read_only: bool) -> Value {
-    json!({"name": name, "description": description, "inputSchema": {"type": "object", "additionalProperties": true}, "annotations": {"title": name, "canonicalName": name, "readOnlyHint": read_only, "destructiveHint": false, "idempotentHint": read_only, "openWorldHint": false}, "outputSchema": {"type": "object", "additionalProperties": true}})
+    json!({"name": name, "description": description, "inputSchema": tool_input_schema(name), "annotations": {"title": name, "canonicalName": name, "readOnlyHint": read_only, "destructiveHint": false, "idempotentHint": read_only, "openWorldHint": false}, "outputSchema": {"type": "object", "additionalProperties": true}})
+}
+
+fn tool_input_schema(name: &str) -> Value {
+    let working_directory = json!({"type": "string", "description": "Repository working directory under an allowed root; omit to use the first allowed root."});
+    let path = json!({"type": "string", "description": "Repository-relative explicit path; absolute paths and parent traversal are refused."});
+    let paths = json!({"type": "array", "items": path, "minItems": 1});
+    let work_scope = json!({"type": "string", "description": "Live work-scope reference returned by git_begin_work_scope."});
+    let schema = match name {
+        "git_guidance" => {
+            json!({"properties": {"workflow": {"type": "string"}, "tool": {"type": "string"}}})
+        }
+        "git_policy_inspect" => json!({"properties": {}}),
+        "git_begin_work_scope" => {
+            json!({"properties": {"working_directory": working_directory, "allowed_paths": paths, "base_state": {"type": "object", "additionalProperties": false, "properties": {"head": {"type": ["string", "null"]}, "index_digest": {"type": ["string", "null"]}}}}, "required": ["allowed_paths"]})
+        }
+        "git_workflow_record" => {
+            json!({"properties": {"workflow_id": {"type": "string"}, "scope_label": {"type": "string"}, "summary": {}, "repositories": {"type": "array", "items": {"type": "object"}, "minItems": 1}}, "required": ["repositories"]})
+        }
+        "git_add" | "git_unstage" => {
+            json!({"properties": {"working_directory": working_directory, "paths": paths, "work_scope_ref": work_scope}, "required": ["paths"]})
+        }
+        "git_commit" => {
+            json!({"properties": {"working_directory": working_directory, "message": {"type": "string", "minLength": 1}, "body": {"type": "string"}, "work_scope_ref": work_scope, "expected_staged_paths": paths}, "required": ["message", "work_scope_ref"]})
+        }
+        "git_push" => {
+            json!({"properties": {"working_directory": working_directory, "remote": {"type": "string"}, "branch": {"type": "string"}, "expected_commit": {"type": "string", "description": "Expected SHA or git_commit:<sha>."}, "work_scope_ref": work_scope}, "required": ["work_scope_ref"]})
+        }
+        "git_status" => {
+            json!({"properties": {"working_directory": working_directory, "work_scope_ref": work_scope, "pathspecs": paths, "staged_only": {"type": "boolean"}, "include_untracked": {"type": "boolean"}, "format": {"type": "string", "enum": ["full", "paths", "summary"]}}})
+        }
+        "git_sync_status" => json!({"properties": {"working_directory": working_directory}}),
+        "git_branch_list" => {
+            json!({"properties": {"working_directory": working_directory, "scope": {"type": "string", "enum": ["local", "remote", "all"]}}})
+        }
+        "git_output_show" => {
+            json!({"properties": {"ref": {"type": "string"}, "output_ref": {"type": "string"}, "offset": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 20000}}, "anyOf": [{"required": ["ref"]}, {"required": ["output_ref"]}]})
+        }
+        "git_changed_summary" => {
+            json!({"properties": {"working_directory": working_directory, "pathspecs": paths, "relevance_filters": paths}})
+        }
+        "git_repositories_summary" => {
+            json!({"properties": {"repositories": {"type": "array", "items": {"type": "object", "additionalProperties": false, "properties": {"working_directory": working_directory, "label": {"type": "string"}}, "required": ["working_directory"]}, "minItems": 1}}, "required": ["repositories"]})
+        }
+        "git_diff" => {
+            json!({"properties": {"working_directory": working_directory, "scope": {"type": "string", "enum": ["working", "staged", "commit"]}, "commit": {"type": "string"}, "pathspec": path, "pathspecs": paths, "include_untracked": {"type": "boolean"}, "offset": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 20000}}})
+        }
+        "git_log" => {
+            json!({"properties": {"working_directory": working_directory, "limit": {"type": "integer", "minimum": 1, "maximum": 100}, "pathspec": path}})
+        }
+        "git_show" => {
+            json!({"properties": {"working_directory": working_directory, "commit": {"type": "string"}, "pathspec": path, "include_patch": {"type": "boolean"}}, "required": ["commit"]})
+        }
+        _ => json!({"properties": {}}),
+    };
+    let mut object = schema;
+    object["type"] = json!("object");
+    object["additionalProperties"] = json!(false);
+    object
 }
 
 fn prompt_get(params: &Value) -> Result<Value, GitError> {
@@ -395,7 +453,7 @@ fn prompt_get(params: &Value) -> Result<Value, GitError> {
         ));
     }
     Ok(
-        json!({"description": "Guidance for branch, inspect, stage, commit, and push workflows.", "messages": [{"role": "user", "content": {"type": "text", "text": "Start with git_guidance, then inspect git_policy_inspect and git_status. Rust-native mode is read-only; use the JavaScript Git MCP for scoped mutation and publication."}}]}),
+        json!({"description": "Guidance for branch, inspect, stage, commit, and push workflows.", "messages": [{"role": "user", "content": {"type": "text", "text": "Start with git_guidance, git_policy_inspect, and git_status. Use git_begin_work_scope before scoped mutations; native git_commit and git_push are authoritative and refuse stale or out-of-scope state."}}]}),
     )
 }
 
@@ -437,8 +495,27 @@ fn call_tool(
 }
 
 fn guidance(_args: &Value) -> Result<Value, GitError> {
+    let tools = list_tools();
+    let read = tools
+        .iter()
+        .filter(|tool| {
+            tool.pointer("/annotations/readOnlyHint")
+                .and_then(Value::as_bool)
+                == Some(true)
+        })
+        .filter_map(|tool| tool.get("name").cloned())
+        .collect::<Vec<_>>();
+    let write = tools
+        .iter()
+        .filter(|tool| {
+            tool.pointer("/annotations/readOnlyHint")
+                .and_then(Value::as_bool)
+                == Some(false)
+        })
+        .filter_map(|tool| tool.get("name").cloned())
+        .collect::<Vec<_>>();
     Ok(
-        json!({"schema": "narada.mcp_surface.guidance.v0", "status": "ok", "surface_id": "git", "purpose": "Governed Git inspection and publication workflows.", "tool_inventory": {"read": ["git_policy_inspect", "git_begin_work_scope", "git_status", "git_sync_status", "git_branch_list", "git_changed_summary", "git_repositories_summary", "git_diff", "git_log", "git_show"], "write": ["git_workflow_record", "git_add", "git_unstage", "git_commit", "git_push", "git_fetch", "git_rebase", "git_merge"]}, "native_boundary": "Rust canary covers bounded read operations, non-mutating work-scope admission, local workflow records, and reversible index changes; JavaScript remains authoritative for history/remote mutation, recovery, and publication."}),
+        json!({"schema": "narada.mcp_surface.guidance.v0", "status": "ok", "surface_id": "git", "purpose": "Governed Git inspection and publication workflows.", "tool_inventory": {"read": read, "write": write}, "native_boundary": "The Rust-native surface is authoritative for every tool in this live inventory, including scoped commit and non-force push.", "workflow": ["git_status", "git_changed_summary or git_diff", "git_begin_work_scope", "git_add", "git_commit", "git_push"]}),
     )
 }
 
@@ -476,8 +553,17 @@ fn git_status(
     let query = apply_status_query(state, &mut parsed, args, root.trim())?;
     let remotes = git_remotes(state, &cwd, cancellation.clone())?;
     let upstream = parsed.get("upstream").cloned().unwrap_or(Value::Null);
+    let push_target = upstream.as_str().and_then(|value| value.split_once('/')).map(|(remote, branch)| {
+        json!({"status": "resolved", "remote": remote, "branch": branch, "source": "upstream"})
+    }).unwrap_or_else(|| json!({"status": "unresolved", "remote": Value::Null, "branch": parsed.get("branch"), "reason": "upstream_not_configured"}));
+    let push_remediation = if push_target.get("status").and_then(Value::as_str) == Some("resolved")
+    {
+        Value::Null
+    } else {
+        json!({"kind": "set_upstream_or_push_explicit_target"})
+    };
     Ok(
-        json!({"schema": "narada.git.status.v1", "status": "ok", "working_directory": cwd.to_string_lossy(), "repository_root": root.trim(), "branch": parsed.get("branch"), "upstream": upstream, "ahead": parsed.get("ahead").unwrap_or(&json!(0)), "behind": parsed.get("behind").unwrap_or(&json!(0)), "unborn": parsed.get("unborn").unwrap_or(&Value::Bool(false)), "status_entries": parsed.get("status_entries"), "staged": parsed.get("staged"), "unstaged": parsed.get("unstaged"), "untracked": parsed.get("untracked"), "conflicts": parsed.get("conflicts"), "paths": parsed.get("paths"), "clean": parsed.get("clean"), "summary": parsed.get("summary"), "format": query.get("format").and_then(Value::as_str).unwrap_or("full"), "query": query, "remotes": remotes, "remote_names": Value::Array(git_remotes_names(state, &cwd, cancellation)?), "push_target": {"status": "unresolved", "remote": Value::Null, "branch": parsed.get("branch"), "reason": "upstream_not_configured"}, "push_remediation": {"kind": "set_upstream_or_push_explicit_target"}}),
+        json!({"schema": "narada.git.status.v1", "status": "ok", "working_directory": cwd.to_string_lossy(), "repository_root": root.trim(), "branch": parsed.get("branch"), "upstream": upstream, "ahead": parsed.get("ahead").unwrap_or(&json!(0)), "behind": parsed.get("behind").unwrap_or(&json!(0)), "unborn": parsed.get("unborn").unwrap_or(&Value::Bool(false)), "status_entries": parsed.get("status_entries"), "staged": parsed.get("staged"), "unstaged": parsed.get("unstaged"), "untracked": parsed.get("untracked"), "conflicts": parsed.get("conflicts"), "paths": parsed.get("paths"), "clean": parsed.get("clean"), "summary": parsed.get("summary"), "format": query.get("format").and_then(Value::as_str).unwrap_or("full"), "query": query, "remotes": remotes, "remote_names": Value::Array(git_remotes_names(state, &cwd, cancellation)?), "push_target": push_target, "push_remediation": push_remediation}),
     )
 }
 
@@ -1671,14 +1757,16 @@ fn git_show(
         .get("include_patch")
         .and_then(Value::as_bool)
         .unwrap_or(true);
+    let pathspec = args.get("pathspec").and_then(Value::as_str);
+    if let Some(path) = pathspec {
+        validate_path(path)?;
+    }
     let patch = if include_patch {
-        git_text(
-            state,
-            &cwd,
-            &["show", "--format=", "--patch", "--no-ext-diff", commit],
-            cancellation,
-            "git_show_failed",
-        )?
+        let mut command = vec!["show", "--format=", "--patch", "--no-ext-diff", commit];
+        if let Some(path) = pathspec {
+            command.extend(["--", path]);
+        }
+        git_text(state, &cwd, &command, cancellation, "git_show_failed")?
     } else {
         String::new()
     };
@@ -2202,4 +2290,51 @@ fn output_show(state: &State, args: &Value) -> Result<Value, GitError> {
     Ok(
         json!({"schema": "narada.mcp_output_page.v1", "status": "ok", "ref": reference, "tool_name": record.get("tool_name"), "full_output_char_length": text.chars().count(), "offset": offset.min(text.chars().count()), "limit": limit, "output_limit": limit, "output_truncated": page.1.is_some(), "next_offset": page.1.map(|value| json!(value)).unwrap_or(Value::Null), "output_text": page.0}),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_catalog_has_precise_closed_schemas() {
+        let tools = list_tools();
+        assert_eq!(tools.len(), 17);
+        for tool in &tools {
+            assert_eq!(tool["inputSchema"]["type"], "object");
+            assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+        }
+        let commit = tools
+            .iter()
+            .find(|tool| tool["name"] == "git_commit")
+            .unwrap();
+        assert!(commit["inputSchema"]["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("work_scope_ref")));
+        let show = tools
+            .iter()
+            .find(|tool| tool["name"] == "git_show")
+            .unwrap();
+        assert_eq!(show["inputSchema"]["required"], json!(["commit"]));
+    }
+
+    #[test]
+    fn guidance_inventory_is_derived_from_live_catalog() {
+        let value = guidance(&Value::Null).unwrap();
+        let writes = value["tool_inventory"]["write"].as_array().unwrap();
+        assert!(writes.contains(&json!("git_commit")));
+        assert!(writes.contains(&json!("git_push")));
+        assert!(!writes.contains(&json!("git_fetch")));
+        assert!(value["native_boundary"]
+            .as_str()
+            .unwrap()
+            .contains("authoritative"));
+    }
+
+    #[test]
+    fn status_parser_preserves_upstream_for_push_resolution() {
+        let status = parse_status("## main...origin/main\0");
+        assert_eq!(status["upstream"], "origin/main");
+    }
 }

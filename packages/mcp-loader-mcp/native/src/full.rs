@@ -401,10 +401,7 @@ impl ChildSession {
                             continue;
                         };
                         let result = if let Some(error) = object.get("error") {
-                            Err(
-                                Diagnostic::new("child_error", format!("child_error:{}", error))
-                                    .with_details(json!({"child_error": error})),
-                            )
+                            Err(child_error_diagnostic(error))
                         } else {
                             Ok(object.get("result").cloned().unwrap_or(Value::Null))
                         };
@@ -596,6 +593,27 @@ impl ChildSession {
     fn killed(&self) -> bool {
         self.killed.load(Ordering::SeqCst)
     }
+}
+
+fn child_error_diagnostic(error: &Value) -> Diagnostic {
+    let data = error.get("data").unwrap_or(&Value::Null);
+    let code = data
+        .get("code")
+        .and_then(Value::as_str)
+        .unwrap_or("child_error");
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(code);
+    let mut details = json!({
+        "child_jsonrpc_code": error.get("code").cloned().unwrap_or(Value::Null),
+        "child_code": code,
+    });
+    if let Some(domain_details) = data.get("details") {
+        details["child_details"] = domain_details.clone();
+    }
+    Diagnostic::new(code, message).with_details(details)
 }
 
 fn value_u64(value: &Value) -> Option<u64> {
@@ -4904,7 +4922,7 @@ fn call_tool(name: &str, arguments: Value, state: &mut LoaderState) -> Result<Va
 
 #[cfg(test)]
 mod tests {
-    use super::{compact_child_result, extract_proxy_child_args};
+    use super::{child_error_diagnostic, compact_child_result, extract_proxy_child_args};
     use serde_json::json;
 
     #[test]
@@ -4920,6 +4938,23 @@ mod tests {
         assert_eq!(compacted["isError"], false);
         let text_only = json!({"content":[{"type":"text","text":"only"}]});
         assert_eq!(compact_child_result(&text_only), text_only);
+    }
+
+    #[test]
+    fn child_error_is_projected_once_as_domain_diagnostic() {
+        let diagnostic = child_error_diagnostic(&json!({
+            "code": -32000,
+            "message": "git_push_head_mismatch",
+            "data": {
+                "code": "git_push_head_mismatch",
+                "details": {"expected_commit": "a", "actual_head": "b"}
+            }
+        }));
+        assert_eq!(diagnostic.code, "git_push_head_mismatch");
+        assert_eq!(diagnostic.message, "git_push_head_mismatch");
+        assert_eq!(diagnostic.details["child_jsonrpc_code"], -32000);
+        assert_eq!(diagnostic.details["child_details"]["actual_head"], "b");
+        assert!(diagnostic.details.get("child_error").is_none());
     }
 
     #[test]
