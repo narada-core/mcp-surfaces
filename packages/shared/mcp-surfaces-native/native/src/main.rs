@@ -683,11 +683,11 @@ fn list_tools(surface_id: &str) -> Vec<Value> {
         "browser-control" | "operator-console-overlay" | "cloudflare-carrier" | "speech" | "graph-mail" => host_contracts::list_tools(surface_id),
         "catalog-observation" => vec![
             guidance_tool("catalog-observation"),
-            tool("catalog_observation_observe", "Observe a provider model catalog through the Narada-owned observation port.", json!({
+            tool("catalog_observation_observe", "Observe a provider model catalog through an installed Narada-owned observation port. Without that port, return a typed unavailable result rather than inferred catalog data.", json!({
                 "type": "object",
                 "properties": {
-                    "provider_id": { "type": "string", "description": "Canonical inference-provider resource id." },
-                    "observed_at": { "type": "string", "description": "Explicit observation instant in ISO format." },
+                    "provider_id": { "type": "string", "minLength": 1, "maxLength": 512, "description": "Canonical inference-provider resource id." },
+                    "observed_at": { "type": "string", "format": "date-time", "description": "Explicit RFC 3339 observation instant." },
                     "access_mode": { "type": "string", "enum": ["public", "credentialed", "operator_attested"], "default": "public" }
                 },
                 "required": ["provider_id", "observed_at"],
@@ -829,10 +829,13 @@ fn call_tool(
 fn catalog_guidance(_args: &Map<String, Value>) -> Result<Value, Value> {
     Ok(json!({
         "schema": "narada.catalog-observation.guidance.v1",
+        "status": "ok",
+        "capability_status": "contract_only_until_observation_port_installed",
         "authority": "Narada management owns catalog observation and credential resolution.",
         "boundary": "This MCP surface is read-only and forwards typed observation requests only.",
         "credentials": "Credential values never cross this MCP boundary and never appear in observations.",
-        "unavailable": "Without an injected Narada observation port, the surface returns an unavailable observation."
+        "unavailable": "Without an installed Narada observation port, the surface returns a typed unavailable observation and never infers model availability.",
+        "retry": "Retry only after the Site installs a provider authority port; repeated calls without one are deterministically unavailable."
     }))
 }
 
@@ -845,16 +848,16 @@ fn catalog_observation(args: &Map<String, Value>) -> Result<Value, Value> {
         .unwrap_or("public");
     if !matches!(access_mode, "public" | "credentialed" | "operator_attested") {
         return Err(diagnostic(
-            "invalid_request",
+            "catalog_observation_access_mode_invalid",
             "access_mode must be public, credentialed, or operator_attested.",
-            Value::Null,
+            json!({"field":"access_mode","received":access_mode,"allowed":["public","credentialed","operator_attested"]}),
         ));
     }
     if OffsetDateTime::parse(&observed_at, &Rfc3339).is_err() {
         return Err(diagnostic(
-            "invalid_request",
-            "observed_at must be an explicit ISO instant.",
-            Value::Null,
+            "catalog_observation_observed_at_invalid",
+            "observed_at must be an explicit RFC 3339 instant.",
+            json!({"field":"observed_at","received":observed_at}),
         ));
     }
     Ok(json!({
@@ -862,6 +865,7 @@ fn catalog_observation(args: &Map<String, Value>) -> Result<Value, Value> {
         "id": format!("catalog-observation:unavailable-{provider_id}"),
         "observed_at": observed_at,
         "inference_provider": { "kind": "inference-provider", "id": provider_id },
+        "requested_access_mode": access_mode,
         "access_mode": "unavailable",
         "authority": { "kind": "unavailable", "authority_ref": "narada-observation-port:not-injected" },
         "source": { "kind": "unavailable", "reference": "narada-observation-port:not-injected" },
@@ -1364,7 +1368,57 @@ mod tests {
             &json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"catalog_observation_observe","arguments":{"provider_id":"inference-provider:test","observed_at":"not-an-instant"}}}),
             &test_options(),
         ).expect("response");
-        assert_eq!(response["error"]["data"]["code"], "invalid_request");
+        assert_eq!(
+            response["error"]["data"]["code"],
+            "catalog_observation_observed_at_invalid"
+        );
+    }
+
+    #[test]
+    fn catalog_observation_is_closed_and_truthful_without_authority() {
+        let tools = list_tools("catalog-observation");
+        assert!(tools
+            .iter()
+            .all(|tool| tool["inputSchema"]["additionalProperties"] == false));
+        let guidance = handle_request(
+            &json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"catalog_observation_guidance","arguments":{}}}),
+            &test_options(),
+        )
+        .expect("guidance");
+        assert_eq!(
+            guidance["result"]["structuredContent"]["capability_status"],
+            "contract_only_until_observation_port_installed"
+        );
+        let observed = handle_request(
+            &json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"catalog_observation_observe","arguments":{"provider_id":"inference-provider:test","observed_at":"2026-08-14T00:00:00Z","access_mode":"credentialed"}}}),
+            &test_options(),
+        )
+        .expect("observation");
+        assert_eq!(observed["result"]["isError"], true);
+        assert_eq!(
+            observed["result"]["structuredContent"]["status"],
+            "unavailable"
+        );
+        assert_eq!(
+            observed["result"]["structuredContent"]["requested_access_mode"],
+            "credentialed"
+        );
+        assert_eq!(observed["result"]["structuredContent"]["models"], json!([]));
+        assert!(!observed.to_string().contains("credential_value"));
+    }
+
+    #[test]
+    fn catalog_observation_invalid_access_mode_has_actionable_diagnostic() {
+        let response = handle_request(
+            &json!({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"catalog_observation_observe","arguments":{"provider_id":"inference-provider:test","observed_at":"2026-08-14T00:00:00Z","access_mode":"ambient"}}}),
+            &test_options(),
+        )
+        .expect("response");
+        assert_eq!(
+            response["error"]["data"]["code"],
+            "catalog_observation_access_mode_invalid"
+        );
+        assert_eq!(response["error"]["data"]["details"]["field"], "access_mode");
     }
 
     #[test]

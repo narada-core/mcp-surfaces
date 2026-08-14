@@ -6,12 +6,22 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { runSopEngineParity } from './verify-sop-engine-parity.mjs';
-import { requireNativeArtifact } from '@narada-core/mcp-runtime-proxy/native-artifact';
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const executableName = process.platform === 'win32' ? 'narada-mcp-surfaces.exe' : 'narada-mcp-surfaces';
 const executable = process.env.NARADA_NATIVE_SURFACE_EXECUTABLE
-  ?? requireNativeArtifact(packageRoot, executableName);
+  ?? requireLocalNativeArtifact(packageRoot, executableName);
+
+function requireLocalNativeArtifact(root, artifactName) {
+  const pointerPath = join(root, 'dist', 'native', 'current.json');
+  if (!existsSync(pointerPath)) throw new Error(`native_surface_artifact_pointer_missing:${pointerPath}`);
+  const pointer = JSON.parse(readFileSync(pointerPath, 'utf8'));
+  const relative = pointer?.artifacts?.[artifactName];
+  if (typeof relative !== 'string' || !relative) throw new Error(`native_surface_artifact_missing:${artifactName}`);
+  const artifact = resolve(dirname(pointerPath), relative);
+  if (!existsSync(artifact)) throw new Error(`native_surface_artifact_path_missing:${artifact}`);
+  return artifact;
+}
 const paritySlice = process.argv[2] ?? process.env.NARADA_PARITY_SLICE ?? 'all';
 let controlPlaneReady = false;
 function resolveNaradaRoot(workspaceRoot) {
@@ -117,6 +127,33 @@ for (const surface of surfaces) {
   const modernInitialize = byId.get(5)?.error;
   if (modernInitialize?.data?.code !== 'initialize_removed') throw new Error(`${surface}:modern_initialize_not_removed`);
 }
+
+function verifyCatalogObservationContract() {
+  const observedAt = '2026-08-14T00:00:00Z';
+  const requests = [
+    { jsonrpc: '2.0', id: 101, method: 'tools/call', params: { name: 'catalog_observation_guidance', arguments: {} } },
+    { jsonrpc: '2.0', id: 102, method: 'tools/call', params: { name: 'catalog_observation_observe', arguments: { provider_id: 'inference-provider:test', observed_at: observedAt, access_mode: 'credentialed' } } },
+    { jsonrpc: '2.0', id: 103, method: 'tools/call', params: { name: 'catalog_observation_observe', arguments: { provider_id: 'inference-provider:test', observed_at: 'not-an-instant' } } },
+    { jsonrpc: '2.0', id: 104, method: 'tools/call', params: { name: 'catalog_observation_observe', arguments: { provider_id: 'inference-provider:test', observed_at: observedAt, access_mode: 'ambient' } } },
+  ];
+  const result = spawnSync(executable, ['--surface-id', 'catalog-observation', '--site-root', packageRoot], {
+    input: requests.map((request) => JSON.stringify(request)).join('\n') + '\n',
+    encoding: 'utf8', timeout: 10_000, maxBuffer: 512 * 1024, windowsHide: true,
+  });
+  if (result.error || result.status !== 0) throw new Error(`catalog-observation:contract_spawn_failed:${result.error?.message ?? result.status}:${String(result.stderr).slice(0, 500)}`);
+  const responses = String(result.stdout).trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+  if (responses.length !== requests.length) throw new Error(`catalog-observation:contract_response_count:${responses.length}`);
+  const byId = new Map(responses.map((response) => [response.id, response]));
+  if (byId.get(101)?.result?.structuredContent?.capability_status !== 'contract_only_until_observation_port_installed') throw new Error('catalog-observation:guidance_not_truthful');
+  const unavailable = byId.get(102)?.result;
+  if (unavailable?.isError !== true || unavailable?.structuredContent?.status !== 'unavailable' || unavailable?.structuredContent?.models?.length !== 0) throw new Error('catalog-observation:unavailable_contract_invalid');
+  if (unavailable?.structuredContent?.requested_access_mode !== 'credentialed') throw new Error('catalog-observation:requested_access_mode_missing');
+  if (JSON.stringify(unavailable).includes('credential_value')) throw new Error('catalog-observation:credential_leak');
+  if (byId.get(103)?.error?.data?.code !== 'catalog_observation_observed_at_invalid') throw new Error('catalog-observation:invalid_instant_diagnostic_missing');
+  if (byId.get(104)?.error?.data?.code !== 'catalog_observation_access_mode_invalid') throw new Error('catalog-observation:invalid_access_diagnostic_missing');
+}
+
+if (surfaces.includes('catalog-observation')) verifyCatalogObservationContract();
 
 function runMailbox(command, args, requests, cwd, env = process.env) {
   const result = spawnSync(command, [...args], {
