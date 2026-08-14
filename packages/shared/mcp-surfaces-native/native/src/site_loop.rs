@@ -14,6 +14,8 @@ const MAX_TEXT_BYTES: u64 = 512_000;
 const MAX_TEST_OUTPUT_BYTES: usize = 64 * 1024;
 const TEST_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_PROOF_REQUESTS: usize = 500;
+const MAX_RESIDENT_RECORDS: usize = 500;
+const RESIDENT_HEARTBEAT_FRESH_MS: i128 = 30_000;
 const READ_TOOLS: &[&str] = &[
     "site_loop_doctor", "site_docs_list", "site_docs_show", "site_test_list",
     "site_loop_config_validate", "site_loop_operator_affordances", "site_loop_status",
@@ -152,6 +154,67 @@ fn mutation_schema(name: &str) -> Value {
 fn config_path(root: &Path) -> PathBuf { root.join(".narada").join("capabilities").join("site-loop-config.json") }
 fn db_path(root: &Path) -> PathBuf { root.join(DB_RELATIVE) }
 fn proof_request_dir(root: &Path) -> PathBuf { root.join(".ai").join("runtime").join("resident-production-proof-requests") }
+
+fn resolve_site_path(root: &Path, value: &str) -> PathBuf {
+    let path = PathBuf::from(value);
+    if path.is_absolute() { path } else { root.join(path) }
+}
+
+fn resident_session_roots(root: &Path, config: &Value) -> Vec<PathBuf> {
+    let runtime = config.get("resident_runtime").and_then(Value::as_object);
+    let primary = runtime.and_then(|value| value.get("session_root")).and_then(Value::as_str).unwrap_or(".narada/crew/nars-sessions");
+    let mut roots = vec![resolve_site_path(root, primary)];
+    if let Some(external) = runtime.and_then(|value| value.get("external_session_roots")).and_then(Value::as_array) {
+        for value in external.iter().filter_map(Value::as_str).take(16) {
+            let candidate = resolve_site_path(root, value);
+            if !roots.contains(&candidate) { roots.push(candidate); }
+        }
+    }
+    roots
+}
+
+fn read_bounded_json(path: &Path) -> Result<Option<Value>, Value> {
+    let metadata = match fs::metadata(path) { Ok(value) => value, Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => return Ok(None), Err(cause) => return Err(error("site_loop_record_read_failed", &cause.to_string())) };
+    if metadata.len() > MAX_TEXT_BYTES { return Err(error("site_loop_record_too_large", &path.to_string_lossy())); }
+    let text = fs::read_to_string(path).map_err(|cause| error("site_loop_record_read_failed", &cause.to_string()))?;
+    serde_json::from_str(&text).map(Some).map_err(|cause| error("site_loop_record_invalid_json", &cause.to_string()))
+}
+
+fn resident_status(root: &Path, config: &Value) -> Result<Value, Value> {
+    let resident_id = config.pointer("/resident/agent_id").and_then(Value::as_str).unwrap_or("site.resident");
+    let results_root = root.join(".ai").join("runtime").join("agent-start-results");
+    let mut result_paths = if results_root.exists() {
+        fs::read_dir(&results_root).map_err(|cause| error("resident_result_list_failed", &cause.to_string()))?
+            .filter_map(Result::ok).map(|entry| entry.path())
+            .filter(|path| path.file_name().and_then(|value| value.to_str()).is_some_and(|value| value.ends_with(".result.json")))
+            .collect::<Vec<_>>()
+    } else { Vec::new() };
+    result_paths.sort();
+    if result_paths.len() > MAX_RESIDENT_RECORDS { result_paths.drain(..result_paths.len() - MAX_RESIDENT_RECORDS); }
+    result_paths.reverse();
+    let searched_result_count = result_paths.len();
+    let roots = resident_session_roots(root, config);
+    for result_path in result_paths {
+        let Some(result) = read_bounded_json(&result_path)? else { continue };
+        let identity = result.get("identity").or_else(|| result.get("agent_id")).and_then(Value::as_str);
+        if identity != Some(resident_id) { continue; }
+        let session_id = result.pointer("/carrier_session/carrier_session_id")
+            .or_else(|| result.get("carrier_session_id")).or_else(|| result.pointer("/carrier_session/record/carrier_session_id"))
+            .and_then(Value::as_str).unwrap_or("");
+        if !safe_record_id(session_id) { continue; }
+        let session_root = roots.iter().find(|base| base.join(session_id).is_dir()).cloned().unwrap_or_else(|| roots[0].clone());
+        let session_dir = session_root.join(session_id);
+        let retirement = read_bounded_json(&session_dir.join("retired.json"))?;
+        let heartbeat = read_bounded_json(&session_dir.join("heartbeat.json"))?;
+        let heartbeat_at = heartbeat.as_ref().and_then(|value| value.get("heartbeat_at")).and_then(Value::as_str);
+        let age_ms = heartbeat_at.and_then(|value| OffsetDateTime::parse(value, &Rfc3339).ok()).map(|value| (OffsetDateTime::now_utc() - value).whole_milliseconds().max(0));
+        let heartbeat_alive = heartbeat.as_ref().and_then(|value| value.get("status")).and_then(Value::as_str) == Some("alive");
+        let fresh = age_ms.is_some_and(|value| value <= RESIDENT_HEARTBEAT_FRESH_MS);
+        let live = retirement.is_none() && heartbeat_alive && fresh;
+        return Ok(json!({"schema":"narada.site_loop.resident_status.v1","status":"ok","resident_agent_id":resident_id,"carrier_session_id":session_id,"runtime":result.get("runtime").cloned().unwrap_or(Value::Null),"live":live,"reason":if retirement.is_some(){"carrier_retired"}else if !heartbeat_alive{"carrier_heartbeat_not_alive"}else if !fresh{"carrier_heartbeat_stale"}else{"fresh_carrier_heartbeat"},"heartbeat":heartbeat,"heartbeat_age_ms":age_ms,"retirement":retirement,"result_path":result_path.to_string_lossy(),"session_dir":session_dir.to_string_lossy(),"bounded":true}));
+    }
+    Ok(json!({"schema":"narada.site_loop.resident_status.v1","status":"absent","resident_agent_id":resident_id,"live":false,"reason":"resident_launch_result_not_found","searched_result_count":searched_result_count,"bounded":true}))
+}
 
 fn safe_record_id(value: &str) -> bool {
     !value.is_empty() && value.len() <= 256 && value.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
@@ -636,7 +699,8 @@ fn unified_status(root: &Path) -> Result<Value, Value> {
     let scheduler = object.get("scheduler").and_then(Value::as_object).cloned().unwrap_or_default();
     let pid_files = scheduler.get("pid_files").and_then(Value::as_array).cloned().unwrap_or_default();
     let pids = pid_files.into_iter().take(20).filter_map(|value| value.as_str().map(ToOwned::to_owned)).map(|relative| { let path = root.join(&relative); json!({"path":relative,"exists":path.exists()}) }).collect::<Vec<_>>();
-    Ok(json!({"schema":"narada.site_loop.unified_status.v1","status":"ok","config_status":if config.is_some(){"loaded"}else{"missing"},"scheduler_task":scheduler.get("default_task_name"),"pid_files":pids,"resident":"not_probed_by_native_read_slice","control":"not_probed_by_native_read_slice","authority_boundary":"scheduler_and_resident_owner"}))
+    let resident = if let Some(document) = config.as_ref() { resident_status(root, document)? } else { json!({"status":"unavailable","live":false,"reason":"site_loop_config_missing"}) };
+    Ok(json!({"schema":"narada.site_loop.unified_status.v1","status":"ok","config_status":if config.is_some(){"loaded"}else{"missing"},"scheduler_task":scheduler.get("default_task_name"),"pid_files":pids,"resident":resident,"control":"native_store_authority","authority_boundary":"scheduler_owner"}))
 }
 
 fn recovery_plan(root: &Path) -> Result<Value, Value> {
@@ -647,7 +711,10 @@ fn recovery_plan(root: &Path) -> Result<Value, Value> {
 
 fn health(root: &Path) -> Result<Value, Value> {
     let validation = config_validate(root)?;
-    Ok(json!({"schema":"narada.site_loop.health.v1","status":if validation.get("valid").and_then(Value::as_bool).unwrap_or(false){"ok"}else{"attention"},"config_valid":validation.get("valid"),"proof":"not_probed_by_native_read_slice","resident":"not_probed_by_native_read_slice","scheduler":"not_probed_by_native_read_slice"}))
+    let config = load_config(root)?;
+    let resident = if let Some(document) = config.as_ref() { resident_status(root, document)? } else { json!({"status":"unavailable","live":false,"reason":"site_loop_config_missing"}) };
+    let config_valid = validation.get("valid").and_then(Value::as_bool).unwrap_or(false);
+    Ok(json!({"schema":"narada.site_loop.health.v1","status":if config_valid && resident.get("live").and_then(Value::as_bool)==Some(true){"ok"}else{"attention"},"config_valid":config_valid,"proof":proof_status(root)?,"resident":resident,"scheduler":"separate_authority"}))
 }
 
 fn operating_status(root: &Path) -> Result<Value, Value> {
@@ -664,12 +731,23 @@ fn proof_status(root: &Path) -> Result<Value, Value> {
 
 fn readiness(root: &Path) -> Result<Value, Value> {
     let validation = config_validate(root)?;
-    Ok(json!({"schema":"narada.site_loop.readiness.v1","status":if validation.get("valid").and_then(Value::as_bool).unwrap_or(false){"attention"}else{"blocked"},"config_valid":validation.get("valid"),"production_proof":"unverified","resident":"unverified","scheduler":"unverified","native_read_slice":true}))
+    let config = load_config(root)?;
+    let resident = if let Some(document) = config.as_ref() { resident_status(root, document)? } else { json!({"live":false,"reason":"site_loop_config_missing"}) };
+    let proof = proof_status(root)?;
+    let config_valid = validation.get("valid").and_then(Value::as_bool).unwrap_or(false);
+    let resident_live = resident.get("live").and_then(Value::as_bool).unwrap_or(false);
+    let proof_passed = proof.pointer("/latest_request/status").and_then(Value::as_str) == Some("passed");
+    Ok(json!({"schema":"narada.site_loop.readiness.v1","status":if config_valid&&resident_live&&proof_passed{"ready"}else if config_valid{"attention"}else{"blocked"},"config_valid":config_valid,"production_proof":proof,"resident":resident,"scheduler":"separate_authority","native_read_authority":true}))
 }
 
 fn coherence(root: &Path) -> Result<Value, Value> {
     let readiness = readiness(root)?;
-    Ok(json!({"schema":"narada.site_loop.coherence.v1","status":"attention","blockers":["native_read_slice_does_not_probe_resident_scheduler_or_production_proof"],"readiness":readiness}))
+    let ready = readiness.get("status").and_then(Value::as_str) == Some("ready");
+    let mut blockers = Vec::new();
+    if readiness.get("config_valid").and_then(Value::as_bool) != Some(true) { blockers.push("site_loop_config_invalid"); }
+    if readiness.pointer("/resident/live").and_then(Value::as_bool) != Some(true) { blockers.push("resident_not_live"); }
+    if readiness.pointer("/production_proof/latest_request/status").and_then(Value::as_str) != Some("passed") { blockers.push("production_proof_not_passed"); }
+    Ok(json!({"schema":"narada.site_loop.coherence.v1","status":if ready{"ok"}else{"attention"},"blockers":blockers,"readiness":readiness}))
 }
 
 fn affordances() -> Value { json!({"schema":"narada.site_loop.operator_affordances.v1","status":"ok","actions":[{"id":"inspect_status","tool":"site_loop_unified_status","read_only":true},{"id":"inspect_health","tool":"site_loop_health","read_only":true},{"id":"inspect_recovery","tool":"site_loop_recovery_plan","read_only":true},{"id":"run_controlled_mutation","tool":"site_loop_run_once","read_only":false,"authority":"site_loop_owner"}]}) }
@@ -715,6 +793,18 @@ mod tests {
         let proof = call_tool("site_loop_proof_status", &Map::new(), &root).expect("proof status");
         assert_eq!(proof["request_count"], 1);
         assert_eq!(proof["latest_request"]["status"], "queued");
+        let session_id = "carrier-native-resident-test";
+        let results = root.join(".ai/runtime/agent-start-results");
+        let session = root.join(".narada/crew/nars-sessions").join(session_id);
+        fs::create_dir_all(&results).expect("results");
+        fs::create_dir_all(&session).expect("session");
+        fs::write(results.join("launch.result.json"), serde_json::to_vec(&json!({"identity":"site.resident","runtime":"narada-agent-runtime-server","carrier_session":{"carrier_session_id":session_id}})).expect("result json")).expect("result");
+        fs::write(session.join("heartbeat.json"), serde_json::to_vec(&json!({"schema":"narada.nars.heartbeat.v1","session_id":session_id,"agent_id":"site.resident","status":"alive","heartbeat_at":now_iso()})).expect("heartbeat json")).expect("heartbeat");
+        let unified = unified_status(&root).expect("unified");
+        assert_eq!(unified["resident"]["live"], true);
+        assert_eq!(health(&root).expect("health")["resident"]["carrier_session_id"], session_id);
+        fs::write(session.join("retired.json"), serde_json::to_vec(&json!({"status":"retired"})).expect("retired json")).expect("retired");
+        assert_eq!(unified_status(&root).expect("retired unified")["resident"]["live"], false);
         fs::remove_dir_all(root).expect("cleanup");
     }
 
