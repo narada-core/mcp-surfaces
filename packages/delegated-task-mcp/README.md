@@ -19,9 +19,9 @@ Use this package when a caller wants to delegate a task outcome rather than manu
 - `delegated_task_template_catalog`: list built-in workflow templates, milestone objects, authority gates, and worker-delegation output contracts.
 - `delegated_task_validate`: preflight a task request without creating or running it.
 - `delegated_task_run`: create a durable delegated task from intent/objective, constraints, workflow, acceptance contract, result policy, and execution policy; by default it starts worker/review steps through `worker-delegation-mcp`.
-- `delegated_task_status`: return compact lifecycle state for one task; `refresh=true` updates already-running workers and schedules any newly ready steps once.
-- `delegated_task_advance`: explicitly refresh workers and schedule ready pending steps once; default output is compact and `include_diagnostics=true` embeds the full result view.
-- `delegated_task_wait`: wait on the delegated task handle while child worker runs advance.
+- `delegated_task_status`: return compact lifecycle state for one task without advancing it.
+- `delegated_task_advance`: explicitly refresh workers and schedule ready pending steps once.
+- `delegated_task_wait`: advance and wait on the delegated task handle; this is a mutation and enforces Site ownership.
 - `delegated_tasks_list`: rediscover the current site's active delegated tasks by default; set `include_terminal=true` for terminal history rows and `site_scope=all_sites` or `site_scope=user_global` for shared/legacy queue projections.
 - `delegated_task_result`: return the normalized handoff/result packet for one task.
 - `delegated_task_summary`: return a compact human review handoff for one task.

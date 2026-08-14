@@ -21,7 +21,7 @@
   "scripts": {
     "build": "tsc -b",
     "typecheck": "tsc -b --pretty false",
-    "test": "pnpm run test:bun",
+    "test": "cargo test --locked --manifest-path ../shared/mcp-surfaces-native/native/Cargo.toml delegated_task",
     "test:bun": "pnpm build && bun dist/test/run-tests.js",
     "test:node": "pnpm build && node dist/test/run-tests.js",
     "test:coverage": "pnpm build && c8 --all --src=dist/src --include=dist/src/**/*.js --temp-directory=.tmp/c8 --reporter=text --check-coverage --statements=90 --lines=90 --branches=74 --functions=95 node dist/test/run-tests.js",

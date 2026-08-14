@@ -46,7 +46,7 @@ pub fn list_tools() -> Vec<Value> {
         (
             "delegated_tasks_list",
             "List bounded delegated tasks by lifecycle and site scope.",
-            json!({"type":"object","properties":{"limit":{"type":"integer","minimum":1,"maximum":200,"default":20},"view":{"type":"string"},"site_scope":{"type":"string"}},"additionalProperties":false}),
+            json!({"type":"object","properties":{"limit":{"type":"integer","minimum":1,"maximum":200,"default":20},"view":{"type":"string"},"site_scope":{"type":"string"},"owner_site_id":{"type":"string"},"include_active":{"type":"boolean"},"include_terminal":{"type":"boolean"},"include_acknowledged":{"type":"boolean"}},"additionalProperties":false}),
         ),
         (
             "delegated_task_result",
@@ -70,17 +70,35 @@ pub fn list_tools() -> Vec<Value> {
         tools.push(tool(
             name,
             "Delegated task mutation remains owned by the worker/task authority.",
-            json!({"type":"object","additionalProperties":true}),
+            mutation_schema(name),
             false,
         ));
     }
     tools.push(tool(
         "delegated_task_wait",
-        "Wait for a delegated task to advance toward terminal status.",
-        id_schema(true),
-        true,
+        "Advance and wait for a delegated task to approach terminal status.",
+        json!({"type":"object","properties":{"task_id":{"type":"string"},"timeout_ms":{"type":"integer","minimum":0,"maximum":600000,"default":30000},"poll_ms":{"type":"integer","minimum":50,"maximum":30000,"default":500},"expected_owner_site_id":{"type":"string"},"allow_cross_site":{"type":"boolean","default":false}},"required":["task_id"],"additionalProperties":false}),
+        false,
     ));
     tools
+}
+
+fn mutation_schema(name: &str) -> Value {
+    let scope = json!({"expected_owner_site_id":{"type":"string"},"allow_cross_site":{"type":"boolean","default":false}});
+    let mut properties = scope.as_object().cloned().unwrap_or_default();
+    match name {
+        "delegated_task_run" => {
+            for field in ["objective","idempotency_key","task_id"] { properties.insert(field.into(),json!({"type":"string"})); }
+            for field in ["intent","workflow","constraints","acceptance","result_policy","execution","execution_binding","source_task_ref"] { properties.insert(field.into(),json!({"type":"object"})); }
+            for field in ["depends_on_task_ids","import_task_outputs","import_worker_refs"] { properties.insert(field.into(),json!({"type":"array","items":{"type":"string"}})); }
+            json!({"type":"object","properties":properties,"anyOf":[{"required":["objective"]},{"required":["intent"]},{"required":["task_id"]}],"additionalProperties":false})
+        }
+        "delegated_task_advance" => { properties.insert("task_id".into(),json!({"type":"string"})); json!({"type":"object","properties":properties,"required":["task_id"],"additionalProperties":false}) }
+        "delegated_task_cancel" => { properties.insert("task_id".into(),json!({"type":"string"})); properties.insert("reason".into(),json!({"type":"string"})); json!({"type":"object","properties":properties,"required":["task_id"],"additionalProperties":false}) }
+        "delegated_task_parent_takeover" => { for field in ["task_id","parent_task_id","reason"] { properties.insert(field.into(),json!({"type":"string"})); } json!({"type":"object","properties":properties,"required":["task_id","parent_task_id"],"additionalProperties":false}) }
+        "delegated_task_acknowledge" => { for field in ["task_id","acknowledged_by","note"] { properties.insert(field.into(),json!({"type":"string"})); } json!({"type":"object","properties":properties,"required":["task_id"],"additionalProperties":false}) }
+        _ => json!({"type":"object","properties":{},"additionalProperties":false}),
+    }
 }
 
 pub fn auxiliary(method: &str, params: &Map<String, Value>) -> Result<Value, Value> {
@@ -943,6 +961,7 @@ fn task_run(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     if task_path(root, &id)?.is_file() {
         let mut task = read_task(root, &id)?;
         if args.get("objective").is_none() && args.get("intent").is_none() {
+            assert_mutation_scope(&task, args, root)?;
             task = advance_value(task, root)?;
         } else if args.get("idempotency_key").is_some() {
             let fingerprint = request_fingerprint(args, root, &id);
@@ -1703,7 +1722,7 @@ fn task_acknowledge(args: &Map<String, Value>, root: &Path) -> Result<Value, Val
 }
 
 fn id_schema(required: bool) -> Value {
-    json!({"type":"object","properties":{"task_id":{"type":"string"},"refresh":{"type":"boolean","default":false}},"required":if required {json!(["task_id"])} else {json!([])},"additionalProperties":false})
+    json!({"type":"object","properties":{"task_id":{"type":"string"}},"required":if required {json!(["task_id"])} else {json!([])},"additionalProperties":false})
 }
 fn error(code: &str, message: &str) -> Value {
     json!({"schema":"narada.delegated_task.error.v1","code":code,"message":message})
@@ -1715,6 +1734,22 @@ fn tool(name: &str, description: &str, schema: Value, read_only: bool) -> Value 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mutating_tool_contracts_are_closed_named_and_callable() {
+        let tools = list_tools();
+        for name in MUTATING {
+            let tool = tools.iter().find(|tool| tool["name"] == *name).expect("tool");
+            assert_eq!(tool["inputSchema"]["additionalProperties"], false, "{name}");
+            assert!(tool["inputSchema"]["properties"].as_object().is_some_and(|value| !value.is_empty()), "{name}");
+        }
+        let run = tools.iter().find(|tool| tool["name"] == "delegated_task_run").unwrap();
+        for field in ["objective","intent","workflow","execution","execution_binding","idempotency_key"] { assert!(run["inputSchema"]["properties"].get(field).is_some(), "{field}"); }
+        let wait = tools.iter().find(|tool| tool["name"] == "delegated_task_wait").unwrap();
+        assert_eq!(wait["annotations"]["readOnlyHint"], false);
+        assert!(wait["inputSchema"]["properties"].get("timeout_ms").is_some());
+        assert!(wait["inputSchema"]["properties"].get("allow_cross_site").is_some());
+    }
 
     #[test]
     fn native_delegated_task_reads_durable_json_without_execution() {
