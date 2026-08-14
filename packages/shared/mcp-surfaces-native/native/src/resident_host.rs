@@ -22,6 +22,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let authority = optional(args, "--authority");
     let mcp_scope = optional(args, "--mcp-scope");
     let orientation_entry_file = optional(args, "--orientation-entry-file");
+    let target_site_id = optional(args, "--target-site-id");
     let intelligence_provider = optional(args, "--intelligence-provider");
     let enable_native_shell = args.iter().any(|value| value == "--enable-native-shell");
     validate_id(&session_id)?;
@@ -82,6 +83,11 @@ pub fn run(args: &[String]) -> Result<(), String> {
             .arg(entry_file)
             .env("NARADA_ORIENTATION_REQUIRED", "1")
             .env("NARADA_ORIENTATION_ENTRY_FILE", entry_file);
+    } else {
+        command.env("NARADA_ORIENTATION_REQUIRED", "0");
+    }
+    if let Some(target_site_id) = target_site_id.as_deref() {
+        command.env("NARADA_TARGET_SITE_ID", target_site_id);
     }
     if let Some(provider) = intelligence_provider.as_deref() {
         command.env("NARADA_INTELLIGENCE_PROVIDER", provider);

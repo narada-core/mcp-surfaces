@@ -283,6 +283,8 @@ fn plan(
             &path_text(&runtime_binary),
             "--site-root",
             &record.site_root,
+            "--target-site-id",
+            &record.site,
             "--identity",
             &record.agent,
             "--session",
