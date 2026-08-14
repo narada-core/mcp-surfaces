@@ -19,6 +19,7 @@ mod launcher;
 mod local_admin;
 mod mailbox;
 mod mailbox_sync;
+mod operator_surface_authority;
 mod runtime_introspection;
 mod scheduler;
 mod scheduler_activation;

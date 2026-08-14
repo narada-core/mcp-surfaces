@@ -1,5 +1,6 @@
 use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
+use crate::operator_surface_authority;
 
 const SITE_LIFECYCLE_COMMANDS: &[(&str, &str, bool, bool, bool)] = &[
     (
@@ -25,6 +26,10 @@ const SITE_LIFECYCLE_COMMANDS: &[(&str, &str, bool, bool, bool)] = &[
         false,
         false,
     ),
+    ("site_admit_role", "narada operator-surface agent instantiate", false, true, true),
+    ("site_verify_role", "narada operator-surface doctor", true, false, false),
+    ("site_observe_runtime", "narada operator-surface status", true, false, false),
+    ("site_bind_runtime", "narada operator-surface bind-focused", false, true, true),
     (
         "site_doctor",
         "narada sites doctor <site-id>",
@@ -236,6 +241,13 @@ fn call_site_lifecycle(name: &str, args: &Map<String, Value>, root: &Path) -> Re
         return Ok(
             json!({"status":"ok","implementation":"rust-native","commands":lifecycle_command_map(),"count":SITE_LIFECYCLE_COMMANDS.len()}),
         );
+    }
+    match name {
+        "site_admit_role" => return operator_surface_authority::admit_role(args, root),
+        "site_verify_role" => return operator_surface_authority::verify_role(args, root),
+        "site_observe_runtime" => return operator_surface_authority::observe_runtime(args, root),
+        "site_bind_runtime" => return operator_surface_authority::bind_runtime(args, root),
+        _ => {}
     }
     let spec = SITE_LIFECYCLE_COMMANDS
         .iter()
@@ -557,6 +569,7 @@ fn lifecycle_tool(name: &str, description: &str, read_only: bool) -> Value {
 }
 
 fn lifecycle_input_schema(name: &str) -> Value {
+    if matches!(name, "site_admit_role" | "site_verify_role" | "site_observe_runtime" | "site_bind_runtime") { return operator_surface_schema(name); }
     let mut properties = Map::new();
     properties.insert(
         "site_id".to_string(),
@@ -584,6 +597,20 @@ fn lifecycle_input_schema(name: &str) -> Value {
         "site_lifecycle_doctor" | "site_show" | "site_doctor" => vec!["site_id", "site_root"],
         "site_init" => vec!["site_id", "site_root", "substrate", "authority_basis"],
         _ => Vec::new(),
+    };
+    json!({"type":"object","properties":properties,"required":required,"additionalProperties":false})
+}
+
+fn operator_surface_schema(name: &str) -> Value {
+    let string = || json!({"type":"string","minLength":1,"maxLength":512});
+    let path = || json!({"type":"string","minLength":3,"maxLength":4096});
+    let authority = json!({"type":"object","minProperties":1,"maxProperties":32,"additionalProperties":true});
+    let (properties, required) = match name {
+        "site_admit_role" => (json!({"site_id":string(),"site_root":path(),"role":{"type":"string","enum":["architect","builder","observer"]},"agent_kind":string(),"identity":string(),"label":string(),"by":string(),"input_capabilities":{"type":"string","maxLength":1024},"submit_strategy":{"type":"string","enum":["type_only","operator_confirmed_submit","known_surface_submit"]},"execute":{"type":"boolean","const":true},"authority_basis":authority}), vec!["site_id","site_root","role","agent_kind","by","execute","authority_basis"]),
+        "site_verify_role" => (json!({"site_id":string(),"site_root":path(),"runtime_locus":string(),"limit":{"type":"integer","minimum":1,"maximum":500,"default":100}}), vec!["site_id","site_root"]),
+        "site_observe_runtime" => (json!({"site_id":string(),"site_root":path(),"limit":{"type":"integer","minimum":1,"maximum":500,"default":100}}), vec!["site_id","site_root"]),
+        "site_bind_runtime" => (json!({"site_root":path(),"identity":string(),"runtime_locus":string(),"handle":path(),"observed_handle":path(),"stale_after":{"type":"string","format":"date-time","maxLength":64},"window_title":{"type":"string","maxLength":1024},"window_class":string(),"process_name":string(),"process_id":string(),"execute":{"type":"boolean","const":true},"authority_basis":authority}), vec!["site_root","identity","runtime_locus","handle","execute","authority_basis"]),
+        _ => (json!({}), Vec::new()),
     };
     json!({"type":"object","properties":properties,"required":required,"additionalProperties":false})
 }

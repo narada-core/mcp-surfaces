@@ -1778,6 +1778,49 @@ function runSiteInboxParity() {
   }
 }
 
+function runSiteLifecycleAuthorityParity() {
+  const root = mkdtempSync(join(tmpdir(), 'narada-site-lifecycle-authority-'));
+  try {
+    mkdirSync(join(root, '.narada'), { recursive: true });
+    const authority = { kind: 'operator_request', summary: 'native authority verifier' };
+    const admission = { site_id: 'fixture', site_root: root, role: 'builder', agent_kind: 'codex_cli', by: 'operator', execute: true, authority_basis: authority };
+    const binding = { site_root: root, identity: 'fixture.builder', runtime_locus: 'user-pc', handle: 'codex-thread:fixture', observed_handle: 'codex-thread:fixture', execute: true, authority_basis: authority };
+    const requests = [
+      { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} },
+      { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'site_verify_role', arguments: { site_id: 'fixture', site_root: root } } },
+      { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'site_observe_runtime', arguments: { site_id: 'fixture', site_root: root } } },
+      { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'site_admit_role', arguments: { ...admission, execute: false } } },
+      { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'site_admit_role', arguments: admission } },
+      { jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'site_admit_role', arguments: admission } },
+      { jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'site_bind_runtime', arguments: { ...binding, observed_handle: 'different' } } },
+      { jsonrpc: '2.0', id: 8, method: 'tools/call', params: { name: 'site_bind_runtime', arguments: binding } },
+      { jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'site_bind_runtime', arguments: binding } },
+      { jsonrpc: '2.0', id: 10, method: 'tools/call', params: { name: 'site_verify_role', arguments: { site_id: 'fixture', site_root: root } } },
+      { jsonrpc: '2.0', id: 11, method: 'tools/call', params: { name: 'site_observe_runtime', arguments: { site_id: 'fixture', site_root: root } } },
+      { jsonrpc: '2.0', id: 12, method: 'tools/call', params: { name: 'site_admit_role', arguments: { ...admission, agent_kind: 'kimi_cli' } } },
+    ];
+    const responses = runMailbox(executable, ['--surface-id', 'site-lifecycle', '--site-root', root], requests, root);
+    const tools = responses.find((response) => response.id === 1)?.result?.tools ?? [];
+    for (const name of ['site_admit_role', 'site_verify_role', 'site_observe_runtime', 'site_bind_runtime']) {
+      const tool = tools.find((candidate) => candidate.name === name);
+      if (!tool || tool.inputSchema?.additionalProperties !== false || Object.values(tool.inputSchema?.properties ?? {}).some((property) => property?.type === 'string' && property?.maxLength == null && !Array.isArray(property?.enum))) throw new Error('site_lifecycle.native_authority_schema_invalid:' + name);
+    }
+    if (mailboxStructured(responses, 2, 'rust').status !== 'not_found' || mailboxStructured(responses, 3, 'rust').binding_count !== 0) throw new Error('site_lifecycle.native_empty_authority_invalid');
+    if (!responses.find((response) => response.id === 4)?.error) throw new Error('site_lifecycle.native_execute_gate_missing');
+    if (mailboxStructured(responses, 5, 'rust').status !== 'admitted' || mailboxStructured(responses, 6, 'rust').status !== 'reused') throw new Error('site_lifecycle.native_admission_replay_invalid');
+    if (!responses.find((response) => response.id === 7)?.error) throw new Error('site_lifecycle.native_binding_postcondition_not_enforced');
+    if (mailboxStructured(responses, 8, 'rust').status !== 'admitted' || mailboxStructured(responses, 9, 'rust').status !== 'reused') throw new Error('site_lifecycle.native_binding_replay_invalid');
+    if (mailboxStructured(responses, 10, 'rust').identities?.[0]?.runtime_bound !== true || mailboxStructured(responses, 11, 'rust').binding_count !== 1) throw new Error('site_lifecycle.native_readback_invalid');
+    if (!responses.find((response) => response.id === 12)?.error) throw new Error('site_lifecycle.native_identity_conflict_not_refused');
+    const identities = JSON.parse(readFileSync(join(root, '.narada', 'operator-surfaces', 'identities.json'), 'utf8'));
+    const bindings = JSON.parse(readFileSync(join(root, '.narada', 'operator-surfaces', 'runtime-bindings.json'), 'utf8'));
+    if (identities.identities?.length !== 1 || bindings.bindings?.length !== 1) throw new Error('site_lifecycle.native_artifact_readback_invalid');
+    return { status: 'passed', verified: ['four_authority_tools', 'closed_bounded_schemas', 'empty', 'execute_authority_gate', 'admission_replay_conflict', 'binding_evidence_replay', 'readback', 'artifact_compatibility'] };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 function runCalendarParity() {
   const workspaceRoot = resolve(packageRoot, '..', '..', '..');
   const bunEntrypoint = join(workspaceRoot, 'packages', 'calendar-mcp', 'src', 'main.ts');
@@ -2567,6 +2610,7 @@ const surfaceFeedbackParity = runSlice('surface-feedback', runSurfaceFeedbackPar
 const siteLoopParity = runSlice('site-loop', runSiteLoopParity);
 const operatorRoutingParity = runSlice('operator-routing', runOperatorRoutingParity);
 const siteInboxParity = runSlice('site-inbox', runSiteInboxParity);
+const siteLifecycleAuthorityParity = runSlice('site-lifecycle', runSiteLifecycleAuthorityParity);
 const calendarParity = runSlice('calendar', runCalendarParity);
 const calendarAuthorityBridge = runSlice('calendar', runCalendarAuthorityBridge);
 const calendarNativeGraphParity = runSlice('calendar', runCalendarNativeGraphParity);
@@ -2606,6 +2650,7 @@ process.stdout.write(JSON.stringify({
   site_loop_parity: siteLoopParity,
   operator_routing_parity: operatorRoutingParity,
   site_inbox_parity: siteInboxParity,
+  site_lifecycle_authority_parity: siteLifecycleAuthorityParity,
   calendar_parity: calendarParity,
   calendar_authority_bridge: calendarAuthorityBridge,
   calendar_native_graph_parity: calendarNativeGraphParity,
