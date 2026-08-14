@@ -1833,12 +1833,18 @@ function runSiteLifecycleAuthorityParity() {
       { jsonrpc: '2.0', id: 29, method: 'tools/call', params: { name: 'site_list', arguments: {} } },
       { jsonrpc: '2.0', id: 30, method: 'tools/call', params: { name: 'site_dependency_posture', arguments: {} } },
       { jsonrpc: '2.0', id: 31, method: 'tools/call', params: { name: 'site_deps_sync', arguments: { execute: true, authority_basis: { kind: 'legacy_caller' } } } },
+      { jsonrpc: '2.0', id: 32, method: 'tools/call', params: { name: 'site_init', arguments: { site_id: 'initialized-plan', substrate: 'windows-native', root: join(root, 'initialized-plan') } } },
+      { jsonrpc: '2.0', id: 33, method: 'tools/call', params: { name: 'site_init', arguments: { site_id: 'initialized', substrate: 'windows-native', root: join(root, 'initialized'), execute: true } } },
+      { jsonrpc: '2.0', id: 34, method: 'tools/call', params: { name: 'site_init', arguments: { site_id: 'initialized', substrate: 'windows-native', root: join(root, 'initialized'), execute: true, authority_basis: authority } } },
+      { jsonrpc: '2.0', id: 35, method: 'tools/call', params: { name: 'site_init', arguments: { site_id: 'initialized', substrate: 'windows-native', root: join(root, 'initialized'), execute: true, authority_basis: authority } } },
+      { jsonrpc: '2.0', id: 36, method: 'tools/call', params: { name: 'site_init', arguments: { site_id: 'fixture', substrate: 'windows-native', root: join(root, 'conflicting-fixture'), execute: true, authority_basis: authority } } },
+      { jsonrpc: '2.0', id: 37, method: 'tools/call', params: { name: 'site_doctor', arguments: { site_id: 'fixture' } } },
+      { jsonrpc: '2.0', id: 38, method: 'tools/call', params: { name: 'site_doctor', arguments: { site_id: 'missing' } } },
     ];
     const responses = runMailbox(executable, ['--surface-id', 'site-lifecycle', '--site-root', root], requests, root, { ...process.env, NARADA_USER_SITE_ROOT: userSiteRoot, NARADA_NATIVE_SITES_BASE_DIR: discoveryBase });
     const tools = responses.find((response) => response.id === 1)?.result?.tools ?? [];
-    for (const name of ['site_admit_role', 'site_verify_role', 'site_observe_runtime', 'site_bind_runtime']) {
-      const tool = tools.find((candidate) => candidate.name === name);
-      if (!tool || tool.inputSchema?.additionalProperties !== false || Object.values(tool.inputSchema?.properties ?? {}).some((property) => property?.type === 'string' && property?.maxLength == null && !Array.isArray(property?.enum))) throw new Error('site_lifecycle.native_authority_schema_invalid:' + name);
+    for (const tool of tools) {
+      if (!tool.inputSchema?.title || tool.inputSchema?.additionalProperties !== false || Object.values(tool.inputSchema?.properties ?? {}).some((property) => property?.type === 'string' && property?.maxLength == null && !Array.isArray(property?.enum))) throw new Error('site_lifecycle.native_tool_schema_invalid:' + tool.name);
     }
     if (mailboxStructured(responses, 2, 'rust').status !== 'not_found' || mailboxStructured(responses, 3, 'rust').binding_count !== 0) throw new Error('site_lifecycle.native_empty_authority_invalid');
     if (!responses.find((response) => response.id === 4)?.error) throw new Error('site_lifecycle.native_execute_gate_missing');
@@ -1871,10 +1877,29 @@ function runSiteLifecycleAuthorityParity() {
     const retiredSync = mailboxStructured(responses, 31, 'rust');
     if (dependencyPosture.status !== 'native_self_contained' || dependencyPosture.node_required !== false || dependencyPosture.runtime_dependencies?.length !== 0) throw new Error('site_lifecycle.native_dependency_posture_invalid');
     if (retiredSync.status !== 'retired' || retiredSync.replacement_tool !== 'site_dependency_posture' || retiredSync.node_modules_modified !== false || existsSync(join(root, 'node_modules'))) throw new Error('site_lifecycle.native_legacy_dependency_sync_not_retired');
+    const initPlan = mailboxStructured(responses, 32, 'rust');
+    if (initPlan.status !== 'planned' || initPlan.mutation_performed !== false || existsSync(join(root, 'initialized-plan'))) throw new Error('site_lifecycle.native_init_plan_invalid');
+    if (!responses.find((response) => response.id === 33)?.error) throw new Error('site_lifecycle.native_init_authority_gate_missing');
+    const initialized = mailboxStructured(responses, 34, 'rust');
+    const reusedInitialization = mailboxStructured(responses, 35, 'rust');
+    if (initialized.status !== 'success' || initialized.mutation_performed !== true || !existsSync(join(root, 'initialized', 'config.json')) || !existsSync(join(root, 'initialized', 'AGENTS.md'))) throw new Error('site_lifecycle.native_init_apply_invalid');
+    if (reusedInitialization.status !== 'reused' || reusedInitialization.mutation_performed !== false || reusedInitialization.idempotency_replay !== true) throw new Error('site_lifecycle.native_init_retry_invalid');
+    if (!responses.find((response) => response.id === 36)?.error || existsSync(join(root, 'conflicting-fixture'))) throw new Error('site_lifecycle.native_init_registry_conflict_not_preflighted');
+    const doctor = mailboxStructured(responses, 37, 'rust');
+    if (doctor.status !== 'ok' || doctor.result?.resolution_evidence?.resolution_source !== 'canonical_registry' || doctor.result?.resolution_evidence?.inspected !== true) throw new Error('site_lifecycle.native_doctor_registry_resolution_invalid');
+    if (mailboxStructured(responses, 38, 'rust').status !== 'not_found') throw new Error('site_lifecycle.native_doctor_missing_site_invalid');
+    const repairDb = new DatabaseSync(join(userSiteRoot, 'registry.db'));
+    repairDb.prepare("DELETE FROM site_registry WHERE site_id='initialized'").run();
+    repairDb.close();
+    const repairResponses = runMailbox(executable, ['--surface-id', 'site-lifecycle', '--site-root', root], [
+      { jsonrpc: '2.0', id: 39, method: 'tools/call', params: { name: 'site_init', arguments: { site_id: 'initialized', substrate: 'windows-native', root: join(root, 'initialized'), execute: true, authority_basis: authority } } },
+    ], root, { ...process.env, NARADA_USER_SITE_ROOT: userSiteRoot, NARADA_NATIVE_SITES_BASE_DIR: discoveryBase });
+    const repairedInitialization = mailboxStructured(repairResponses, 39, 'rust');
+    if (repairedInitialization.status !== 'repaired_registry' || repairedInitialization.mutation_performed !== true || repairedInitialization.idempotency_replay !== false) throw new Error('site_lifecycle.native_init_registry_recovery_invalid');
     const identities = JSON.parse(readFileSync(join(root, '.narada', 'operator-surfaces', 'identities.json'), 'utf8'));
     const bindings = JSON.parse(readFileSync(join(root, '.narada', 'operator-surfaces', 'runtime-bindings.json'), 'utf8'));
     if (identities.identities?.length !== 1 || bindings.bindings?.length !== 1) throw new Error('site_lifecycle.native_artifact_readback_invalid');
-    return { status: 'passed', verified: ['four_authority_tools', 'create_presets_and_plans', 'registry_list_show', 'transactional_discovery_and_retry', 'native_dependency_posture_and_legacy_retirement', 'transformation_kinds_preflight', 'relation_list_validate', 'mutation_authority_preflight', 'root_confinement', 'closed_bounded_schemas', 'empty', 'execute_authority_gate', 'admission_replay_conflict', 'binding_evidence_replay', 'readback', 'artifact_compatibility'] };
+    return { status: 'passed', verified: ['four_authority_tools', 'create_presets_and_plans', 'registry_list_show', 'transactional_discovery_and_retry', 'native_site_init_plan_apply_retry_conflict_recovery', 'native_site_doctor_registry_resolution_and_missing_site', 'native_dependency_posture_and_legacy_retirement', 'transformation_kinds_preflight', 'relation_list_validate', 'mutation_authority_preflight', 'root_confinement', 'all_tool_schemas_named_closed_bounded', 'empty', 'execute_authority_gate', 'admission_replay_conflict', 'binding_evidence_replay', 'readback', 'artifact_compatibility'] };
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

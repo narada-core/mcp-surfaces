@@ -1,8 +1,8 @@
-use serde_json::{json, Map, Value};
-use std::path::{Path, PathBuf};
 use crate::operator_surface_authority;
 use crate::site_lifecycle_authority;
 use crate::site_registry_authority;
+use serde_json::{json, Map, Value};
+use std::path::{Path, PathBuf};
 
 const SITE_LIFECYCLE_COMMANDS: &[(&str, &str, bool, bool, bool)] = &[
     (
@@ -28,10 +28,34 @@ const SITE_LIFECYCLE_COMMANDS: &[(&str, &str, bool, bool, bool)] = &[
         false,
         false,
     ),
-    ("site_admit_role", "narada operator-surface agent instantiate", false, true, true),
-    ("site_verify_role", "narada operator-surface doctor", true, false, false),
-    ("site_observe_runtime", "narada operator-surface status", true, false, false),
-    ("site_bind_runtime", "narada operator-surface bind-focused", false, true, true),
+    (
+        "site_admit_role",
+        "narada operator-surface agent instantiate",
+        false,
+        true,
+        true,
+    ),
+    (
+        "site_verify_role",
+        "narada operator-surface doctor",
+        true,
+        false,
+        false,
+    ),
+    (
+        "site_observe_runtime",
+        "narada operator-surface status",
+        true,
+        false,
+        false,
+    ),
+    (
+        "site_bind_runtime",
+        "narada operator-surface bind-focused",
+        false,
+        true,
+        true,
+    ),
     (
         "site_doctor",
         "narada sites doctor <site-id>",
@@ -88,7 +112,13 @@ const SITE_LIFECYCLE_COMMANDS: &[(&str, &str, bool, bool, bool)] = &[
         false,
         false,
     ),
-    ("site_dependency_posture", "inspect native dependency posture", true, false, false),
+    (
+        "site_dependency_posture",
+        "inspect native dependency posture",
+        true,
+        false,
+        false,
+    ),
 ];
 
 const SITE_REGISTRY_COMMANDS: &[(&str, &str)] = &[
@@ -221,24 +251,19 @@ fn call_site_lifecycle(name: &str, args: &Map<String, Value>, root: &Path) -> Re
         return Ok(guidance_result("site-lifecycle", args));
     }
     if name == "site_lifecycle_doctor" {
-        let evidence = site_resolution_evidence(args, root);
-        let status = evidence
-            .get("status")
-            .and_then(Value::as_str)
-            .unwrap_or("attention");
         return Ok(json!({
             "schema":"narada.site_lifecycle.doctor.v1",
-            "status":status,
+            "status":"ok",
             "server_name":"site-lifecycle-mcp",
             "implementation":"rust-native",
+            "runtime_dependency":"none",
             "site_root":root.to_string_lossy(),
             "command_count":SITE_LIFECYCLE_COMMANDS.len(),
             "coverage":lifecycle_command_map(),
             "cli_module_exists":false,
             "cli_module_path":null,
-            "inspected":evidence.get("inspected").and_then(Value::as_bool).unwrap_or(false),
-            "resolution_evidence":evidence,
-            "items":evidence.get("checks").cloned().unwrap_or_else(|| json!([]))
+            "native_authorities":["site_registry","operator_surface","site_relations","site_creation","site_discovery"],
+            "legacy_dependency_sync":"retired"
         }));
     }
     if name == "site_lifecycle_command_map" {
@@ -254,29 +279,57 @@ fn call_site_lifecycle(name: &str, args: &Map<String, Value>, root: &Path) -> Re
         "site_create_presets_list" => return Ok(site_lifecycle_authority::create_presets()),
         "site_create_plan" => return site_lifecycle_authority::create_plan(args, root),
         "site_discover" => {
-            if args.get("execute").and_then(Value::as_bool) != Some(true) { return Err(diagnostic("site_discover_execute_required","site_discover requires execute=true")); }
-            if args.get("authority_basis").and_then(Value::as_object).is_none_or(Map::is_empty) { return Err(diagnostic("site_discover_authority_required","site_discover requires a non-empty authority_basis")); }
+            if args.get("execute").and_then(Value::as_bool) != Some(true) {
+                return Err(diagnostic(
+                    "site_discover_execute_required",
+                    "site_discover requires execute=true",
+                ));
+            }
+            if args
+                .get("authority_basis")
+                .and_then(Value::as_object)
+                .is_none_or(Map::is_empty)
+            {
+                return Err(diagnostic(
+                    "site_discover_authority_required",
+                    "site_discover requires a non-empty authority_basis",
+                ));
+            }
             return site_registry_authority::apply_discovery(args);
         }
         "site_list" => {
             let listed = site_registry_authority::call("site_registry_list", &Map::new())?;
             let sites = listed["sites"].as_array().cloned().unwrap_or_default().into_iter().map(|site| json!({"siteId":site["site_id"],"variant":site["variant"],"substrate":site["substrate"],"health":"unknown","lastCycle":null,"failures":0})).collect::<Vec<_>>();
-            return Ok(json!({"status":"success","sites":sites,"paging":{"count":listed["count"],"returned":listed["returned"],"has_more":listed["has_more"],"next_offset":listed["next_offset"]}}));
+            return Ok(
+                json!({"status":"success","sites":sites,"paging":{"count":listed["count"],"returned":listed["returned"],"has_more":listed["has_more"],"next_offset":listed["next_offset"]}}),
+            );
         }
         "site_show" => {
             let site_id = require_string(args, "site_id")?;
-            let shown = site_registry_authority::call("site_registry_show", &serde_json::from_value(json!({"reference":site_id})).unwrap())?;
-            if shown["status"] != "success" { return Ok(json!({"status":"error","error":format!("Site not found: {site_id}"),"refusals":shown["refusals"]})); }
-            let site=&shown["site"];
-            return Ok(json!({"status":"success","site":{"siteId":site["site_id"],"variant":site["variant"],"siteRoot":site["site_root"],"substrate":site["substrate"],"aimJson":site["aim_json"],"controlEndpoint":site["control_endpoint"],"lastSeenAt":site["last_seen_at"],"createdAt":site["created_at"],"health":null}}));
+            let shown = site_registry_authority::call(
+                "site_registry_show",
+                &serde_json::from_value(json!({"reference":site_id})).unwrap(),
+            )?;
+            if shown["status"] != "success" {
+                return Ok(
+                    json!({"status":"error","error":format!("Site not found: {site_id}"),"refusals":shown["refusals"]}),
+                );
+            }
+            let site = &shown["site"];
+            return Ok(
+                json!({"status":"success","site":{"siteId":site["site_id"],"variant":site["variant"],"siteRoot":site["site_root"],"substrate":site["substrate"],"aimJson":site["aim_json"],"controlEndpoint":site["control_endpoint"],"lastSeenAt":site["last_seen_at"],"createdAt":site["created_at"],"health":null}}),
+            );
         }
         "site_lifecycle_kinds" => return Ok(site_lifecycle_authority::kinds()),
         "site_lifecycle_preflight" => return site_lifecycle_authority::preflight(args),
         "site_relation_list" => return site_lifecycle_authority::relation_list(args, root),
         "site_relation_validate" => return site_lifecycle_authority::relation_validate(args, root),
-        "site_authority_preflight" => return site_lifecycle_authority::authority_preflight(args, root),
+        "site_authority_preflight" => {
+            return site_lifecycle_authority::authority_preflight(args, root)
+        }
         "site_dependency_posture" => return site_lifecycle_authority::dependency_posture(root),
         "site_deps_sync" => return Ok(site_lifecycle_authority::retired_dependency_sync(root)),
+        "site_init" => return site_lifecycle_authority::init_site(args),
         _ => {}
     }
     let spec = SITE_LIFECYCLE_COMMANDS
@@ -302,7 +355,28 @@ fn call_site_lifecycle(name: &str, args: &Map<String, Value>, root: &Path) -> Re
     }
     let mutation = !spec.2;
     let (result, resolution_status) = if name == "site_doctor" {
-        let evidence = site_resolution_evidence(args, root);
+        let site_id = require_string(args, "site_id")?;
+        let mut resolved_args = args.clone();
+        let resolution_source = if args.get("root").and_then(Value::as_str).is_some() {
+            "explicit_root"
+        } else {
+            let shown = site_registry_authority::call(
+                "site_registry_show",
+                &serde_json::from_value(json!({"reference":site_id})).unwrap(),
+            )?;
+            let Some(site_root) = shown.pointer("/site/site_root").and_then(Value::as_str) else {
+                return Ok(json!({
+                    "schema":"narada.site_lifecycle.result.v1","status":"not_found",
+                    "implementation":"rust-native","tool":name,"read_only":true,
+                    "mutation_performed":false,"site_id":site_id,
+                    "message":"Site is not registered and no explicit root was supplied."
+                }));
+            };
+            resolved_args.insert("root".to_string(), Value::String(site_root.to_string()));
+            "canonical_registry"
+        };
+        let mut evidence = site_resolution_evidence(&resolved_args, root);
+        evidence["resolution_source"] = Value::String(resolution_source.to_string());
         let status = evidence
             .get("status")
             .and_then(Value::as_str)
@@ -368,12 +442,22 @@ fn call_site_registry(name: &str, args: &Map<String, Value>, root: &Path) -> Res
 
 fn registry_input_schema(name: &str) -> Value {
     let properties = match name {
-        "site_registry_list" => json!({"limit":{"type":"integer","minimum":1,"maximum":500,"default":100},"offset":{"type":"integer","minimum":0,"maximum":10000,"default":0}}),
-        "site_registry_show" => json!({"reference":{"type":"string","minLength":1,"maxLength":512}}),
-        "site_registry_discover_plan" => json!({"source":{"type":"string","enum":["filesystem","launch_registry","all"],"default":"all"},"root":{"type":"string","minLength":1,"maxLength":4096},"actor":{"type":"string","minLength":1,"maxLength":512}}),
+        "site_registry_list" => {
+            json!({"limit":{"type":"integer","minimum":1,"maximum":500,"default":100},"offset":{"type":"integer","minimum":0,"maximum":10000,"default":0}})
+        }
+        "site_registry_show" => {
+            json!({"reference":{"type":"string","minLength":1,"maxLength":512}})
+        }
+        "site_registry_discover_plan" => {
+            json!({"source":{"type":"string","enum":["filesystem","launch_registry","all"],"default":"all"},"root":{"type":"string","minLength":1,"maxLength":4096},"actor":{"type":"string","minLength":1,"maxLength":512}})
+        }
         _ => json!({}),
     };
-    let required = if name == "site_registry_show" { json!(["reference"]) } else { json!([]) };
+    let required = if name == "site_registry_show" {
+        json!(["reference"])
+    } else {
+        json!([])
+    };
     json!({"type":"object","properties":properties,"required":required,"additionalProperties":false})
 }
 
@@ -506,7 +590,7 @@ fn site_resolution_evidence(args: &Map<String, Value>, root: &Path) -> Value {
         .filter(|value| !value.is_empty())
         .map(ToString::to_string);
     let requested_site_root = args
-        .get("site_root")
+        .get("root")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -587,66 +671,105 @@ fn lifecycle_tool(name: &str, description: &str, read_only: bool) -> Value {
 }
 
 fn lifecycle_input_schema(name: &str) -> Value {
-    if matches!(name, "site_admit_role" | "site_verify_role" | "site_observe_runtime" | "site_bind_runtime") { return operator_surface_schema(name); }
-    let mut properties = Map::new();
-    properties.insert(
-        "site_id".to_string(),
-        json!({"type":"string","minLength":1,"maxLength":512,"description":"Canonical Site identifier."}),
-    );
-    properties.insert("site_root".to_string(), json!({"type":"string","minLength":1,"maxLength":4096,"description":"Explicit workspace root or its .narada authority root."}));
-    properties.insert("root".to_string(), json!({"type":"string","minLength":1,"maxLength":4096}));
-    properties.insert("cwd".to_string(), json!({"type":"string","minLength":1,"maxLength":4096}));
-    properties.insert("config".to_string(), json!({"type":"string","minLength":1,"maxLength":4096}));
-    properties.insert("preset".to_string(), json!({"type":"string","enum":["minimal","agent-site-core","agent-memory","task-lifecycle","site-machinery"]}));
-    properties.insert("site_kind".to_string(), json!({"type":"string","minLength":1,"maxLength":128}));
-    properties.insert("authority_locus".to_string(), json!({"type":"string","minLength":1,"maxLength":128}));
-    properties.insert(
-        "kind".to_string(),
-        json!({"type":"string","minLength":1,"maxLength":128,"description":"Lifecycle kind or preflight selector."}),
-    );
-    properties.insert(
-        "substrate".to_string(),
-        json!({"type":"string","minLength":1,"maxLength":128,"description":"Requested Site substrate."}),
-    );
-    properties.insert(
-        "authority_basis".to_string(),
-        json!({"type":"object","description":"Explicit authority basis for a mutation."}),
-    );
-    properties.insert("execute".to_string(), json!({"type":"boolean","description":"Whether an owning authority may execute the planned mutation."}));
-    properties.insert(
-        "dry_run".to_string(),
-        json!({"type":"boolean","description":"Return a plan without mutation."}),
-    );
-    properties.insert("source_site".to_string(),json!({"type":"string","minLength":1,"maxLength":4096}));
-    properties.insert("target_site".to_string(),json!({"type":"string","minLength":1,"maxLength":4096}));
-    properties.insert("authority_mode".to_string(),json!({"type":"string","minLength":1,"maxLength":128}));
-    properties.insert("mutation_family".to_string(),json!({"type":"string","enum":["task_lifecycle","inbox","publication","secret","site"]}));
-    properties.insert("status".to_string(),json!({"type":"string","minLength":1,"maxLength":128}));
-    properties.insert("limit".to_string(),json!({"type":"integer","minimum":1,"maximum":500,"default":20}));
-    let required: Vec<&str> = match name {
-        "site_lifecycle_doctor" => vec!["site_id", "site_root"],
-        "site_show" | "site_doctor" => vec!["site_id"],
-        "site_init" => vec!["site_id", "site_root", "substrate", "authority_basis"],
-        _ => Vec::new(),
+    if matches!(
+        name,
+        "site_admit_role" | "site_verify_role" | "site_observe_runtime" | "site_bind_runtime"
+    ) {
+        return operator_surface_schema(name);
+    }
+    let string = || json!({"type":"string","minLength":1,"maxLength":512});
+    let path = || json!({"type":"string","minLength":1,"maxLength":4096});
+    let authority =
+        json!({"type":"object","minProperties":1,"maxProperties":32,"additionalProperties":true});
+    let (properties, required) = match name {
+        "site_create_plan" => (
+            json!({"config":path(),"preset":{"type":"string","enum":["minimal","agent-site-core","agent-memory","task-lifecycle","site-machinery"]},"site_id":string(),"root":path(),"site_kind":string(),"authority_locus":string()}),
+            vec![],
+        ),
+        "site_discover" => (
+            json!({"execute":{"type":"boolean"},"dry_run":{"type":"boolean"},"authority_basis":authority}),
+            vec![],
+        ),
+        "site_show" => (json!({"site_id":string()}), vec!["site_id"]),
+        "site_doctor" => (
+            json!({"site_id":string(),"root":path(),"authority_locus":{"type":"string","enum":["user","pc","project","client_service"]},"kind":{"type":"string","enum":["windows","client","project","linux","linux-user","linux-system"]},"role":string(),"role_required":{"type":"boolean"}}),
+            vec!["site_id"],
+        ),
+        "site_init" => (
+            json!({"site_id":string(),"substrate":{"type":"string","enum":["windows-native","windows-wsl","macos","linux-user","linux-system"]},"operation":string(),"root":path(),"authority_locus":{"type":"string","enum":["user","pc"]},"sync":{"type":"string","enum":["local_only","cloud_synced_folder","git_backed","hybrid","hybrid_capable_plain_folder"]},"execution_surface":{"type":"string","enum":["windows_native","wsl_assisted","wsl_native","linux_user","linux_system","macos_native"]},"dry_run":{"type":"boolean"},"execute":{"type":"boolean"},"authority_basis":authority}),
+            vec!["site_id", "substrate"],
+        ),
+        "site_lifecycle_preflight" => (
+            json!({"kind":{"type":"string","enum":["clone","fork","split","absorb","migrate","re-instantiate","archive"]},"source_site":path(),"target_site":path(),"authority_mode":string()}),
+            vec!["kind"],
+        ),
+        "site_relation_list" => (
+            json!({"kind":{"type":"string","enum":["absorbed","absorbed_by","references","routes_to","subscribes_to","publishes_to"]},"source_site":string(),"target_site":string(),"status":{"type":"string","enum":["active","superseded","rejected"]},"limit":{"type":"integer","minimum":1,"maximum":500,"default":20},"cwd":path()}),
+            vec![],
+        ),
+        "site_relation_validate" => (json!({"cwd":path()}), vec![]),
+        "site_authority_preflight" => (
+            json!({"cwd":path(),"mutation_family":{"type":"string","enum":["task_lifecycle","inbox","publication","secret","site"]}}),
+            vec![],
+        ),
+        "site_deps_sync" => (
+            json!({"root":path(),"apply":{"type":"boolean"},"execute":{"type":"boolean"},"authority_basis":authority}),
+            vec![],
+        ),
+        _ => (json!({}), vec![]),
     };
-    json!({"type":"object","properties":properties,"required":required,"additionalProperties":false})
+    json!({"title":format!("{name}.input"),"type":"object","properties":properties,"required":required,"additionalProperties":false})
 }
 
 fn operator_surface_schema(name: &str) -> Value {
     let string = || json!({"type":"string","minLength":1,"maxLength":512});
     let path = || json!({"type":"string","minLength":3,"maxLength":4096});
-    let authority = json!({"type":"object","minProperties":1,"maxProperties":32,"additionalProperties":true});
+    let authority =
+        json!({"type":"object","minProperties":1,"maxProperties":32,"additionalProperties":true});
     let (properties, required) = match name {
-        "site_admit_role" => (json!({"site_id":string(),"site_root":path(),"role":{"type":"string","enum":["architect","builder","observer"]},"agent_kind":string(),"identity":string(),"label":string(),"by":string(),"input_capabilities":{"type":"string","maxLength":1024},"submit_strategy":{"type":"string","enum":["type_only","operator_confirmed_submit","known_surface_submit"]},"execute":{"type":"boolean","const":true},"authority_basis":authority}), vec!["site_id","site_root","role","agent_kind","by","execute","authority_basis"]),
-        "site_verify_role" => (json!({"site_id":string(),"site_root":path(),"runtime_locus":string(),"limit":{"type":"integer","minimum":1,"maximum":500,"default":100}}), vec!["site_id","site_root"]),
-        "site_observe_runtime" => (json!({"site_id":string(),"site_root":path(),"limit":{"type":"integer","minimum":1,"maximum":500,"default":100}}), vec!["site_id","site_root"]),
-        "site_bind_runtime" => (json!({"site_root":path(),"identity":string(),"runtime_locus":string(),"handle":path(),"observed_handle":path(),"stale_after":{"type":"string","format":"date-time","maxLength":64},"window_title":{"type":"string","maxLength":1024},"window_class":string(),"process_name":string(),"process_id":string(),"execute":{"type":"boolean","const":true},"authority_basis":authority}), vec!["site_root","identity","runtime_locus","handle","execute","authority_basis"]),
+        "site_admit_role" => (
+            json!({"site_id":string(),"site_root":path(),"role":{"type":"string","enum":["architect","builder","observer"]},"agent_kind":string(),"identity":string(),"label":string(),"by":string(),"input_capabilities":{"type":"string","maxLength":1024},"submit_strategy":{"type":"string","enum":["type_only","operator_confirmed_submit","known_surface_submit"]},"execute":{"type":"boolean","const":true},"authority_basis":authority}),
+            vec![
+                "site_id",
+                "site_root",
+                "role",
+                "agent_kind",
+                "by",
+                "execute",
+                "authority_basis",
+            ],
+        ),
+        "site_verify_role" => (
+            json!({"site_id":string(),"site_root":path(),"runtime_locus":string(),"limit":{"type":"integer","minimum":1,"maximum":500,"default":100}}),
+            vec!["site_id", "site_root"],
+        ),
+        "site_observe_runtime" => (
+            json!({"site_id":string(),"site_root":path(),"limit":{"type":"integer","minimum":1,"maximum":500,"default":100}}),
+            vec!["site_id", "site_root"],
+        ),
+        "site_bind_runtime" => (
+            json!({"site_root":path(),"identity":string(),"runtime_locus":string(),"handle":path(),"observed_handle":path(),"stale_after":{"type":"string","format":"date-time","maxLength":64},"window_title":{"type":"string","maxLength":1024},"window_class":string(),"process_name":string(),"process_id":string(),"execute":{"type":"boolean","const":true},"authority_basis":authority}),
+            vec![
+                "site_root",
+                "identity",
+                "runtime_locus",
+                "handle",
+                "execute",
+                "authority_basis",
+            ],
+        ),
         _ => (json!({}), Vec::new()),
     };
     json!({"type":"object","properties":properties,"required":required,"additionalProperties":false})
 }
 
 fn tool_with_schema(name: &str, description: &str, read_only: bool, input_schema: Value) -> Value {
+    let mut input_schema = input_schema;
+    if let Some(schema) = input_schema.as_object_mut() {
+        schema
+            .entry("title".to_string())
+            .or_insert_with(|| Value::String(format!("{name}.input")));
+    }
     json!({
         "name":name,"description":description,
         "inputSchema":input_schema,
@@ -658,7 +781,7 @@ fn tool_with_schema(name: &str, description: &str, read_only: bool, input_schema
 fn tool(name: &str, description: &str, read_only: bool) -> Value {
     json!({
         "name":name,"description":description,
-        "inputSchema":{"type":"object","properties":{},"additionalProperties":false},
+        "inputSchema":{"title":format!("{name}.input"),"type":"object","properties":{},"additionalProperties":false},
         "annotations":{"title":name,"readOnlyHint":read_only,"destructiveHint":!read_only,"idempotentHint":true,"openWorldHint":false},
         "outputSchema":{"type":"object","additionalProperties":true}
     })
@@ -698,15 +821,12 @@ mod tests {
     }
 
     #[test]
-    fn site_lifecycle_doctor_requires_coordinates_and_reports_resolution() {
+    fn site_lifecycle_doctor_reports_native_runtime_without_coordinates() {
         let doctor = list_tools("site-lifecycle")
             .into_iter()
             .find(|tool| tool["name"] == "site_lifecycle_doctor")
             .expect("doctor tool");
-        assert_eq!(
-            doctor["inputSchema"]["required"],
-            json!(["site_id", "site_root"])
-        );
+        assert_eq!(doctor["inputSchema"]["required"], json!([]));
 
         let args = Map::new();
         let result = call_tool(
@@ -716,13 +836,9 @@ mod tests {
             Path::new("C:/definitely-missing-site"),
         )
         .unwrap();
-        assert_eq!(result["status"], "attention");
-        assert_eq!(result["inspected"], false);
-        assert!(result["items"]
-            .as_array()
-            .map(|items| !items.is_empty())
-            .unwrap_or(false));
-        assert_eq!(result["resolution_evidence"]["bound_root_match"], false);
+        assert_eq!(result["status"], "ok");
+        assert_eq!(result["runtime_dependency"], "none");
+        assert_eq!(result["legacy_dependency_sync"], "retired");
     }
 
     #[test]
