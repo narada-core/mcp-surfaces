@@ -8,7 +8,14 @@ use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-const ENTITY_KINDS: &[&str] = &["problem", "conjecture", "claim", "criticism", "test", "source"];
+const ENTITY_KINDS: &[&str] = &[
+    "problem",
+    "conjecture",
+    "claim",
+    "criticism",
+    "test",
+    "source",
+];
 const CORE_RELATIONS: &[&str] = &[
     "addresses",
     "criticizes",
@@ -54,6 +61,18 @@ pub fn list_tools() -> Vec<Value> {
             false,
         ),
         tool(
+            "epistemic_graph_capture_sources",
+            "Create one bounded proposal from concise source descriptors plus typed non-source operations; reports existing identities before explicit review and admission.",
+            capture_sources_schema(),
+            false,
+        ),
+        tool(
+            "epistemic_graph_proposal_read",
+            "Read immutable proposal metadata and a bounded page of operations.",
+            json!({"type":"object","properties":{"proposal_id":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":100},"offset":{"type":"integer","minimum":0}},"required":["proposal_id"],"additionalProperties":false}),
+            true,
+        ),
+        tool(
             "epistemic_graph_proposal_review",
             "Validate an immutable proposal without asserting truth.",
             proposal_id_schema(),
@@ -87,6 +106,8 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, site_root: &Path) -> Res
         "epistemic_graph_query" => query(site_root, args),
         "epistemic_graph_neighborhood" => neighborhood(site_root, args),
         "epistemic_graph_proposal_submit" => proposal_submit(site_root, args),
+        "epistemic_graph_capture_sources" => capture_sources(site_root, args),
+        "epistemic_graph_proposal_read" => proposal_read(site_root, args),
         "epistemic_graph_proposal_review" => proposal_review(site_root, args),
         "epistemic_graph_proposal_admit" => proposal_admit(site_root, args),
         "epistemic_graph_proposal_reject" => proposal_reject(site_root, args),
@@ -164,6 +185,191 @@ fn proposal_receipt(proposal: &Value) -> Value {
         "expected_ledger_head":proposal["expected_ledger_head"],
         "created_at":proposal["created_at"]
     })
+}
+
+fn capture_sources(root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
+    prepare(root)?;
+    rebuild_projection(root)?;
+    let sources = args
+        .get("sources")
+        .and_then(Value::as_array)
+        .ok_or_else(|| error("invalid_capture", "sources must be an array", Value::Null))?;
+    let supplied = args
+        .get("operations")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            error(
+                "invalid_capture",
+                "operations must be an array",
+                Value::Null,
+            )
+        })?;
+    if sources.is_empty() {
+        return Err(error(
+            "invalid_capture",
+            "at least one source is required",
+            Value::Null,
+        ));
+    }
+    let mut operations = Vec::with_capacity(sources.len() + supplied.len());
+    for source in sources {
+        let source = source.as_object().ok_or_else(|| {
+            error(
+                "invalid_capture",
+                "each source must be an object",
+                Value::Null,
+            )
+        })?;
+        operations.push(json!({
+            "op":"entity.declare",
+            "entity_id":required(source, "source_id")?,
+            "kind":"source",
+            "title":required(source, "title")?,
+            "version":required(source, "version")?,
+            "locator":required(source, "locator")?
+        }));
+    }
+    for operation in supplied {
+        if operation.get("kind").and_then(Value::as_str) == Some("source") {
+            return Err(error(
+                "invalid_capture",
+                "declare sources through the sources field, not operations",
+                Value::Null,
+            ));
+        }
+        operations.push(operation.clone());
+    }
+    if operations.len() > MAX_OPERATIONS {
+        return Err(error(
+            "invalid_capture",
+            "combined source and operation count exceeds 200",
+            json!({"source_count":sources.len(),"operation_count":supplied.len(),"combined_count":operations.len()}),
+        ));
+    }
+    let existing_identities = existing_operation_identities(root, &operations)?;
+    let mut proposal_args = args.clone();
+    proposal_args.remove("sources");
+    proposal_args.insert("operations".into(), json!(operations));
+    let receipt = proposal_submit(root, &proposal_args)?;
+    Ok(json!({
+        "schema":"narada.epistemic.source_capture.v1",
+        "status":"draft_submitted",
+        "proposal_id":receipt["proposal_id"],
+        "proposal_digest":receipt["proposal_digest"],
+        "expected_ledger_head":receipt["expected_ledger_head"],
+        "source_count":sources.len(),
+        "operation_count":receipt["operation_count"],
+        "existing_identity_count":existing_identities.len(),
+        "existing_identities":existing_identities,
+        "next":{"review":{"tool":"epistemic_graph_proposal_review","proposal_id":receipt["proposal_id"]}},
+        "admission_requires_explicit_call":true,
+        "certifies_truth":false,
+        "bounded":true
+    }))
+}
+
+fn existing_operation_identities(root: &Path, operations: &[Value]) -> Result<Vec<Value>, Value> {
+    let db = Connection::open(projection_path(root)).map_err(db_error("projection_open_failed"))?;
+    let mut existing = Vec::new();
+    for operation in operations {
+        let (table, column, identity) = match operation.get("op").and_then(Value::as_str) {
+            Some("entity.declare") => ("entities", "entity_id", operation.get("entity_id")),
+            Some("relation.declare") => ("relations", "relation_id", operation.get("relation_id")),
+            Some("assessment.record") => ("records", "record_id", operation.get("assessment_id")),
+            Some("test_outcome.record") => ("records", "record_id", operation.get("outcome_id")),
+            Some("sweep.record") => ("records", "record_id", operation.get("sweep_id")),
+            _ => continue,
+        };
+        let Some(identity) = identity.and_then(Value::as_str) else {
+            continue;
+        };
+        let sql = format!("select 1 from {table} where {column}=?1 limit 1");
+        let found = db
+            .query_row(&sql, params![identity], |_| Ok(()))
+            .optional()
+            .map_err(db_error("projection_duplicate_check_failed"))?
+            .is_some();
+        if found {
+            existing.push(json!({"op":operation["op"],"identity":identity}));
+        }
+    }
+    Ok(existing)
+}
+
+fn proposal_read(root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
+    let id = required(args, "proposal_id")?;
+    let proposal = load_proposal(root, &id)?;
+    let operations = proposal["operations"].as_array().ok_or_else(|| {
+        error(
+            "proposal_corrupt",
+            "proposal operations missing",
+            json!({"proposal_id":id}),
+        )
+    })?;
+    let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(20)
+        .min(MAX_PAGE) as usize;
+    let items = operations
+        .iter()
+        .skip(offset)
+        .take(limit)
+        .cloned()
+        .collect::<Vec<_>>();
+    let next_offset = (offset + items.len() < operations.len()).then_some(offset + items.len());
+    let lifecycle = proposal_lifecycle(root, &id)?;
+    Ok(json!({
+        "schema":"narada.epistemic.proposal_read.v1",
+        "status":lifecycle["status"],
+        "lifecycle":lifecycle,
+        "proposal_id":proposal["proposal_id"],
+        "proposal_digest":proposal["digest"],
+        "actor":proposal["actor"],
+        "authority_basis":proposal["authority_basis"],
+        "idempotency_key":proposal["idempotency_key"],
+        "expected_ledger_head":proposal["expected_ledger_head"],
+        "created_at":proposal["created_at"],
+        "operation_count":operations.len(),
+        "offset":offset,
+        "limit":limit,
+        "returned":items.len(),
+        "operations":items,
+        "has_more":next_offset.is_some(),
+        "next_offset":next_offset,
+        "bounded":true
+    }))
+}
+
+fn proposal_lifecycle(root: &Path, proposal_id: &str) -> Result<Value, Value> {
+    for path in ledger_files(root)? {
+        let event = read_json(&path)?;
+        if event.get("proposal_id").and_then(Value::as_str) == Some(proposal_id) {
+            return Ok(json!({
+                "status":"admitted",
+                "event_id":event["event_id"],
+                "sequence":event["sequence"],
+                "ledger_head":event["event_hash"],
+                "admitted_at":event["occurred_at"]
+            }));
+        }
+    }
+    let rejection_path = proposals(root).join(format!("{}.rejection.json", safe_name(proposal_id)));
+    if rejection_path.exists() {
+        let rejection = read_json(&rejection_path)?;
+        return Ok(json!({
+            "status":"rejected",
+            "rejected_at":rejection["occurred_at"],
+            "reason":rejection["reason"]
+        }));
+    }
+    let review_path = proposals(root).join(format!("{}.review.json", safe_name(proposal_id)));
+    if review_path.exists() {
+        let review = read_json(&review_path)?;
+        return Ok(json!({"status":"reviewed","review_status":review["status"]}));
+    }
+    Ok(json!({"status":"submitted"}))
 }
 
 fn proposal_review(root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
@@ -286,7 +492,10 @@ fn query(root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
         .min(MAX_PAGE);
     let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0);
     let kind = args.get("kind").and_then(Value::as_str).unwrap_or("");
-    let compact = args.get("compact").and_then(Value::as_bool).unwrap_or(false);
+    let compact = args
+        .get("compact")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let text = args.get("text").and_then(Value::as_str).unwrap_or("");
     let like = format!("%{text}%");
     if let Some(record_kind) = args.get("record_kind").and_then(Value::as_str) {
@@ -299,8 +508,12 @@ fn query(root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
                 json!({"record_id":row.get::<_,String>(0)?,"record_kind":row.get::<_,String>(1)?,"payload":payload,"event_id":row.get::<_,String>(3)?})
             })
         }).map_err(db_error("projection_record_query_failed"))?;
-        let items = rows.collect::<Result<Vec<_>, _>>().map_err(db_error("projection_record_query_row_failed"))?;
-        return Ok(json!({"schema":"narada.epistemic.query.v1","status":"ok","result_kind":"records","record_kind":record_kind,"compact":compact,"items":items,"offset":offset,"limit":limit,"returned":items.len(),"bounded":true}));
+        let items = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(db_error("projection_record_query_row_failed"))?;
+        return Ok(
+            json!({"schema":"narada.epistemic.query.v1","status":"ok","result_kind":"records","record_kind":record_kind,"compact":compact,"items":items,"offset":offset,"limit":limit,"returned":items.len(),"bounded":true}),
+        );
     }
     let mut stmt = db.prepare("select entity_id,kind,payload_json,event_id from entities where (?1='' or kind=?1) and (?2='' or payload_json like ?3) order by entity_id limit ?4 offset ?5").map_err(db_error("projection_query_prepare_failed"))?;
     let rows = stmt.query_map(params![kind,text,like,limit,offset], |row| {
@@ -370,8 +583,16 @@ fn export(root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
         .map_err(db_error("projection_export_failed"))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(db_error("projection_export_row_failed"))?;
-    let mut record_stmt = db.prepare("select payload_json from records order by record_id limit 1000").map_err(db_error("projection_export_record_prepare_failed"))?;
-    let records = record_stmt.query_map([], |r| Ok(serde_json::from_str::<Value>(&r.get::<_,String>(0)?).unwrap_or(Value::Null))).map_err(db_error("projection_export_record_failed"))?.collect::<Result<Vec<_>, _>>().map_err(db_error("projection_export_record_row_failed"))?;
+    let mut record_stmt = db
+        .prepare("select payload_json from records order by record_id limit 1000")
+        .map_err(db_error("projection_export_record_prepare_failed"))?;
+    let records = record_stmt
+        .query_map([], |r| {
+            Ok(serde_json::from_str::<Value>(&r.get::<_, String>(0)?).unwrap_or(Value::Null))
+        })
+        .map_err(db_error("projection_export_record_failed"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(db_error("projection_export_record_row_failed"))?;
     let context = if format == "jsonld" {
         json!({"prov":"http://www.w3.org/ns/prov#","cito":"http://purl.org/spar/cito/","fabio":"http://purl.org/spar/fabio/","narada":"https://narada.local/epistemic/"})
     } else {
@@ -604,7 +825,12 @@ fn validate_operations(ops: &[Value], require_evidence: bool) -> Result<(), Valu
                     return Err(error(
                         "invalid_relation_type",
                         "extension relations must be namespaced",
-                        json!({"relation_type":typ}),
+                        json!({
+                            "relation_type":typ,
+                            "core_relations":CORE_RELATIONS,
+                            "extension_pattern":"<namespace>:<relation>",
+                            "examples":["marici:refines","marici:generalizes"]
+                        }),
                     ));
                 }
                 required(obj, "source_id")?;
@@ -786,14 +1012,16 @@ fn guidance() -> Value {
         "purpose":"Preserve evolving problem situations, not certify truth.",
         "workflow":[
             {"step":1,"tool":"epistemic_graph_status","why":"Read the current ledger_head for optimistic concurrency."},
-            {"step":2,"tool":"epistemic_graph_query","why":"Avoid duplicate entities and inspect the current problem neighborhood."},
-            {"step":3,"tool":"epistemic_graph_proposal_submit","why":"Persist one atomic, idempotent set of typed operations."},
-            {"step":4,"tool":"epistemic_graph_proposal_review","why":"Validate schema, references, provenance locations, invariants, and ledger head without asserting truth."},
-            {"step":5,"tool":"epistemic_graph_proposal_admit","why":"Append a policy-valid proposal to immutable canonical history."},
-            {"step":6,"tool":"epistemic_graph_neighborhood","why":"Verify the admitted problem situation and its relations."}
+            {"step":2,"tool":"epistemic_graph_capture_sources","why":"For ledger or literature capture, declare sources concisely and receive a compact existing-identity report plus proposal receipt."},
+            {"step":3,"tool":"epistemic_graph_proposal_submit","alternative":true,"why":"For contributions without source batching, persist one atomic typed proposal directly."},
+            {"step":4,"tool":"epistemic_graph_proposal_read","optional":true,"why":"Inspect stored operations explicitly through bounded pages when needed."},
+            {"step":5,"tool":"epistemic_graph_proposal_review","why":"Validate schema, references, provenance locations, invariants, and ledger head without asserting truth."},
+            {"step":6,"tool":"epistemic_graph_proposal_admit","why":"Append a policy-valid proposal to immutable canonical history."},
+            {"step":7,"tool":"epistemic_graph_neighborhood","why":"Verify the admitted problem situation and its relations."}
         ],
         "entity_kinds":ENTITY_KINDS,
         "core_relations":CORE_RELATIONS,
+        "extension_relation_rule":"Any relation outside core_relations must be namespaced, for example marici:refines or marici:generalizes.",
         "operation_kinds":["entity.declare","relation.declare","assessment.record","test_outcome.record","sweep.record"],
         "provenance_choices":[
             "Represent a document as a versioned source entity and connect claims with derived_from.",
@@ -824,7 +1052,7 @@ fn evidence_schema() -> Value {
 fn operation_schema() -> Value {
     json!({"oneOf":[
         {"title":"Declare entity","type":"object","properties":{"op":{"const":"entity.declare"},"entity_id":non_empty_string(),"kind":{"type":"string","enum":ENTITY_KINDS},"title":non_empty_string(),"version":non_empty_string(),"locator":non_empty_string()},"required":["op","entity_id","kind","title"],"allOf":[{"if":{"properties":{"kind":{"const":"source"}},"required":["kind"]},"then":{"required":["version","locator"]}}],"additionalProperties":true},
-        {"title":"Declare relation","type":"object","properties":{"op":{"const":"relation.declare"},"relation_id":non_empty_string(),"relation_type":{"type":"string","description":"One core relation or a namespaced extension such as marici:refines."},"source_id":non_empty_string(),"target_id":non_empty_string()},"required":["op","relation_id","relation_type","source_id","target_id"],"additionalProperties":true},
+        {"title":"Declare relation","type":"object","properties":{"op":{"const":"relation.declare"},"relation_id":non_empty_string(),"relation_type":{"oneOf":[{"type":"string","enum":CORE_RELATIONS},{"type":"string","pattern":"^[A-Za-z][A-Za-z0-9_.-]*:[A-Za-z][A-Za-z0-9_.-]*$"}],"description":"Use a listed core relation, or namespace an extension such as marici:refines."},"source_id":non_empty_string(),"target_id":non_empty_string()},"required":["op","relation_id","relation_type","source_id","target_id"],"additionalProperties":true},
         {"title":"Record assessment","type":"object","properties":{"op":{"const":"assessment.record"},"assessment_id":non_empty_string(),"subject_id":non_empty_string(),"judgment":non_empty_string(),"actor":non_empty_string(),"reason":non_empty_string(),"evidence":{"type":"array","minItems":1,"items":evidence_schema()}},"required":["op","assessment_id","subject_id","judgment","actor","reason","evidence"],"additionalProperties":true},
         {"title":"Record test outcome","type":"object","properties":{"op":{"const":"test_outcome.record"},"outcome_id":non_empty_string(),"test_id":non_empty_string(),"actor":non_empty_string(),"outcome":non_empty_string(),"evidence":{"type":"array","minItems":1,"items":evidence_schema()}},"required":["op","outcome_id","test_id","actor","outcome","evidence"],"additionalProperties":true},
         {"title":"Record bounded search sweep","type":"object","properties":{"op":{"const":"sweep.record"},"sweep_id":non_empty_string(),"interval_start":non_empty_string(),"interval_end":non_empty_string(),"method":non_empty_string(),"result":non_empty_string()},"required":["op","sweep_id","interval_start","interval_end","method","result"],"additionalProperties":true}
@@ -832,6 +1060,16 @@ fn operation_schema() -> Value {
 }
 fn proposal_schema() -> Value {
     json!({"type":"object","properties":{"actor":non_empty_string(),"authority_basis":{"type":"object","description":"Why this actor may propose the contribution.","minProperties":1},"idempotency_key":non_empty_string(),"expected_ledger_head":{"type":["string","null"],"description":"Current status.ledger_head; null only for an empty graph."},"operations":{"type":"array","minItems":1,"maxItems":200,"items":operation_schema()}},"required":["actor","authority_basis","idempotency_key","expected_ledger_head","operations"],"additionalProperties":false})
+}
+fn capture_sources_schema() -> Value {
+    json!({"type":"object","properties":{
+        "actor":non_empty_string(),
+        "authority_basis":{"type":"object","description":"Why this actor may propose the contribution.","minProperties":1},
+        "idempotency_key":non_empty_string(),
+        "expected_ledger_head":{"type":["string","null"],"description":"Current status.ledger_head; null only for an empty graph."},
+        "sources":{"type":"array","minItems":1,"maxItems":100,"items":{"type":"object","properties":{"source_id":non_empty_string(),"title":non_empty_string(),"version":non_empty_string(),"locator":non_empty_string()},"required":["source_id","title","version","locator"],"additionalProperties":false}},
+        "operations":{"type":"array","minItems":1,"maxItems":199,"items":operation_schema()}
+    },"required":["actor","authority_basis","idempotency_key","expected_ledger_head","sources","operations"],"additionalProperties":false})
 }
 fn proposal_id_schema() -> Value {
     json!({"type":"object","properties":{"proposal_id":{"type":"string"}},"required":["proposal_id"],"additionalProperties":false})
@@ -898,7 +1136,8 @@ mod tests {
     #[test]
     fn source_entity_requires_a_version_and_locator() {
         let operation = json!({"op":"entity.declare","entity_id":"source:unlocated","kind":"source","title":"Unlocated source","version":"1"});
-        let failure = validate_operations(&[operation], false).expect_err("unlocated source must refuse");
+        let failure =
+            validate_operations(&[operation], false).expect_err("unlocated source must refuse");
         assert_eq!(failure["code"], "required_argument_missing");
         assert_eq!(failure["details"]["field"], "locator");
     }
@@ -911,13 +1150,106 @@ mod tests {
             {"op":"entity.declare","entity_id":"test:record-test","kind":"test","title":"Record test"},
             {"op":"assessment.record","assessment_id":"assessment:record-test","subject_id":"test:record-test","judgment":"conditional","actor":"tester","reason":"Some gates remain open.","evidence":[{"source_id":"source:record-test","locator":"Current status","paraphrase":"The source reports a conditional result."}]}
         ]);
-        let proposal = proposal_submit(&root, &Map::from_iter([("actor".into(),json!("tester")),("authority_basis".into(),json!({"kind":"test"})),("idempotency_key".into(),json!("record-p1")),("expected_ledger_head".into(),Value::Null),("operations".into(),operations)])).expect("proposal");
-        proposal_admit(&root, &Map::from_iter([("proposal_id".into(),proposal["proposal_id"].clone()),("actor".into(),json!("tester")),("authority_basis".into(),json!({"kind":"test"})),("expected_ledger_head".into(),Value::Null),("idempotency_key".into(),json!("record-a1"))])).expect("admit");
-        let records = query(&root, &Map::from_iter([("record_kind".into(),json!("assessment.record"))])).expect("record query");
+        let proposal = proposal_submit(
+            &root,
+            &Map::from_iter([
+                ("actor".into(), json!("tester")),
+                ("authority_basis".into(), json!({"kind":"test"})),
+                ("idempotency_key".into(), json!("record-p1")),
+                ("expected_ledger_head".into(), Value::Null),
+                ("operations".into(), operations),
+            ]),
+        )
+        .expect("proposal");
+        proposal_admit(
+            &root,
+            &Map::from_iter([
+                ("proposal_id".into(), proposal["proposal_id"].clone()),
+                ("actor".into(), json!("tester")),
+                ("authority_basis".into(), json!({"kind":"test"})),
+                ("expected_ledger_head".into(), Value::Null),
+                ("idempotency_key".into(), json!("record-a1")),
+            ]),
+        )
+        .expect("admit");
+        let records = query(
+            &root,
+            &Map::from_iter([("record_kind".into(), json!("assessment.record"))]),
+        )
+        .expect("record query");
         assert_eq!(records["returned"], 1);
         assert_eq!(status(&root).expect("status")["record_count"], 1);
-        assert_eq!(neighborhood(&root, &Map::from_iter([("entity_id".into(),json!("test:record-test"))])).expect("neighborhood")["records"].as_array().map(Vec::len), Some(1));
-        assert_eq!(export(&root, &Map::new()).expect("export")["records"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            neighborhood(
+                &root,
+                &Map::from_iter([("entity_id".into(), json!("test:record-test"))])
+            )
+            .expect("neighborhood")["records"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            export(&root, &Map::new()).expect("export")["records"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn proposal_submission_is_compact_and_explicit_reads_are_bounded() {
+        let root =
+            std::env::temp_dir().join(format!("epistemic-proposal-read-test-{}", Uuid::new_v4()));
+        let operations = (0..MAX_OPERATIONS)
+            .map(|index| json!({"op":"entity.declare","entity_id":format!("claim:{index}"),"kind":"claim","title":format!("Claim {index}")}))
+            .collect::<Vec<_>>();
+        let receipt = proposal_submit(
+            &root,
+            &Map::from_iter([
+                ("actor".into(), json!("tester")),
+                ("authority_basis".into(), json!({"kind":"test"})),
+                ("idempotency_key".into(), json!("compact-p1")),
+                ("expected_ledger_head".into(), Value::Null),
+                ("operations".into(), json!(operations)),
+            ]),
+        )
+        .expect("proposal");
+        assert_eq!(receipt["operation_count"], MAX_OPERATIONS);
+        assert!(receipt.get("operations").is_none());
+        assert!(
+            serde_json::to_vec(&receipt)
+                .expect("serialize receipt")
+                .len()
+                < 1024
+        );
+
+        let first = proposal_read(
+            &root,
+            &Map::from_iter([
+                ("proposal_id".into(), receipt["proposal_id"].clone()),
+                ("limit".into(), json!(7)),
+            ]),
+        )
+        .expect("first page");
+        assert_eq!(first["returned"], 7);
+        assert_eq!(first["offset"], 0);
+        assert_eq!(first["next_offset"], 7);
+        assert_eq!(first["bounded"], true);
+
+        let final_page = proposal_read(
+            &root,
+            &Map::from_iter([
+                ("proposal_id".into(), receipt["proposal_id"].clone()),
+                ("offset".into(), json!(195)),
+                ("limit".into(), json!(100)),
+            ]),
+        )
+        .expect("final page");
+        assert_eq!(final_page["returned"], 5);
+        assert_eq!(final_page["has_more"], false);
+        assert!(final_page["next_offset"].is_null());
         let _ = fs::remove_dir_all(root);
     }
 
@@ -925,7 +1257,10 @@ mod tests {
     fn proposal_admission_rebuilds_projection_and_preserves_truth_boundary() {
         let root = std::env::temp_dir().join(format!("epistemic-test-{}", Uuid::new_v4()));
         let proposal=proposal_submit(&root,&Map::from_iter([("actor".into(),json!("nima")),("authority_basis".into(),json!({"kind":"operator_request"})),("idempotency_key".into(),json!("p1")),("expected_ledger_head".into(),Value::Null),("operations".into(),json!([{"op":"entity.declare","entity_id":"problem-1","kind":"problem","title":"What explains X?"}]))])).unwrap();
-        assert_eq!(proposal["schema"], "narada.epistemic.proposal_submission.v1");
+        assert_eq!(
+            proposal["schema"],
+            "narada.epistemic.proposal_submission.v1"
+        );
         assert_eq!(proposal["operation_count"], 1);
         assert!(proposal.get("operations").is_none());
         let id = proposal["proposal_id"].as_str().unwrap();
@@ -946,8 +1281,64 @@ mod tests {
         assert!(event.get("operations").is_none());
         assert_eq!(event["ledger_head"].as_str().map(str::len), Some(64));
         assert_eq!(event["certifies_truth"], false);
+        let admitted = proposal_read(&root, &Map::from_iter([("proposal_id".into(), json!(id))]))
+            .expect("admitted proposal readback");
+        assert_eq!(admitted["status"], "admitted");
+        assert_eq!(admitted["lifecycle"]["event_id"], event["event_id"]);
+        assert_eq!(admitted["lifecycle"]["ledger_head"], event["ledger_head"]);
         let result = query(&root, &Map::new()).unwrap();
         assert_eq!(result["returned"], 1);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn source_capture_builds_a_compact_deduplicated_draft_without_admitting_it() {
+        let root = std::env::temp_dir().join(format!("epistemic-capture-test-{}", Uuid::new_v4()));
+        let seed = proposal_submit(
+            &root,
+            &Map::from_iter([
+                ("actor".into(), json!("tester")),
+                ("authority_basis".into(), json!({"kind":"test"})),
+                ("idempotency_key".into(), json!("seed-p1")),
+                ("expected_ledger_head".into(), Value::Null),
+                ("operations".into(), json!([{"op":"entity.declare","entity_id":"claim:existing","kind":"claim","title":"Existing claim"}])),
+            ]),
+        ).expect("seed proposal");
+        let seed_event = proposal_admit(
+            &root,
+            &Map::from_iter([
+                ("proposal_id".into(), seed["proposal_id"].clone()),
+                ("actor".into(), json!("tester")),
+                ("authority_basis".into(), json!({"kind":"test"})),
+                ("expected_ledger_head".into(), Value::Null),
+                ("idempotency_key".into(), json!("seed-a1")),
+            ]),
+        )
+        .expect("seed admission");
+        let capture = capture_sources(
+            &root,
+            &Map::from_iter([
+                ("actor".into(), json!("tester")),
+                ("authority_basis".into(), json!({"kind":"test"})),
+                ("idempotency_key".into(), json!("capture-p1")),
+                ("expected_ledger_head".into(), seed_event["ledger_head"].clone()),
+                ("sources".into(), json!([{"source_id":"source:ledger-1","title":"Ledger one","version":"1","locator":"src/ledger/1.md"}])),
+                ("operations".into(), json!([
+                    {"op":"entity.declare","entity_id":"claim:existing","kind":"claim","title":"Existing claim"},
+                    {"op":"relation.declare","relation_id":"rel:existing-source","relation_type":"derived_from","source_id":"claim:existing","target_id":"source:ledger-1"}
+                ])),
+            ]),
+        ).expect("source capture");
+        assert_eq!(capture["status"], "draft_submitted");
+        assert_eq!(capture["source_count"], 1);
+        assert_eq!(capture["operation_count"], 3);
+        assert_eq!(capture["existing_identity_count"], 1);
+        assert_eq!(
+            capture["existing_identities"][0]["identity"],
+            "claim:existing"
+        );
+        assert_eq!(capture["admission_requires_explicit_call"], true);
+        assert_eq!(ledger_files(&root).expect("ledger").len(), 1);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -973,8 +1364,10 @@ mod tests {
                 ("expected_ledger_head".into(), Value::Null),
                 ("idempotency_key".into(), json!("claim-a1")),
             ]),
-        ).expect("claim admission");
-        let result = query(&root, &Map::from_iter([("compact".into(), json!(true))])).expect("compact query");
+        )
+        .expect("claim admission");
+        let result = query(&root, &Map::from_iter([("compact".into(), json!(true))]))
+            .expect("compact query");
         assert_eq!(result["compact"], true);
         assert_eq!(result["items"][0]["entity_id"], "claim:tree-result");
         assert_eq!(result["items"][0]["title"], "Attributed theorem result");
