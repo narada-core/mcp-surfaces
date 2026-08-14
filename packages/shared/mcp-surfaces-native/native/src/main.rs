@@ -53,6 +53,13 @@ struct Options {
 
 fn main() {
     let arguments = env::args().skip(1).collect::<Vec<_>>();
+    if site_loop::is_supervisor_mode(&arguments) {
+        if let Err(error) = site_loop::run_supervisor(&arguments) {
+            let _ = writeln!(io::stderr(), "{error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if resident_host::is_host_mode(&arguments) {
         if let Err(error) = resident_host::run(&arguments) {
             let _ = writeln!(io::stderr(), "{error}");

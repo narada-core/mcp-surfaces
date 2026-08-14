@@ -30,6 +30,18 @@ const MUTATING_TOOLS: &[&str] = &[
     "site_loop_attention_ack", "site_loop_control_set", "site_loop_run_once",
 ];
 
+pub fn is_supervisor_mode(args:&[String])->bool{args.first().map(String::as_str)==Some("--site-loop-supervise-native")}
+
+pub fn run_supervisor(args:&[String])->Result<(),String>{
+    let root=supervisor_arg(args,"--site-root").map(PathBuf::from).ok_or("site_loop_supervisor_site_root_required")?; let cycles=supervisor_arg(args,"--cycles").map(|value|value.parse::<u64>().map_err(|_|"site_loop_supervisor_cycles_invalid".to_string())).transpose()?; let interval_ms=supervisor_arg(args,"--interval-ms").map(|value|value.parse::<u64>().map_err(|_|"site_loop_supervisor_interval_invalid".to_string())).transpose()?.unwrap_or(60_000).clamp(100,3_600_000); let timeout_ms=supervisor_arg(args,"--timeout-ms").map(|value|value.parse::<u64>().map_err(|_|"site_loop_supervisor_timeout_invalid".to_string())).transpose()?.unwrap_or(120_000).clamp(1,300_000); let limit=supervisor_arg(args,"--limit").map(|value|value.parse::<u64>().map_err(|_|"site_loop_supervisor_limit_invalid".to_string())).transpose()?.unwrap_or(25).clamp(1,500); let dry=args.iter().any(|value|value=="--dry-run");
+    let admitted=["--site-loop-supervise-native","--site-root","--cycles","--interval-ms","--timeout-ms","--limit","--dry-run"]; let mut index=0;while index<args.len(){let key=args[index].as_str();if !admitted.contains(&key){return Err(format!("site_loop_supervisor_unknown_argument:{key}"))} index+=if matches!(key,"--site-loop-supervise-native"|"--dry-run"){1}else{2};}
+    let heartbeat_path=root.join(".ai/runtime/site-loop-supervisor-heartbeat.json"); let mut completed=0_u64;
+    loop{let config=load_config(&root).map_err(|value|value.to_string())?.ok_or("site_loop_config_missing")?; let started=now_iso(); let result=if dry{let dry_args=json!({"dry_run":true}).as_object().cloned().unwrap_or_default();run_once(&dry_args,&root)}else{execute_loop_once(&root,&config,limit,timeout_ms,false)}; let packet=json!({"schema":"narada.site_loop.native_supervisor_heartbeat.v1","status":if result.is_ok(){"alive"}else{"attention"},"pid":std::process::id(),"site_root":root,"cycle":completed+1,"cycle_started_at":started,"heartbeat_at":now_iso(),"last_result":result.as_ref().ok(),"last_error":result.as_ref().err()});write_json_atomically(&heartbeat_path,&packet).map_err(|value|value.to_string())?;result.map_err(|value|value.to_string())?;completed+=1;if cycles.is_some_and(|value|completed>=value){break}thread::sleep(Duration::from_millis(interval_ms));}
+    Ok(())
+}
+
+fn supervisor_arg(args:&[String],key:&str)->Option<String>{args.iter().position(|value|value==key).and_then(|index|args.get(index+1)).cloned()}
+
 pub fn list_tools() -> Vec<Value> {
     let mut tools = vec![guidance_tool()];
     for name in READ_TOOLS {
@@ -1129,6 +1141,10 @@ mod tests {
         assert_eq!(bridged["materialized_count"],1);
         assert_eq!(bridged["materialized"][0]["inbox"]["status"],"acknowledged");
         assert!(bridged["materialized"][0]["task"]["task_number"].as_i64().is_some());
+        run_supervisor(&vec!["--site-loop-supervise-native".into(),"--site-root".into(),root.to_string_lossy().to_string(),"--cycles".into(),"1".into(),"--dry-run".into()]).expect("dry supervisor");
+        let heartbeat=read_bounded_json(&root.join(".ai/runtime/site-loop-supervisor-heartbeat.json")).expect("heartbeat read").expect("heartbeat");
+        assert_eq!(heartbeat["status"],"alive");
+        assert_eq!(heartbeat["cycle"],1);
         fs::remove_dir_all(root).expect("cleanup");
     }
 
