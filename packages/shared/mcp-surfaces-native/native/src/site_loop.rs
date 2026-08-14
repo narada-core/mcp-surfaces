@@ -1,12 +1,18 @@
 use serde_json::{json, Map, Value};
 use rusqlite::{params, types::ValueRef, Connection, OpenFlags, OptionalExtension};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 const SERVER_NAME: &str = "narada-site-loop-mcp";
 const DB_RELATIVE: &str = ".ai/task-lifecycle.db";
 const MAX_TEXT_BYTES: u64 = 512_000;
+const MAX_TEST_OUTPUT_BYTES: usize = 64 * 1024;
+const TEST_TIMEOUT: Duration = Duration::from_secs(120);
 const READ_TOOLS: &[&str] = &[
     "site_loop_doctor", "site_docs_list", "site_docs_show", "site_test_list",
     "site_loop_config_validate", "site_loop_operator_affordances", "site_loop_status",
@@ -101,6 +107,7 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<V
         "site_loop_attention_list" => attention_list(args, root),
         "site_loop_attention_show" => attention_show(args, root),
         "site_loop_output_show" => output_show(args, root),
+        "site_test_run" => test_run(args, root),
         "site_loop_attention_ack" => attention_ack(args, root),
         "site_loop_control_set" => control_set(args, root),
         name if MUTATING_TOOLS.contains(&name) => Err(authority_boundary(name)),
@@ -113,7 +120,7 @@ fn guidance_tool() -> Value {
 }
 
 fn guidance(args: &Map<String, Value>) -> Value {
-    json!({"schema":"narada.mcp_surface.guidance.v0","status":"ok","surface_id":"site-loop","guidance_tool":"site_loop_guidance","purpose":"Inspect site-loop configuration, status, proof, and recovery posture.","requested":{"workflow":args.get("workflow").cloned().unwrap_or(Value::Null),"tool":args.get("tool").cloned().unwrap_or(Value::Null)},"first_use":["Call site_loop_doctor first.","Use site_loop_unified_status and site_loop_health before recovery.","Use site_loop_proof_status/readiness/coherence to distinguish freshness from coherence.","Keep scheduler, resident carrier, task lifecycle, and control mutations with their owning authorities."],"boundaries":["This native slice is read-only except for no local writes.","Configured commands are reported, never executed.","Resident launch and loop control remain explicit authority boundaries."]})
+    json!({"schema":"narada.mcp_surface.guidance.v0","status":"ok","surface_id":"site-loop","guidance_tool":"site_loop_guidance","purpose":"Inspect site-loop configuration, status, proof, and recovery posture.","requested":{"workflow":args.get("workflow").cloned().unwrap_or(Value::Null),"tool":args.get("tool").cloned().unwrap_or(Value::Null)},"first_use":["Call site_loop_doctor first.","Use site_loop_unified_status and site_loop_health before recovery.","Use site_loop_proof_status/readiness/coherence to distinguish freshness from coherence.","Use site_test_list before site_test_run; only exact configured selectors execute.","Keep scheduler, resident carrier, and task-lifecycle mutations with their owning authorities."],"boundaries":["The native surface owns configured test execution plus durable attention acknowledgement and loop control.","Configured tests execute directly without shell interpolation and return bounded output.","Resident launch, proof, recovery drill, and production loop execution remain explicit authority boundaries."]})
 }
 
 fn mutation_description(name: &str) -> &'static str {
@@ -446,7 +453,7 @@ fn load_config(root: &Path) -> Result<Option<Value>, Value> {
 fn doctor(root: &Path) -> Result<Value, Value> {
     let config = load_config(root)?;
     let object = config.as_ref().and_then(Value::as_object).cloned().unwrap_or_default();
-    Ok(json!({"schema":"narada.site_loop.doctor.v1","status":"ok","site_root":root.to_string_lossy(),"config_path":config_path(root).to_string_lossy(),"config_status":if config.is_some(){"loaded"}else{"missing"},"config_schema":object.get("schema").cloned().unwrap_or(Value::Null),"site_id":object.get("site_id").cloned().unwrap_or(Value::Null),"loop_id":object.get("loop_id").cloned().unwrap_or(Value::Null),"resident_agent_id":object.get("resident").and_then(Value::as_object).and_then(|v|v.get("agent_id")).cloned().unwrap_or(Value::Null),"native_adapter":"read_only_local","mutations":"authority_boundary","server_name":SERVER_NAME}))
+    Ok(json!({"schema":"narada.site_loop.doctor.v1","status":"ok","site_root":root.to_string_lossy(),"config_path":config_path(root).to_string_lossy(),"config_status":if config.is_some(){"loaded"}else{"missing"},"config_schema":object.get("schema").cloned().unwrap_or(Value::Null),"site_id":object.get("site_id").cloned().unwrap_or(Value::Null),"loop_id":object.get("loop_id").cloned().unwrap_or(Value::Null),"resident_agent_id":object.get("resident").and_then(Value::as_object).and_then(|v|v.get("agent_id")).cloned().unwrap_or(Value::Null),"native_adapter":"local_authority","native_operations":["configured_test_run","attention_ack","control_set"],"delegated_operations":["proof_run","recovery_drill","production_run_once"],"server_name":SERVER_NAME}))
 }
 
 fn config_validate(root: &Path) -> Result<Value, Value> {
@@ -499,6 +506,53 @@ fn test_list(root: &Path) -> Result<Value, Value> {
         Some(json!({"selector":name,"command":command_line}))
     }).collect::<Vec<_>>();
     Ok(json!({"status":"ok","site_root":root.to_string_lossy(),"tests":entries}))
+}
+
+fn test_run(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let selector = args.get("selector").and_then(Value::as_str).filter(|value| !value.is_empty() && value.len() <= 256)
+        .ok_or_else(|| error("site_test_selector_required", "selector must be a non-empty string of at most 256 bytes"))?;
+    let config = load_config(root)?.ok_or_else(|| error("site_loop_config_missing", "site-loop config is required to run an approved test"))?;
+    let tests = config.as_object().and_then(|value| value.get("tests")).and_then(Value::as_object)
+        .ok_or_else(|| error("site_test_config_invalid", "site-loop config tests must be an object"))?;
+    let definition = tests.get(selector).and_then(Value::as_object)
+        .ok_or_else(|| error("test_selector_not_approved", &format!("test selector is not approved: {selector}")))?;
+    let command = definition.get("command").and_then(Value::as_str).filter(|value| !value.is_empty())
+        .ok_or_else(|| error("site_test_config_invalid", "approved test command must be a non-empty string"))?;
+    let command_args = definition.get("args").and_then(Value::as_array)
+        .ok_or_else(|| error("site_test_config_invalid", "approved test args must be an array"))?
+        .iter().map(|value| value.as_str().map(ToOwned::to_owned).ok_or_else(|| error("site_test_config_invalid", "every approved test argument must be a string")))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut process = Command::new(command);
+    process.args(&command_args).current_dir(root).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped())
+        .env_remove("WT_SESSION").env_remove("WT_PROFILE_ID");
+    #[cfg(windows)]
+    { use std::os::windows::process::CommandExt; process.creation_flags(0x0800_0000); }
+    let mut child = process.spawn().map_err(|cause| error("site_test_start_failed", &format!("failed to start approved selector {selector}: {cause}")))?;
+    let stdout_reader = child.stdout.take().map(|stream| thread::spawn(move || read_bounded(stream)));
+    let stderr_reader = child.stderr.take().map(|stream| thread::spawn(move || read_bounded(stream)));
+    let started = Instant::now();
+    let (exit_code, timed_out) = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break (status.code(), false),
+            Ok(None) if started.elapsed() < TEST_TIMEOUT => thread::sleep(Duration::from_millis(10)),
+            Ok(None) => { let _ = child.kill(); let status = child.wait().ok().and_then(|value| value.code()); break (status, true); }
+            Err(cause) => return Err(error("site_test_wait_failed", &cause.to_string())),
+        }
+    };
+    let (stdout, stdout_truncated) = join_output(stdout_reader)?;
+    let (mut stderr, stderr_truncated) = join_output(stderr_reader)?;
+    if timed_out { if !stderr.is_empty() { stderr.push('\n'); } stderr.push_str("timed_out"); }
+    Ok(json!({"schema":"narada.site_test.result.v1","status":if timed_out{"timed_out"}else if exit_code==Some(0){"passed"}else{"failed"},"selector":selector,"exit_code":exit_code,"stdout":stdout,"stderr":stderr,"stdout_truncated":stdout_truncated,"stderr_truncated":stderr_truncated,"timeout_ms":TEST_TIMEOUT.as_millis() as u64}))
+}
+
+fn read_bounded<R: Read>(mut reader: R) -> (String, bool) {
+    let mut retained = Vec::new(); let mut buffer = [0_u8; 8192]; let mut truncated = false;
+    loop { match reader.read(&mut buffer) { Ok(0) | Err(_) => break, Ok(count) => { let available = MAX_TEST_OUTPUT_BYTES.saturating_sub(retained.len()); retained.extend_from_slice(&buffer[..count.min(available)]); truncated |= count > available; } } }
+    (String::from_utf8_lossy(&retained).into_owned(), truncated)
+}
+
+fn join_output(handle: Option<thread::JoinHandle<(String, bool)>>) -> Result<(String, bool), Value> {
+    handle.map(|value| value.join().map_err(|_| error("site_test_output_read_failed", "approved test output reader panicked"))).transpose().map(|value| value.unwrap_or_default())
 }
 
 fn status(root: &Path) -> Result<Value, Value> {
@@ -588,12 +642,26 @@ fn tool(name: &str, description: &str, input_schema: Value, read_only: bool) -> 
 mod tests {
     use super::*;
     #[test]
-    fn native_site_loop_read_slice_is_bounded_and_refuses_mutation() {
+    fn native_site_loop_local_authority_is_bounded_and_refuses_external_mutation() {
         let root = std::env::temp_dir().join(format!("narada-site-loop-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(root.join(".narada/capabilities")).expect("root");
         fs::write(config_path(&root), r#"{"schema":"narada.site_loop.config.v2","loop_id":"site.loop","site_id":"test","display_name":"Test","resident":{},"scheduler":{},"policy":{},"persistence":{}}"#).expect("config");
         assert_eq!(config_validate(&root).expect("validation")["valid"], true);
         assert_eq!(call_tool("site_loop_run_once", &Map::new(), &root).expect_err("boundary")["status"], "unavailable");
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn native_site_loop_runs_only_configured_tests_with_bounded_output() {
+        let root = std::env::temp_dir().join(format!("narada-site-loop-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join(".narada/capabilities")).expect("root");
+        fs::write(config_path(&root), r#"{"schema":"narada.site_loop.config.v2","loop_id":"site.loop","site_id":"test","display_name":"Test","resident":{},"scheduler":{},"tests":{"rust_version":{"command":"rustc","args":["--version"]}},"policy":{},"persistence":{}}"#).expect("config");
+        let result = test_run(&json_map(json!({"selector":"rust_version"})), &root).expect("configured test");
+        assert_eq!(result["status"], "passed");
+        assert!(result["stdout"].as_str().is_some_and(|value| value.starts_with("rustc ")));
+        assert_eq!(result["stdout_truncated"], false);
+        let refused = test_run(&json_map(json!({"selector":"arbitrary"})), &root).expect_err("allowlist");
+        assert_eq!(refused["code"], "test_selector_not_approved");
         fs::remove_dir_all(root).expect("cleanup");
     }
 

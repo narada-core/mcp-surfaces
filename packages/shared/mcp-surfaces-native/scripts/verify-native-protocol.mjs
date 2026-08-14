@@ -1628,9 +1628,6 @@ function runSurfaceFeedbackParity() {
 }
 
 function runSiteLoopParity() {
-  const workspaceRoot = resolve(packageRoot, '..', '..', '..');
-  const bunEntrypoint = join(workspaceRoot, 'packages', 'site-loop-mcp', 'src', 'site-loop-mcp-server.ts');
-  if (!existsSync(bunEntrypoint)) throw new Error('site_loop_parity_bun_entrypoint_missing:' + bunEntrypoint);
   const root = mkdtempSync(join(tmpdir(), 'narada-site-loop-native-parity-'));
   try {
     const configDir = join(root, '.narada', 'capabilities');
@@ -1643,7 +1640,7 @@ function runSiteLoopParity() {
       resident: { agent_id: 'fixture-agent', role: 'resident' },
       scheduler: { default_task_name: 'Fixture-Loop' },
       docs: [{ path: 'README.md', description: 'Fixture documentation' }],
-      tests: { smoke_echo: { command: 'node', args: ['-e', 'process.stdout.write("ok")'] } },
+      tests: { rust_version: { command: 'rustc', args: ['--version'] } },
       policy: {},
       persistence: {
         schema: 'narada.site_loop.persistence.v2',
@@ -1655,17 +1652,6 @@ function runSiteLoopParity() {
       },
     }), 'utf8');
     writeFileSync(join(root, 'README.md'), 'Fixture Site Loop documentation.\n', 'utf8');
-    const bunCommand = process.env.NARADA_BUN_EXECUTABLE ?? 'bun';
-    const prepare = spawnSync(bunCommand, ['-e', "import { openSiteLoopStore } from './packages/site-loop-mcp/src/site-loop/site-loop-store.ts'; const store = openSiteLoopStore(process.env.NARADA_PARITY_ROOT, { storeMode: 'prepare' }); store.close();"], {
-      cwd: workspaceRoot,
-      env: { ...process.env, NARADA_PARITY_ROOT: root },
-      encoding: 'utf8',
-      timeout: 15_000,
-      maxBuffer: 2 * 1024 * 1024,
-      windowsHide: true,
-    });
-    if (prepare.error) throw new Error('site_loop_parity_store_prepare_failed:' + prepare.error.message);
-    if (prepare.status !== 0) throw new Error('site_loop_parity_store_prepare_exit:' + prepare.status + ':' + String(prepare.stderr).slice(0, 500));
     const requests = [{ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'site_loop_config_validate', arguments: {} } }, {
       jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'site_docs_list', arguments: {} },
     }, {
@@ -1674,16 +1660,25 @@ function runSiteLoopParity() {
       jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'site_test_list', arguments: {} },
     }, {
       jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'site_loop_status', arguments: {} },
+    }, {
+      jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'site_test_run', arguments: { selector: 'rust_version' } },
     }];
-    const bun = runMailbox(bunCommand, [bunEntrypoint, '--site-root', root], requests, workspaceRoot);
-    const rust = runMailbox(executable, ['--surface-id', 'site-loop', '--site-root', root], requests, workspaceRoot);
-    const comparable = (value) => Object.fromEntries(['schema', 'status', 'site_root', 'path', 'schema_id', 'config_schema', 'loop_id', 'site_id', 'display_name', 'errors', 'active_tools_refuse'].map((key) => [key, value?.[key]]));
-    assertSame('site_loop.config_validate', comparable(mailboxStructured(bun, 1, 'bun')), comparable(mailboxStructured(rust, 1, 'rust')));
-    assertSame('site_loop.docs_list', mailboxStructured(bun, 2, 'bun'), mailboxStructured(rust, 2, 'rust'));
-    assertSame('site_loop.docs_show', mailboxStructured(bun, 3, 'bun'), mailboxStructured(rust, 3, 'rust'));
-    assertSame('site_loop.tests_list', mailboxStructured(bun, 4, 'bun'), mailboxStructured(rust, 4, 'rust'));
-    assertSame('site_loop.status', mailboxStructured(bun, 5, 'bun'), mailboxStructured(rust, 5, 'rust'));
-    return { status: 'passed', fixture: 'config_docs_tests_and_status_read', compared: ['config_validate', 'docs_list', 'docs_show', 'tests_list', 'status'] };
+    const rust = runMailbox(executable, ['--surface-id', 'site-loop', '--site-root', root], requests, root);
+    const validation = mailboxStructured(rust, 1, 'rust');
+    if (validation.status !== 'ok' || validation.valid !== true || validation.loop_id !== 'fixture.loop') throw new Error('site_loop.config_validate.native_invalid');
+    const docs = mailboxStructured(rust, 2, 'rust');
+    if (docs.status !== 'ok' || docs.docs?.length !== 1) throw new Error('site_loop.docs_list.native_invalid');
+    const shown = mailboxStructured(rust, 3, 'rust');
+    if (shown.status !== 'ok' || shown.content !== 'Fixture Site Loop documentation.\n') throw new Error('site_loop.docs_show.native_invalid');
+    const tests = mailboxStructured(rust, 4, 'rust');
+    if (tests.status !== 'ok' || tests.tests?.[0]?.selector !== 'rust_version') throw new Error('site_loop.tests_list.native_invalid');
+    const status = mailboxStructured(rust, 5, 'rust');
+    if (status.status !== 'ok' && status.schema !== 'narada.site_operating_loop.status.v1') throw new Error('site_loop.status.native_invalid');
+    const rustTest = mailboxStructured(rust, 6, 'rust');
+    if (rustTest.status !== 'passed' || rustTest.selector !== 'rust_version' || rustTest.exit_code !== 0) throw new Error('site_loop.test_run.native_invalid');
+    if (!String(rustTest.stdout ?? '').startsWith('rustc ')) throw new Error('site_loop.test_run.native_stdout_missing');
+    if (rustTest.stdout_truncated !== false || rustTest.stderr_truncated !== false) throw new Error('site_loop.test_run.native_output_bounds_invalid');
+    return { status: 'passed', fixture: 'native_config_docs_tests_status_and_configured_execution', verified: ['config_validate', 'docs_list', 'docs_show', 'tests_list', 'status', 'test_run'] };
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
