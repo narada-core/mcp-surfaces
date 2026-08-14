@@ -8,7 +8,9 @@ Use mcp_loader_guidance for model-facing orientation, workflow selection, recove
 
 Every loader lifecycle projection uses the `narada.mcp_loader.runtime_lifecycle.v1` shape. Attached replayable projections expose `runtime_lifecycle` with `managed_by: "mcp-loader"`, `restartable: true`, and connection-scoped inspect/restart actions. `session_pinned` and `restart_required` projections expose `restartable: false`, `restartability_status: "unavailable_for_lifecycle"`, no child restart action, and a carrier/runtime-supervisor recovery action instead. The machine-readable `loader_restart_action` describes the operation required to restart the loader itself; its `next_call.tool_name` is the external supervisor capability `restart_mcp_loader_process`, deliberately not a child-surface tool and not implemented by the loader process itself. Pre-attachment guidance exposes the same shape with `restartable: null` and `restartability_status: "available_after_successful_attach"`. Inspect `mcp_loader_surface_status` or `mcp_loader_connection_inventory`, then call `mcp_loader_surface_restart({ connection_id, reason })` only for an attached replayable projection. The agent session does not need to restart for that child replacement. Child-surface domain policy remains authoritative, and restart invalidates refs owned by the replaced child.
 
-When a proxied child guidance tool is called, its `structuredContent` is augmented with `loader_runtime_lifecycle` and `loader_runtime_freshness`, so the attached surface guidance itself advertises loader ownership and recovery.
+Runtime lifecycle and freshness metadata is opt-in on ordinary discovery and proxy calls. Pass `include_runtime_metadata: true` when that evidence is material; compact responses are the default. A proxied child guidance result is augmented with loader lifecycle and freshness only when that flag is set.
+
+Use `mcp_loader_resume_or_open_surface` with a canonical `binding_id` for retryable agent workflows. It reuses a live logical handle within the current loader process and transparently reopens the admitted binding after a loader restart. Raw handles remain process-scoped.
 
 ## Tools
 
@@ -18,7 +20,7 @@ The loader's own public tools are:
   `mcp_loader_runtime_status`.
 - `mcp_loader_list_site_surfaces`, `mcp_loader_site_fabric_diagnostics`, and
   `mcp_loader_site_tool_inventory_check`.
-- `mcp_loader_attach_surface`, `mcp_loader_open_surface`,
+- `mcp_loader_attach_surface`, `mcp_loader_open_surface`, `mcp_loader_resume_or_open_surface`,
   `mcp_loader_surface_status`, `mcp_loader_surface_restart`,
   `mcp_loader_detach`, and `mcp_loader_connection_inventory`.
 - `mcp_loader_list_tools`, `mcp_loader_tool_discovery_manifest`,

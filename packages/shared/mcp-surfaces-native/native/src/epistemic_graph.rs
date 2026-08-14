@@ -77,6 +77,12 @@ pub fn list_tools() -> Vec<Value> {
             false,
         ),
         tool(
+            "epistemic_graph_submit_review_admit",
+            "Submit, policy-review, and admit one atomic contribution while preserving the immutable proposal and review gate.",
+            proposal_schema(),
+            false,
+        ),
+        tool(
             "epistemic_graph_capture_sources",
             "Create one bounded proposal from concise source descriptors plus typed non-source operations; reports existing identities before explicit review and admission.",
             capture_sources_schema(),
@@ -130,6 +136,7 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, site_root: &Path) -> Res
         "epistemic_graph_source_inspect" => source_inspect(site_root, args),
         "epistemic_graph_neighborhood" => neighborhood(site_root, args),
         "epistemic_graph_proposal_submit" => proposal_submit(site_root, args),
+        "epistemic_graph_submit_review_admit" => submit_review_admit(site_root, args),
         "epistemic_graph_capture_sources" => capture_sources(site_root, args),
         "epistemic_graph_proposal_read" => proposal_read(site_root, args),
         "epistemic_graph_proposal_resubmit" => proposal_resubmit(site_root, args),
@@ -148,8 +155,7 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, site_root: &Path) -> Res
 fn proposal_submit(root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
     prepare(root)?;
     let actor = required(args, "actor")?;
-    let idempotency_key = required(args, "idempotency_key")?;
-    let operations = args
+    let supplied_operations = args
         .get("operations")
         .and_then(Value::as_array)
         .ok_or_else(|| {
@@ -159,25 +165,31 @@ fn proposal_submit(root: &Path, args: &Map<String, Value>) -> Result<Value, Valu
                 Value::Null,
             )
         })?;
-    if operations.is_empty() || operations.len() > MAX_OPERATIONS {
+    if supplied_operations.is_empty() || supplied_operations.len() > MAX_OPERATIONS {
         return Err(error(
             "invalid_proposal",
             "operations count must be between 1 and 200",
-            json!({"count":operations.len()}),
+            json!({"count":supplied_operations.len()}),
         ));
     }
-    validate_operations(operations, false)?;
-    let expected = args
-        .get("expected_ledger_head")
-        .cloned()
-        .unwrap_or(Value::Null);
+    let operations = normalize_operations(supplied_operations)?;
+    validate_operations(&operations, false)?;
+    let expected = resolve_expected_ledger_head(root, args.get("expected_ledger_head"))?;
+    let semantic_content = json!({"actor":actor,"authority_basis":args.get("authority_basis"),"operations":operations});
+    let content_fingerprint = digest_value(&semantic_content)?;
+    let idempotency_key = args
+        .get("idempotency_key")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| derived_idempotency_key("proposal", &semantic_content));
     let proposal_id = format!("ep_{}", Uuid::new_v4());
     let created_at = now();
     let payload = json!({
         "schema":"narada.epistemic.proposal.v1", "proposal_id":proposal_id,
         "status":"submitted", "actor":actor, "authority_basis":args.get("authority_basis"),
         "idempotency_key":idempotency_key, "expected_ledger_head":expected,
-        "created_at":created_at, "operations":operations
+        "created_at":created_at, "content_fingerprint":content_fingerprint, "operations":operations
     });
     let digest = digest_value(&payload)?;
     let mut stored = payload;
@@ -190,6 +202,18 @@ fn proposal_submit(root: &Path, args: &Map<String, Value>) -> Result<Value, Valu
         let existing =
             fs::read_to_string(&idem_path).map_err(io_error("proposal_idempotency_read_failed"))?;
         let stored = read_json(&proposals(root).join(format!("{}.json", existing.trim())))?;
+        if stored
+            .get("content_fingerprint")
+            .and_then(Value::as_str)
+            .is_some()
+            && stored.get("content_fingerprint") != Some(&json!(content_fingerprint))
+        {
+            return Err(error(
+                "proposal_idempotency_conflict",
+                "idempotency key already names different proposal content",
+                json!({"idempotency_key":idempotency_key,"existing_proposal_id":stored["proposal_id"]}),
+            ));
+        }
         return Ok(proposal_receipt(&stored));
     }
     write_new_json(
@@ -200,12 +224,183 @@ fn proposal_submit(root: &Path, args: &Map<String, Value>) -> Result<Value, Valu
     Ok(proposal_receipt(&stored))
 }
 
+fn submit_review_admit(root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
+    let submission = proposal_submit(root, args)?;
+    let proposal_id = submission["proposal_id"].as_str().ok_or_else(|| {
+        error(
+            "proposal_submission_corrupt",
+            "proposal id missing",
+            submission.clone(),
+        )
+    })?;
+    let lifecycle = proposal_lifecycle(root, proposal_id)?;
+    if lifecycle["status"] == "admitted" {
+        let review =
+            read_json(&proposals(root).join(format!("{}.review.json", safe_name(proposal_id))))?;
+        return Ok(json!({
+            "schema":"narada.epistemic.submit_review_admit.v1",
+            "status":"already_admitted",
+            "submission":submission,
+            "review":review,
+            "admission":lifecycle,
+            "review_gate_preserved":true,
+            "certifies_truth":false
+        }));
+    }
+    let review = proposal_review(
+        root,
+        &Map::from_iter([("proposal_id".into(), json!(proposal_id))]),
+    )?;
+    if review["status"] != "policy_valid" {
+        return Err(error(
+            "proposal_not_admissible",
+            "compound contribution stopped at the preserved review gate",
+            json!({"submission":submission,"review":review}),
+        ));
+    }
+    let admission_idempotency = derived_idempotency_key(
+        "admission",
+        &json!({"proposal_id":proposal_id,"proposal_digest":submission["proposal_digest"]}),
+    );
+    let admission = proposal_admit(
+        root,
+        &Map::from_iter([
+            ("proposal_id".into(), json!(proposal_id)),
+            ("actor".into(), json!(required(args, "actor")?)),
+            (
+                "authority_basis".into(),
+                args.get("authority_basis").cloned().unwrap_or(Value::Null),
+            ),
+            (
+                "expected_ledger_head".into(),
+                submission["expected_ledger_head"].clone(),
+            ),
+            ("idempotency_key".into(), json!(admission_idempotency)),
+        ]),
+    )?;
+    Ok(json!({
+        "schema":"narada.epistemic.submit_review_admit.v1",
+        "status":"admitted",
+        "submission":submission,
+        "review":review,
+        "admission":admission,
+        "review_gate_preserved":true,
+        "certifies_truth":false
+    }))
+}
+
+fn normalize_operations(operations: &[Value]) -> Result<Vec<Value>, Value> {
+    let mut local_ids = std::collections::HashMap::new();
+    let mut first_pass = Vec::with_capacity(operations.len());
+    for operation in operations {
+        let mut normalized = operation.clone();
+        if operation.get("op").and_then(Value::as_str) == Some("entity.declare") {
+            let object = normalized.as_object_mut().unwrap();
+            if object.get("entity_id").and_then(Value::as_str).is_none() {
+                let kind = object.get("kind").and_then(Value::as_str).unwrap_or("");
+                let title = object.get("title").and_then(Value::as_str).unwrap_or("");
+                if !kind.is_empty() && !title.is_empty() {
+                    let digest = digest_value(
+                        &json!({"kind":kind,"title":title,"version":object.get("version"),"locator":object.get("locator")}),
+                    )?;
+                    object.insert(
+                        "entity_id".into(),
+                        json!(format!("{}:{}", safe_name(kind), &digest[..20])),
+                    );
+                }
+            }
+            if let (Some(local_ref), Some(entity_id)) = (
+                object.get("local_ref").and_then(Value::as_str),
+                object.get("entity_id").and_then(Value::as_str),
+            ) {
+                if local_ids
+                    .insert(local_ref.to_string(), entity_id.to_string())
+                    .is_some()
+                {
+                    return Err(error(
+                        "duplicate_local_ref",
+                        "entity local_ref must be unique within a proposal",
+                        json!({"local_ref":local_ref}),
+                    ));
+                }
+            }
+        }
+        first_pass.push(normalized);
+    }
+    first_pass
+        .iter()
+        .map(|operation| {
+            let mut normalized = operation.clone();
+            if operation.get("op").and_then(Value::as_str) == Some("relation.declare") {
+                let object = normalized.as_object_mut().unwrap();
+                for (id_field, ref_field) in [("source_id", "source_ref"), ("target_id", "target_ref")] {
+                    if object.get(id_field).and_then(Value::as_str).is_none() {
+                        if let Some(reference) = object.get(ref_field).and_then(Value::as_str) {
+                            let resolved = local_ids.get(reference).ok_or_else(|| error("local_ref_not_found", "relation reference does not identify an entity in this proposal", json!({"field":ref_field,"local_ref":reference})))?;
+                            object.insert(id_field.into(), json!(resolved));
+                        }
+                    }
+                }
+            }
+            if normalized.get("op").and_then(Value::as_str) == Some("relation.declare")
+                && normalized
+                    .get("relation_id")
+                    .and_then(Value::as_str)
+                    .is_none()
+            {
+                let relation_type = normalized
+                    .get("relation_type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let source_id = normalized
+                    .get("source_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let target_id = normalized
+                    .get("target_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                if relation_type.is_empty() || source_id.is_empty() || target_id.is_empty() {
+                    return Ok(normalized);
+                }
+                let digest =
+                    sha256(format!("{relation_type}\0{source_id}\0{target_id}").as_bytes());
+                normalized.as_object_mut().unwrap().insert(
+                    "relation_id".into(),
+                    json!(format!(
+                        "rel:{}-{}",
+                        safe_name(&relation_type),
+                        &digest[..16]
+                    )),
+                );
+            }
+            Ok(normalized)
+        })
+        .collect()
+}
+
+fn resolve_expected_ledger_head(root: &Path, supplied: Option<&Value>) -> Result<Value, Value> {
+    if supplied.and_then(Value::as_str) == Some("latest") {
+        return Ok(ledger_head(root)?.map(Value::String).unwrap_or(Value::Null));
+    }
+    Ok(supplied.cloned().unwrap_or(Value::Null))
+}
+
+fn derived_idempotency_key(kind: &str, payload: &Value) -> String {
+    let canonical = serde_json::to_vec(payload).unwrap_or_default();
+    format!("auto-{kind}-{}", &sha256(&canonical)[..24])
+}
+
 fn proposal_receipt(proposal: &Value) -> Value {
     json!({
         "schema":"narada.epistemic.proposal_submission.v1",
         "status":proposal["status"],
         "proposal_id":proposal["proposal_id"],
         "proposal_digest":proposal["digest"],
+        "content_fingerprint":proposal["content_fingerprint"],
         "operation_count":proposal["operations"].as_array().map_or(0, Vec::len),
         "expected_ledger_head":proposal["expected_ledger_head"],
         "created_at":proposal["created_at"]
@@ -222,13 +417,8 @@ fn capture_sources(root: &Path, args: &Map<String, Value>) -> Result<Value, Valu
     let supplied = args
         .get("operations")
         .and_then(Value::as_array)
-        .ok_or_else(|| {
-            error(
-                "invalid_capture",
-                "operations must be an array",
-                Value::Null,
-            )
-        })?;
+        .cloned()
+        .unwrap_or_default();
     if sources.is_empty() {
         return Err(error(
             "invalid_capture",
@@ -254,7 +444,7 @@ fn capture_sources(root: &Path, args: &Map<String, Value>) -> Result<Value, Valu
             "locator":required(source, "locator")?
         }));
     }
-    for operation in supplied {
+    for operation in &supplied {
         if operation.get("kind").and_then(Value::as_str) == Some("source") {
             return Err(error(
                 "invalid_capture",
@@ -559,7 +749,8 @@ fn proposal_admit(root: &Path, args: &Map<String, Value>) -> Result<Value, Value
             review,
         ));
     }
-    let expected = args.get("expected_ledger_head").and_then(Value::as_str);
+    let expected_value = resolve_expected_ledger_head(root, args.get("expected_ledger_head"))?;
+    let expected = expected_value.as_str();
     let current = ledger_head(root)?;
     if expected != current.as_deref()
         || proposal.get("expected_ledger_head").and_then(Value::as_str) != current.as_deref()
@@ -1329,6 +1520,9 @@ fn safe_name(v: &str) -> String {
         .take(120)
         .collect()
 }
+fn sha256(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
 fn required(args: &Map<String, Value>, key: &str) -> Result<String, Value> {
     args.get(key)
         .and_then(Value::as_str)
@@ -1347,17 +1541,17 @@ fn guidance() -> Value {
         "schema":"narada.epistemic.guidance.v2",
         "purpose":"Preserve evolving problem situations, not certify truth.",
         "workflow":[
-            {"step":1,"tool":"epistemic_graph_status","why":"Read the current ledger_head for optimistic concurrency."},
-            {"step":2,"tool":"epistemic_graph_capture_sources","why":"For ledger or literature capture, declare sources concisely and receive a compact existing-identity report plus proposal receipt."},
-            {"step":3,"tool":"epistemic_graph_proposal_submit","alternative":true,"why":"For contributions without source batching, persist one atomic typed proposal directly."},
-            {"step":4,"tool":"epistemic_graph_proposal_read","optional":true,"why":"Inspect stored operations explicitly through bounded pages when needed."},
-            {"step":5,"tool":"epistemic_graph_proposal_review","why":"Validate schema, references, provenance locations, invariants, and ledger head without asserting truth."},
-            {"step":6,"tool":"epistemic_graph_proposal_admit","why":"Append a policy-valid proposal to immutable canonical history."},
-            {"step":7,"tool":"epistemic_graph_neighborhood","why":"Verify the admitted problem situation and its relations."}
+            {"step":1,"tool":"epistemic_graph_submit_review_admit","preferred":true,"why":"Perform the ordinary submit, preserved policy review, and admission workflow atomically. Use expected_ledger_head latest and omit idempotency_key for deterministic retry safety."},
+            {"step":2,"tool":"epistemic_graph_capture_sources","alternative":true,"why":"Create a reviewable source proposal when manual review before admission is intended; operations may be empty for pure source capture."},
+            {"step":3,"tool":"epistemic_graph_proposal_submit","alternative":true,"why":"Persist a reviewable proposal without source batching."},
+            {"step":4,"tools":["epistemic_graph_proposal_review","epistemic_graph_proposal_admit"],"manual_only":true,"why":"Use separate calls only when the operator wants an explicit pause between proposal, review, and admission."},
+            {"step":5,"tool":"epistemic_graph_neighborhood","why":"Verify the admitted problem situation and its relations."}
         ],
         "entity_kinds":ENTITY_KINDS,
         "core_relations":CORE_RELATIONS,
         "extension_relation_rule":"Any relation outside core_relations must be namespaced, for example marici:refines or marici:generalizes.",
+        "identity_rule":{"relations":"Omit relation_id to derive it deterministically from relation_type, source_id, and target_id. Supply an override only when parallel duplicate relations are intentional.","idempotency":"Omit idempotency_key for deterministic content-hash retry identity; supply one only to name a wider caller-defined retry scope."},
+        "revision_pattern":{"entity_title_correction":"Declare a successor entity with the corrected title and connect it to the prior entity using supersedes. Keep the prior identity as immutable history.","discovery":"Query or inspect the predecessor neighborhood before declaring the successor.","reason":"The graph is append-only; revision is explicit explanation, not silent record mutation."},
         "operation_kinds":["entity.declare","relation.declare","assessment.record","test_outcome.record","sweep.record"],
         "provenance_choices":[
             "Represent a document as a versioned source entity and connect claims with derived_from.",
@@ -1373,7 +1567,7 @@ fn guidance() -> Value {
             "review":{"proposal_id":"<proposal_id from submit>"},
             "admit":{"proposal_id":"<proposal_id>","actor":"agent-id","authority_basis":{"kind":"operator_request","summary":"Admit the reviewed contribution; this does not certify truth."},"expected_ledger_head":null,"idempotency_key":"stable-admission-key-v1"}
         },
-        "concurrency_rule":"Use status.ledger_head as expected_ledger_head. For an empty graph use null. If review reports stale, query again and submit a new proposal; do not rewrite the immutable proposal.",
+        "concurrency_rule":"Use expected_ledger_head latest to snapshot the live head during submission while retaining CAS protection through admission. Supply a concrete status.ledger_head only when an external read must be the concurrency boundary. If review reports stale, query again and submit a new proposal; do not rewrite the immutable proposal.",
         "admission_meaning":"policy-valid contribution; never truth certification",
         "search_boundary":"Use external providers for discovery. Record a sweep only when it explains coverage or changes the graph.",
         "problem_policy":"Transform apparent solutions into successor problems; record closure only as an attributed assessment."
@@ -1387,25 +1581,25 @@ fn evidence_schema() -> Value {
 }
 fn operation_schema() -> Value {
     json!({"oneOf":[
-        {"title":"Declare entity","type":"object","properties":{"op":{"const":"entity.declare"},"entity_id":non_empty_string(),"kind":{"type":"string","enum":ENTITY_KINDS},"title":non_empty_string(),"version":non_empty_string(),"locator":non_empty_string()},"required":["op","entity_id","kind","title"],"allOf":[{"if":{"properties":{"kind":{"const":"source"}},"required":["kind"]},"then":{"required":["version","locator"]}}],"additionalProperties":true},
-        {"title":"Declare relation","type":"object","properties":{"op":{"const":"relation.declare"},"relation_id":non_empty_string(),"relation_type":{"oneOf":[{"type":"string","enum":CORE_RELATIONS},{"type":"string","pattern":"^[A-Za-z][A-Za-z0-9_.-]*:[A-Za-z][A-Za-z0-9_.-]*$"}],"description":"Use a listed core relation, or namespace an extension such as marici:refines."},"source_id":non_empty_string(),"target_id":non_empty_string()},"required":["op","relation_id","relation_type","source_id","target_id"],"additionalProperties":true},
+        {"title":"Declare entity","type":"object","properties":{"op":{"const":"entity.declare"},"entity_id":{"type":"string","minLength":1,"description":"Optional override; omit for deterministic identity from kind, title, version, and locator."},"local_ref":{"type":"string","minLength":1,"description":"Optional proposal-local name for relation source_ref/target_ref."},"kind":{"type":"string","enum":ENTITY_KINDS},"title":non_empty_string(),"version":non_empty_string(),"locator":non_empty_string()},"required":["op","kind","title"],"allOf":[{"if":{"properties":{"kind":{"const":"source"}},"required":["kind"]},"then":{"required":["version","locator"]}}],"additionalProperties":true},
+        {"title":"Declare relation","type":"object","properties":{"op":{"const":"relation.declare"},"relation_id":{"type":"string","minLength":1,"description":"Optional override. Omit to derive a deterministic id from relation_type, source_id, and target_id."},"relation_type":{"oneOf":[{"type":"string","enum":CORE_RELATIONS},{"type":"string","pattern":"^[A-Za-z][A-Za-z0-9_.-]*:[A-Za-z][A-Za-z0-9_.-]*$"}],"description":"Use a listed core relation, or namespace an extension such as marici:refines."},"source_id":non_empty_string(),"target_id":non_empty_string(),"source_ref":non_empty_string(),"target_ref":non_empty_string()},"required":["op","relation_type"],"allOf":[{"anyOf":[{"required":["source_id"]},{"required":["source_ref"]}]},{"anyOf":[{"required":["target_id"]},{"required":["target_ref"]}]}],"additionalProperties":true},
         {"title":"Record assessment","type":"object","properties":{"op":{"const":"assessment.record"},"assessment_id":non_empty_string(),"subject_id":non_empty_string(),"judgment":non_empty_string(),"actor":non_empty_string(),"reason":non_empty_string(),"evidence":{"type":"array","minItems":1,"items":evidence_schema()}},"required":["op","assessment_id","subject_id","judgment","actor","reason","evidence"],"additionalProperties":true},
         {"title":"Record test outcome","type":"object","properties":{"op":{"const":"test_outcome.record"},"outcome_id":non_empty_string(),"test_id":non_empty_string(),"actor":non_empty_string(),"outcome":non_empty_string(),"evidence":{"type":"array","minItems":1,"items":evidence_schema()}},"required":["op","outcome_id","test_id","actor","outcome","evidence"],"additionalProperties":true},
         {"title":"Record bounded search sweep","type":"object","properties":{"op":{"const":"sweep.record"},"sweep_id":non_empty_string(),"interval_start":non_empty_string(),"interval_end":non_empty_string(),"method":non_empty_string(),"result":non_empty_string()},"required":["op","sweep_id","interval_start","interval_end","method","result"],"additionalProperties":true}
     ]})
 }
 fn proposal_schema() -> Value {
-    json!({"type":"object","properties":{"actor":non_empty_string(),"authority_basis":{"type":"object","description":"Why this actor may propose the contribution.","minProperties":1},"idempotency_key":non_empty_string(),"expected_ledger_head":{"type":["string","null"],"description":"Current status.ledger_head; null only for an empty graph."},"operations":{"type":"array","minItems":1,"maxItems":200,"items":operation_schema()}},"required":["actor","authority_basis","idempotency_key","expected_ledger_head","operations"],"additionalProperties":false})
+    json!({"type":"object","properties":{"actor":non_empty_string(),"authority_basis":{"type":"object","description":"Why this actor may propose the contribution.","minProperties":1},"idempotency_key":{"type":"string","minLength":1,"description":"Optional override; omitted values use deterministic content-hash idempotency."},"expected_ledger_head":{"type":["string","null"],"description":"Use latest to snapshot the current head at submission, a specific head for explicit CAS, or null only for an empty graph."},"operations":{"type":"array","minItems":1,"maxItems":200,"items":operation_schema()}},"required":["actor","authority_basis","expected_ledger_head","operations"],"additionalProperties":false})
 }
 fn capture_sources_schema() -> Value {
     json!({"type":"object","properties":{
         "actor":non_empty_string(),
         "authority_basis":{"type":"object","description":"Why this actor may propose the contribution.","minProperties":1},
-        "idempotency_key":non_empty_string(),
-        "expected_ledger_head":{"type":["string","null"],"description":"Current status.ledger_head; null only for an empty graph."},
+        "idempotency_key":{"type":"string","minLength":1,"description":"Optional override; omitted values use deterministic content-hash idempotency."},
+        "expected_ledger_head":{"type":["string","null"],"description":"Use latest to snapshot the current head at submission, a specific head for explicit CAS, or null only for an empty graph."},
         "sources":{"type":"array","minItems":1,"maxItems":100,"items":{"type":"object","properties":{"source_id":non_empty_string(),"title":non_empty_string(),"version":non_empty_string(),"locator":non_empty_string()},"required":["source_id","title","version","locator"],"additionalProperties":false}},
-        "operations":{"type":"array","minItems":1,"maxItems":199,"items":operation_schema()}
-    },"required":["actor","authority_basis","idempotency_key","expected_ledger_head","sources","operations"],"additionalProperties":false})
+        "operations":{"type":"array","maxItems":199,"default":[],"items":operation_schema()}
+    },"required":["actor","authority_basis","expected_ledger_head","sources"],"additionalProperties":false})
 }
 fn proposal_id_schema() -> Value {
     json!({"type":"object","properties":{"proposal_id":{"type":"string"}},"required":["proposal_id"],"additionalProperties":false})
@@ -1832,6 +2026,77 @@ mod tests {
         fs::write(&path, serde_json::to_vec_pretty(&event).unwrap()).unwrap();
         let failure = rebuild_projection(&root).unwrap_err();
         assert_eq!(failure["code"], "ledger_hash_invalid");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn pure_source_capture_needs_no_placeholder_operation() {
+        let root = std::env::temp_dir().join(format!("epistemic-source-only-{}", Uuid::new_v4()));
+        let result = capture_sources(
+            &root,
+            &Map::from_iter([
+                ("actor".into(), json!("tester")),
+                ("authority_basis".into(), json!({"kind":"test"})),
+                ("expected_ledger_head".into(), json!("latest")),
+                ("sources".into(), json!([{"source_id":"source:only","title":"Only source","version":"1","locator":"ledger/only.md"}])),
+            ]),
+        )
+        .expect("source-only capture");
+        assert_eq!(result["source_count"], 1);
+        assert_eq!(result["operation_count"], 1);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn compound_workflow_derives_relation_and_retry_identities() {
+        let root = std::env::temp_dir().join(format!("epistemic-compound-{}", Uuid::new_v4()));
+        let args = Map::from_iter([
+            ("actor".into(), json!("tester")),
+            ("authority_basis".into(), json!({"kind":"test"})),
+            ("expected_ledger_head".into(), json!("latest")),
+            (
+                "operations".into(),
+                json!([
+                    {"op":"entity.declare","local_ref":"claim","kind":"claim","title":"A"},
+                    {"op":"entity.declare","local_ref":"source","kind":"source","title":"Source A","version":"1","locator":"ledger/a.md"},
+                    {"op":"relation.declare","relation_type":"derived_from","source_ref":"claim","target_ref":"source"}
+                ]),
+            ),
+        ]);
+        let first = submit_review_admit(&root, &args).expect("compound admission");
+        assert_eq!(first["review"]["status"], "policy_valid");
+        assert_eq!(first["admission"]["status"], "admitted");
+        let proposal =
+            load_proposal(&root, first["submission"]["proposal_id"].as_str().unwrap()).unwrap();
+        assert!(proposal["operations"][0]["entity_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("claim:"));
+        assert!(proposal["operations"][1]["entity_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("source:"));
+        assert_eq!(
+            proposal["operations"][2]["source_id"],
+            proposal["operations"][0]["entity_id"]
+        );
+        assert_eq!(
+            proposal["operations"][2]["target_id"],
+            proposal["operations"][1]["entity_id"]
+        );
+        assert!(proposal["operations"][2]["relation_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("rel:derived_from-"));
+        let retried = submit_review_admit(&root, &args).expect("idempotent compound retry");
+        assert_eq!(
+            retried["submission"]["proposal_id"],
+            first["submission"]["proposal_id"]
+        );
+        assert_eq!(
+            retried["admission"]["event_id"],
+            first["admission"]["event_id"]
+        );
         let _ = fs::remove_dir_all(root);
     }
 }

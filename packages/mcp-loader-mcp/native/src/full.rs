@@ -2131,13 +2131,14 @@ fn list_tools() -> Vec<Value> {
         tool_definition("mcp_loader_connection_inventory","List attached loader connections, including liveness, age, explicit loader-managed restartability, capacity, and bounded recovery actions for stale children.",json!({}),&[],true,false),
         tool_definition("mcp_loader_process_ownership","Inspect process ownership for children spawned by this loader run. This is a read-only reconciliation view: it reports loader-owned direct children and safe cleanup actions, but never enumerates or terminates unrelated host processes or conhost descendants.",json!({}),&[],true,false),
         tool_definition("mcp_loader_runtime_observation","Return the normalized V2 runtime observation for one attached surface, including stable logical identity, generation state, lifecycle eligibility, contract digests, and bounded actuator guidance.",json!({"connection_id":{"type":"string"},"carrier_kind":{"type":"string"},"manifest_digest":{"type":"string"}}),&["connection_id","carrier_kind"],true,false),
-        tool_definition("mcp_loader_list_site_surfaces","List resolvable MCP surfaces declared in a site's local fabric.",json!({"site_root":{"type":"string"}}),&["site_root"],true,false),
+        tool_definition("mcp_loader_list_site_surfaces","List resolvable MCP surfaces declared in a site's local fabric. Runtime metadata is opt-in.",json!({"site_root":{"type":"string"},"include_runtime_metadata":{"type":"boolean","default":false}}),&["site_root"],true,false),
         tool_definition("mcp_loader_site_fabric_diagnostics","Inspect site MCP fabric provenance and classify shared-registry drift or intentional entrypoint overrides.",json!({"site_root":{"type":"string"}}),&["site_root"],true,false),
         tool_definition("mcp_loader_site_tool_inventory_check","Compare site fabric declarations with fresh child tools/list responses; compact output includes per-finding status and tool-name deltas, runtime-skipped surfaces produce partial coverage, and an immutable observation_ref is materialized for Registrar conformance checks.",json!({"site_root":{"type":"string"},"surface_ids":{"type":"array","items":{"type":"string"}},"runtime_kind":{"type":"string"},"include_ok":{"type":"boolean"}}),&["site_root"],true,false),
         tool_definition("mcp_loader_attach_surface","Spawn and initialize an exactly admitted stdio MCP binding, return a connection id, and report loader-managed restartability.",json!({"site_root":{"type":"string"},"binding_id":{"type":"string"},"surface_id":{"type":"string"},"runtime_kind":{"type":"string"},"entrypoint":{"type":"string"},"args":{"type":"array","items":{"type":"string"}}}),&["site_root","binding_id"],false,false),
-        tool_definition("mcp_loader_open_surface","Open an exactly admitted binding and return a stable logical handle for calls across loader-managed child generations.",json!({"site_root":{"type":"string"},"binding_id":{"type":"string"},"surface_id":{"type":"string"},"runtime_kind":{"type":"string"},"entrypoint":{"type":"string"},"args":{"type":"array","items":{"type":"string"}}}),&["site_root","binding_id"],false,false),
+        tool_definition("mcp_loader_open_surface","Open an exactly admitted binding and return a stable logical handle for calls across loader-managed child generations. Runtime metadata is opt-in.",json!({"site_root":{"type":"string"},"binding_id":{"type":"string"},"surface_id":{"type":"string"},"runtime_kind":{"type":"string"},"entrypoint":{"type":"string"},"args":{"type":"array","items":{"type":"string"}},"include_runtime_metadata":{"type":"boolean","default":false}}),&["site_root","binding_id"],false,false),
+        tool_definition("mcp_loader_resume_or_open_surface","Resume the current loader-process handle for a binding when present, otherwise reopen the admitted binding and return a fresh handle.",json!({"site_root":{"type":"string"},"binding_id":{"type":"string"},"surface_id":{"type":"string"},"runtime_kind":{"type":"string"},"include_runtime_metadata":{"type":"boolean","default":false}}),&["site_root","binding_id"],false,false),
         tool_definition("mcp_loader_surface_handle_inventory","List stable logical surface handles and the current child generation, without spawning or replacing a surface.",json!({}),&[],true,false),
-        tool_definition("mcp_loader_list_tools","List tools exposed by an attached MCP surface.",json!({"connection_id":{"type":"string"}}),&["connection_id"],true,false),
+        tool_definition("mcp_loader_list_tools","List tools exposed by an attached MCP surface. Runtime metadata is opt-in.",json!({"connection_id":{"type":"string"},"include_runtime_metadata":{"type":"boolean","default":false}}),&["connection_id"],true,false),
         tool_definition("mcp_loader_surface_status","Inspect the runtime status and loader-managed restartability of an attached MCP surface child process.",json!({"connection_id":{"type":"string"}}),&["connection_id"],true,false),
         tool_definition("mcp_loader_tool_discovery_manifest","Return canonical semantic tool names for an attached surface and flag generated aliases as non-authoritative.",json!({"connection_id":{"type":"string"}}),&["connection_id"],true,false),
         tool_definition("mcp_loader_call_tool","Call a tool on an attached MCP surface. Results are bounded by default and include a typed summary; set include_runtime_metadata=true when lifecycle/freshness evidence is needed on this call.",json!({"connection_id":{"type":"string"},"tool_name":{"type":"string"},"arguments":{"type":"object"},"include_runtime_metadata":{"type":"boolean"}}),&["connection_id","tool_name"],false,false),
@@ -2185,8 +2186,8 @@ fn guidance_result(arguments: &JsonObject, state: &LoaderState) -> Value {
             {"step":"recover","guidance":"For a stale or transport-closed child, inspect inventory or status, then call mcp_loader_surface_restart."},
             {"step":"reconcile_processes","guidance":"Use mcp_loader_process_ownership to distinguish loader-owned direct children from unobserved host processes."},
             {"step":"resolve_site","guidance":"Use mcp_loader_list_site_surfaces and mcp_loader_site_fabric_diagnostics against the same explicit Site root."},
-            {"step":"attach","guidance":"Use mcp_loader_open_surface when repeated calls should survive a loader-managed child restart."},
-            {"step":"discover","guidance":"Use mcp_loader_list_tools or mcp_loader_tool_discovery_manifest."},
+            {"step":"attach","guidance":"Use mcp_loader_resume_or_open_surface with canonical binding_id for retryable workflows. It reuses a live handle in this loader process and reopens after loader restart."},
+            {"step":"discover","guidance":"Use compact mcp_loader_list_tools by default; request include_runtime_metadata only when lifecycle or freshness evidence is material."},
             {"step":"observe_live","guidance":"Use mcp_loader_site_tool_inventory_check to compare declared tools with fresh child tools/list responses."},
             {"step":"observe_runtime","guidance":"Call mcp_loader_runtime_observation after attachment."},
             {"step":"operate","guidance":"Call a child tool only after selecting the intended connection and honoring the child surface policy."},
@@ -3394,16 +3395,53 @@ fn open_surface(arguments: &JsonObject, state: &mut LoaderState) -> Result<Value
     };
     let created_at = record.created_at.clone();
     state.handles.insert(handle.clone(), record);
-    Ok(json!({
+    let mut result = json!({
         "schema":"narada.mcp_loader.surface_handle_opened.v1","status":"opened","surface_handle":handle,
         "handle_scope":"loader_process","handle_survives_child_restart":true,"handle_survives_loader_restart":false,
         "logical_connection_id":connection.logical_connection_id,"connection_id":connection.connection_id,
         "ownership":connection_ownership(connection),"generation_id":connection.generation_id,"site_root":connection.site_root,
         "surface_id":connection.surface_id,"runtime_kind":connection.runtime_kind,"runtime_requirements":connection.runtime_requirements,
-        "runtime_lifecycle":runtime_lifecycle(Some(&connection.connection_id),Some(&connection.lifecycle)),
-        "runtime_freshness":runtime_freshness(state),"tool_count":connection.tools.len(),"created_at":created_at,
+        "tool_count":connection.tools.len(),"created_at":created_at,
         "call":{"tool_name":"mcp_loader_call_surface_tool","arguments":{"surface_handle":handle,"tool_name":"<child_tool>","arguments":{}}}
-    }))
+    });
+    if arguments
+        .get("include_runtime_metadata")
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        result["runtime_lifecycle"] =
+            runtime_lifecycle(Some(&connection.connection_id), Some(&connection.lifecycle));
+        result["runtime_freshness"] = runtime_freshness(state);
+    }
+    Ok(result)
+}
+
+fn resume_or_open_surface(
+    arguments: &JsonObject,
+    state: &mut LoaderState,
+) -> Result<Value, Diagnostic> {
+    let binding_id = required_string(arguments, "binding_id", "missing_binding_id")?;
+    if let Some(record) = state.handles.values().find(|handle| {
+        state.connections.values().any(|connection| {
+            connection.logical_connection_id == handle.logical_connection_id
+                && connection.binding_id.as_deref() == Some(binding_id.as_str())
+                && connection_live(connection)
+        })
+    }) {
+        return Ok(json!({
+            "schema":"narada.mcp_loader.surface_handle_resumed.v1",
+            "status":"resumed",
+            "surface_handle":record.handle,
+            "binding_id":binding_id,
+            "site_root":record.site_root,
+            "surface_id":record.surface_id,
+            "handle_scope":"loader_process"
+        }));
+    }
+    let mut result = open_surface(arguments, state)?;
+    result["status"] = json!("reopened");
+    result["resume_attempted"] = json!(true);
+    Ok(result)
 }
 
 fn policy_inspect(state: &LoaderState) -> Value {
@@ -3530,6 +3568,10 @@ fn list_site_surfaces(arguments: &JsonObject, state: &LoaderState) -> Result<Val
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
+    let include_runtime = arguments
+        .get("include_runtime_metadata")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let mut surfaces = Vec::new();
     for (server_id, server) in servers {
         let binding_id = server
@@ -3566,20 +3608,26 @@ fn list_site_surfaces(arguments: &JsonObject, state: &LoaderState) -> Result<Val
             .map(|object| object.keys().cloned().collect())
             .unwrap_or_default();
         let requirements = surface_requirements(Some(&server));
-        surfaces.push(json!({
+        let mut surface = json!({
             "binding_id":if binding_id.is_empty(){Value::Null}else{json!(binding_id)},"surface_id":surface_id,"server_name":server_id,"command":server.get("command").cloned().unwrap_or(Value::Null),
             "args":server.get("args").cloned().unwrap_or_else(|| json!([])),"env_vars":env_vars,
-            "runtime_requirements":requirements,"runtime_lifecycle":runtime_lifecycle(None,None)
-        }));
+            "runtime_requirements":requirements
+        });
+        if include_runtime {
+            surface["runtime_lifecycle"] = runtime_lifecycle(None, None);
+        }
+        surfaces.push(surface);
     }
     surfaces.sort_by(|left, right| {
         left.get("surface_id")
             .and_then(Value::as_str)
             .cmp(&right.get("surface_id").and_then(Value::as_str))
     });
-    Ok(
-        json!({"schema":"narada.mcp_loader.site_surfaces.v1","site_root":site_root,"runtime_freshness":runtime_freshness(state),"surfaces":surfaces}),
-    )
+    let mut result = json!({"schema":"narada.mcp_loader.site_surfaces.v1","site_root":site_root,"surfaces":surfaces});
+    if include_runtime {
+        result["runtime_freshness"] = runtime_freshness(state);
+    }
+    Ok(result)
 }
 
 fn classify_fabric_entrypoint(
@@ -3759,11 +3807,17 @@ fn find_connection_for_handle<'a>(
 
 fn list_attached_tools(arguments: &JsonObject, state: &LoaderState) -> Result<Value, Diagnostic> {
     let connection = get_connection(arguments, state)?;
-    Ok(
-        json!({"schema":"narada.mcp_loader.tools.v1","connection_id":connection.connection_id,"surface_id":connection.surface_id,
-        "runtime_lifecycle":runtime_lifecycle(Some(&connection.connection_id),Some(&connection.lifecycle)),
-        "runtime_freshness":runtime_freshness(state),"tools":connection.tools}),
-    )
+    let mut result = json!({"schema":"narada.mcp_loader.tools.v1","connection_id":connection.connection_id,"surface_id":connection.surface_id,"tools":connection.tools});
+    if arguments
+        .get("include_runtime_metadata")
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        result["runtime_lifecycle"] =
+            runtime_lifecycle(Some(&connection.connection_id), Some(&connection.lifecycle));
+        result["runtime_freshness"] = runtime_freshness(state);
+    }
+    Ok(result)
 }
 
 fn surface_status(arguments: &JsonObject, state: &LoaderState) -> Result<Value, Diagnostic> {
@@ -4910,6 +4964,7 @@ fn call_tool(name: &str, arguments: Value, state: &mut LoaderState) -> Result<Va
         "mcp_loader_site_tool_inventory_check" => site_tool_inventory(&object, state),
         "mcp_loader_attach_surface" => attach_surface(&object, state),
         "mcp_loader_open_surface" => open_surface(&object, state),
+        "mcp_loader_resume_or_open_surface" => resume_or_open_surface(&object, state),
         "mcp_loader_surface_handle_inventory" => Ok(surface_handle_inventory(state)),
         "mcp_loader_list_tools" => list_attached_tools(&object, state),
         "mcp_loader_surface_status" => surface_status(&object, state),
@@ -4929,10 +4984,35 @@ fn call_tool(name: &str, arguments: Value, state: &mut LoaderState) -> Result<Va
 #[cfg(test)]
 mod tests {
     use super::{
-        child_error_diagnostic, compact_child_result, extract_proxy_child_args,
+        child_error_diagnostic, compact_child_result, extract_proxy_child_args, list_tools,
         request_error_details,
     };
     use serde_json::json;
+
+    #[test]
+    fn loader_discovery_defaults_to_compact_metadata_and_exposes_resume() {
+        let tools = list_tools();
+        let find = |name: &str| {
+            tools
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .expect("tool must exist")
+        };
+        assert!(
+            find("mcp_loader_resume_or_open_surface")["inputSchema"]["properties"]["binding_id"]
+                .is_object()
+        );
+        for name in [
+            "mcp_loader_list_site_surfaces",
+            "mcp_loader_open_surface",
+            "mcp_loader_list_tools",
+        ] {
+            assert_eq!(
+                find(name)["inputSchema"]["properties"]["include_runtime_metadata"]["default"],
+                false
+            );
+        }
+    }
 
     #[test]
     fn compact_child_result_removes_duplicate_text_when_structured_data_exists() {

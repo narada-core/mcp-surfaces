@@ -251,6 +251,7 @@ fn extend_epistemic_catalog(contract: &mut Value) {
         ("epistemic_graph_source_inspect", true),
         ("epistemic_graph_neighborhood", true),
         ("epistemic_graph_proposal_submit", false),
+        ("epistemic_graph_submit_review_admit", false),
         ("epistemic_graph_capture_sources", false),
         ("epistemic_graph_proposal_read", true),
         ("epistemic_graph_proposal_resubmit", false),
@@ -4515,11 +4516,12 @@ mod tests {
             .and_then(|items| items.iter().find(|item| item["id"] == "epistemic-graph"))
             .expect("epistemic catalog");
         let names = surface["tools"].as_array().expect("tool names");
-        assert_eq!(names.len(), 14);
+        assert_eq!(names.len(), 15);
         for required in [
             "epistemic_graph_query_batch",
             "epistemic_graph_source_inspect",
             "epistemic_graph_capture_sources",
+            "epistemic_graph_submit_review_admit",
             "epistemic_graph_proposal_read",
             "epistemic_graph_proposal_resubmit",
         ] {
