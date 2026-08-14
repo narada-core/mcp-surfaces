@@ -1,8 +1,8 @@
 # @narada-core/site-coherence-mcp
 
-Site-level continuity coherence readback MCP surface for comparing local Narada posture with Cloudflare embodiment posture.
+Site-level continuity coherence readback MCP surface for comparing local Narada posture with Cloudflare embodiment posture. The selected authority is native Rust for every runtime profile; Node and Bun are unavailable for this surface.
 
-This surface is read-only. It does not mutate site continuity state or perform operator actions.
+This surface is read-only. It does not mutate site continuity state or perform operator actions. Remote reads are bounded by connection/read/write deadlines and a 256 KB response cap. The server-bound operator cookie is sent only to the configured carrier and is never returned in MCP results or diagnostics.
 
 ## Tools
 
@@ -13,7 +13,7 @@ This surface is read-only. It does not mutate site continuity state or perform o
 ## Verification
 
 ```powershell
-pnpm --filter @narada-core/site-coherence-mcp test
+cargo test --locked --manifest-path packages/shared/mcp-surfaces-native/native/Cargo.toml site_coherence
 ```
 
 ## Telemetry
