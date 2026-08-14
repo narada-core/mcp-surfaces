@@ -1831,6 +1831,8 @@ function runSiteLifecycleAuthorityParity() {
       { jsonrpc: '2.0', id: 27, method: 'tools/call', params: { name: 'site_discover', arguments: { execute: true, authority_basis: { kind: 'operator_request', summary: 'fixture discovery' } } } },
       { jsonrpc: '2.0', id: 28, method: 'tools/call', params: { name: 'site_discover', arguments: { execute: true, authority_basis: { kind: 'operator_request', summary: 'fixture discovery retry' } } } },
       { jsonrpc: '2.0', id: 29, method: 'tools/call', params: { name: 'site_list', arguments: {} } },
+      { jsonrpc: '2.0', id: 30, method: 'tools/call', params: { name: 'site_dependency_posture', arguments: {} } },
+      { jsonrpc: '2.0', id: 31, method: 'tools/call', params: { name: 'site_deps_sync', arguments: { execute: true, authority_basis: { kind: 'legacy_caller' } } } },
     ];
     const responses = runMailbox(executable, ['--surface-id', 'site-lifecycle', '--site-root', root], requests, root, { ...process.env, NARADA_USER_SITE_ROOT: userSiteRoot, NARADA_NATIVE_SITES_BASE_DIR: discoveryBase });
     const tools = responses.find((response) => response.id === 1)?.result?.tools ?? [];
@@ -1865,10 +1867,14 @@ function runSiteLifecycleAuthorityParity() {
     const discoveryAuditCount = discoveryDb.prepare("SELECT COUNT(*) AS count FROM registry_management_audit WHERE site_id='discovered'").get().count;
     discoveryDb.close();
     if (discoveryAuditCount !== 1) throw new Error('site_lifecycle.native_discovery_audit_invalid');
+    const dependencyPosture = mailboxStructured(responses, 30, 'rust');
+    const retiredSync = mailboxStructured(responses, 31, 'rust');
+    if (dependencyPosture.status !== 'native_self_contained' || dependencyPosture.node_required !== false || dependencyPosture.runtime_dependencies?.length !== 0) throw new Error('site_lifecycle.native_dependency_posture_invalid');
+    if (retiredSync.status !== 'retired' || retiredSync.replacement_tool !== 'site_dependency_posture' || retiredSync.node_modules_modified !== false || existsSync(join(root, 'node_modules'))) throw new Error('site_lifecycle.native_legacy_dependency_sync_not_retired');
     const identities = JSON.parse(readFileSync(join(root, '.narada', 'operator-surfaces', 'identities.json'), 'utf8'));
     const bindings = JSON.parse(readFileSync(join(root, '.narada', 'operator-surfaces', 'runtime-bindings.json'), 'utf8'));
     if (identities.identities?.length !== 1 || bindings.bindings?.length !== 1) throw new Error('site_lifecycle.native_artifact_readback_invalid');
-    return { status: 'passed', verified: ['four_authority_tools', 'create_presets_and_plans', 'registry_list_show', 'transactional_discovery_and_retry', 'transformation_kinds_preflight', 'relation_list_validate', 'mutation_authority_preflight', 'root_confinement', 'closed_bounded_schemas', 'empty', 'execute_authority_gate', 'admission_replay_conflict', 'binding_evidence_replay', 'readback', 'artifact_compatibility'] };
+    return { status: 'passed', verified: ['four_authority_tools', 'create_presets_and_plans', 'registry_list_show', 'transactional_discovery_and_retry', 'native_dependency_posture_and_legacy_retirement', 'transformation_kinds_preflight', 'relation_list_validate', 'mutation_authority_preflight', 'root_confinement', 'closed_bounded_schemas', 'empty', 'execute_authority_gate', 'admission_replay_conflict', 'binding_evidence_replay', 'readback', 'artifact_compatibility'] };
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

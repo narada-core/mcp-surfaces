@@ -83,11 +83,12 @@ const SITE_LIFECYCLE_COMMANDS: &[(&str, &str, bool, bool, bool)] = &[
     ),
     (
         "site_deps_sync",
-        "narada sites deps sync",
+        "retired: legacy JavaScript package-link synchronization",
+        true,
         false,
-        true,
-        true,
+        false,
     ),
+    ("site_dependency_posture", "inspect native dependency posture", true, false, false),
 ];
 
 const SITE_REGISTRY_COMMANDS: &[(&str, &str)] = &[
@@ -274,6 +275,8 @@ fn call_site_lifecycle(name: &str, args: &Map<String, Value>, root: &Path) -> Re
         "site_relation_list" => return site_lifecycle_authority::relation_list(args, root),
         "site_relation_validate" => return site_lifecycle_authority::relation_validate(args, root),
         "site_authority_preflight" => return site_lifecycle_authority::authority_preflight(args, root),
+        "site_dependency_posture" => return site_lifecycle_authority::dependency_posture(root),
+        "site_deps_sync" => return Ok(site_lifecycle_authority::retired_dependency_sync(root)),
         _ => {}
     }
     let spec = SITE_LIFECYCLE_COMMANDS

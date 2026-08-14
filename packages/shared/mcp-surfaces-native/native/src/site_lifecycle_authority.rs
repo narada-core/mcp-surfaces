@@ -672,6 +672,28 @@ pub(crate) fn authority_preflight(
     )
 }
 
+pub(crate) fn dependency_posture(bound_root: &Path) -> Result<Value, Value> {
+    let executable =
+        std::env::current_exe().map_err(io_error("native_executable_resolution_failed"))?;
+    let packages = [
+        "agent-cli",
+        "mcp-transport",
+        "task-governance-core",
+        "task-lifecycle-mcp",
+    ];
+    let legacy_links = packages.iter().filter_map(|name| {
+        let path = bound_root.join("node_modules/@narada-core").join(name);
+        path.symlink_metadata().ok().map(|metadata| json!({"package_name":format!("@narada-core/{name}"),"path":path.to_string_lossy(),"is_symlink":metadata.file_type().is_symlink(),"is_directory":metadata.is_dir()}))
+    }).collect::<Vec<_>>();
+    Ok(
+        json!({"schema":"narada.site_native_dependency_posture.v1","status":if legacy_links.is_empty(){"native_self_contained"}else{"legacy_links_present"},"implementation":"rust-native","runtime_dependencies":[],"node_required":false,"bun_required":false,"typescript_required":false,"native_executable":executable.to_string_lossy(),"site_root":bound_root.to_string_lossy(),"legacy_package_links":legacy_links,"legacy_package_link_count":legacy_links.len(),"mutation_performed":false,"next_action":if legacy_links.is_empty(){Value::Null}else{Value::String("Review and remove legacy node_modules links through an explicit filesystem authority after confirming no legacy runtime consumes them.".to_string())}}),
+    )
+}
+
+pub(crate) fn retired_dependency_sync(bound_root: &Path) -> Value {
+    json!({"schema":"narada.site_deps_sync.retired.v1","status":"retired","implementation":"rust-native","mutation_attempted":false,"mutation_performed":false,"site_root":bound_root.to_string_lossy(),"reason":"legacy_node_package_link_synchronization_removed_from_native_runtime","replacement_tool":"site_dependency_posture","node_modules_modified":false,"remediation":"Call site_dependency_posture. Native MCP surfaces are self-contained and do not synchronize JavaScript package links."})
+}
+
 fn kind_json(entry: &LifecycleKind) -> Value {
     json!({"kind":entry.kind,"purpose":entry.purpose,"source_required":entry.source_required,"target_required":entry.target_required,"authority_modes":entry.authority_modes,"artifacts":entry.artifacts})
 }
