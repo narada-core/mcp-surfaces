@@ -143,14 +143,27 @@ fn proposal_submit(root: &Path, args: &Map<String, Value>) -> Result<Value, Valu
     if idem_path.exists() {
         let existing =
             fs::read_to_string(&idem_path).map_err(io_error("proposal_idempotency_read_failed"))?;
-        return read_json(&proposals(root).join(format!("{}.json", existing.trim())));
+        let stored = read_json(&proposals(root).join(format!("{}.json", existing.trim())))?;
+        return Ok(proposal_receipt(&stored));
     }
     write_new_json(
         &proposals(root).join(format!("{proposal_id}.json")),
         &stored,
     )?;
     write_new(&idem_path, proposal_id.as_bytes())?;
-    Ok(stored)
+    Ok(proposal_receipt(&stored))
+}
+
+fn proposal_receipt(proposal: &Value) -> Value {
+    json!({
+        "schema":"narada.epistemic.proposal_submission.v1",
+        "status":proposal["status"],
+        "proposal_id":proposal["proposal_id"],
+        "proposal_digest":proposal["digest"],
+        "operation_count":proposal["operations"].as_array().map_or(0, Vec::len),
+        "expected_ledger_head":proposal["expected_ledger_head"],
+        "created_at":proposal["created_at"]
+    })
 }
 
 fn proposal_review(root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
@@ -202,7 +215,8 @@ fn proposal_admit(root: &Path, args: &Map<String, Value>) -> Result<Value, Value
     if idem_path.exists() {
         let event_id =
             fs::read_to_string(&idem_path).map_err(io_error("ledger_idempotency_read_failed"))?;
-        return read_json(&ledger(root).join(format!("{}.json", event_id.trim())));
+        let event = read_json(&ledger(root).join(format!("{}.json", event_id.trim())))?;
+        return Ok(admission_receipt(&event));
     }
     let seq = ledger_files(root)?.len() as u64 + 1;
     let event_id = format!("ev-{seq:012}-{}", Uuid::new_v4());
@@ -216,7 +230,21 @@ fn proposal_admit(root: &Path, args: &Map<String, Value>) -> Result<Value, Value
     write_new_json(&ledger(root).join(format!("{event_id}.json")), &event)?;
     write_new(&idem_path, event_id.as_bytes())?;
     rebuild_projection(root)?;
-    Ok(event)
+    Ok(admission_receipt(&event))
+}
+
+fn admission_receipt(event: &Value) -> Value {
+    json!({
+        "schema":"narada.epistemic.proposal_admission.v1",
+        "status":"admitted",
+        "proposal_id":event["proposal_id"],
+        "proposal_digest":event["proposal_digest"],
+        "event_id":event["event_id"],
+        "sequence":event["sequence"],
+        "operation_count":event["operations"].as_array().map_or(0, Vec::len),
+        "ledger_head":event["event_hash"],
+        "certifies_truth":false
+    })
 }
 
 fn proposal_reject(root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
@@ -882,6 +910,9 @@ mod tests {
     fn proposal_admission_rebuilds_projection_and_preserves_truth_boundary() {
         let root = std::env::temp_dir().join(format!("epistemic-test-{}", Uuid::new_v4()));
         let proposal=proposal_submit(&root,&Map::from_iter([("actor".into(),json!("nima")),("authority_basis".into(),json!({"kind":"operator_request"})),("idempotency_key".into(),json!("p1")),("expected_ledger_head".into(),Value::Null),("operations".into(),json!([{"op":"entity.declare","entity_id":"problem-1","kind":"problem","title":"What explains X?"}]))])).unwrap();
+        assert_eq!(proposal["schema"], "narada.epistemic.proposal_submission.v1");
+        assert_eq!(proposal["operation_count"], 1);
+        assert!(proposal.get("operations").is_none());
         let id = proposal["proposal_id"].as_str().unwrap();
         let event = proposal_admit(
             &root,
@@ -894,6 +925,11 @@ mod tests {
             ]),
         )
         .unwrap();
+        assert_eq!(event["schema"], "narada.epistemic.proposal_admission.v1");
+        assert_eq!(event["status"], "admitted");
+        assert_eq!(event["operation_count"], 1);
+        assert!(event.get("operations").is_none());
+        assert_eq!(event["ledger_head"].as_str().map(str::len), Some(64));
         assert_eq!(event["certifies_truth"], false);
         let result = query(&root, &Map::new()).unwrap();
         assert_eq!(result["returned"], 1);
