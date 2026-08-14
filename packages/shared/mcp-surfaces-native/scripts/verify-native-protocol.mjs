@@ -1684,6 +1684,43 @@ function runSiteLoopParity() {
   }
 }
 
+function runOperatorRoutingParity() {
+  const root = mkdtempSync(join(tmpdir(), 'narada-operator-routing-native-'));
+  const logRoot = join(root, 'routing-log');
+  try {
+    const requests = [
+      { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} },
+      { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'operator_route_doctor', arguments: {} } },
+      { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'operator_route_request', arguments: { transcript: 'admit resident', target_runtime: 'codex', target_identity: 'fixture.resident', operation_kind: 'role_admission', target_site_id: 'fixture', target_site_root: root, role: 'resident', principal: 'operator', request_id: 'route-role' } } },
+      { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'operator_route_request', arguments: { transcript: 'bind runtime', target_runtime: 'codex', operation_kind: 'runtime_binding', target_site_root: root, request_id: 'route-runtime' } } },
+      { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'operator_route_request', arguments: { transcript: 'record only', target_runtime: 'codex', allow_inbox_fallback: false, request_id: 'route-unroutable' } } },
+      { jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'operator_route_request', arguments: { target_runtime: 'codex' } } },
+      { jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'operator_route_request', arguments: { transcript: 'admit resident', target_runtime: 'codex', target_identity: 'fixture.resident', operation_kind: 'role_admission', target_site_id: 'fixture', target_site_root: root, role: 'resident', principal: 'operator', request_id: 'route-role' } } },
+      { jsonrpc: '2.0', id: 8, method: 'tools/call', params: { name: 'operator_route_request', arguments: { transcript: 'different request', target_runtime: 'codex', request_id: 'route-role' } } },
+    ];
+    const responses = runMailbox(executable, ['--surface-id', 'operator-routing', '--site-root', root, '--log-root', logRoot], requests, root);
+    const tools = responses.find((response) => response.id === 1)?.result?.tools ?? [];
+    const requestTool = tools.find((tool) => tool.name === 'operator_route_request');
+    if (!requestTool || requestTool.inputSchema?.additionalProperties !== false || requestTool.inputSchema?.properties?.transcript?.maxLength !== 65536) throw new Error('operator_routing.native_schema_invalid');
+    const doctor = mailboxStructured(responses, 2, 'rust');
+    if (doctor.handoff_contract?.role_admission?.tool !== 'site_admit_role') throw new Error('operator_routing.native_doctor_handoff_missing');
+    const role = mailboxStructured(responses, 3, 'rust');
+    if (role.routing?.handoff?.status !== 'ready' || role.routing?.handoff?.tool !== 'site_admit_role' || role.routing?.handoff?.mutation_authorized !== false) throw new Error('operator_routing.native_role_handoff_invalid');
+    const runtime = mailboxStructured(responses, 4, 'rust');
+    if (runtime.routing?.handoff?.status !== 'needs_input' || JSON.stringify(runtime.routing?.handoff?.required_inputs) !== JSON.stringify(['target_identity', 'runtime_locus', 'runtime_handle'])) throw new Error('operator_routing.native_runtime_handoff_invalid');
+    const unroutable = mailboxStructured(responses, 5, 'rust');
+    if (unroutable.status !== 'unroutable' || unroutable.inbox_envelope !== null) throw new Error('operator_routing.native_unroutable_invalid');
+    if (!responses.find((response) => response.id === 6)?.error) throw new Error('operator_routing.native_invalid_input_not_refused');
+    if (mailboxStructured(responses, 7, 'rust').idempotency_replay !== true) throw new Error('operator_routing.native_retry_not_replayed');
+    if (!responses.find((response) => response.id === 8)?.error) throw new Error('operator_routing.native_request_id_conflict_not_refused');
+    const lines = readFileSync(join(logRoot, 'operator-routing-log.jsonl'), 'utf8').trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+    if (lines.length !== 3 || lines[0]?.request_id !== 'route-role' || lines[2]?.request_id !== 'route-unroutable') throw new Error('operator_routing.native_durable_readback_invalid');
+    return { status: 'passed', verified: ['closed_bounded_schema', 'doctor', 'role_handoff', 'runtime_needs_input', 'fallback_disabled', 'invalid_input', 'idempotent_retry', 'request_id_conflict', 'durable_readback'] };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 function runCalendarParity() {
   const workspaceRoot = resolve(packageRoot, '..', '..', '..');
   const bunEntrypoint = join(workspaceRoot, 'packages', 'calendar-mcp', 'src', 'main.ts');
@@ -2471,6 +2508,7 @@ const sopDurabilityMutationParity = runSlice('sop', runSopDurabilityMutationPari
 const sopEngineParity = runSlice('sop', () => runSopEngineParity({ executable, workspaceRoot: resolve(packageRoot, '..', '..', '..') }));
 const surfaceFeedbackParity = runSlice('surface-feedback', runSurfaceFeedbackParity);
 const siteLoopParity = runSlice('site-loop', runSiteLoopParity);
+const operatorRoutingParity = runSlice('operator-routing', runOperatorRoutingParity);
 const calendarParity = runSlice('calendar', runCalendarParity);
 const calendarAuthorityBridge = runSlice('calendar', runCalendarAuthorityBridge);
 const calendarNativeGraphParity = runSlice('calendar', runCalendarNativeGraphParity);
@@ -2508,6 +2546,7 @@ process.stdout.write(JSON.stringify({
   sop_engine_parity: sopEngineParity,
   surface_feedback_parity: surfaceFeedbackParity,
   site_loop_parity: siteLoopParity,
+  operator_routing_parity: operatorRoutingParity,
   calendar_parity: calendarParity,
   calendar_authority_bridge: calendarAuthorityBridge,
   calendar_native_graph_parity: calendarNativeGraphParity,

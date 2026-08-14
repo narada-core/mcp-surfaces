@@ -1,8 +1,9 @@
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use std::env;
 use std::fs::{create_dir_all, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -700,13 +701,21 @@ fn list_tools(surface_id: &str) -> Vec<Value> {
             tool("operator_route_request", "Compile a transcript into a routing decision and a site-inbox-compatible fallback envelope.", json!({
                 "type": "object",
                 "properties": {
-                    "transcript": { "type": "string", "description": "Transcript text to route." },
-                    "target_runtime": { "type": "string", "description": "Target runtime or runtime family to receive the command." },
-                    "target_identity": { "type": "string", "default": Value::Null, "description": "Optional target agent identity." },
-                    "intent_kind": { "type": "string", "default": Value::Null, "description": "Optional intent classification." },
-                    "speaker_agent_id": { "type": "string", "default": Value::Null, "description": "Optional speaker identity to preserve in the route record." },
+                    "transcript": { "type": "string", "minLength": 1, "maxLength": 65536, "description": "Transcript text to route." },
+                    "target_runtime": { "type": "string", "minLength": 1, "maxLength": 256, "description": "Target runtime or runtime family to receive the command." },
+                    "target_identity": { "type": "string", "minLength": 1, "maxLength": 512, "description": "Optional target agent identity." },
+                    "intent_kind": { "type": "string", "minLength": 1, "maxLength": 256, "description": "Optional intent classification." },
+                    "speaker_agent_id": { "type": "string", "minLength": 1, "maxLength": 512, "description": "Optional speaker identity to preserve in the route record." },
+                    "target_site_id": { "type": "string", "minLength": 1, "maxLength": 512, "description": "Canonical target Site id for a project-scoped handoff." },
+                    "target_site_root": { "type": "string", "minLength": 1, "maxLength": 4096, "description": "Explicit target Site workspace root for a project-scoped handoff." },
+                    "operation_kind": { "type": "string", "enum": ["role_admission", "runtime_binding"], "description": "Typed handoff operation; inferred from intent_kind when omitted." },
+                    "role": { "type": "string", "minLength": 1, "maxLength": 256 },
+                    "agent_kind": { "type": "string", "minLength": 1, "maxLength": 256 },
+                    "principal": { "type": "string", "minLength": 1, "maxLength": 512 },
+                    "runtime_locus": { "type": "string", "minLength": 1, "maxLength": 4096 },
+                    "runtime_handle": { "type": "string", "minLength": 1, "maxLength": 4096 },
                     "allow_inbox_fallback": { "type": "boolean", "default": true, "description": "Allow a site-inbox fallback envelope when direct delivery is unavailable." },
-                    "request_id": { "type": "string", "default": Value::Null, "description": "Optional stable request identifier." }
+                    "request_id": { "type": "string", "minLength": 1, "maxLength": 512, "description": "Optional stable request identifier." }
                 },
                 "required": ["transcript", "target_runtime"],
                 "additionalProperties": false
@@ -905,6 +914,12 @@ fn operator_route_doctor(options: &Options) -> Result<Value, Value> {
         "site_root": options.site_root.to_string_lossy(),
         "direct_delivery_supported": false,
         "fallback_channel": "site-inbox",
+        "handoff_contract": {
+            "schema": "narada.mcp_handoff.v1",
+            "role_admission": { "target_surface": "site-lifecycle", "tool": "site_admit_role", "authority": "explicit project Site authority root" },
+            "runtime_binding": { "target_surface": "site-lifecycle", "tool": "site_bind_runtime", "authority": "owning runtime locus with observed handle" },
+            "default_fallback": { "target_surface": "site-inbox", "channel": "site-inbox", "mutation": "deferred until owning surface admits it" }
+        },
         "suggested_speech": { "provider": "openai_api", "model": "tts-1", "voice": "nova", "text": "Request recorded. Direct delivery to that runtime is not available from this surface. I can route it through the admitted inbox path." }
     }))
 }
@@ -915,6 +930,14 @@ fn operator_route_request(args: &Map<String, Value>, options: &Options) -> Resul
     let target_identity = optional_string(args, "target_identity");
     let intent_kind = optional_string(args, "intent_kind");
     let speaker_agent_id = optional_string(args, "speaker_agent_id");
+    let target_site_id = optional_string(args, "target_site_id");
+    let target_site_root = optional_string(args, "target_site_root");
+    let operation_kind = optional_string(args, "operation_kind").or_else(|| infer_operation_kind(intent_kind.as_deref()));
+    let role = optional_string(args, "role");
+    let agent_kind = optional_string(args, "agent_kind");
+    let principal = optional_string(args, "principal").or_else(|| speaker_agent_id.clone());
+    let runtime_locus = optional_string(args, "runtime_locus");
+    let runtime_handle = optional_string(args, "runtime_handle");
     let allow_inbox_fallback = args
         .get("allow_inbox_fallback")
         .and_then(Value::as_bool)
@@ -926,6 +949,16 @@ fn operator_route_request(args: &Map<String, Value>, options: &Options) -> Resul
             &Uuid::new_v4().to_string()[..8]
         )
     });
+    let request_fingerprint = operator_route_fingerprint(args)?;
+    if let Some(existing) = find_route_record(&request_id, options)? {
+        if existing.get("request_fingerprint").and_then(Value::as_str) != Some(request_fingerprint.as_str()) {
+            return Err(diagnostic("operator_route_request_id_conflict", "request_id already names a different routing request", json!({"request_id":request_id})));
+        }
+        let mut replay = existing.as_object().cloned().unwrap_or_default();
+        replay.insert("idempotency_replay".to_string(), json!(true));
+        replay.insert("log_path".to_string(), json!(route_log_path(options).to_string_lossy()));
+        return Ok(Value::Object(replay));
+    }
     let recorded_at = now_iso();
     let spoken_text = if allow_inbox_fallback {
         "Request recorded. Direct delivery to that runtime is not available from this surface. I can route it through the admitted inbox path."
@@ -937,6 +970,18 @@ fn operator_route_request(args: &Map<String, Value>, options: &Options) -> Resul
     } else {
         "unroutable"
     };
+    let handoff = operator_typed_handoff(
+        operation_kind.as_deref(),
+        &target_runtime,
+        target_identity.as_deref(),
+        target_site_id.as_deref(),
+        target_site_root.as_deref(),
+        role.as_deref(),
+        agent_kind.as_deref(),
+        principal.as_deref(),
+        runtime_locus.as_deref(),
+        runtime_handle.as_deref(),
+    );
     let inbox_envelope = if allow_inbox_fallback {
         Some(json!({
             "kind": "command_request",
@@ -946,7 +991,7 @@ fn operator_route_request(args: &Map<String, Value>, options: &Options) -> Resul
             "target_role": Value::Null,
             "severity": 35,
             "authority_level": "operator_confirmed",
-            "payload": { "request_id": request_id, "recorded_at": recorded_at, "transcript": transcript, "target_runtime": target_runtime, "target_identity": target_identity, "intent_kind": intent_kind, "speaker_agent_id": speaker_agent_id, "spoken_acknowledgement": spoken_text, "suggested_delivery_channel": "site-inbox" }
+            "payload": { "request_id": request_id, "recorded_at": recorded_at, "transcript": transcript, "target_runtime": target_runtime, "target_identity": target_identity, "intent_kind": intent_kind, "speaker_agent_id": speaker_agent_id, "spoken_acknowledgement": spoken_text, "suggested_delivery_channel": "site-inbox", "typed_handoff": handoff }
         }))
     } else {
         None
@@ -955,6 +1000,7 @@ fn operator_route_request(args: &Map<String, Value>, options: &Options) -> Resul
         "schema": "narada.operator_routing.route_request.v1",
         "status": if allow_inbox_fallback { "drafted_for_site_inbox" } else { "unroutable" },
         "request_id": request_id,
+        "request_fingerprint": request_fingerprint,
         "recorded_at": recorded_at,
         "direct_delivery_supported": false,
         "direct_delivery_attempted": false,
@@ -962,9 +1008,10 @@ fn operator_route_request(args: &Map<String, Value>, options: &Options) -> Resul
         "target_runtime": target_runtime,
         "target_identity": target_identity,
         "intent_kind": intent_kind,
+        "operation_kind": operation_kind,
         "speaker_agent_id": speaker_agent_id,
         "transcript": transcript,
-        "routing": { "target_runtime": target_runtime, "target_identity": target_identity, "route_kind": route_kind, "fallback_channel": if allow_inbox_fallback { json!("site-inbox") } else { Value::Null }, "next_step": if allow_inbox_fallback { "submit_to_site_inbox" } else { "none" } },
+        "routing": { "target_runtime": target_runtime, "target_identity": target_identity, "route_kind": route_kind, "fallback_channel": if allow_inbox_fallback { json!("site-inbox") } else { Value::Null }, "next_step": if handoff.is_some() { format!("handoff_to_{}", handoff.as_ref().and_then(|value| value.get("target_surface")).and_then(Value::as_str).unwrap_or("site-inbox")) } else if allow_inbox_fallback { "submit_to_site_inbox".to_string() } else { "none".to_string() }, "handoff": handoff },
         "spoken_acknowledgement": { "provider": "openai_api", "model": "tts-1", "voice": "nova", "text": spoken_text },
         "inbox_envelope": inbox_envelope
     });
@@ -977,14 +1024,71 @@ fn operator_route_request(args: &Map<String, Value>, options: &Options) -> Resul
     Ok(Value::Object(result))
 }
 
-fn append_route_record(record: &Value, options: &Options) -> Result<PathBuf, Value> {
-    let root = options.log_root.clone().unwrap_or_else(|| {
-        options
-            .site_root
-            .join(".narada")
-            .join("runtime")
-            .join("operator-routing")
+fn operator_route_fingerprint(args: &Map<String, Value>) -> Result<String, Value> {
+    let fields = ["transcript","target_runtime","target_identity","intent_kind","speaker_agent_id","target_site_id","target_site_root","operation_kind","role","agent_kind","principal","runtime_locus","runtime_handle","allow_inbox_fallback"];
+    let canonical = Value::Object(fields.into_iter().filter_map(|key| args.get(key).cloned().map(|value|(key.to_string(),value))).collect());
+    let bytes = serde_json::to_vec(&canonical).map_err(|cause| diagnostic("operator_route_fingerprint_failed", &cause.to_string(), Value::Null))?;
+    Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
+}
+
+fn route_log_path(options: &Options) -> PathBuf {
+    options.log_root.clone().unwrap_or_else(|| options.site_root.join(".narada").join("runtime").join("operator-routing")).join("operator-routing-log.jsonl")
+}
+
+fn find_route_record(request_id: &str, options: &Options) -> Result<Option<Value>, Value> {
+    let path = route_log_path(options);
+    if !path.exists() { return Ok(None); }
+    let metadata = std::fs::metadata(&path).map_err(|cause| diagnostic("operator_route_log_read_failed", &cause.to_string(), Value::Null))?;
+    if metadata.len() > 16 * 1024 * 1024 { return Err(diagnostic("operator_route_log_too_large", "routing log exceeds the 16 MiB idempotency scan bound", json!({"path":path,"bytes":metadata.len()}))); }
+    let file = std::fs::File::open(&path).map_err(|cause| diagnostic("operator_route_log_read_failed", &cause.to_string(), Value::Null))?;
+    for line in BufReader::new(file).lines().take(100_000) {
+        let line = line.map_err(|cause| diagnostic("operator_route_log_read_failed", &cause.to_string(), Value::Null))?;
+        let value: Value = serde_json::from_str(&line).map_err(|cause| diagnostic("operator_route_log_invalid", &cause.to_string(), Value::Null))?;
+        if value.get("request_id").and_then(Value::as_str) == Some(request_id) { return Ok(Some(value)); }
+    }
+    Ok(None)
+}
+
+fn infer_operation_kind(intent_kind: Option<&str>) -> Option<String> {
+    let normalized = intent_kind.unwrap_or_default().to_ascii_lowercase().replace(['-', ' '], "_");
+    if normalized.contains("bind") || normalized.contains("runtime") {
+        Some("runtime_binding".to_string())
+    } else if normalized.contains("admit") || normalized.contains("identity") || normalized.contains("role") || normalized.contains("instantiate") {
+        Some("role_admission".to_string())
+    } else {
+        None
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn operator_typed_handoff(
+    operation_kind: Option<&str>, target_runtime: &str, target_identity: Option<&str>, target_site_id: Option<&str>,
+    target_site_root: Option<&str>, role: Option<&str>, agent_kind: Option<&str>, principal: Option<&str>,
+    runtime_locus: Option<&str>, runtime_handle: Option<&str>,
+) -> Option<Value> {
+    let site_authority = target_site_root.map(|root| {
+        let path = Path::new(root);
+        if path.file_name().is_some_and(|name| name.eq_ignore_ascii_case(".narada")) { path.to_path_buf() } else { path.join(".narada") }
     });
+    match operation_kind {
+        Some("role_admission") => {
+            let missing = [("target_site_id", target_site_id), ("target_site_root", target_site_root), ("role", role), ("principal", principal)]
+                .into_iter().filter_map(|(name, value)| value.is_none().then_some(name)).collect::<Vec<_>>();
+            Some(json!({"schema":"narada.mcp_handoff.v1","status":if missing.is_empty(){"ready"}else{"needs_input"},"executable":missing.is_empty(),"target_surface":"site-lifecycle","tool":"site_admit_role","authority_locus":site_authority.map(|path|path.to_string_lossy().to_string()),"arguments":{"site_id":target_site_id,"site_root":target_site_root,"role":role,"agent_kind":agent_kind.unwrap_or(target_runtime),"identity":target_site_id.zip(role).map(|(site,role)|format!("{site}.{role}")).or_else(||target_identity.map(ToOwned::to_owned)),"by":principal,"execute":true,"authority_basis":"<operator-authority-basis>"},"required_inputs":missing,"mutation_authorized":false,"reason":"Durable project-role admission is owned by the project Site lifecycle surface."}))
+        }
+        Some("runtime_binding") => {
+            let missing = [("target_site_root", target_site_root), ("target_identity", target_identity), ("runtime_locus", runtime_locus), ("runtime_handle", runtime_handle)]
+                .into_iter().filter_map(|(name, value)| value.is_none().then_some(name)).collect::<Vec<_>>();
+            Some(json!({"schema":"narada.mcp_handoff.v1","status":if missing.is_empty(){"ready"}else{"needs_input"},"executable":missing.is_empty(),"target_surface":"site-lifecycle","tool":"site_bind_runtime","authority_locus":site_authority.map(|path|path.to_string_lossy().to_string()),"arguments":{"site_root":target_site_root,"identity":target_identity,"runtime_locus":runtime_locus,"handle":runtime_handle,"execute":true,"authority_basis":"<operator-authority-basis>"},"required_inputs":missing,"mutation_authorized":false,"reason":"Volatile runtime binding is owned by the owning runtime locus and requires observed target evidence."}))
+        }
+        Some(_) => None,
+        None => Some(json!({"schema":"narada.mcp_handoff.v1","status":"deferred","executable":false,"target_surface":"site-inbox","tool":"submit_to_site_inbox","authority_locus":"target Site","arguments":{"target_runtime":target_runtime,"target_identity":target_identity},"required_inputs":[],"mutation_authorized":false,"reason":"No typed project action was declared; retain the durable fallback envelope."})),
+    }
+}
+
+fn append_route_record(record: &Value, options: &Options) -> Result<PathBuf, Value> {
+    let path = route_log_path(options);
+    let root = path.parent().map(Path::to_path_buf).ok_or_else(|| diagnostic("operator_route_log_path_invalid", "routing log has no parent directory", Value::Null))?;
     create_dir_all(&root).map_err(|error| {
         diagnostic(
             "operator_route_log_create_failed",
@@ -992,7 +1096,6 @@ fn append_route_record(record: &Value, options: &Options) -> Result<PathBuf, Val
             Value::Null,
         )
     })?;
-    let path = root.join("operator-routing-log.jsonl");
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -1441,10 +1544,27 @@ mod tests {
         )
         .expect("route");
         assert_eq!(result["structuredContent"]["request_id"], "route-test");
+        let replay = call_tool("operator-routing", params.as_object().expect("params"), &options).expect("route replay");
+        assert_eq!(replay["structuredContent"]["idempotency_replay"], true);
+        let conflict_params = json!({"name":"operator_route_request","arguments":{"transcript":"different","target_runtime":"codex","request_id":"route-test"}});
+        let conflict = call_tool("operator-routing", conflict_params.as_object().expect("params"), &options).expect_err("request id conflict");
+        assert_eq!(conflict["code"], "operator_route_request_id_conflict");
         let log = root.join("log").join("operator-routing-log.jsonl");
         assert!(log.exists());
         let content = std::fs::read_to_string(log).expect("log");
         assert!(content.contains(r#""request_id":"route-test""#));
+        let role_params = json!({"name":"operator_route_request","arguments":{"transcript":"admit resident","target_runtime":"codex","target_identity":"fixture.resident","operation_kind":"role_admission","target_site_id":"fixture","target_site_root":root.to_string_lossy(),"role":"resident","principal":"operator","request_id":"route-role"}});
+        let role = call_tool("operator-routing", role_params.as_object().expect("params"), &options).expect("role route");
+        assert_eq!(role["structuredContent"]["routing"]["handoff"]["status"], "ready");
+        assert_eq!(role["structuredContent"]["routing"]["handoff"]["tool"], "site_admit_role");
+        assert_eq!(role["structuredContent"]["routing"]["handoff"]["mutation_authorized"], false);
+        let incomplete_params = json!({"name":"operator_route_request","arguments":{"transcript":"bind runtime","target_runtime":"codex","operation_kind":"runtime_binding","target_site_root":root.to_string_lossy(),"request_id":"route-runtime"}});
+        let incomplete = call_tool("operator-routing", incomplete_params.as_object().expect("params"), &options).expect("runtime route");
+        assert_eq!(incomplete["structuredContent"]["routing"]["handoff"]["status"], "needs_input");
+        assert_eq!(incomplete["structuredContent"]["routing"]["handoff"]["required_inputs"], json!(["target_identity","runtime_locus","runtime_handle"]));
+        let route_tool = list_tools("operator-routing").into_iter().find(|tool| tool["name"] == "operator_route_request").expect("route tool");
+        assert_eq!(route_tool["inputSchema"]["additionalProperties"], false);
+        assert_eq!(route_tool["inputSchema"]["properties"]["transcript"]["maxLength"], 65536);
         std::fs::remove_dir_all(root).expect("cleanup");
     }
     #[test]
