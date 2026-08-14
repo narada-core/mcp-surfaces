@@ -481,23 +481,39 @@ fn binding_list(db: &Connection, args: &Map<String, Value>) -> Result<Value, Val
             ));
         }
     }
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_i64)
+        .unwrap_or(100)
+        .clamp(1, 500);
+    let offset = args
+        .get("offset")
+        .and_then(Value::as_i64)
+        .unwrap_or(0)
+        .clamp(0, 10_000);
     let mut statement = db
         .prepare(if status.is_some() {
-            "select * from scheduler_bindings where status=?1 order by binding_id"
+            "select * from scheduler_bindings where status=?1 order by binding_id limit ?2 offset ?3"
         } else {
-            "select * from scheduler_bindings order by binding_id"
+            "select * from scheduler_bindings order by binding_id limit ?1 offset ?2"
         })
         .map_err(|cause| db_error("scheduler_binding_query_failed", cause))?;
     let bindings = if let Some(status) = status {
-        statement.query_map(params![status], binding_from_row)
+        statement.query_map(params![status, limit + 1, offset], binding_from_row)
     } else {
-        statement.query_map([], binding_from_row)
+        statement.query_map(params![limit + 1, offset], binding_from_row)
     }
     .map_err(|cause| db_error("scheduler_binding_query_failed", cause))?
     .collect::<rusqlite::Result<Vec<_>>>()
     .map_err(|cause| db_error("scheduler_binding_query_failed", cause))?;
+    let has_more = bindings.len() as i64 > limit;
+    let bindings = bindings
+        .into_iter()
+        .take(limit as usize)
+        .collect::<Vec<_>>();
+    let returned = bindings.len();
     Ok(
-        json!({"schema":"narada.scheduler.binding_list.v1","count":bindings.len(),"bindings":bindings}),
+        json!({"schema":"narada.scheduler.binding_list.v1","status":"ok","count":returned,"returned":returned,"bindings":bindings,"offset":offset,"limit":limit,"has_more":has_more,"next_offset":if has_more{json!(offset + returned as i64)}else{Value::Null},"bounded":true}),
     )
 }
 
@@ -646,7 +662,7 @@ fn event_admit(db: &Connection, args: &Map<String, Value>) -> Result<Value, Valu
                 params![activation_id,binding_id,event_id,format!("{binding_id}:{event_id}"),binding.get("target_sop_id").and_then(Value::as_str).unwrap_or(""),binding.get("target_template_version").and_then(Value::as_str).unwrap_or(""),partition_key,due_at,if blocked{"blocked"}else{"pending"},if blocked{Some("blocked_outcome_requires_explicit_unblock")}else{None},now],
             ).map_err(|cause| db_error("scheduler_activation_insert_failed", cause))?;
         }
-        let activations = list_activations(db, None, None, Some(&event_id), None, 500)?;
+        let activations = list_activations(db, None, None, Some(&event_id), None, 500, 0)?;
         Ok(
             json!({"schema":"narada.scheduler.event_admission.v1","status":if existing_digest.is_some(){"replayed"}else{"admitted"},"event_id":event_id,"activation_count":activations.len(),"activations":activations}),
         )
@@ -780,16 +796,28 @@ fn activation_list(db: &Connection, args: &Map<String, Value>) -> Result<Value, 
         .and_then(Value::as_i64)
         .unwrap_or(100)
         .clamp(1, 500);
+    let offset = args
+        .get("offset")
+        .and_then(Value::as_i64)
+        .unwrap_or(0)
+        .clamp(0, 10_000);
     let activations = list_activations(
         db,
         args.get("status").and_then(Value::as_str),
         args.get("binding_id").and_then(Value::as_str),
         args.get("source_event_id").and_then(Value::as_str),
         args.get("sop_run_id").and_then(Value::as_str),
-        limit,
+        limit + 1,
+        offset,
     )?;
+    let has_more = activations.len() as i64 > limit;
+    let activations = activations
+        .into_iter()
+        .take(limit as usize)
+        .collect::<Vec<_>>();
+    let returned = activations.len();
     Ok(
-        json!({"schema":"narada.scheduler.activation_list.v1","count":activations.len(),"activations":activations}),
+        json!({"schema":"narada.scheduler.activation_list.v1","status":"ok","count":returned,"returned":returned,"activations":activations,"offset":offset,"limit":limit,"has_more":has_more,"next_offset":if has_more{json!(offset + returned as i64)}else{Value::Null},"bounded":true}),
     )
 }
 
@@ -800,6 +828,7 @@ fn list_activations(
     source_event_id: Option<&str>,
     sop_run_id: Option<&str>,
     limit: i64,
+    offset: i64,
 ) -> Result<Vec<Value>, Value> {
     let mut clauses = Vec::new();
     let mut values = Vec::<SqlValue>::new();
@@ -815,8 +844,9 @@ fn list_activations(
         }
     }
     values.push(SqlValue::Integer(limit));
+    values.push(SqlValue::Integer(offset));
     let sql = format!(
-        "select * from scheduler_activations {} order by due_at,activation_id limit ?",
+        "select * from scheduler_activations {} order by due_at,activation_id limit ? offset ?",
         if clauses.is_empty() {
             String::new()
         } else {
@@ -1289,6 +1319,52 @@ mod tests {
         let mut changed = binding().as_object().unwrap().clone();
         changed.insert("default_delay_ms".into(), json!(1));
         assert!(call_tool("scheduler_binding_upsert", &changed, &root).is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn binding_and_activation_lists_are_cursor_pageable() {
+        let root = fixture();
+        let mut first = binding().as_object().unwrap().clone();
+        first.insert("binding_id".into(), json!("binding-a"));
+        let mut second = binding().as_object().unwrap().clone();
+        second.insert("binding_id".into(), json!("binding-b"));
+        call_tool("scheduler_binding_upsert", &first, &root).expect("first binding");
+        call_tool("scheduler_binding_upsert", &second, &root).expect("second binding");
+        let first_page = call(
+            &root,
+            "scheduler_binding_list",
+            json!({"limit":1,"offset":0}),
+        )
+        .expect("first page");
+        let second_page = call(
+            &root,
+            "scheduler_binding_list",
+            json!({"limit":1,"offset":1}),
+        )
+        .expect("second page");
+        assert_eq!(first_page["returned"], 1);
+        assert_eq!(first_page["has_more"], true);
+        assert_eq!(first_page["next_offset"], 1);
+        assert_ne!(
+            first_page["bindings"][0]["binding_id"],
+            second_page["bindings"][0]["binding_id"]
+        );
+
+        call(
+            &root,
+            "scheduler_event_admit",
+            event("event-page", "synced"),
+        )
+        .expect("event");
+        let activation_page = call(
+            &root,
+            "scheduler_activation_list",
+            json!({"limit":1,"offset":0}),
+        )
+        .expect("activation page");
+        assert_eq!(activation_page["status"], "ok");
+        assert_eq!(activation_page["returned"], 1);
+        assert_eq!(activation_page["bounded"], true);
         let _ = fs::remove_dir_all(root);
     }
     #[test]

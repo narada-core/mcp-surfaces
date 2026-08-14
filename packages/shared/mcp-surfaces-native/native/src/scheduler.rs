@@ -142,7 +142,7 @@ fn guidance(args: &Map<String, Value>) -> Value {
         "schema":"narada.mcp_surface.guidance.v0","status":"ok","surface_id":"scheduler","guidance_tool":"scheduler_guidance",
         "purpose":"Operate Windows scheduled tasks and the Site-local durable activation ledger from one native Rust authority.",
         "requested":{"workflow":args.get("workflow").cloned().unwrap_or(Value::Null),"tool":args.get("tool").cloned().unwrap_or(Value::Null)},
-        "first_use":["Call scheduler_runtime_status and retain its implementation_id.","Use bounded task list/show reads before mutation.","Call scheduler_activation_doctor before explicitly preparing the activation database."],
+        "first_use":["Call scheduler_runtime_status and retain its implementation_id.","Use bounded task list/show reads before mutation.","Call scheduler_task_create with dry_run true to validate the complete launch and trigger plan before creating a Windows task.","Call scheduler_activation_doctor before explicitly preparing the activation database."],
         "boundaries":["Task mutations require the exact current native implementation_id.","Scheduled commands run through the native CREATE_NO_WINDOW supervisor.","The activation database is never created or migrated implicitly."]
     })
 }
@@ -237,7 +237,7 @@ fn task_tool(name: &str, read_only: bool) -> Value {
             json!({"type":"object","properties":{},"additionalProperties":false})
         }
         "scheduler_task_list" => {
-            json!({"type":"object","properties":{"folder":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":500,"default":50}},"additionalProperties":false})
+            json!({"type":"object","properties":{"folder":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":500,"default":50},"offset":{"type":"integer","minimum":0,"maximum":10000,"default":0}},"additionalProperties":false})
         }
         "scheduler_task_show" => {
             json!({"type":"object","properties":{"task_name":{"type":"string"}},"required":["task_name"],"additionalProperties":false})
@@ -246,7 +246,7 @@ fn task_tool(name: &str, read_only: bool) -> Value {
             json!({"type":"object","properties":{"task_name":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":200,"default":20}},"required":["task_name"],"additionalProperties":false})
         }
         "scheduler_task_create" => {
-            json!({"type":"object","properties":{"task_name":{"type":"string"},"command":{"type":"string"},"arguments":{"type":"string"},"working_dir":{"type":"string"},"schedule":{"type":"string","enum":["daily","hourly","at_startup","at_logon","once"]},"start_time":{"type":"string"},"interval_minutes":{"type":"integer","minimum":1,"maximum":1440},"execution_time_limit_seconds":{"type":"integer","minimum":1,"maximum":86400},"multiple_instances":{"type":"string","enum":["ignore_new","parallel","queue","stop_existing"]},"implementation_id":{"type":"string"}},"required":["task_name","command","schedule","implementation_id"],"additionalProperties":false})
+            json!({"type":"object","properties":{"task_name":{"type":"string"},"command":{"type":"string"},"arguments":{"type":"string"},"working_dir":{"type":"string"},"schedule":{"type":"string","enum":["daily","hourly","at_startup","at_logon","once"]},"start_time":{"type":"string"},"interval_minutes":{"type":"integer","minimum":1,"maximum":1440},"execution_time_limit_seconds":{"type":"integer","minimum":1,"maximum":86400},"multiple_instances":{"type":"string","enum":["ignore_new","parallel","queue","stop_existing"]},"dry_run":{"type":"boolean","default":false,"description":"Validate and return the complete native launch plan without creating a Windows scheduled task."},"implementation_id":{"type":"string"}},"required":["task_name","command","schedule","implementation_id"],"additionalProperties":false})
         }
         "scheduler_task_update_action" => {
             json!({"type":"object","properties":{"task_name":{"type":"string"},"command":{"type":"string"},"arguments":{"type":"string"},"working_dir":{"type":"string"},"execution_time_limit_seconds":{"type":"integer","minimum":1,"maximum":86400},"multiple_instances":{"type":"string","enum":["ignore_new","parallel","queue","stop_existing"]},"dry_run":{"type":"boolean"},"implementation_id":{"type":"string"}},"required":["task_name","command","implementation_id"],"additionalProperties":false})
@@ -280,7 +280,7 @@ fn activation_tool(name: &str, read_only: bool) -> Value {
             json!({"type":"object","properties":{"implementation_id":implementation},"required":["implementation_id"],"additionalProperties":false})
         }
         "scheduler_binding_list" => {
-            json!({"type":"object","properties":{"status":{"type":"string","enum":["active","paused","retired"]}},"additionalProperties":false})
+            json!({"type":"object","properties":{"status":{"type":"string","enum":["active","paused","retired"]},"limit":{"type":"integer","minimum":1,"maximum":500,"default":100},"offset":{"type":"integer","minimum":0,"maximum":10000,"default":0}},"additionalProperties":false})
         }
         "scheduler_binding_show" => {
             json!({"type":"object","properties":{"binding_id":string},"required":["binding_id"],"additionalProperties":false})
@@ -298,7 +298,7 @@ fn activation_tool(name: &str, read_only: bool) -> Value {
             json!({"type":"object","properties":{"event_id":string,"topic":string,"partition_key":string,"aggregate_id":string,"aggregate_revision":{"type":"integer","minimum":0},"schema_version":{"type":"integer","minimum":1},"causation_id":string,"idempotency_key":string,"payload":record,"occurred_at":string,"implementation_id":implementation},"required":["event_id","topic","partition_key","aggregate_id","aggregate_revision","schema_version","causation_id","idempotency_key","payload","occurred_at","implementation_id"],"additionalProperties":false})
         }
         "scheduler_activation_list" => {
-            json!({"type":"object","properties":{"status":{"type":"string","enum":["pending","leased","admitted","terminal","blocked"]},"binding_id":string,"source_event_id":string,"sop_run_id":string,"limit":{"type":"integer","minimum":1,"maximum":500,"default":100}},"additionalProperties":false})
+            json!({"type":"object","properties":{"status":{"type":"string","enum":["pending","leased","admitted","terminal","blocked"]},"binding_id":string,"source_event_id":string,"sop_run_id":string,"limit":{"type":"integer","minimum":1,"maximum":500,"default":100},"offset":{"type":"integer","minimum":0,"maximum":10000,"default":0}},"additionalProperties":false})
         }
         "scheduler_activation_claim" => {
             json!({"type":"object","properties":{"consumer_id":string,"lease_ms":{"type":"integer","minimum":1000,"maximum":300000},"implementation_id":implementation},"required":["consumer_id","implementation_id"],"additionalProperties":false})
@@ -522,6 +522,11 @@ fn task_list(args: &Map<String, Value>) -> Result<Value, Value> {
         .and_then(Value::as_u64)
         .unwrap_or(50)
         .clamp(1, 500) as usize;
+    let offset = args
+        .get("offset")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        .min(10_000) as usize;
     let result = schtasks(&strings(&["/query", "/fo", "CSV", "/v", "/tn", folder]))?;
     if result.exit_code != 0 && result.exit_code != 1 {
         return Err(command_failure(
@@ -532,9 +537,19 @@ fn task_list(args: &Map<String, Value>) -> Result<Value, Value> {
             "",
         ));
     }
-    let mut items = compact_rows(&parse_csv(&result.stdout));
-    items.truncate(limit);
-    Ok(json!({"items":items,"count":items.len(),"folder":folder}))
+    let all_items = compact_rows(&parse_csv(&result.stdout));
+    let observed_total = all_items.len();
+    let count_exact = result.stdout.len() < MAX_COMMAND_OUTPUT as usize;
+    let items = all_items
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .collect::<Vec<_>>();
+    let returned = items.len();
+    let has_more = offset.saturating_add(returned) < observed_total || !count_exact;
+    Ok(
+        json!({"schema":"narada.scheduler.task_list.v1","status":"ok","items":items,"count":returned,"returned":returned,"total":if count_exact{json!(observed_total)}else{Value::Null},"observed_total":observed_total,"count_exact":count_exact,"folder":folder,"offset":offset,"limit":limit,"has_more":has_more,"next_offset":if has_more && returned>0{json!(offset + returned)}else{Value::Null},"bounded":true}),
+    )
 }
 
 fn task_show(args: &Map<String, Value>) -> Result<Value, Value> {
@@ -808,13 +823,19 @@ fn task_create(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     let execution_limit = optional_integer_range(args, "execution_time_limit_seconds", 1, 86_400)?;
     let instances = multiple_instances(args.get("multiple_instances"))?;
     assert_action_allowed(&command, &arguments, working_dir.as_deref(), root)?;
-    let plan = launch_plan(&command, &arguments, true)?;
+    let dry_run = args.get("dry_run").and_then(Value::as_bool) == Some(true);
+    let plan = launch_plan(&command, &arguments, !dry_run)?;
     let placeholder = format!(
         "\"{}\" --scheduled-noop-v1",
         plan.launcher_path.to_string_lossy()
     );
     let mut sch_args = strings(&["/create", "/tn", &task_name, "/tr", &placeholder, "/f"]);
     sch_args.extend(schedule_args(&schedule, args)?);
+    if dry_run {
+        return Ok(
+            json!({"schema":"narada.scheduler.task_create_plan.v1","status":"planned","task_name":task_name,"schedule":schedule,"command":join_command(&plan.target_command,&plan.target_arguments),"execute":plan.target_command,"arguments":plan.target_arguments,"launcher_execute":plan.launcher_path.to_string_lossy(),"launcher_arguments":plan.launcher_arguments,"working_dir":working_dir.as_ref().map(|path|path.to_string_lossy().to_string()),"execution_time_limit_seconds":execution_limit,"multiple_instances":instances,"schtasks_create_args":sch_args,"host_effect":false,"bounded":true}),
+        );
+    }
     let created = schtasks(&sch_args)?;
     if created.exit_code != 0 {
         return Err(command_failure(
@@ -1426,8 +1447,9 @@ mod tests {
     use super::*;
     #[test]
     fn tool_contract_is_complete() {
-        let names = list_tools()
-            .into_iter()
+        let tools = list_tools();
+        let names = tools
+            .iter()
             .filter_map(|value| {
                 value
                     .get("name")
@@ -1442,6 +1464,15 @@ mod tests {
         ] {
             assert!(names.contains(&name.to_string()), "{name}");
         }
+        let find = |name: &str| tools.iter().find(|tool| tool["name"] == name).unwrap();
+        assert_eq!(
+            find("scheduler_task_list")["inputSchema"]["properties"]["offset"]["default"],
+            0
+        );
+        assert_eq!(
+            find("scheduler_task_create")["inputSchema"]["properties"]["dry_run"]["default"],
+            false
+        );
     }
     #[test]
     fn schedule_translation_matches_existing_contract() {
@@ -1510,5 +1541,10 @@ mod tests {
         let args=json!({"task_name":"\\Narada\\Fixture","command":"pwsh.exe","arguments":"-NoProfile","implementation_id":implementation_id(),"dry_run":true}).as_object().unwrap().clone();
         let result = task_update_action(&args, Path::new("C:\\workspace"));
         assert_eq!(result.unwrap()["status"], "planned");
+        let create=json!({"task_name":"\\Narada\\Fixture","command":"C:\\workspace\\job.exe","schedule":"at_logon","implementation_id":implementation_id(),"dry_run":true}).as_object().unwrap().clone();
+        let planned = task_create(&create, Path::new("C:\\workspace")).expect("create plan");
+        assert_eq!(planned["status"], "planned");
+        assert_eq!(planned["host_effect"], false);
+        assert_eq!(planned["schema"], "narada.scheduler.task_create_plan.v1");
     }
 }
