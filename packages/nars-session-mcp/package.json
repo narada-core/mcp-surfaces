@@ -25,7 +25,7 @@
   "scripts": {
     "build": "tsc -b",
     "typecheck": "tsc -b --pretty false",
-    "test": "pnpm run test:bun",
+    "test": "cargo test --locked --manifest-path ../shared/mcp-surfaces-native/native/Cargo.toml nars_",
     "test:bun": "pnpm --filter @narada-core/mcp-e2e-harness build && pnpm build && bun test dist/test/nars-session-mcp.test.js && bun dist/test/site-fabric-session-e2e.test.js",
     "test:node": "pnpm --filter @narada-core/mcp-e2e-harness build && pnpm build && node dist/test/nars-session-mcp.test.js && node dist/test/site-fabric-session-e2e.test.js",
     "test:e2e:site-fabric": "pnpm --filter @narada-core/mcp-e2e-harness build && pnpm build && bun dist/test/site-fabric-session-e2e.test.js"

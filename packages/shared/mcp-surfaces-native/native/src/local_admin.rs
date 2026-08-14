@@ -64,12 +64,18 @@ fn artifact_tools() -> Vec<Value> {
     vec![guidance("artifacts_guidance"), tool("artifacts_doctor", "Report bound native NARS artifact endpoint and session-index readiness.", json!({"type":"object","additionalProperties":false}), true), tool("artifact_register_file", "Idempotently register one Site-local file with the bound NARS artifact authority.", json!({"type":"object","properties":{"session_id":session,"path":{"type":"string","minLength":1,"maxLength":4096},"kind":kind,"title":{"type":"string","maxLength":2048},"render_hint":render,"content_type":{"type":"string","maxLength":256},"access_scope":{"type":"string","enum":["session","site"]},"idempotency_key":{"type":"string","minLength":1,"maxLength":128}},"required":["path","kind","idempotency_key"],"additionalProperties":false}), false), tool("artifact_list", "List a bounded page of artifacts in the bound NARS session.", json!({"type":"object","properties":{"session_id":session,"offset":{"type":"integer","minimum":0,"maximum":1000000},"limit":{"type":"integer","minimum":1,"maximum":200}},"additionalProperties":false}), true), tool("artifact_read", "Read one artifact metadata record from the bound NARS session.", json!({"type":"object","properties":{"session_id":session,"artifact_id":artifact_id},"required":["artifact_id"],"additionalProperties":false}), true), tool("artifact_present", "Idempotently present an artifact through the bound NARS authority.", json!({"type":"object","properties":{"session_id":session,"artifact_id":artifact_id,"text":{"type":"string","maxLength":32768},"title":{"type":"string","maxLength":2048},"render_hint":render,"idempotency_key":{"type":"string","minLength":1,"maxLength":128}},"required":["artifact_id","idempotency_key"],"additionalProperties":false}), false), tool("artifact_message_part_create", "Create a pure renderable artifact_ref message part from known metadata.", json!({"type":"object","properties":{"artifact_id":artifact_id,"kind":kind,"title":{"type":"string","maxLength":2048},"render_hint":render},"required":["artifact_id"],"additionalProperties":false}), true)]
 }
 fn nars_tools() -> Vec<Value> {
+    let site_id=||json!({"type":"string","minLength":1,"maxLength":160});
+    let session_id=||json!({"type":"string","minLength":1,"maxLength":128,"pattern":"^[A-Za-z0-9_-]+$"});
+    let selector=||json!({"type":"string","minLength":1,"maxLength":256});
+    let mut deliver=tool("nars_session_input_deliver", "Idempotently deliver one explicit send, enqueue, or policy-admitted steer request to a concrete live NARS session.", json!({"type":"object","properties":{"site_id":site_id(),"session_id":session_id(),"content":{"type":"string","minLength":1,"maxLength":20000},"directive":{"type":"object","properties":{"content":{"type":"object","properties":{"text":{"type":"string","minLength":1,"maxLength":20000}},"required":["text"],"additionalProperties":false}},"required":["content"],"additionalProperties":false},"delivery":{"type":"string","enum":["send","enqueue","steer"]},"idempotency_key":{"type":"string","minLength":1,"maxLength":128},"expected_authority_epoch":{"type":"integer","minimum":1}},"required":["session_id","delivery","idempotency_key"],"anyOf":[{"required":["content"]},{"required":["directive"]}],"additionalProperties":false}), false);
+    deliver["annotations"]["idempotentHint"]=json!(true);
+    deliver["annotations"]["destructiveHint"]=json!(false);
     vec![
         guidance("nars_session_guidance"),
-        tool("nars_session_list", "List bounded local NARS session index records.", json!({"type":"object","properties":{"site_id":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":100}},"additionalProperties":false}), true),
-        tool("nars_session_show", "Show one bounded local NARS session index record.", json!({"type":"object","properties":{"site_id":{"type":"string"},"session_id":{"type":"string"}},"required":["session_id"],"additionalProperties":false}), true),
-        tool("nars_session_input_deliver", "Deliver one explicit send, enqueue, or steer request to a concrete existing NARS session.", json!({"type":"object","properties":{"site_id":{"type":"string"},"session_id":{"type":"string"},"content":{"type":"string","maxLength":20000},"directive":{"type":"object","additionalProperties":true},"delivery":{"type":"string","enum":["send","enqueue","steer"]},"idempotency_key":{"type":"string","minLength":1,"maxLength":128},"expected_authority_epoch":{"type":"integer","minimum":1},"payload_ref":{"type":"string"}},"required":["session_id","delivery","idempotency_key"],"additionalProperties":false}), false),
-        tool("nars_session_input_status", "Read authoritative NARS admission, request-state, terminal-state, and outcome evidence for a submitted input.", json!({"type":"object","properties":{"site_id":{"type":"string"},"session_id":{"type":"string"},"input_event_id":{"type":"string"},"request_id":{"type":"string"},"directive_id":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":200},"payload_ref":{"type":"string"}},"required":["session_id"],"additionalProperties":false}), true),
+        tool("nars_session_list", "List bounded local NARS session index records.", json!({"type":"object","properties":{"site_id":site_id(),"limit":{"type":"integer","minimum":1,"maximum":100},"include_health":{"type":"boolean"}},"additionalProperties":false}), true),
+        tool("nars_session_show", "Show one bounded local NARS session index record.", json!({"type":"object","properties":{"site_id":site_id(),"session_id":session_id(),"include_health":{"type":"boolean"}},"required":["session_id"],"additionalProperties":false}), true),
+        deliver,
+        tool("nars_session_input_status", "Read authoritative NARS admission, request-state, terminal-state, and outcome evidence for a submitted input; omit selectors only for legacy materialized status readback.", json!({"type":"object","properties":{"site_id":site_id(),"session_id":session_id(),"input_event_id":selector(),"request_id":selector(),"directive_id":selector(),"limit":{"type":"integer","minimum":1,"maximum":200}},"required":["session_id"],"additionalProperties":false}), true),
     ]
 }
 fn quota_tools() -> Vec<Value> {
@@ -385,8 +391,8 @@ fn probe_event_health(endpoint: &str) -> Value {
     };
     let mut result = response.as_object().cloned().unwrap_or_default();
     let status = match result.get("status").and_then(Value::as_str).map(|value| value.to_ascii_lowercase()).as_deref() {
-        Some("starting") | Some("healthy") | Some("degraded") | Some("unhealthy") | Some("closing") | Some("unavailable") => result.get("status").and_then(Value::as_str).unwrap_or("healthy"),
-        _ => "healthy",
+        Some("starting") | Some("healthy") | Some("degraded") | Some("unhealthy") | Some("closing") | Some("unavailable") => result.get("status").and_then(Value::as_str).unwrap_or("unavailable"),
+        _ => "unavailable",
     };
     result.insert("status".into(), json!(status));
     result.insert("probe_status".into(), json!("reachable"));
@@ -436,6 +442,22 @@ fn tool(name: &str, description: &str, schema: Value, read_only: bool) -> Value 
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn nars_catalog_exposes_exact_bounded_native_arguments() {
+        let tools = nars_tools();
+        assert_eq!(tools.len(), 5);
+        for tool in &tools {
+            assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+        }
+        let list = tools.iter().find(|tool| tool["name"] == "nars_session_list").expect("list");
+        assert_eq!(list["inputSchema"]["properties"]["include_health"]["type"], "boolean");
+        let delivery = tools.iter().find(|tool| tool["name"] == "nars_session_input_deliver").expect("delivery");
+        assert!(delivery["inputSchema"]["properties"].get("payload_ref").is_none());
+        assert_eq!(delivery["inputSchema"]["properties"]["directive"]["additionalProperties"], false);
+        assert_eq!(delivery["annotations"]["idempotentHint"], true);
+        assert_eq!(delivery["annotations"]["destructiveHint"], false);
+    }
 
     #[test]
     fn artifact_reads_use_the_local_bounded_index() {

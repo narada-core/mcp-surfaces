@@ -344,10 +344,7 @@ fn assert_requested_site(args: &Map<String, Value>, record: &Value) -> Result<()
 }
 
 fn health_is_healthy(value: &Value) -> bool {
-    match value.get("status").and_then(Value::as_str).map(|status| status.to_ascii_lowercase()).as_deref() {
-        Some("starting" | "degraded" | "unhealthy" | "closing" | "unavailable") => false,
-        _ => true,
-    }
+    value.get("status").and_then(Value::as_str).is_some_and(|status| status.eq_ignore_ascii_case("healthy"))
 }
 
 fn directive_content(args: &Map<String, Value>) -> Result<String, Value> {
@@ -610,11 +607,12 @@ mod tests {
     }
 
     #[test]
-    fn health_gate_rejects_non_live_statuses_and_accepts_omitted_status() {
+    fn health_gate_requires_explicit_healthy_status() {
         assert!(health_is_healthy(&json!({"status":"healthy"})));
         assert!(health_is_healthy(&json!({"status":"degraded"})) == false);
         assert!(health_is_healthy(&json!({"status":"closing"})) == false);
-        assert!(health_is_healthy(&json!({"event":"session_health"})));
+        assert!(!health_is_healthy(&json!({"event":"session_health"})));
+        assert!(!health_is_healthy(&json!({})));
     }
 
     #[test]
