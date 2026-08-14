@@ -468,6 +468,9 @@ fn project_recurring_definition(row: Value) -> Result<Value, String> {
     }
     Ok(Value::Object(projected))
 }
+fn compact_recurring_definition(value: &Value) -> Value {
+    json!({"recurrence_id":value.get("recurrence_id"),"status":value.get("status"),"title":value.get("title"),"trigger_mode":value.get("trigger_mode"),"schedule_kind":value.get("schedule_kind"),"schedule_timezone":value.get("schedule_timezone"),"last_due_key":value.get("last_due_key"),"last_auto_triggered_at":value.get("last_auto_triggered_at"),"updated_at":value.get("updated_at")})
+}
 fn project_recurring_run(row: Value) -> Result<Value, String> {
     let text = row
         .get("run_json")
@@ -864,9 +867,6 @@ impl LifecycleServer {
                 }
             });
         }
-        if self.options.surface == Surface::Task && prefix != "output_resource_uri_invalid" {
-            return json!({"code": -32000, "message": message});
-        }
         let schema = match self.options.surface {
             Surface::Task => "narada.task_lifecycle.error.v1",
             Surface::Work => "narada.work_lifecycle.error.v1",
@@ -1178,7 +1178,7 @@ impl LifecycleServer {
             "task_lifecycle_compatibility_reconcile" => self.task_compatibility_reconcile(args),
             "task_lifecycle_set_routing" => self.task_set_routing(args),
             "task_lifecycle_dependency_declare" => self.task_dependency_declare(args),
-            "task_lifecycle_dependency_disposition_record" => {
+            "task_lifecycle_dependency_dispose" | "task_lifecycle_dependency_disposition_record" => {
                 self.task_dependency_disposition(args)
             }
             "task_lifecycle_search" => self.task_search(args),
@@ -1572,16 +1572,21 @@ impl LifecycleServer {
             .unwrap_or(20)
             .clamp(1, 100);
         if name == "task_lifecycle_recurring_list" {
+            let offset = args.get("offset").and_then(Value::as_i64).unwrap_or(0).clamp(0, 10_000);
+            let compact = args.get("compact").and_then(Value::as_bool).unwrap_or(true);
             let rows = self.query_objects(
-                "select recurrence_id,status,definition_json,last_due_key,last_auto_triggered_at,updated_at from recurring_task_definitions where (?1 is null or status=?1) order by updated_at desc limit ?2",
-                params![args.get("status").and_then(Value::as_str),limit],
+                "select recurrence_id,status,definition_json,last_due_key,last_auto_triggered_at,updated_at from recurring_task_definitions where (?1 is null or status=?1) order by updated_at desc limit ?2 offset ?3",
+                params![args.get("status").and_then(Value::as_str),limit + 1,offset],
             )?;
-            let definitions = rows
+            let mut definitions = rows
                 .into_iter()
                 .map(project_recurring_definition)
                 .collect::<Result<Vec<_>, _>>()?;
+            let has_more = definitions.len() > limit as usize;
+            definitions.truncate(limit as usize);
+            if compact { definitions = definitions.iter().map(compact_recurring_definition).collect(); }
             return Ok(
-                json!({"schema":"narada.task.recurring.list.v1","status":"ok","count":definitions.len(),"definitions":definitions}),
+                json!({"schema":"narada.task.recurring.list.v1","status":"ok","count":definitions.len(),"returned":definitions.len(),"offset":offset,"limit":limit,"has_more":has_more,"next_offset":if has_more{json!(offset + limit)}else{Value::Null},"compact":compact,"definitions":definitions}),
             );
         }
         let recurrence_id = required_string(&args, "recurrence_id")?;
@@ -1772,6 +1777,7 @@ impl LifecycleServer {
             .and_then(Value::as_i64)
             .unwrap_or(50)
             .clamp(1, 200);
+        let offset = args.get("offset").and_then(Value::as_i64).unwrap_or(0).clamp(0, 10_000);
         let status = args.get("status").and_then(Value::as_str);
         let agent = args.get("agent_id").and_then(Value::as_str);
         let wanted_tags = args
@@ -1783,10 +1789,13 @@ impl LifecycleServer {
             .get("tag_match")
             .and_then(Value::as_str)
             .unwrap_or("all");
-        let mut stmt=connection.prepare("select l.task_id,l.task_number,l.status,l.governed_by,l.closed_at,l.closed_by,l.closure_mode,l.relative_priority,l.priority_reason,l.reopened_at,l.reopened_by,l.continuation_packet_json,l.updated_at,s.title,s.tags_json,(select a.agent_id from task_assignments a where a.task_id=l.task_id and a.released_at is null order by a.claimed_at desc limit 1),(select a.claimed_at from task_assignments a where a.task_id=l.task_id and a.released_at is null order by a.claimed_at desc limit 1) from task_lifecycle l left join task_specs s on s.task_id=l.task_id order by l.task_number desc limit 200").map_err(db_error)?;
+        let mut stmt=connection.prepare("select l.task_id,l.task_number,l.status,l.governed_by,l.closed_at,l.closed_by,l.closure_mode,l.relative_priority,l.priority_reason,l.reopened_at,l.reopened_by,l.continuation_packet_json,l.updated_at,s.title,s.tags_json,(select a.agent_id from task_assignments a where a.task_id=l.task_id and a.released_at is null order by a.claimed_at desc limit 1),(select a.claimed_at from task_assignments a where a.task_id=l.task_id and a.released_at is null order by a.claimed_at desc limit 1) from task_lifecycle l left join task_specs s on s.task_id=l.task_id order by l.task_number desc limit 1000").map_err(db_error)?;
         let mut tasks = Vec::new();
+        let mut matched = 0i64;
+        let mut scanned = 0usize;
         let mut rows = stmt.query([]).map_err(db_error)?;
         while let Some(row) = rows.next().map_err(db_error)? {
+            scanned += 1;
             let row_status: String = row.get(2).map_err(db_error)?;
             if status.is_some_and(|expected| expected != row_status) {
                 continue;
@@ -1812,17 +1821,21 @@ impl LifecycleServer {
             if !tags_match {
                 continue;
             }
+            if matched < offset { matched += 1; continue; }
+            matched += 1;
             let number: i64 = row.get(1).map_err(db_error)?;
             let task_id: String = row.get(0).map_err(db_error)?;
             let title: Option<String> = row.get(13).ok().flatten();
             let claimed_at: Option<String> = row.get(16).ok().flatten();
             tasks.push(json!({"task_number":number,"task_id":task_id,"task_ref":format!("task #{number}"),"task_reference":{"schema":"narada.task.reference.v1","task_ref":format!("task #{number}"),"task_id":task_id,"task_number":number,"number_authority":"task_lifecycle","task_file_name":format!("{task_id}.md")},"status":row_status,"title":title,"assigned_to":assigned,"claimed_at":claimed_at,"tags":tags,"updated_at":row.get::<_,String>(12).map_err(db_error)?,"projection_consistency":{"status":"coherent","reasons":[]},"executability_posture":{"status":"unknown"}}));
-            if tasks.len() >= limit as usize {
+            if tasks.len() > limit as usize {
                 break;
             }
         }
+        let has_more = tasks.len() > limit as usize;
+        tasks.truncate(limit as usize);
         Ok(
-            json!({"status":"ok","count":tasks.len(),"filters":{"status":status,"agent_id":args.get("agent_id"),"tags":args.get("tags").cloned().unwrap_or_else(||json!([])),"tag_match":args.get("tag_match").cloned().unwrap_or(json!("all"))},"projection_consistency":{"status":"snapshot_coherent","stale":false,"snapshot_isolation":"sqlite_transaction","scanned_count":tasks.len(),"returned_count":tasks.len(),"stale_count":0,"contention":{"attempts":1,"retries":0},"stale_tasks":[]},"tasks":tasks}),
+            json!({"schema":"narada.task.list.v1","status":"ok","count":tasks.len(),"returned":tasks.len(),"offset":offset,"limit":limit,"has_more":has_more,"next_offset":if has_more{json!(offset + limit)}else{Value::Null},"count_exact":!has_more,"filters":{"status":status,"agent_id":args.get("agent_id"),"tags":args.get("tags").cloned().unwrap_or_else(||json!([])),"tag_match":args.get("tag_match").cloned().unwrap_or(json!("all"))},"projection_consistency":{"status":"snapshot_coherent","stale":false,"snapshot_isolation":"sqlite_transaction","scanned_count":scanned,"returned_count":tasks.len(),"stale_count":0,"contention":{"attempts":1,"retries":0},"stale_tasks":[]},"tasks":tasks}),
         )
     }
     fn task_show(&self, args: Value) -> Result<Value, String> {
@@ -2876,6 +2889,7 @@ impl LifecycleServer {
             .ok_or("output_ref_required")?;
         let id = safe_reference_id(&reference, "mcp_output:")?;
         let candidates = [
+            self.options.site_root.join(".ai").join("tmp").join("mcp-outputs").join("workspace").join(format!("{id}.json")),
             self.options
                 .site_root
                 .join(".ai")
@@ -2896,7 +2910,12 @@ impl LifecycleServer {
             .iter()
             .find(|p| p.exists())
             .ok_or_else(|| format!("output_ref_not_found: {reference}"))?;
-        let text = fs::read_to_string(path).map_err(|e| format!("output_read_failed:{e}"))?;
+        let stored = fs::read_to_string(path).map_err(|e| format!("output_read_failed:{e}"))?;
+        let text = serde_json::from_str::<Value>(&stored).ok()
+            .filter(|record| record.get("schema").and_then(Value::as_str)==Some("narada.mcp_output_ref.v1"))
+            .and_then(|record| record.get("full_output").cloned())
+            .and_then(|output| serde_json::to_string_pretty(&output).ok())
+            .unwrap_or(stored);
         let chars: Vec<char> = text.chars().take(4_000_000).collect();
         let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
         let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(4_000) as usize;
@@ -4115,6 +4134,7 @@ fn normalize_task_tool_name(name: &str) -> &str {
             | "task_lifecycle_tags_update"
             | "task_lifecycle_set_routing"
             | "task_lifecycle_dependency_declare"
+            | "task_lifecycle_dependency_dispose"
             | "task_lifecycle_dependency_disposition_record"
             | "task_lifecycle_compatibility_reconcile"
             | "task_lifecycle_recurring_create"
@@ -4215,6 +4235,12 @@ fn guidance_payload(site_root: &Path, args: Value) -> Value {
         Some(tool_name) => task_lifecycle_tool_guidance(tool_name),
         None => Value::Null,
     };
+    let detail = string_arg(&args, "detail").unwrap_or_else(|| "compact".to_string());
+    result["detail"] = json!(detail);
+    if detail != "full" {
+        let keep = ["status","schema","common_guidance_contract_schema","surface_id","guidance_tool","purpose","requested","workflow","tool","first_use","sections","site_policy","recommended_first_call","tool_specific_note","detail"];
+        if let Some(object) = result.as_object_mut() { object.retain(|key, _| keep.contains(&key.as_str())); }
+    }
     result
 }
 
@@ -4382,6 +4408,39 @@ mod modern_protocol_tests {
     }
 
     #[test]
+    fn task_errors_preserve_structured_diagnostics() {
+        let error = server(Surface::Task).error_value("task_not_found:2469".to_string());
+        assert_eq!(error["data"]["schema"], "narada.task_lifecycle.error.v1");
+        assert_eq!(error["data"]["code"], "task_not_found");
+        assert_eq!(error["data"]["site_root"], ".");
+    }
+
+    #[test]
+    fn guidance_is_compact_by_default_and_full_on_request() {
+        let compact = guidance_payload(Path::new("."), json!({"workflow":"ordinary_task"}));
+        let full = guidance_payload(Path::new("."), json!({"workflow":"ordinary_task","detail":"full"}));
+        assert_eq!(compact["detail"], "compact");
+        assert!(compact.get("state_truth_table").is_none());
+        assert_eq!(full["detail"], "full");
+        assert!(full.get("state_truth_table").is_some());
+        assert!(serde_json::to_string(&compact).unwrap().len() < 4_000);
+    }
+
+    #[test]
+    fn materialized_output_round_trips_through_output_show() {
+        let root = std::env::temp_dir().join(format!("narada-native-output-roundtrip-{}", Uuid::new_v4()));
+        let mut server = server(Surface::Task);
+        server.options.site_root = root.clone();
+        let body = "x".repeat(5_000);
+        let result = server.tool_result("task_lifecycle_guidance", json!({"status":"ok","body":body}), false).expect("materialize output");
+        let output_ref = result["structuredContent"]["output_ref"].as_str().expect("output ref");
+        let page = server.output_show(json!({"ref":output_ref,"offset":0,"limit":10_000})).expect("read materialized output");
+        assert!(page["output_text"].as_str().unwrap().contains(&body));
+        assert_eq!(page["output_truncated"], false);
+        fs::remove_dir_all(root).expect("remove output fixture");
+    }
+
+    #[test]
     fn status_projection_uses_the_authoritative_task_id() {
         let root = std::env::temp_dir().join(format!("narada-native-projection-{}", Uuid::new_v4()));
         let task_dir = root.join(".ai/do-not-open/tasks");
@@ -4517,6 +4576,26 @@ mod modern_protocol_tests {
         );
         drop(server);
         fs::remove_dir_all(root).expect("remove recurring fixture");
+    }
+
+    #[test]
+    fn recurring_list_is_compact_and_paginated_by_default() {
+        let root = std::env::temp_dir().join(format!("narada-native-recurring-list-{}", Uuid::new_v4()));
+        let options = Options { surface: Surface::Task, site_root: root.clone(), site_root_source: "test".to_string(), prepare: false, migrate_legacy: false, source_database_path: None };
+        LifecycleServer::prepare_database(&options).expect("prepare task database");
+        let mut server = LifecycleServer::new(options).expect("open task server");
+        let authority = json!({"kind":"test","summary":"pagination test"});
+        server.task_recurring_create(json!({"title":"First","actor_agent_id":"test-agent","authority_basis":authority})).unwrap();
+        server.task_recurring_create(json!({"title":"Second","actor_agent_id":"test-agent","authority_basis":authority})).unwrap();
+        let first = server.task_recurring_read("task_lifecycle_recurring_list", json!({"limit":1})).unwrap();
+        let second = server.task_recurring_read("task_lifecycle_recurring_list", json!({"limit":1,"offset":1})).unwrap();
+        assert_eq!(first["compact"], true);
+        assert_eq!(first["has_more"], true);
+        assert_eq!(first["next_offset"], 1);
+        assert!(first["definitions"][0].get("goal").is_none());
+        assert_ne!(first["definitions"][0]["recurrence_id"], second["definitions"][0]["recurrence_id"]);
+        drop(server);
+        fs::remove_dir_all(root).expect("remove recurring list fixture");
     }
 
     #[test]

@@ -88,6 +88,12 @@
           "type": "number",
           "description": "Maximum results; defaults to 50."
         },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "Zero-based offset into the filtered newest-first task sequence."
+        },
         "payload_ref": {
           "type": "string",
           "description": "Optional immutable payload ref for long arguments such as summaries, evidence packets, or changed_files."
@@ -1195,8 +1201,8 @@
     }
   },
   {
-    "name": "task_lifecycle_dependency_disposition_record",
-    "description": "Canonical action: dependency disposition record (task_lifecycle_dependency_disposition_record). Record explicit disposition for a blocking dependency outcome. Use after dependency satisfaction reports disposition_required=true; required_outcome_id is inferred from the latest outcome when omitted.",
+    "name": "task_lifecycle_dependency_dispose",
+    "description": "Record explicit disposition for a blocking dependency outcome. Use after dependency satisfaction reports disposition_required=true; required_outcome_id is inferred from the latest outcome when omitted. The former task_lifecycle_dependency_disposition_record name remains accepted but is not advertised.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1265,7 +1271,7 @@
       "additionalProperties": false
     },
     "annotations": {
-      "title": "task_lifecycle_dependency_disposition_record",
+      "title": "task_lifecycle_dependency_dispose",
       "readOnlyHint": false,
       "destructiveHint": false,
       "idempotentHint": false,
@@ -2158,7 +2164,18 @@
         },
         "limit": {
           "type": "number",
-          "description": "Maximum definitions to return. Defaults to 50."
+          "description": "Maximum definitions to return. Defaults to 20."
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "Zero-based offset into the filtered newest-first recurrence sequence."
+        },
+        "compact": {
+          "type": "boolean",
+          "default": true,
+          "description": "Return recurrence identity, schedule, and status fields only. Set false for complete stored task definitions."
         },
         "payload_ref": {
           "type": "string",
@@ -2576,6 +2593,12 @@
         "tool": {
           "type": "string",
           "description": "Optional lifecycle tool name for tool-specific guidance, such as task_lifecycle_submit_work or task_lifecycle_report_blocked."
+        },
+        "detail": {
+          "type": "string",
+          "enum": ["compact", "full"],
+          "default": "compact",
+          "description": "Compact returns the selected workflow and essential operating guidance. Full returns every decision table, example, recovery rule, and boundary."
         }
       },
       "additionalProperties": false
