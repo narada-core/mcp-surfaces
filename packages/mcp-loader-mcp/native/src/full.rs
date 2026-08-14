@@ -1951,6 +1951,37 @@ fn assert_binding_admission_available(state: &LoaderState) -> Result<(), Diagnos
     }
 }
 
+fn canonical_binding_id(site_id: Option<&str>, surface_id: &str, declared: Option<&str>) -> String {
+    declared
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| {
+            site_id
+                .filter(|value| !value.is_empty())
+                .map(|site| format!("{site}-{surface_id}"))
+        })
+        .unwrap_or_default()
+}
+
+fn admitted_binding_entry(envelope: &Value, requested: &str) -> Option<Value> {
+    let aliases = [Some(requested), requested.strip_prefix("narada-")];
+    envelope
+        .get("bindings")
+        .and_then(Value::as_array)
+        .and_then(|bindings| {
+            bindings
+                .iter()
+                .find(|binding| {
+                    let candidate = binding.get("binding_id").and_then(Value::as_str);
+                    aliases
+                        .iter()
+                        .flatten()
+                        .any(|alias| candidate == Some(*alias))
+                })
+                .cloned()
+        })
+}
+
 fn admitted_binding(
     state: &LoaderState,
     _site_root: &str,
@@ -1961,15 +1992,7 @@ fn admitted_binding(
     let Some(envelope) = &state.binding_admission else {
         return Ok(None);
     };
-    let entry = envelope
-        .get("bindings")
-        .and_then(Value::as_array)
-        .and_then(|bindings| {
-            bindings.iter().find(|binding| {
-                binding.get("binding_id").and_then(Value::as_str) == Some(binding_id)
-            })
-        })
-        .cloned()
+    let entry = admitted_binding_entry(envelope, binding_id)
         .ok_or_else(|| {
             let candidates = envelope
                 .get("bindings")
@@ -1997,7 +2020,7 @@ fn admitted_binding(
                 "requested_binding_id":binding_id,
                 "operation":operation,
                 "candidate_binding_ids":candidates,
-                "remediation":"Use the canonical binding_id returned by mcp_loader_list_site_surfaces or registrar_site_bind; server_name/server_key is not binding identity."
+                "remediation":"Use the canonical binding_id returned by mcp_loader_list_site_surfaces or registrar_site_bind. Generated server names prefixed with narada- are accepted as compatibility aliases."
             }))
         })?;
     let operation_allowed = entry
@@ -3568,23 +3591,31 @@ fn list_site_surfaces(arguments: &JsonObject, state: &LoaderState) -> Result<Val
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
+    let site_id = bundle.fabric.get("site_id").and_then(Value::as_str);
     let include_runtime = arguments
         .get("include_runtime_metadata")
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let mut surfaces = Vec::new();
     for (server_id, server) in servers {
-        let binding_id = server
-            .get("binding_id")
+        let surface_id = server
+            .get("surface_id")
             .and_then(Value::as_str)
-            .unwrap_or_default();
+            .unwrap_or(&server_id)
+            .to_string();
+        let binding_id = canonical_binding_id(
+            site_id,
+            &surface_id,
+            server.get("binding_id").and_then(Value::as_str),
+        );
         if let Some(envelope) = &state.binding_admission {
             let discoverable = envelope
                 .get("bindings")
                 .and_then(Value::as_array)
                 .is_some_and(|bindings| {
                     bindings.iter().any(|binding| {
-                        binding.get("binding_id").and_then(Value::as_str) == Some(binding_id)
+                        binding.get("binding_id").and_then(Value::as_str)
+                            == Some(binding_id.as_str())
                             && binding
                                 .get("operations")
                                 .and_then(Value::as_array)
@@ -3597,11 +3628,6 @@ fn list_site_surfaces(arguments: &JsonObject, state: &LoaderState) -> Result<Val
                 continue;
             }
         }
-        let surface_id = server
-            .get("surface_id")
-            .and_then(Value::as_str)
-            .unwrap_or(&server_id)
-            .to_string();
         let env_vars: Vec<String> = server
             .get("env")
             .and_then(Value::as_object)
@@ -4984,8 +5010,8 @@ fn call_tool(name: &str, arguments: Value, state: &mut LoaderState) -> Result<Va
 #[cfg(test)]
 mod tests {
     use super::{
-        child_error_diagnostic, compact_child_result, extract_proxy_child_args, list_tools,
-        request_error_details,
+        admitted_binding_entry, canonical_binding_id, child_error_diagnostic, compact_child_result,
+        extract_proxy_child_args, list_tools, request_error_details,
     };
     use serde_json::json;
 
@@ -5012,6 +5038,36 @@ mod tests {
                 false
             );
         }
+    }
+
+    #[test]
+    fn fragmented_site_surface_derives_canonical_binding_id() {
+        assert_eq!(
+            canonical_binding_id(Some("cintamani"), "task-lifecycle", None),
+            "cintamani-task-lifecycle"
+        );
+        assert_eq!(
+            canonical_binding_id(
+                Some("cintamani"),
+                "task-lifecycle",
+                Some("explicit-binding")
+            ),
+            "explicit-binding"
+        );
+    }
+
+    #[test]
+    fn generated_server_name_resolves_to_admitted_binding() {
+        let envelope = json!({"bindings":[
+            {"binding_id":"cintamani-task-lifecycle"},
+            {"binding_id":"marici-task-lifecycle"}
+        ]});
+        assert_eq!(
+            admitted_binding_entry(&envelope, "narada-cintamani-task-lifecycle").unwrap()
+                ["binding_id"],
+            "cintamani-task-lifecycle"
+        );
+        assert!(admitted_binding_entry(&envelope, "narada-unknown-task-lifecycle").is_none());
     }
 
     #[test]
