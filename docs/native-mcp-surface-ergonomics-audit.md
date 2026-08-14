@@ -28,7 +28,7 @@ Builds during review are permitted. Carrier materialization and restart are defe
 | mcp-loader | re-audit | Prior loader ergonomics/recovery repair; completion audit pending | pending | prior commits | pending |
 | mcp-registrar | re-audit | Prior native registrar/materializer repair; completion audit pending | pending | prior commits | pending |
 | structured-command | pre-restart complete | Closed selector-aware schemas; native detached background runner; native policy-gated elevation; removed JavaScript fallbacks | Rust 20/20; real stdio start/poll, cancellation, timeout, paging, refs, terminal isolation | `04b81ef`, artifact `94523d8` | pending |
-| catalog-observation | queued | pending | pending | pending | pending |
+| catalog-observation | pre-restart complete | Contract-only posture is explicit; unavailable result preserves requested access mode; precise invalid-field diagnostics; standalone verifier no longer requires workspace JS package | Rust focused 3/3; real stdio legacy/2026 discovery, guidance, unavailable, invalid instant/mode, credential non-disclosure | `4a84399` | pending |
 | git | re-audit | Prior ergonomics repair; completion audit pending | pending | prior commits | pending |
 | calendar | re-audit | Prior native Graph authority repair; completion audit pending | pending | prior commits | pending |
 | site-loop | queued | pending | pending | pending | pending |
@@ -65,7 +65,7 @@ These are not user-facing domain surfaces, but must not invalidate the native cl
 | Component | Status | Required evidence |
 |---|---|---|
 | MCP runtime proxy | re-audit | Native proxy, transport, lifecycle, cancellation, and no JavaScript subprocess |
-| JavaScript fallback runtime | contradiction to resolve | The runtime matrix still marks the native profile as Bun for `mcp-javascript-fallback-runtime`; determine whether this is an obsolete declaration or a real remaining dependency |
+| JavaScript fallback runtime | pending audit | Determine whether the native-profile Bun fallback is still reachable by any admitted surface after all surface reviews; remove it only with reachability evidence |
 
 ## Final gate
 
