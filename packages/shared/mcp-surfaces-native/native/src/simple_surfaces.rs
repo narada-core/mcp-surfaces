@@ -250,6 +250,7 @@ fn call_site_lifecycle(name: &str, args: &Map<String, Value>, root: &Path) -> Re
         "site_verify_role" => return operator_surface_authority::verify_role(args, root),
         "site_observe_runtime" => return operator_surface_authority::observe_runtime(args, root),
         "site_bind_runtime" => return operator_surface_authority::bind_runtime(args, root),
+        "site_create_presets_list" => return Ok(site_lifecycle_authority::create_presets()),
         "site_list" => {
             let listed = site_registry_authority::call("site_registry_list", &Map::new())?;
             let sites = listed["sites"].as_array().cloned().unwrap_or_default().into_iter().map(|site| json!({"siteId":site["site_id"],"variant":site["variant"],"substrate":site["substrate"],"health":"unknown","lastCycle":null,"failures":0})).collect::<Vec<_>>();

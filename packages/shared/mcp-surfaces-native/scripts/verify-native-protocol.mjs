@@ -1819,6 +1819,7 @@ function runSiteLifecycleAuthorityParity() {
       { jsonrpc: '2.0', id: 19, method: 'tools/call', params: { name: 'site_relation_validate', arguments: {} } },
       { jsonrpc: '2.0', id: 20, method: 'tools/call', params: { name: 'site_authority_preflight', arguments: { mutation_family: 'site' } } },
       { jsonrpc: '2.0', id: 21, method: 'tools/call', params: { name: 'site_relation_list', arguments: { cwd: tmpdir() } } },
+      { jsonrpc: '2.0', id: 22, method: 'tools/call', params: { name: 'site_create_presets_list', arguments: {} } },
     ];
     const responses = runMailbox(executable, ['--surface-id', 'site-lifecycle', '--site-root', root], requests, root, { ...process.env, NARADA_USER_SITE_ROOT: userSiteRoot });
     const tools = responses.find((response) => response.id === 1)?.result?.tools ?? [];
@@ -1837,10 +1838,12 @@ function runSiteLifecycleAuthorityParity() {
     if (mailboxStructured(responses, 15, 'rust').kinds?.length !== 7 || mailboxStructured(responses, 16, 'rust').status !== 'ready' || mailboxStructured(responses, 17, 'rust').status !== 'blocked') throw new Error('site_lifecycle.native_transformation_catalog_invalid');
     if (mailboxStructured(responses, 18, 'rust').relations?.[0]?.relation_id !== 'rel-a' || mailboxStructured(responses, 19, 'rust').valid !== true) throw new Error('site_lifecycle.native_relation_authority_invalid');
     if (mailboxStructured(responses, 20, 'rust').locus_state !== 'authority_locus' || !responses.find((response) => response.id === 21)?.error) throw new Error('site_lifecycle.native_mutation_preflight_or_root_bound_invalid');
+    const presets = mailboxStructured(responses, 22, 'rust');
+    if (presets.presets?.length !== 5 || presets.recommended_preset !== 'agent-site-core' || presets.presets?.find((preset) => preset.preset === 'agent-site-core')?.descriptor_components?.length !== 3) throw new Error('site_lifecycle.native_create_presets_invalid');
     const identities = JSON.parse(readFileSync(join(root, '.narada', 'operator-surfaces', 'identities.json'), 'utf8'));
     const bindings = JSON.parse(readFileSync(join(root, '.narada', 'operator-surfaces', 'runtime-bindings.json'), 'utf8'));
     if (identities.identities?.length !== 1 || bindings.bindings?.length !== 1) throw new Error('site_lifecycle.native_artifact_readback_invalid');
-    return { status: 'passed', verified: ['four_authority_tools', 'registry_list_show', 'transformation_kinds_preflight', 'relation_list_validate', 'mutation_authority_preflight', 'root_confinement', 'closed_bounded_schemas', 'empty', 'execute_authority_gate', 'admission_replay_conflict', 'binding_evidence_replay', 'readback', 'artifact_compatibility'] };
+    return { status: 'passed', verified: ['four_authority_tools', 'create_presets', 'registry_list_show', 'transformation_kinds_preflight', 'relation_list_validate', 'mutation_authority_preflight', 'root_confinement', 'closed_bounded_schemas', 'empty', 'execute_authority_gate', 'admission_replay_conflict', 'binding_evidence_replay', 'readback', 'artifact_compatibility'] };
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

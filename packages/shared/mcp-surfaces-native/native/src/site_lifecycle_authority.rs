@@ -25,6 +25,125 @@ const KINDS: &[LifecycleKind] = &[
     LifecycleKind { kind:"archive", purpose:"Retire a Site from active operation while preserving trace, provenance, and explicit non-authority posture.", source_required:true, target_required:false, authority_modes:&["retired_non_authority"], artifacts:&["source_site_ref","archive_manifest","authority_retirement_record","trace_preservation_record"] },
 ];
 
+pub(crate) fn create_presets() -> Value {
+    let presets = ["minimal","agent-site-core","agent-memory","task-lifecycle","site-machinery"].into_iter().map(|preset| {
+        let (label,recommended,use_when,includes,does_not_include)=match preset {
+            "agent-site-core"=>("Agent Site core",true,"Create a useful agent-facing Site baseline with task lifecycle, agent memory, and canonical inbox descriptors.",vec!["task_lifecycle","agent_context_memory","canonical_inbox"],vec!["site_config_awareness","site_lift_adoption","live capability grants","source runtime import"]),
+            "task-lifecycle"=>("Task lifecycle only",false,"Create only the task lifecycle descriptor slice.",vec!["task_lifecycle"],vec!["agent_context_memory","canonical_inbox","site_config_awareness","site_lift_adoption","live capability grants"]),
+            "agent-memory"=>("Agent memory only",false,"Create only the agent context memory descriptor slice.",vec!["agent_context_memory"],vec!["task_lifecycle","canonical_inbox","site_config_awareness","site_lift_adoption","live capability grants"]),
+            "site-machinery"=>("Inbox/config/lift",false,"Create the narrower inbox, known-Site config, and lift/adoption descriptor bundle.",vec!["canonical_inbox","site_config_awareness","site_lift_adoption"],vec!["task_lifecycle","agent_context_memory","live capability grants","source runtime import"]),
+            _=>("Minimal skeleton",false,"Create a bare Site skeleton without descriptor packages.",vec![],vec!["task_lifecycle","agent_context_memory","canonical_inbox","site_config_awareness","site_lift_adoption","live capability grants"]),
+        };
+        let packages=packages_for_preset(preset);
+        json!({"preset":preset,"label":label,"recommended":recommended,"use_when":use_when,"includes":includes,"does_not_include":does_not_include,"template_id":format!("narada-proper.templates.site.{preset}.v0"),"exposure_class":if preset=="minimal"{"mutating_guarded"}else{"descriptor_only"},"package_components":packages,"descriptor_components":packages.iter().map(|name|package_descriptor(name)).collect::<Vec<_>>(),"operational_commands":{"dry_run":format!("narada sites create --preset {preset} --site-id <id> --root <path> --dry-run --format json"),"skeleton":format!("narada sites create --preset {preset} --site-id <id> --root <path> --format json"),"live":if preset=="minimal"{Value::Null}else{Value::String(format!("narada sites create --preset {preset} --site-id <id> --root <path> --execute-live --live-authority-basis <basis> --format json"))}},"admission_boundary":{"package_selection_grants_live_capability":false,"source_state_imported":false,"live_execution_requires_explicit_authority":true}})
+    }).collect::<Vec<_>>();
+    json!({"schema":"narada.create_site.presets.v0","status":"ok","recommended_preset":"agent-site-core","default_interactive_preset":"agent-site-core","presets":presets,"non_claims":["source Site import/migration/lift","implicit capability grants","private MCP client config mutation","real Windows profile mutation outside target Site artifacts","PC/operator-surface mutation"]})
+}
+
+fn packages_for_preset(preset: &str) -> Vec<&'static str> {
+    match preset {
+        "agent-site-core" => vec![
+            "@narada-core/site-task-lifecycle",
+            "@narada-core/agent-context-memory",
+            "@narada-core/site-inbox",
+        ],
+        "task-lifecycle" => vec!["@narada-core/site-task-lifecycle"],
+        "agent-memory" => vec!["@narada-core/agent-context-memory"],
+        "site-machinery" => vec![
+            "@narada-core/site-inbox",
+            "@narada-core/site-config",
+            "@narada-core/site-lift",
+        ],
+        _ => vec![],
+    }
+}
+fn package_descriptor(name: &str) -> Value {
+    let (descriptors, denied) = match name {
+        "@narada-core/site-task-lifecycle" => (
+            vec![
+                "receiving_site_setup_plan",
+                "task_db_schema_init_plan",
+                "task_db_adapter_conformance_contract",
+                "task_admission_write_request",
+                "mcp_registration_descriptor",
+            ],
+            vec![
+                "package-owned SQLite",
+                "SQLite mutation",
+                "source task DB/history import",
+                "live MCP registration",
+            ],
+        ),
+        "@narada-core/agent-context-memory" => (
+            vec![
+                "named_agent_registry_fragment",
+                "session_start_contract",
+                "checkpoint_descriptor",
+                "hydration_request_descriptor",
+                "agent_context_schema_init_plan",
+                "mcp_registration_descriptor",
+                "capability_registry_fragment",
+            ],
+            vec![
+                "package-owned SQLite",
+                "runtime hydration execution",
+                "source checkpoint/agent-context DB import",
+                "live MCP registration",
+            ],
+        ),
+        "@narada-core/site-inbox" => (
+            vec![
+                "envelope_admission_request",
+                "admission_decision",
+                "portable_artifact_plan",
+                "crossing_coordinates",
+                "inbox_refusal_guard",
+            ],
+            vec![
+                "inbox DB mutation",
+                "portable envelope file write",
+                "source inbox DB/history import",
+                "task promotion",
+                "live MCP registration",
+            ],
+        ),
+        "@narada-core/site-config" => (
+            vec![
+                "known_site_registry_entry",
+                "capability_edge",
+                "capability_denial",
+                "registered_site_probe_request",
+                "registered_site_probe_report",
+            ],
+            vec![
+                "target Site config mutation",
+                "target task/inbox DB import",
+                "trust record mutation",
+                "live probe execution",
+                "arbitrary client/project scan",
+            ],
+        ),
+        "@narada-core/site-lift" => (
+            vec![
+                "artifact_descriptor",
+                "adoption_plan",
+                "adoption_command_packet",
+                "nonportable_state_refusal",
+                "receiver_admission_summary",
+            ],
+            vec![
+                "file copy/install/bootstrap",
+                "source runtime state import",
+                "receiving Site mutation authority",
+                "live MCP registration",
+                "catalog publication",
+            ],
+        ),
+        _ => (vec![], vec!["unknown package cannot grant live capability"]),
+    };
+    json!({"package_name":name,"posture":if descriptors.is_empty(){"unknown_package_refused"}else{"descriptor_only"},"descriptors":descriptors,"denied_live_effects":denied})
+}
+
 pub(crate) fn kinds() -> Value {
     json!({"status":"success","mutation_performed":false,"kinds":KINDS.iter().map(kind_json).collect::<Vec<_>>()})
 }
@@ -410,6 +529,7 @@ mod tests {
     use super::*;
     #[test]
     fn lifecycle_catalog_and_preflight_are_coherent() {
+        assert_eq!(create_presets()["presets"].as_array().unwrap().len(), 5);
         assert_eq!(kinds()["kinds"].as_array().unwrap().len(), 7);
         let ready=preflight(&serde_json::from_value(json!({"kind":"archive","source_site":"a","authority_mode":"retired_non_authority"})).unwrap()).unwrap();
         assert_eq!(ready["status"], "ready");
