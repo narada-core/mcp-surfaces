@@ -65,6 +65,7 @@ These are not user-facing domain surfaces, but must not invalidate the native cl
 | Component | Status | Required evidence |
 |---|---|---|
 | MCP runtime proxy | re-audit | Native proxy, transport, lifecycle, cancellation, and no JavaScript subprocess |
+| Native input-contract boundary | pre-restart complete | The shared Rust server now names every published tool schema, closes every top-level argument object, deterministically bounds previously unbounded strings and arrays, and rejects type/required/unknown-field/length/collection-size violations before authority dispatch. All 25 currently admitted shared-native surface catalogs are traversed by regression proof; individual surface audits still own semantic accuracy and domain diagnostics. |
 | JavaScript fallback runtime | pending audit | Determine whether the native-profile Bun fallback is still reachable by any admitted surface after all surface reviews; remove it only with reachability evidence |
 
 ## Final gate

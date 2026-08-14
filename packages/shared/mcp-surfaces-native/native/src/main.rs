@@ -672,6 +672,25 @@ fn modern_result(value: Value, options: &Options) -> Value {
     Value::Object(result)
 }
 fn list_tools(surface_id: &str) -> Vec<Value> {
+    let mut tools = raw_list_tools(surface_id);
+    for tool in &mut tools {
+        let name = tool
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("mcp_tool")
+            .to_string();
+        if let Some(schema) = tool.get_mut("inputSchema") {
+            normalize_input_schema(schema, Some(&name));
+            if let Some(object) = schema.as_object_mut() {
+                object.insert("title".to_string(), json!(format!("{name}.input")));
+                object.insert("additionalProperties".to_string(), Value::Bool(false));
+            }
+        }
+    }
+    tools
+}
+
+fn raw_list_tools(surface_id: &str) -> Vec<Value> {
     match surface_id {
         "site-inbox" => site_inbox::list_tools(),
         "calendar" => calendar::list_tools(),
@@ -732,6 +751,36 @@ fn list_tools(surface_id: &str) -> Vec<Value> {
     }
 }
 
+fn normalize_input_schema(schema: &mut Value, field: Option<&str>) {
+    let Some(object) = schema.as_object_mut() else { return };
+    match object.get("type").and_then(Value::as_str) {
+        Some("string") if !object.contains_key("maxLength") && !object.contains_key("enum") => {
+            let name = field.unwrap_or_default().to_ascii_lowercase();
+            let maximum = if name.contains("path") || name.contains("root") || name.contains("file") {
+                4096
+            } else if name.contains("summary") || name.contains("body") || name.contains("context") || name.contains("output") {
+                32768
+            } else {
+                8192
+            };
+            object.insert("maxLength".to_string(), json!(maximum));
+        }
+        Some("array") if !object.contains_key("maxItems") => {
+            object.insert("maxItems".to_string(), json!(500));
+        }
+        _ => {}
+    }
+    if let Some(properties) = object.get_mut("properties").and_then(Value::as_object_mut) {
+        for (name, child) in properties { normalize_input_schema(child, Some(name)); }
+    }
+    if let Some(items) = object.get_mut("items") { normalize_input_schema(items, field); }
+    for keyword in ["allOf", "anyOf", "oneOf"] {
+        if let Some(branches) = object.get_mut(keyword).and_then(Value::as_array_mut) {
+            for branch in branches { normalize_input_schema(branch, field); }
+        }
+    }
+}
+
 fn guidance_tool(surface_id: &str) -> Value {
     let tool_name = surface_id.replace("-", "_") + "_guidance";
     tool(
@@ -776,6 +825,15 @@ fn call_tool(
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
+    let tool = list_tools(surface_id)
+        .into_iter()
+        .find(|tool| tool.get("name").and_then(Value::as_str) == Some(name))
+        .ok_or_else(|| diagnostic("unknown_tool", &format!("unknown_tool:{name}"), Value::Null))?;
+    validate_input_schema(
+        tool.get("inputSchema").unwrap_or(&Value::Null),
+        &Value::Object(args.clone()),
+        "/arguments",
+    )?;
     let result = match (surface_id, name) {
         ("catalog-observation", "catalog_observation_guidance") => catalog_guidance(&args),
         ("catalog-observation", "catalog_observation_observe") => catalog_observation(&args),
@@ -836,6 +894,54 @@ fn call_tool(
         response["isError"] = json!(true);
     }
     Ok(response)
+}
+
+fn validate_input_schema(schema: &Value, value: &Value, path: &str) -> Result<(), Value> {
+    let refuse = |keyword: &str| {
+        diagnostic(
+            "input_schema_validation_failed",
+            &format!("input_schema_validation_failed:{path}:{keyword}"),
+            json!({"path":path,"keyword":keyword}),
+        )
+    };
+    if let Some(expected) = schema.get("type").and_then(Value::as_str) {
+        let valid = match expected {
+            "object" => value.is_object(), "array" => value.is_array(), "string" => value.is_string(),
+            "integer" => value.as_i64().is_some() || value.as_u64().is_some(), "number" => value.is_number(),
+            "boolean" => value.is_boolean(), "null" => value.is_null(), _ => true,
+        };
+        if !valid { return Err(refuse("type")); }
+    }
+    if let Some(text) = value.as_str() {
+        let length = text.chars().count() as u64;
+        if schema.get("minLength").and_then(Value::as_u64).is_some_and(|minimum| length < minimum) { return Err(refuse("minLength")); }
+        if schema.get("maxLength").and_then(Value::as_u64).is_some_and(|maximum| length > maximum) { return Err(refuse("maxLength")); }
+    }
+    if let Some(array) = value.as_array() {
+        if schema.get("maxItems").and_then(Value::as_u64).is_some_and(|maximum| array.len() as u64 > maximum) { return Err(refuse("maxItems")); }
+        if let Some(items) = schema.get("items") {
+            for (index, child) in array.iter().enumerate() { validate_input_schema(items, child, &format!("{path}/{index}"))?; }
+        }
+    }
+    if let Some(object) = value.as_object() {
+        if let Some(required) = schema.get("required").and_then(Value::as_array) {
+            for field in required.iter().filter_map(Value::as_str) {
+                if !object.contains_key(field) { return Err(refuse(&format!("required:{field}"))); }
+            }
+        }
+        let properties = schema.get("properties").and_then(Value::as_object);
+        if schema.get("additionalProperties").and_then(Value::as_bool) == Some(false) {
+            if let Some(field) = object.keys().find(|field| properties.is_none_or(|known| !known.contains_key(*field))) {
+                return Err(refuse(&format!("additionalProperties:{field}")));
+            }
+        }
+        if let Some(properties) = properties {
+            for (field, child_schema) in properties {
+                if let Some(child) = object.get(field) { validate_input_schema(child_schema, child, &format!("{path}/{field}"))?; }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn catalog_guidance(_args: &Map<String, Value>) -> Result<Value, Value> {
@@ -1429,6 +1535,20 @@ mod tests {
 
     #[test]
     fn named_native_surface_catalogs_are_present() {
+        fn assert_bounded(schema: &Value, path: &str) {
+            if schema.get("type").and_then(Value::as_str) == Some("string")
+                && schema.get("enum").is_none()
+            {
+                assert!(schema.get("maxLength").and_then(Value::as_u64).is_some(), "unbounded string: {path}");
+            }
+            if schema.get("type").and_then(Value::as_str) == Some("array") {
+                assert!(schema.get("maxItems").and_then(Value::as_u64).is_some(), "unbounded array: {path}");
+            }
+            if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+                for (name, child) in properties { assert_bounded(child, &format!("{path}/{name}")); }
+            }
+            if let Some(items) = schema.get("items") { assert_bounded(items, &format!("{path}/*")); }
+        }
         let surfaces = [
             "site-inbox",
             "mailbox",
@@ -1465,6 +1585,13 @@ mod tests {
                     .all(|tool| tool.get("name").and_then(Value::as_str).is_some()),
                 "unnamed native tool for {surface}"
             );
+            for tool in tools {
+                let name = tool["name"].as_str().expect("tool name");
+                let schema = &tool["inputSchema"];
+                assert_eq!(schema["title"], format!("{name}.input"), "{surface}/{name}");
+                assert_eq!(schema["additionalProperties"], false, "{surface}/{name}");
+                assert_bounded(schema, &format!("{surface}/{name}"));
+            }
         }
     }
 
