@@ -8,7 +8,7 @@ use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-const ENTITY_KINDS: &[&str] = &["problem", "conjecture", "criticism", "test", "source"];
+const ENTITY_KINDS: &[&str] = &["problem", "conjecture", "claim", "criticism", "test", "source"];
 const CORE_RELATIONS: &[&str] = &[
     "addresses",
     "criticizes",
@@ -38,7 +38,7 @@ pub fn list_tools() -> Vec<Value> {
         tool(
             "epistemic_graph_query",
             "List bounded entities, or set record_kind to read assessments, test outcomes, or sweeps.",
-            json!({"type":"object","properties":{"kind":{"type":"string","description":"Entity kind filter."},"record_kind":{"type":"string","enum":["assessment.record","test_outcome.record","sweep.record"],"description":"When present, query durable non-entity records instead of entities."},"text":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":100},"offset":{"type":"integer","minimum":0}},"additionalProperties":false}),
+            json!({"type":"object","properties":{"kind":{"type":"string","enum":ENTITY_KINDS,"description":"Entity kind filter."},"record_kind":{"type":"string","enum":["assessment.record","test_outcome.record","sweep.record"],"description":"When present, query durable non-entity records instead of entities."},"text":{"type":"string"},"compact":{"type":"boolean","default":false,"description":"Return identity and summary fields without full stored payloads."},"limit":{"type":"integer","minimum":1,"maximum":100},"offset":{"type":"integer","minimum":0}},"additionalProperties":false}),
             true,
         ),
         tool(
@@ -286,21 +286,36 @@ fn query(root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
         .min(MAX_PAGE);
     let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0);
     let kind = args.get("kind").and_then(Value::as_str).unwrap_or("");
+    let compact = args.get("compact").and_then(Value::as_bool).unwrap_or(false);
     let text = args.get("text").and_then(Value::as_str).unwrap_or("");
     let like = format!("%{text}%");
     if let Some(record_kind) = args.get("record_kind").and_then(Value::as_str) {
         let mut stmt = db.prepare("select record_id,record_kind,payload_json,event_id from records where record_kind=?1 and (?2='' or payload_json like ?3) order by record_id limit ?4 offset ?5").map_err(db_error("projection_record_query_prepare_failed"))?;
-        let rows = stmt.query_map(params![record_kind,text,like,limit,offset], |row| Ok(json!({"record_id":row.get::<_,String>(0)?,"record_kind":row.get::<_,String>(1)?,"payload":serde_json::from_str::<Value>(&row.get::<_,String>(2)?).unwrap_or(Value::Null),"event_id":row.get::<_,String>(3)?}))).map_err(db_error("projection_record_query_failed"))?;
+        let rows = stmt.query_map(params![record_kind,text,like,limit,offset], |row| {
+            let payload = serde_json::from_str::<Value>(&row.get::<_,String>(2)?).unwrap_or(Value::Null);
+            Ok(if compact {
+                json!({"record_id":row.get::<_,String>(0)?,"record_kind":row.get::<_,String>(1)?,"subject_id":payload.get("subject_id"),"judgment":payload.get("judgment"),"status":payload.get("status"),"event_id":row.get::<_,String>(3)?})
+            } else {
+                json!({"record_id":row.get::<_,String>(0)?,"record_kind":row.get::<_,String>(1)?,"payload":payload,"event_id":row.get::<_,String>(3)?})
+            })
+        }).map_err(db_error("projection_record_query_failed"))?;
         let items = rows.collect::<Result<Vec<_>, _>>().map_err(db_error("projection_record_query_row_failed"))?;
-        return Ok(json!({"schema":"narada.epistemic.query.v1","status":"ok","result_kind":"records","record_kind":record_kind,"items":items,"offset":offset,"limit":limit,"returned":items.len(),"bounded":true}));
+        return Ok(json!({"schema":"narada.epistemic.query.v1","status":"ok","result_kind":"records","record_kind":record_kind,"compact":compact,"items":items,"offset":offset,"limit":limit,"returned":items.len(),"bounded":true}));
     }
     let mut stmt = db.prepare("select entity_id,kind,payload_json,event_id from entities where (?1='' or kind=?1) and (?2='' or payload_json like ?3) order by entity_id limit ?4 offset ?5").map_err(db_error("projection_query_prepare_failed"))?;
-    let rows = stmt.query_map(params![kind,text,like,limit,offset], |row| Ok(json!({"entity_id":row.get::<_,String>(0)?,"kind":row.get::<_,String>(1)?,"payload":serde_json::from_str::<Value>(&row.get::<_,String>(2)?).unwrap_or(Value::Null),"event_id":row.get::<_,String>(3)?}))).map_err(db_error("projection_query_failed"))?;
+    let rows = stmt.query_map(params![kind,text,like,limit,offset], |row| {
+        let payload = serde_json::from_str::<Value>(&row.get::<_,String>(2)?).unwrap_or(Value::Null);
+        Ok(if compact {
+            json!({"entity_id":row.get::<_,String>(0)?,"kind":row.get::<_,String>(1)?,"title":payload.get("title"),"event_id":row.get::<_,String>(3)?})
+        } else {
+            json!({"entity_id":row.get::<_,String>(0)?,"kind":row.get::<_,String>(1)?,"payload":payload,"event_id":row.get::<_,String>(3)?})
+        })
+    }).map_err(db_error("projection_query_failed"))?;
     let items = rows
         .collect::<Result<Vec<_>, _>>()
         .map_err(db_error("projection_query_row_failed"))?;
     Ok(
-        json!({"schema":"narada.epistemic.query.v1","status":"ok","result_kind":"entities","items":items,"offset":offset,"limit":limit,"returned":items.len(),"bounded":true}),
+        json!({"schema":"narada.epistemic.query.v1","status":"ok","result_kind":"entities","compact":compact,"items":items,"offset":offset,"limit":limit,"returned":items.len(),"bounded":true}),
     )
 }
 
@@ -933,6 +948,37 @@ mod tests {
         assert_eq!(event["certifies_truth"], false);
         let result = query(&root, &Map::new()).unwrap();
         assert_eq!(result["returned"], 1);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn claim_entities_and_compact_queries_preserve_epistemic_attribution() {
+        let root = std::env::temp_dir().join(format!("epistemic-claim-test-{}", Uuid::new_v4()));
+        let proposal = proposal_submit(
+            &root,
+            &Map::from_iter([
+                ("actor".into(), json!("tester")),
+                ("authority_basis".into(), json!({"kind":"test"})),
+                ("idempotency_key".into(), json!("claim-p1")),
+                ("expected_ledger_head".into(), Value::Null),
+                ("operations".into(), json!([{"op":"entity.declare","entity_id":"claim:tree-result","kind":"claim","title":"Attributed theorem result"}])),
+            ]),
+        ).expect("claim proposal");
+        proposal_admit(
+            &root,
+            &Map::from_iter([
+                ("proposal_id".into(), proposal["proposal_id"].clone()),
+                ("actor".into(), json!("tester")),
+                ("authority_basis".into(), json!({"kind":"test"})),
+                ("expected_ledger_head".into(), Value::Null),
+                ("idempotency_key".into(), json!("claim-a1")),
+            ]),
+        ).expect("claim admission");
+        let result = query(&root, &Map::from_iter([("compact".into(), json!(true))])).expect("compact query");
+        assert_eq!(result["compact"], true);
+        assert_eq!(result["items"][0]["entity_id"], "claim:tree-result");
+        assert_eq!(result["items"][0]["title"], "Attributed theorem result");
+        assert!(result["items"][0].get("payload").is_none());
         let _ = fs::remove_dir_all(root);
     }
 

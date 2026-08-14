@@ -3262,6 +3262,7 @@ fn site_bind(contract: &Value, args: &Value) -> Result<Value, String> {
     fs::create_dir_all(&config_dir).map_err(|error| error.to_string())?;
     let prefix = site_prefix(&site_id);
     let server_key = format!("{prefix}-{surface_id}");
+    let binding_id = format!("{site_id}-{surface_id}");
     let file_name = format!("{prefix}-{surface_id}-mcp.json");
     let config = build_bind_config(
         contract,
@@ -3281,7 +3282,7 @@ fn site_bind(contract: &Value, args: &Value) -> Result<Value, String> {
     .map_err(|error| error.to_string())?;
     let registry_result = write_site_registry(contract, &site)?;
     Ok(json!({
-        "status":"bound","site_id":site_id,"surface_id":surface_id,"projection_id":projection["id"],"file":file_name,"server_key":server_key,"registry":registry_result,
+        "status":"bound","site_id":site_id,"surface_id":surface_id,"projection_id":projection["id"],"file":file_name,"server_key":server_key,"binding_id":binding_id,"registry":registry_result,
         "activation":{
             "status":if binding_changed {"carrier_rematerialization_required"} else {"binding_unchanged_verify_carrier_admission"},
             "reason":if binding_changed {"The Site binding changed, while already materialized carrier admission envelopes are immutable snapshots."} else {"The Site binding is unchanged. A current carrier may use it only if its admission envelope already contains this binding."},
@@ -3289,7 +3290,7 @@ fn site_bind(contract: &Value, args: &Value) -> Result<Value, String> {
             "next_steps":[
                 {"order":1,"action":"rematerialize_carriers","owner":"narada-mcp-materializer","instruction":"Run the authoritative all-carrier materialization or recover-generation command."},
                 {"order":2,"action":"restart_carrier","owner":"carrier","instruction":"Restart the carrier after successful materialization."},
-                {"order":3,"action":"open_surface","owner":"mcp-loader","instruction":"Open the binding by server_key after restart."}
+                {"order":3,"action":"open_surface","owner":"mcp-loader","instruction":"Open the binding by canonical binding_id after restart.","tool":"mcp_loader_open_surface","arguments":{"site_root":site["root"],"binding_id":binding_id,"surface_id":surface_id}}
             ]
         }
     }))

@@ -1948,10 +1948,34 @@ fn admitted_binding(
         })
         .cloned()
         .ok_or_else(|| {
+            let candidates = envelope
+                .get("bindings")
+                .and_then(Value::as_array)
+                .map(|bindings| {
+                    bindings
+                        .iter()
+                        .filter(|binding| {
+                            let candidate = binding.get("binding_id").and_then(Value::as_str).unwrap_or_default();
+                            let surface = binding.get("surface_id").and_then(Value::as_str).unwrap_or_default();
+                            !surface.is_empty()
+                                && (binding_id.ends_with(surface)
+                                    || candidate.ends_with(binding_id)
+                                    || candidate == binding_id)
+                        })
+                        .filter_map(|binding| binding.get("binding_id").cloned())
+                        .take(10)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
             Diagnostic::new(
                 "mcp_binding_not_admitted",
                 format!("mcp_binding_not_admitted:{binding_id}:{operation}"),
-            )
+            ).with_details(json!({
+                "requested_binding_id":binding_id,
+                "operation":operation,
+                "candidate_binding_ids":candidates,
+                "remediation":"Use the canonical binding_id returned by mcp_loader_list_site_surfaces or registrar_site_bind; server_name/server_key is not binding identity."
+            }))
         })?;
     let operation_allowed = entry
         .get("operations")
