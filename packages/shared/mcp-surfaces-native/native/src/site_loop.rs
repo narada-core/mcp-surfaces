@@ -1,7 +1,7 @@
 use serde_json::{json, Map, Value};
 use rusqlite::{params, types::ValueRef, Connection, OpenFlags, OptionalExtension};
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -267,6 +267,7 @@ fn write_json_atomically(path: &Path, value: &Value) -> Result<(), Value> {
     let temporary = parent.join(format!(".{}.{}.tmp", path.file_name().and_then(|v| v.to_str()).unwrap_or("record"), uuid::Uuid::new_v4()));
     let bytes = serde_json::to_vec_pretty(value).map_err(|e| error("site_loop_record_serialize_failed", &e.to_string()))?;
     fs::write(&temporary, bytes).map_err(|e| error("site_loop_record_write_failed", &e.to_string()))?;
+    if path.exists() { fs::remove_file(path).map_err(|e| { let _ = fs::remove_file(&temporary); error("site_loop_record_replace_failed", &e.to_string()) })?; }
     fs::rename(&temporary, path).map_err(|e| { let _ = fs::remove_file(&temporary); error("site_loop_record_promote_failed", &e.to_string()) })
 }
 
@@ -295,21 +296,95 @@ fn proof_requests(root: &Path) -> Result<Vec<Value>, Value> {
 
 fn proof_run(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     if args.get("proof_kind").and_then(Value::as_str) != Some("resident_production") { return Err(error("unknown_proof_kind", "proof_kind must be resident_production")); }
-    if args.get("wait_for_completion").and_then(Value::as_bool).unwrap_or(false) { return Err(error("proof_run_wait_not_yet_native", "use bounded start mode and poll site_loop_proof_status")); }
+    let wait = args.get("wait_for_completion").and_then(Value::as_bool).unwrap_or(false);
+    let requested_timeout = args.get("timeout_ms").and_then(Value::as_u64).unwrap_or(if wait { 10_000 } else { 120_000 });
+    if wait && requested_timeout > 10_000 { return Err(error("proof_run_wait_exceeds_mcp_transport_budget", "wait_for_completion requires timeout_ms <= 10000")); }
     if let Some(existing) = proof_requests(root)?.into_iter().find(|value| matches!(value.get("status").and_then(Value::as_str), Some("queued" | "running"))) {
+        if wait { return process_proof_request(root, existing, requested_timeout); }
         return Ok(json!({"schema":"narada.site_loop.resident_e2e.v1","status":"started","mode":"live_unattended_start_only","request":existing,"reused":true,"next":{"tool":"site_loop_proof_status","arguments":{}}}));
     }
     let config = load_config(root)?.ok_or_else(|| error("site_loop_config_missing", "site-loop config is required"))?;
     let object = config.as_object().ok_or_else(|| error("site_loop_config_invalid", "site-loop config must be an object"))?;
-    let resident_ensure = if args.get("ensure_resident").and_then(Value::as_bool) == Some(false) { json!({"status":"skipped","reason":"ensure_resident_false"}) } else { ensure_resident(root, &config)? };
+    let resident_ensure = if wait || args.get("ensure_resident").and_then(Value::as_bool) == Some(false) { json!({"status":"skipped","reason":if wait{"owned_by_synchronous_processor"}else{"ensure_resident_false"}}) } else { ensure_resident(root, &config)? };
     let requested_at = now_iso();
     let request_id = format!("resident_proof_request_{}_{}", requested_at.chars().filter(|ch| ch.is_ascii_digit()).collect::<String>(), &uuid::Uuid::new_v4().simple().to_string()[..8]);
     let fixture_id = format!("resident-e2e-{}", uuid::Uuid::new_v4().simple());
     if !safe_record_id(&request_id) || !safe_record_id(&fixture_id) { return Err(error("proof_request_id_invalid", "generated proof request identifier is invalid")); }
-    let packet = json!({"schema":"narada.site_loop.resident_proof_request.v1","site_id":object.get("site_id").cloned().unwrap_or(Value::Null),"loop_id":object.get("loop_id").cloned().unwrap_or(Value::Null),"request_id":request_id,"fixture_id":fixture_id,"title":"Resident production proof","summary":"Controlled resident production proof.","timeout_ms":args.get("timeout_ms").and_then(Value::as_u64).unwrap_or(120000),"poll_ms":args.get("poll_ms").and_then(Value::as_u64).unwrap_or(5000),"status":"queued","requested_at":requested_at,"finished_at":Value::Null,"result":Value::Null});
+    let packet = json!({"schema":"narada.site_loop.resident_proof_request.v1","site_id":object.get("site_id").cloned().unwrap_or(Value::Null),"loop_id":object.get("loop_id").cloned().unwrap_or(Value::Null),"request_id":request_id,"fixture_id":fixture_id,"title":"Resident production proof","summary":"Controlled resident production proof.","timeout_ms":requested_timeout,"poll_ms":args.get("poll_ms").and_then(Value::as_u64).unwrap_or(5000),"ensure_resident":args.get("ensure_resident").and_then(Value::as_bool).unwrap_or(true),"status":"queued","requested_at":requested_at,"finished_at":Value::Null,"result":Value::Null});
     let path = proof_request_dir(root).join(format!("{request_id}.json"));
     write_json_atomically(&path, &packet)?;
+    if wait { return process_proof_request(root, packet, requested_timeout); }
     Ok(json!({"schema":"narada.site_loop.resident_e2e.v1","status":"started","mode":"live_unattended_start_only","request_id":request_id,"request_path":path.to_string_lossy(),"request_status":"queued","resident_ensure":resident_ensure,"reused":false,"next":{"tool":"site_loop_proof_status","arguments":{}}}))
+}
+
+fn process_proof_request(root: &Path, mut request: Value, timeout_ms: u64) -> Result<Value, Value> {
+    let config = load_config(root)?.ok_or_else(|| error("site_loop_config_missing", "site-loop config is required"))?;
+    if request.get("ensure_resident").and_then(Value::as_bool) != Some(false) { let _ = ensure_resident(root, &config)?; }
+    let request_id = request.get("request_id").and_then(Value::as_str).ok_or_else(|| error("proof_request_invalid", "request_id is required"))?.to_string();
+    if !safe_record_id(&request_id) { return Err(error("proof_request_invalid", "request_id is invalid")); }
+    let path = proof_request_dir(root).join(format!("{request_id}.json"));
+    request.as_object_mut().map(|object| object.remove("path"));
+    request["status"] = json!("running"); request["started_at"] = json!(now_iso());
+    write_json_atomically(&path, &request)?;
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms.max(1));
+    let resident = loop {
+        let value = resident_status(root, &config)?;
+        if value.get("live").and_then(Value::as_bool) == Some(true) { break value; }
+        if Instant::now() >= deadline { return finish_proof_request(root, request, "failed", json!({"reason":"resident_not_live_before_timeout","resident":value,"timeout_ms":timeout_ms})); }
+        thread::sleep(Duration::from_millis(100));
+    };
+    let session_id = resident.get("carrier_session_id").and_then(Value::as_str).ok_or_else(|| error("proof_resident_invalid", "carrier_session_id is required"))?;
+    let session_dir = PathBuf::from(resident.get("session_dir").and_then(Value::as_str).ok_or_else(|| error("proof_resident_invalid", "session_dir is required"))?);
+    let directive_id = format!("resident-proof-{request_id}");
+    let content = format!("Controlled native resident production proof. Through the task-lifecycle MCP, create one minimal task titled 'Resident production proof {request_id}', claim it as agent '{}', submit a report whose directive_id is exactly '{directive_id}' and whose evidence states no_files_changed, then close the task. Do not modify project files. Finish only after reading the closed task back.", config.pointer("/resident/agent_id").and_then(Value::as_str).unwrap_or("site.resident"));
+    let frame = json!({"id":request_id,"method":"session.submit","params":{"content":content,"source":"system_directive","source_kind":"site_loop","source_id":request_id,"transport":"native_control_jsonl","delivery_mode":"immediate","directive_id":directive_id,"idempotency_key":format!("site-loop-proof:{request_id}")}});
+    append_control_frame(&session_dir.join("control.jsonl"), &frame)?;
+    loop {
+        let event = proof_terminal_event(&session_dir.join("events.jsonl"), &request_id)?;
+        let report = proof_task_report(root, &directive_id)?;
+        if event.as_ref().and_then(|value| value.get("terminal_state")).and_then(Value::as_str) == Some("completed") && report.is_some() {
+            return finish_proof_request(root, request, "passed", json!({"schema":"narada.site_loop.resident_e2e.proof.v1","required_observations":["directive_emitted","carrier_receipt","task_report_with_directive_id"],"directive_emitted":true,"carrier_receipt_observed":true,"task_report_observed":true,"production_task_report_observed":true,"store_simulation_used":false,"live_carrier_status":"available","carrier_session_id":session_id,"directive_id":directive_id,"terminal_event":event,"task_report":report}));
+        }
+        if event.as_ref().and_then(|value| value.get("terminal_state")).and_then(Value::as_str).is_some_and(|value| value != "completed") {
+            return finish_proof_request(root, request, "failed", json!({"reason":"resident_turn_not_completed","terminal_event":event,"task_report":report,"directive_id":directive_id}));
+        }
+        if Instant::now() >= deadline { return finish_proof_request(root, request, "failed", json!({"reason":"resident_proof_timed_out","timeout_ms":timeout_ms,"terminal_event":event,"task_report":report,"directive_id":directive_id})); }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn finish_proof_request(root: &Path, mut request: Value, status: &str, result: Value) -> Result<Value, Value> {
+    let request_id = request.get("request_id").and_then(Value::as_str).unwrap_or("unknown").to_string();
+    request["status"] = json!(status); request["finished_at"] = json!(now_iso()); request["result"] = result.clone();
+    write_json_atomically(&proof_request_dir(root).join(format!("{request_id}.json")), &request)?;
+    Ok(json!({"schema":"narada.site_loop.resident_e2e.v1","status":status,"mode":"live_unattended","production_proof":status=="passed","live_unattended_proven":status=="passed","request_id":request_id,"result":result}))
+}
+
+fn append_control_frame(path: &Path, frame: &Value) -> Result<(), Value> {
+    if let Some(parent) = path.parent() { fs::create_dir_all(parent).map_err(|cause| error("proof_control_directory_failed", &cause.to_string()))?; }
+    let encoded = serde_json::to_vec(frame).map_err(|cause| error("proof_control_encode_failed", &cause.to_string()))?;
+    if encoded.len() > 64 * 1024 { return Err(error("proof_control_frame_too_large", "proof control frame exceeds 65536 bytes")); }
+    let mut file = fs::OpenOptions::new().create(true).append(true).open(path).map_err(|cause| error("proof_control_open_failed", &cause.to_string()))?;
+    file.write_all(&encoded).and_then(|_|file.write_all(b"\n")).and_then(|_|file.flush()).map_err(|cause| error("proof_control_write_failed", &cause.to_string()))
+}
+
+fn proof_terminal_event(path: &Path, request_id: &str) -> Result<Option<Value>, Value> {
+    let metadata = match fs::metadata(path) { Ok(value) => value, Err(cause) if cause.kind()==std::io::ErrorKind::NotFound => return Ok(None), Err(cause) => return Err(error("proof_event_read_failed", &cause.to_string())) };
+    let start = metadata.len().saturating_sub(MAX_TEXT_BYTES);
+    let mut file = fs::File::open(path).map_err(|cause| error("proof_event_read_failed", &cause.to_string()))?;
+    file.seek(SeekFrom::Start(start)).map_err(|cause| error("proof_event_read_failed", &cause.to_string()))?;
+    let mut text = String::new(); file.take(MAX_TEXT_BYTES).read_to_string(&mut text).map_err(|cause| error("proof_event_read_failed", &cause.to_string()))?;
+    for line in text.lines().rev().take(2000) {
+        let Ok(value) = serde_json::from_str::<Value>(line) else { continue };
+        if value.get("event").and_then(Value::as_str)==Some("session_control_response") && value.get("request_id").and_then(Value::as_str)==Some(request_id) { return Ok(Some(value)); }
+    }
+    Ok(None)
+}
+
+fn proof_task_report(root: &Path, directive_id: &str) -> Result<Option<Value>, Value> {
+    let Some(connection) = open_db(root)? else { return Ok(None); };
+    if !table_exists(&connection, "task_reports") { return Ok(None); }
+    connection.query_row("SELECT report_id,task_id,agent_id,summary,directive_id,submitted_at FROM task_reports WHERE directive_id=?1 ORDER BY submitted_at DESC LIMIT 1", [directive_id], row_value).optional().map_err(|cause| error("proof_task_report_query_failed", &cause.to_string()))
 }
 
 fn open_db(root: &Path) -> Result<Option<Connection>, Value> {
@@ -845,6 +920,18 @@ mod tests {
         let unified = unified_status(&root).expect("unified");
         assert_eq!(unified["resident"]["live"], true);
         assert_eq!(health(&root).expect("health")["resident"]["carrier_session_id"], session_id);
+        let request_id = started["request_id"].as_str().expect("request id");
+        let directive_id = format!("resident-proof-{request_id}");
+        fs::write(session.join("events.jsonl"), format!("{}\n", json!({"event":"session_control_response","request_id":request_id,"terminal_state":"completed"}))).expect("events");
+        let connection = Connection::open(db_path(&root)).expect("proof db");
+        connection.execute_batch("CREATE TABLE task_reports(report_id TEXT PRIMARY KEY,task_id TEXT,agent_id TEXT,summary TEXT,directive_id TEXT,submitted_at TEXT);").expect("proof schema");
+        connection.execute("INSERT INTO task_reports VALUES (?1,'task-proof','site.resident','proof complete',?2,?3)", params!["report-proof",directive_id,now_iso()]).expect("proof report");
+        drop(connection);
+        let mut request = proof_requests(&root).expect("requests").pop().expect("request");
+        request["ensure_resident"] = json!(false);
+        let completed = process_proof_request(&root, request, 1000).expect("completed proof");
+        assert_eq!(completed["status"], "passed");
+        assert_eq!(proof_status(&root).expect("completed status")["latest_request"]["status"], "passed");
         fs::write(session.join("retired.json"), serde_json::to_vec(&json!({"status":"retired"})).expect("retired json")).expect("retired");
         assert_eq!(unified_status(&root).expect("retired unified")["resident"]["live"], false);
         fs::remove_dir_all(root).expect("cleanup");
