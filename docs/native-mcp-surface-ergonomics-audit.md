@@ -69,9 +69,9 @@ These are not user-facing domain surfaces, but must not invalidate the native cl
 
 | Component | Status | Required evidence |
 |---|---|---|
-| MCP runtime proxy | re-audit | Native proxy, transport, lifecycle, cancellation, and no JavaScript subprocess |
+| MCP runtime proxy | pre-restart complete | The Rust proxy owns preflight, transport, lifecycle, cancellation, diagnostics, and child supervision. Native proxy child resolution now refuses Node and Bun by basename even when supplied through absolute paths; it cannot fall back to interpreter discovery. The complete focused Rust suite passes. |
 | Native input-contract boundary | pre-restart complete | The shared Rust server now names every published tool schema, closes every top-level argument object, deterministically bounds previously unbounded strings and arrays, and validates the complete published JSON Schema rather than a partial hand-written subset. Type, required, unknown-field, string/array/object bounds, numeric bounds, enum, const, pattern, and composition constraints are enforced before authority dispatch. All currently admitted shared-native surface catalogs are traversed by regression proof; individual surface audits still own semantic accuracy and domain diagnostics. |
-| JavaScript fallback runtime | pending audit | Determine whether the native-profile Bun fallback is still reachable by any admitted surface after all surface reviews; remove it only with reachability evidence |
+| JavaScript fallback runtime | pre-restart complete | Narada's implementation matrix maps every NARS/proxy profile to Rust and marks Node/Bun unavailable. The native proxy rejects Node/Bun child commands before process creation, while materialized native entrypoints remain ordinary Rust executables. Dormant comparison sources are not reachable carrier authority. |
 
 ## Final gate
 
