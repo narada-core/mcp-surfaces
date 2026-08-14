@@ -12,7 +12,7 @@ const MAX_TEMPLATE_BYTES: u64 = 512_000;
 const RUN_STATUSES: &[&str] = &["pending", "running", "completed", "failed", "cancelled", "awaiting_confirmation"];
 const MUTATING: &[&str] = &[
     "sop_template_create", "sop_template_update", "sop_template_deprecate", "sop_template_unimport", "sop_template_import_yaml",
-    "sop_run_start", "sop_run_refresh", "sop_run_advance", "sop_handoff_claim", "sop_handoff_renew", "sop_handoff_release", "sop_handoff_retry",
+    "sop_run_start", "sop_run_refresh", "sop_run_advance", "sop_handoff_claim", "sop_handoff_claim_and_advance", "sop_handoff_renew", "sop_handoff_release", "sop_handoff_retry",
     "sop_action_resolve", "sop_run_cancel", "sop_outbox_consumer_register", "sop_outbox_ack", "sop_outbox_compact",
 ];
 
@@ -29,15 +29,15 @@ pub fn list_tools() -> Vec<Value> {
         ("sop_run_list", "List SOP runs with optional filters.", json!({"type":"object","properties":{"sop_id":{"type":"string"},"status":{"type":"string","enum":["pending","running","completed","failed","cancelled","awaiting_confirmation"]},"include_terminal":{"type":"boolean"},"limit":{"type":"integer","minimum":1,"maximum":200,"default":50}},"additionalProperties":false})),
         ("sop_handoff_list", "List durable SOP handoffs without exposing lease tokens.", json!({"type":"object","properties":{"run_id":{"type":"string"},"executor":{"type":"string","enum":["agent","operator"]},"status":{"type":"string","enum":["pending","leased","completed","failed","cancelled"]},"limit":{"type":"integer","minimum":1,"maximum":100,"default":50}},"additionalProperties":false})),
         ("sop_handoff_show", "Show one durable SOP handoff without exposing its lease token.", json!({"type":"object","properties":{"handoff_id":{"type":"string"}},"required":["handoff_id"],"additionalProperties":false})),
-        ("sop_action_list", "List SOP actions from the owning SOP store.", json!({"type":"object","additionalProperties":true})),
-        ("sop_action_show", "Show one SOP action from the owning SOP store.", json!({"type":"object","additionalProperties":true})),
+        ("sop_action_list", "List SOP actions from the owning SOP store.", json!({"type":"object","properties":{"run_id":{"type":"string"},"status":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":100,"default":50}},"additionalProperties":false})),
+        ("sop_action_show", "Show one SOP action from the owning SOP store.", json!({"type":"object","properties":{"action_id":{"type":"string"}},"required":["action_id"],"additionalProperties":false})),
         ("sop_run_coverage_since", "List latest SOP run coverage since a supplied timestamp.", json!({"type":"object","properties":{"since":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":500,"default":200},"template_status":{"type":"string","enum":["draft","active","deprecated"],"default":"active"},"status":{"type":"string","enum":["pending","running","completed","failed","cancelled","awaiting_confirmation"]},"include_terminal":{"type":"boolean","default":true}},"required":["since"],"additionalProperties":false})),
         ("sop_run_events", "List bounded SOP run events in reverse insertion order.", json!({"type":"object","properties":{"run_id":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":500,"default":50},"offset":{"type":"integer","minimum":0,"maximum":100000,"default":0}},"required":["run_id"],"additionalProperties":false})),
         ("sop_outbox_list", "List unacknowledged SOP terminal events for a registered consumer.", json!({"type":"object","properties":{"consumer_id":{"type":"string"},"topic":{"type":"string","const":"sop.run.terminal.v1"},"limit":{"type":"integer","minimum":1,"maximum":500,"default":100}},"required":["consumer_id"],"additionalProperties":false})),
     ] {
         tools.push(tool(name, description, schema, true));
     }
-    for name in MUTATING { tools.push(tool(name, "Apply a durable SOP mutation through the native Rust authority.", json!({"type":"object","additionalProperties":true}), false)); }
+    for name in MUTATING { tools.push(tool(name, mutation_description(name), mutation_schema(name), false)); }
     tools
 }
 
@@ -75,7 +75,41 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<V
 }
 
 fn guidance_tool() -> Value { tool("sop_guidance", "Show model-facing operating guidance for SOP workflows.", json!({"type":"object","properties":{"workflow":{"type":"string"},"tool":{"type":"string"}},"additionalProperties":false}), true) }
-fn guidance(args: &Map<String, Value>) -> Value { json!({"schema":"narada.mcp_surface.guidance.v0","status":"ok","surface_id":"sop","guidance_tool":"sop_guidance","purpose":"Inspect and execute bounded, durable SOP workflows.","requested":{"workflow":args.get("workflow").cloned().unwrap_or(Value::Null),"tool":args.get("tool").cloned().unwrap_or(Value::Null)},"first_use":["Call sop_doctor first.","Use candidate list/show/search for local template discovery.","Inspect a template before import or execution.","Use occurrence and completion keys for replay-safe mutations."],"boundaries":["Template candidates are bounded local YAML.","Legacy command effects are refused; effects require governed action bindings.","Native Rust owns template, run, handoff, action, and outbox durability."]}) }
+fn guidance(args: &Map<String, Value>) -> Value { json!({"schema":"narada.mcp_surface.guidance.v0","status":"ok","surface_id":"sop","guidance_tool":"sop_guidance","purpose":"Inspect and execute bounded, durable SOP workflows.","requested":{"workflow":args.get("workflow").cloned().unwrap_or(Value::Null),"tool":args.get("tool").cloned().unwrap_or(Value::Null)},"first_use":["Call sop_doctor first.","Use candidate list/show/search for local template discovery.","Inspect a template before import or execution.","Use occurrence and completion keys for replay-safe mutations.","For immediate completion of an already-produced result, prefer sop_handoff_claim_and_advance so lease acquisition and completion occur in one MCP call. Use claim, renew, and advance separately for work performed between calls."],"boundaries":["Template candidates are bounded local YAML.","Legacy command effects are refused; effects require governed action bindings.","Native Rust owns template, run, handoff, action, and outbox durability."]}) }
+
+fn mutation_description(name: &str) -> &'static str {
+    match name {
+        "sop_handoff_claim_and_advance" => "Claim and immediately complete one handoff in the same MCP call, without cross-call lease-token threading.",
+        _ => "Apply a durable SOP mutation through the native Rust authority.",
+    }
+}
+
+fn mutation_schema(name: &str) -> Value {
+    let string = || json!({"type":"string","minLength":1});
+    let object = || json!({"type":"object","additionalProperties":true});
+    let (properties, required): (Map<String, Value>, Vec<&str>) = match name {
+        "sop_template_create" => (json!({"sop_id":string(),"title":string(),"description":{"type":"string"},"steps":{"type":"array","minItems":1},"trigger_kind":{"type":"string"},"input_schema":object(),"output_mapping":object(),"output_ref_mapping":object(),"output_schema":object(),"acceptance_criteria":{"type":"array"},"evidence_requirements":{"type":"array"},"principal":string()}).as_object().unwrap().clone(), vec!["sop_id","title","steps"]),
+        "sop_template_update" => (json!({"sop_id":string(),"title":string(),"description":{"type":"string"},"steps":{"type":"array","minItems":1},"trigger_kind":{"type":"string"},"input_schema":object(),"output_mapping":object(),"output_ref_mapping":object(),"output_schema":object(),"acceptance_criteria":{"type":"array"},"evidence_requirements":{"type":"array"},"status":{"type":"string","enum":["draft","active","deprecated"]},"principal":string()}).as_object().unwrap().clone(), vec!["sop_id"]),
+        "sop_template_deprecate" => (json!({"sop_id":string(),"reason":string(),"principal":string()}).as_object().unwrap().clone(), vec!["sop_id","reason"]),
+        "sop_template_unimport" => (json!({"sop_id":string(),"version":{"type":"integer","minimum":1},"reason":string(),"principal":string()}).as_object().unwrap().clone(), vec!["sop_id","version","reason","principal"]),
+        "sop_template_import_yaml" => (json!({"sop_id":string(),"path":string(),"yaml":string(),"status":{"type":"string","enum":["draft","active"]},"principal":string()}).as_object().unwrap().clone(), vec!["sop_id"]),
+        "sop_run_start" => (json!({"sop_id":string(),"version":{"type":"integer","minimum":1},"occurrence_key":string(),"input":object(),"input_ref":object(),"trigger_source_kind":{"type":"string"},"trigger_source_ref":{"type":"string"},"triggered_by":string(),"parent_run_id":{"type":"string"},"parent_step_id":{"type":"string"}}).as_object().unwrap().clone(), vec!["sop_id","occurrence_key","triggered_by"]),
+        "sop_run_refresh" => (json!({"run_id":string(),"principal":string()}).as_object().unwrap().clone(), vec!["run_id"]),
+        "sop_run_advance" => (json!({"handoff_id":string(),"run_id":string(),"step_id":string(),"consumer_id":string(),"lease_token":string(),"completion_key":string(),"outcome":{"type":"string","enum":["completed","failed"]},"result":object(),"result_ref":object(),"error_message":{"type":"string"},"principal":string()}).as_object().unwrap().clone(), vec!["handoff_id","run_id","step_id","consumer_id","lease_token","completion_key","outcome","principal"]),
+        "sop_handoff_claim" => (json!({"consumer_id":string(),"handoff_id":string(),"executor":{"type":"string","enum":["agent","operator"]},"lease_ms":{"type":"integer","minimum":1000,"maximum":300000,"default":60000}}).as_object().unwrap().clone(), vec!["consumer_id"]),
+        "sop_handoff_claim_and_advance" => (json!({"consumer_id":string(),"handoff_id":string(),"executor":{"type":"string","enum":["agent","operator"]},"lease_ms":{"type":"integer","minimum":1000,"maximum":300000,"default":60000},"completion_key":string(),"outcome":{"type":"string","enum":["completed","failed"]},"result":object(),"result_ref":object(),"error_message":{"type":"string"},"principal":string()}).as_object().unwrap().clone(), vec!["consumer_id","completion_key","outcome","principal"]),
+        "sop_handoff_renew" => (json!({"handoff_id":string(),"consumer_id":string(),"lease_token":string(),"lease_ms":{"type":"integer","minimum":1000,"maximum":300000,"default":60000}}).as_object().unwrap().clone(), vec!["handoff_id","consumer_id","lease_token"]),
+        "sop_handoff_release" => (json!({"handoff_id":string(),"consumer_id":string(),"lease_token":string(),"error_message":{"type":"string"}}).as_object().unwrap().clone(), vec!["handoff_id","consumer_id","lease_token"]),
+        "sop_handoff_retry" => (json!({"handoff_id":string(),"principal":string(),"reason":{"type":"string"}}).as_object().unwrap().clone(), vec!["handoff_id","principal"]),
+        "sop_action_resolve" => (json!({"action_id":string(),"completion_key":string(),"outcome":{"type":"string","enum":["completed","failed"]},"operation_ref":object(),"result":object(),"result_ref":object(),"error_message":{"type":"string"},"principal":string()}).as_object().unwrap().clone(), vec!["action_id","completion_key","outcome","principal"]),
+        "sop_run_cancel" => (json!({"run_id":string(),"reason":string(),"principal":string()}).as_object().unwrap().clone(), vec!["run_id","reason","principal"]),
+        "sop_outbox_consumer_register" => (json!({"consumer_id":string(),"topic":{"type":"string","const":"sop.run.terminal.v1"},"start":{"type":"string","enum":["latest","earliest"]}}).as_object().unwrap().clone(), vec!["consumer_id"]),
+        "sop_outbox_ack" => (json!({"consumer_id":string(),"event_id":string()}).as_object().unwrap().clone(), vec!["consumer_id","event_id"]),
+        "sop_outbox_compact" => (json!({"retention_days":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1,"maximum":1000}}).as_object().unwrap().clone(), vec![]),
+        _ => (Map::new(), vec![]),
+    };
+    json!({"type":"object","properties":properties,"required":required,"additionalProperties":false})
+}
 
 fn sops_dirs(root: &Path) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
@@ -430,6 +464,18 @@ fn tool(name: &str, description: &str, schema: Value, read_only: bool) -> Value 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_sop_mutations_publish_named_closed_schemas() {
+        let tools = list_tools();
+        for name in MUTATING {
+            let tool = tools.iter().find(|tool| tool["name"] == *name).unwrap_or_else(|| panic!("missing tool {name}"));
+            assert_eq!(tool["inputSchema"]["additionalProperties"], false, "{name} must reject misspelled arguments");
+            assert!(tool["inputSchema"]["properties"].as_object().is_some_and(|properties| !properties.is_empty()), "{name} must advertise named arguments");
+        }
+        let compound = tools.iter().find(|tool| tool["name"] == "sop_handoff_claim_and_advance").expect("compound handoff tool");
+        assert_eq!(compound["inputSchema"]["required"], json!(["consumer_id", "completion_key", "outcome", "principal"]));
+    }
+
     #[test]
     fn native_sop_template_read_is_bounded() {
         let root = std::env::temp_dir().join(format!("narada-sop-{}", uuid::Uuid::new_v4())); let dir = root.join("sops"); fs::create_dir_all(&dir).expect("dir"); fs::write(dir.join("demo.sop.yaml"), "schema: narada.sop.v1\nid: demo\n").expect("yaml");

@@ -30,6 +30,7 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<V
         "sop_template_unimport" => template_unimport(args, root),
         "sop_template_import_yaml" => template_import_yaml(args, root),
         "sop_handoff_claim" => handoff_claim(args, root),
+        "sop_handoff_claim_and_advance" => handoff_claim_and_advance(args, root),
         "sop_handoff_renew" => handoff_renew(args, root),
         "sop_handoff_release" => handoff_release(args, root),
         "sop_outbox_consumer_register" => outbox_consumer_register(args, root),
@@ -688,9 +689,85 @@ fn handoff_claim(args: &Map<String, Value>, root: &Path) -> Result<Value, Value>
         Ok(json!({
             "schema":"narada.sop.handoff_claim.v1",
             "status":"claimed",
-            "handoff":handoff
+            "handoff":handoff,
+            "lease_ms":lease_ms,
+            "lease_remaining_ms":lease_ms,
+            "next":{"tool":"sop_run_advance","required_from_claim":["handoff.handoff_id","handoff.run_id","handoff.step_id","handoff.lease_token"]}
         }))
     })
+}
+
+fn handoff_claim_and_advance(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let claim = handoff_claim(args, root)?;
+    if claim.get("status").and_then(Value::as_str) == Some("empty") {
+        return Ok(
+            json!({"schema":"narada.sop.handoff_claim_and_advance.v1","status":"empty","handoff":null,"advanced":false}),
+        );
+    }
+    let handoff = claim.get("handoff").cloned().ok_or_else(|| {
+        diagnostic(
+            "sop_handoff_claim_response_corrupt",
+            "sop_handoff_claim_response_corrupt",
+            json!({}),
+        )
+    })?;
+    let mut advance = Map::new();
+    for (target, source) in [
+        ("handoff_id", "handoff_id"),
+        ("run_id", "run_id"),
+        ("step_id", "step_id"),
+        ("lease_token", "lease_token"),
+    ] {
+        advance.insert(
+            target.to_string(),
+            handoff.get(source).cloned().unwrap_or(Value::Null),
+        );
+    }
+    for key in [
+        "consumer_id",
+        "completion_key",
+        "outcome",
+        "result",
+        "result_ref",
+        "error_message",
+        "principal",
+    ] {
+        if let Some(value) = args.get(key) {
+            advance.insert(key.to_string(), value.clone());
+        }
+    }
+    match crate::sop_engine::call_tool("sop_run_advance", &advance, root) {
+        Ok(result) => Ok(
+            json!({"schema":"narada.sop.handoff_claim_and_advance.v1","status":"advanced","advanced":true,"claim":claim,"result":result}),
+        ),
+        Err(mut failure) => {
+            let cleanup = handoff_release(
+                &Map::from_iter([
+                    ("handoff_id".into(), handoff["handoff_id"].clone()),
+                    (
+                        "consumer_id".into(),
+                        args.get("consumer_id").cloned().unwrap_or(Value::Null),
+                    ),
+                    ("lease_token".into(), handoff["lease_token"].clone()),
+                    (
+                        "error_message".into(),
+                        json!("compound_advance_failed_released"),
+                    ),
+                ]),
+                root,
+            );
+            if let Some(object) = failure.as_object_mut() {
+                object.insert(
+                    "compound_cleanup".into(),
+                    match cleanup {
+                        Ok(_) => json!({"status":"released","handoff_id":handoff["handoff_id"]}),
+                        Err(error) => json!({"status":"release_failed","error":error}),
+                    },
+                );
+            }
+            Err(failure)
+        }
+    }
 }
 
 fn handoff_renew(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
@@ -714,7 +791,10 @@ fn handoff_renew(args: &Map<String, Value>, root: &Path) -> Result<Value, Value>
             params![lease_expires_at, format_iso(now), handoff_id],
         )
         .map_err(|error| diagnostic("sop_handoff_renew_failed", &error.to_string(), json!({})))?;
-        Ok(public_handoff(get_handoff(db, handoff_id)?, true))
+        let mut handoff = public_handoff(get_handoff(db, handoff_id)?, true);
+        handoff["lease_ms"] = json!(lease_ms);
+        handoff["lease_remaining_ms"] = json!(lease_ms);
+        Ok(handoff)
     })
 }
 
@@ -800,7 +880,7 @@ fn require_lease(
             return Err(diagnostic(
                 "sop_handoff_lease_expired",
                 "sop_handoff_lease_expired",
-                json!({"handoff_id":handoff_id,"lease_expires_at":lease_expires_at}),
+                json!({"handoff_id":handoff_id,"lease_expires_at":lease_expires_at,"recovery":{"tool":"sop_handoff_claim","arguments":{"handoff_id":handoff_id,"consumer_id":consumer_id},"guidance":"Reclaim the expired handoff with a new lease token; the stale token cannot commit."}}),
             ));
         }
     }
@@ -2643,6 +2723,56 @@ pub(crate) fn diagnostic(code: &str, message: &str, details: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claim_and_advance_completes_without_cross_call_lease_threading() {
+        let root = std::env::temp_dir().join(format!("narada-sop-compound-{}", Uuid::new_v4()));
+        template_create(
+            json!({
+                "sop_id":"compound-demo","title":"Compound demo","steps":[{
+                    "id":"manual","executor":"agent","title":"Manual","instructions":"Complete"
+                }]
+            })
+            .as_object()
+            .unwrap(),
+            &root,
+        )
+        .expect("create");
+        template_update(
+            json!({"sop_id":"compound-demo","status":"active"})
+                .as_object()
+                .unwrap(),
+            &root,
+        )
+        .expect("activate");
+        crate::sop_engine::call_tool(
+            "sop_run_start",
+            json!({
+                "sop_id":"compound-demo","occurrence_key":"occ-1",
+                "triggered_by":"test","input":{}
+            })
+            .as_object()
+            .unwrap(),
+            &root,
+        )
+        .expect("start");
+
+        let completed = handoff_claim_and_advance(
+            json!({
+                "consumer_id":"test-agent","completion_key":"completion-1",
+                "outcome":"completed","result":{"answer":42},"principal":"agent:test"
+            })
+            .as_object()
+            .unwrap(),
+            &root,
+        )
+        .expect("claim and advance");
+        assert_eq!(completed["status"], "advanced");
+        assert_eq!(completed["advanced"], true);
+        assert_eq!(completed["result"]["status"], "completed");
+        assert_eq!(completed["claim"]["lease_ms"], 60_000);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
 
     #[test]
     fn template_registry_mutations_are_versioned_and_bounded() {
