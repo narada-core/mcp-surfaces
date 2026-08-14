@@ -84,7 +84,7 @@ pub fn list_tools() -> Vec<Value> {
         ),
         tool(
             "epistemic_graph_capture_sources",
-            "Create one bounded proposal from concise source descriptors plus typed non-source operations; reports existing identities before explicit review and admission.",
+            "Create one bounded proposal from concise source descriptors plus optional typed non-source operations; reports existing identities before explicit review and admission.",
             capture_sources_schema(),
             false,
         ),
@@ -109,7 +109,7 @@ pub fn list_tools() -> Vec<Value> {
         tool(
             "epistemic_graph_proposal_admit",
             "Append a policy-valid proposal to canonical history.",
-            json!({"type":"object","properties":{"proposal_id":{"type":"string"},"actor":{"type":"string"},"authority_basis":{"type":"object"},"expected_ledger_head":{"type":["string","null"]},"idempotency_key":{"type":"string"}},"required":["proposal_id","actor","authority_basis","expected_ledger_head","idempotency_key"],"additionalProperties":false}),
+            json!({"type":"object","properties":{"proposal_id":{"type":"string"},"actor":{"type":"string"},"authority_basis":{"type":"object"},"expected_ledger_head":{"type":["string","null"],"description":"Optional explicit CAS boundary; omitted means the current head."},"idempotency_key":{"type":"string","description":"Optional override; omitted values use deterministic proposal admission identity."}},"required":["proposal_id","actor","authority_basis"],"additionalProperties":false}),
             false,
         ),
         tool(
@@ -383,7 +383,7 @@ fn normalize_operations(operations: &[Value]) -> Result<Vec<Value>, Value> {
 }
 
 fn resolve_expected_ledger_head(root: &Path, supplied: Option<&Value>) -> Result<Value, Value> {
-    if supplied.and_then(Value::as_str) == Some("latest") {
+    if supplied.is_none() || supplied.and_then(Value::as_str) == Some("latest") {
         return Ok(ledger_head(root)?.map(Value::String).unwrap_or(Value::Null));
     }
     Ok(supplied.cloned().unwrap_or(Value::Null))
@@ -583,12 +583,12 @@ fn proposal_resubmit_schema() -> Value {
             "source_proposal_id":{"type":"string","minLength":1},
             "actor":{"type":"string","minLength":1},
             "authority_basis":{"type":"object","minProperties":1},
-            "idempotency_key":{"type":"string","minLength":1},
-            "expected_ledger_head":{"type":["string","null"]},
+            "idempotency_key":{"type":"string","minLength":1,"description":"Optional override; omitted values use deterministic content-hash idempotency."},
+            "expected_ledger_head":{"type":["string","null"],"description":"Optional explicit CAS boundary; omitted means the current head."},
             "drop_operation_ids":{"type":"array","maxItems":200,"uniqueItems":true,"items":{"type":"string","minLength":1}},
             "replacements":{"type":"array","maxItems":200,"items":operation_items}
         },
-        "required":["source_proposal_id","actor","authority_basis","idempotency_key","expected_ledger_head"],
+        "required":["source_proposal_id","actor","authority_basis"],
         "additionalProperties":false
     })
 }
@@ -739,8 +739,34 @@ fn proposal_admit(root: &Path, args: &Map<String, Value>) -> Result<Value, Value
     prepare(root)?;
     let id = required(args, "proposal_id")?;
     let actor = required(args, "actor")?;
-    let idem = required(args, "idempotency_key")?;
     let proposal = load_proposal(root, &id)?;
+    let idem = args
+        .get("idempotency_key")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            derived_idempotency_key(
+                "admission",
+                &json!({"proposal_id":id,"proposal_digest":proposal["digest"]}),
+            )
+        });
+    let idem_path = ledger(root).join(format!("idem-{}.txt", safe_name(&idem)));
+    if idem_path.exists() {
+        let event_id =
+            fs::read_to_string(&idem_path).map_err(io_error("ledger_idempotency_read_failed"))?;
+        let event = read_json(&ledger(root).join(format!("{}.json", event_id.trim())))?;
+        if event.get("proposal_id") != Some(&json!(id))
+            || event.get("proposal_digest") != proposal.get("digest")
+        {
+            return Err(error(
+                "admission_idempotency_conflict",
+                "idempotency key already names a different proposal admission",
+                json!({"idempotency_key":idem,"existing_event_id":event_id.trim()}),
+            ));
+        }
+        return Ok(admission_receipt(&event));
+    }
     let review = proposal_review(root, &Map::from_iter([("proposal_id".into(), json!(id))]))?;
     if review["status"] != "policy_valid" {
         return Err(error(
@@ -760,13 +786,6 @@ fn proposal_admit(root: &Path, args: &Map<String, Value>) -> Result<Value, Value
             "expected ledger head does not match",
             json!({"expected":expected,"proposal_expected":proposal.get("expected_ledger_head"),"actual":current}),
         ));
-    }
-    let idem_path = ledger(root).join(format!("idem-{}.txt", safe_name(&idem)));
-    if idem_path.exists() {
-        let event_id =
-            fs::read_to_string(&idem_path).map_err(io_error("ledger_idempotency_read_failed"))?;
-        let event = read_json(&ledger(root).join(format!("{}.json", event_id.trim())))?;
-        return Ok(admission_receipt(&event));
     }
     let seq = ledger_files(root)?.len() as u64 + 1;
     let event_id = format!("ev-{seq:012}-{}", Uuid::new_v4());
@@ -1541,7 +1560,7 @@ fn guidance() -> Value {
         "schema":"narada.epistemic.guidance.v2",
         "purpose":"Preserve evolving problem situations, not certify truth.",
         "workflow":[
-            {"step":1,"tool":"epistemic_graph_submit_review_admit","preferred":true,"why":"Perform the ordinary submit, preserved policy review, and admission workflow atomically. Use expected_ledger_head latest and omit idempotency_key for deterministic retry safety."},
+            {"step":1,"tool":"epistemic_graph_submit_review_admit","preferred":true,"why":"Perform the ordinary submit, preserved policy review, and admission workflow atomically. Omit expected_ledger_head to snapshot the current head and omit idempotency_key for deterministic retry safety."},
             {"step":2,"tool":"epistemic_graph_capture_sources","alternative":true,"why":"Create a reviewable source proposal when manual review before admission is intended; operations may be empty for pure source capture."},
             {"step":3,"tool":"epistemic_graph_proposal_submit","alternative":true,"why":"Persist a reviewable proposal without source batching."},
             {"step":4,"tools":["epistemic_graph_proposal_review","epistemic_graph_proposal_admit"],"manual_only":true,"why":"Use separate calls only when the operator wants an explicit pause between proposal, review, and admission."},
@@ -1559,15 +1578,14 @@ fn guidance() -> Value {
             "Do not manufacture an assessment merely to attach provenance; conjecture plus derived_from is valid."
         ],
         "minimal_example":{
-            "submit":{"actor":"agent-id","authority_basis":{"kind":"operator_request","summary":"Capture one bounded source claim."},"idempotency_key":"stable-capture-key-v1","expected_ledger_head":null,"operations":[
-                {"op":"entity.declare","entity_id":"source:example-v1","kind":"source","title":"Example source","version":"1","locator":"src/ledger/example.md"},
-                {"op":"entity.declare","entity_id":"conjecture:example","kind":"conjecture","title":"Example explanatory conjecture"},
-                {"op":"relation.declare","relation_id":"rel:example-derived-from-source","relation_type":"derived_from","source_id":"conjecture:example","target_id":"source:example-v1"}
-            ]},
-            "review":{"proposal_id":"<proposal_id from submit>"},
-            "admit":{"proposal_id":"<proposal_id>","actor":"agent-id","authority_basis":{"kind":"operator_request","summary":"Admit the reviewed contribution; this does not certify truth."},"expected_ledger_head":null,"idempotency_key":"stable-admission-key-v1"}
+            "tool":"epistemic_graph_submit_review_admit",
+            "arguments":{"actor":"agent-id","authority_basis":{"kind":"operator_request","summary":"Capture one bounded source claim."},"operations":[
+                {"op":"entity.declare","local_ref":"source","kind":"source","title":"Example source","version":"1","locator":"src/ledger/example.md"},
+                {"op":"entity.declare","local_ref":"conjecture","kind":"conjecture","title":"Example explanatory conjecture"},
+                {"op":"relation.declare","relation_type":"derived_from","source_ref":"conjecture","target_ref":"source"}
+            ]}
         },
-        "concurrency_rule":"Use expected_ledger_head latest to snapshot the live head during submission while retaining CAS protection through admission. Supply a concrete status.ledger_head only when an external read must be the concurrency boundary. If review reports stale, query again and submit a new proposal; do not rewrite the immutable proposal.",
+        "concurrency_rule":"Omit expected_ledger_head to snapshot the live head during submission while retaining CAS protection through admission. Supply a concrete status.ledger_head only when an external read must be the concurrency boundary. If review reports stale, query again and submit a new proposal; do not rewrite the immutable proposal.",
         "admission_meaning":"policy-valid contribution; never truth certification",
         "search_boundary":"Use external providers for discovery. Record a sweep only when it explains coverage or changes the graph.",
         "problem_policy":"Transform apparent solutions into successor problems; record closure only as an attributed assessment."
@@ -1589,17 +1607,17 @@ fn operation_schema() -> Value {
     ]})
 }
 fn proposal_schema() -> Value {
-    json!({"type":"object","properties":{"actor":non_empty_string(),"authority_basis":{"type":"object","description":"Why this actor may propose the contribution.","minProperties":1},"idempotency_key":{"type":"string","minLength":1,"description":"Optional override; omitted values use deterministic content-hash idempotency."},"expected_ledger_head":{"type":["string","null"],"description":"Use latest to snapshot the current head at submission, a specific head for explicit CAS, or null only for an empty graph."},"operations":{"type":"array","minItems":1,"maxItems":200,"items":operation_schema()}},"required":["actor","authority_basis","expected_ledger_head","operations"],"additionalProperties":false})
+    json!({"type":"object","properties":{"actor":non_empty_string(),"authority_basis":{"type":"object","description":"Why this actor may propose the contribution.","minProperties":1},"idempotency_key":{"type":"string","minLength":1,"description":"Optional override; omitted values use deterministic content-hash idempotency."},"expected_ledger_head":{"type":["string","null"],"description":"Optional explicit CAS boundary; omitted means the current head. Use null only for an empty graph."},"operations":{"type":"array","minItems":1,"maxItems":200,"items":operation_schema()}},"required":["actor","authority_basis","operations"],"additionalProperties":false})
 }
 fn capture_sources_schema() -> Value {
     json!({"type":"object","properties":{
         "actor":non_empty_string(),
         "authority_basis":{"type":"object","description":"Why this actor may propose the contribution.","minProperties":1},
         "idempotency_key":{"type":"string","minLength":1,"description":"Optional override; omitted values use deterministic content-hash idempotency."},
-        "expected_ledger_head":{"type":["string","null"],"description":"Use latest to snapshot the current head at submission, a specific head for explicit CAS, or null only for an empty graph."},
+        "expected_ledger_head":{"type":["string","null"],"description":"Optional explicit CAS boundary; omitted means the current head. Use null only for an empty graph."},
         "sources":{"type":"array","minItems":1,"maxItems":100,"items":{"type":"object","properties":{"source_id":non_empty_string(),"title":non_empty_string(),"version":non_empty_string(),"locator":non_empty_string()},"required":["source_id","title","version","locator"],"additionalProperties":false}},
         "operations":{"type":"array","maxItems":199,"default":[],"items":operation_schema()}
-    },"required":["actor","authority_basis","expected_ledger_head","sources"],"additionalProperties":false})
+    },"required":["actor","authority_basis","sources"],"additionalProperties":false})
 }
 fn proposal_id_schema() -> Value {
     json!({"type":"object","properties":{"proposal_id":{"type":"string"}},"required":["proposal_id"],"additionalProperties":false})
@@ -1650,11 +1668,15 @@ mod tests {
         let value = guidance();
         assert_eq!(value["schema"], "narada.epistemic.guidance.v2");
         assert_eq!(
-            value.pointer("/minimal_example/submit/operations/0/op"),
+            value.pointer("/minimal_example/tool"),
+            Some(&json!("epistemic_graph_submit_review_admit"))
+        );
+        assert_eq!(
+            value.pointer("/minimal_example/arguments/operations/0/op"),
             Some(&json!("entity.declare"))
         );
         assert_eq!(
-            value.pointer("/minimal_example/submit/operations/2/op"),
+            value.pointer("/minimal_example/arguments/operations/2/op"),
             Some(&json!("relation.declare"))
         );
         assert!(value["concurrency_rule"]
@@ -1875,7 +1897,7 @@ mod tests {
     #[test]
     fn proposal_admission_rebuilds_projection_and_preserves_truth_boundary() {
         let root = std::env::temp_dir().join(format!("epistemic-test-{}", Uuid::new_v4()));
-        let proposal=proposal_submit(&root,&Map::from_iter([("actor".into(),json!("nima")),("authority_basis".into(),json!({"kind":"operator_request"})),("idempotency_key".into(),json!("p1")),("expected_ledger_head".into(),Value::Null),("operations".into(),json!([{"op":"entity.declare","entity_id":"problem-1","kind":"problem","title":"What explains X?"}]))])).unwrap();
+        let proposal=proposal_submit(&root,&Map::from_iter([("actor".into(),json!("nima")),("authority_basis".into(),json!({"kind":"operator_request"})),("operations".into(),json!([{"op":"entity.declare","entity_id":"problem-1","kind":"problem","title":"What explains X?"}]))])).unwrap();
         assert_eq!(
             proposal["schema"],
             "narada.epistemic.proposal_submission.v1"
@@ -1889,8 +1911,6 @@ mod tests {
                 ("proposal_id".into(), json!(id)),
                 ("actor".into(), json!("nima")),
                 ("authority_basis".into(), json!({"kind":"operator_request"})),
-                ("expected_ledger_head".into(), Value::Null),
-                ("idempotency_key".into(), json!("a1")),
             ]),
         )
         .unwrap();
@@ -1900,6 +1920,16 @@ mod tests {
         assert!(event.get("operations").is_none());
         assert_eq!(event["ledger_head"].as_str().map(str::len), Some(64));
         assert_eq!(event["certifies_truth"], false);
+        let retry = proposal_admit(
+            &root,
+            &Map::from_iter([
+                ("proposal_id".into(), json!(id)),
+                ("actor".into(), json!("nima")),
+                ("authority_basis".into(), json!({"kind":"operator_request"})),
+            ]),
+        )
+        .expect("deterministic admission retry");
+        assert_eq!(retry["event_id"], event["event_id"]);
         let admitted = proposal_read(&root, &Map::from_iter([("proposal_id".into(), json!(id))]))
             .expect("admitted proposal readback");
         assert_eq!(admitted["status"], "admitted");
@@ -2037,7 +2067,6 @@ mod tests {
             &Map::from_iter([
                 ("actor".into(), json!("tester")),
                 ("authority_basis".into(), json!({"kind":"test"})),
-                ("expected_ledger_head".into(), json!("latest")),
                 ("sources".into(), json!([{"source_id":"source:only","title":"Only source","version":"1","locator":"ledger/only.md"}])),
             ]),
         )
@@ -2053,7 +2082,6 @@ mod tests {
         let args = Map::from_iter([
             ("actor".into(), json!("tester")),
             ("authority_basis".into(), json!({"kind":"test"})),
-            ("expected_ledger_head".into(), json!("latest")),
             (
                 "operations".into(),
                 json!([
