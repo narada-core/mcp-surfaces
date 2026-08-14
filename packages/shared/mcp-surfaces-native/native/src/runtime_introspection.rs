@@ -28,16 +28,16 @@ pub fn list_tools() -> Vec<Value> {
     vec![
         guidance_tool(),
         tool("runtime_introspection_formats", "List the read-only inline input formats accepted by the runtime introspection surface.", json!({"type":"object","properties":{},"additionalProperties":false})),
-        tool("runtime_introspection_top_events", "Return the N largest normalized runtime trace events by serialized size.", json!({"type":"object","properties":{"analysis":{"type":"object","additionalProperties":true},"limit":{"type":"integer","minimum":1,"maximum":200}},"additionalProperties":false})),
+        tool("runtime_introspection_top_events", "Analyze inline input and return the N largest normalized runtime trace events by serialized size.", trace_query_schema(json!({"limit":{"type":"integer","minimum":1,"maximum":200}}))),
         tool("runtime_introspection_analyze_trace", "Analyze saved or inline runtime trace/session JSONL composition into Narada runtime introspection metrics.", input_schema()),
         tool("runtime_introspection_analyze", "Analyze inline runtime events or Codex adapter records into Narada runtime composition metrics.", input_schema()),
-        tool("runtime_introspection_top", "Return ranked runtime metrics from an existing analysis or inline input events.", json!({"type":"object","properties":{"analysis":{"type":"object","additionalProperties":true},"format":{"type":"string","enum":FORMATS},"events":{"type":"array","items":{"type":"object","additionalProperties":true}},"jsonl":{"type":"string"},"transcript":{"type":"array","items":{"type":"object","additionalProperties":true}},"dimension":{"type":"string","enum":DIMENSIONS},"limit":{"type":"integer","minimum":1,"maximum":50},"sort":{"type":"string","enum":["count","duration_ms","errors"]}},"additionalProperties":false})),
-        tool("runtime_introspection_show", "Show a focused read-only view from an existing analysis or inline input events.", json!({"type":"object","properties":{"analysis":{"type":"object","additionalProperties":true},"format":{"type":"string","enum":FORMATS},"events":{"type":"array","items":{"type":"object","additionalProperties":true}},"jsonl":{"type":"string"},"transcript":{"type":"array","items":{"type":"object","additionalProperties":true}},"view":{"type":"string","enum":VIEWS},"limit":{"type":"integer","minimum":1,"maximum":200}},"additionalProperties":false})),
-        tool("runtime_introspection_show_event", "Show one normalized runtime trace event by event_id or zero-based index.", json!({"type":"object","properties":{"analysis":{"type":"object","additionalProperties":true},"format":{"type":"string","enum":FORMATS},"events":{"type":"array","items":{"type":"object","additionalProperties":true}},"jsonl":{"type":"string"},"transcript":{"type":"array","items":{"type":"object","additionalProperties":true}},"event_id":{"type":"string"},"index":{"type":"integer","minimum":0}},"additionalProperties":false})),
+        tool("runtime_introspection_top", "Analyze inline input and return ranked runtime metrics in one call.", trace_query_schema(json!({"dimension":{"type":"string","enum":DIMENSIONS},"limit":{"type":"integer","minimum":1,"maximum":50},"sort":{"type":"string","enum":["count","duration_ms","errors"]}}))),
+        tool("runtime_introspection_show", "Analyze inline input and show one focused read-only view in one call.", trace_query_schema(json!({"view":{"type":"string","enum":VIEWS},"limit":{"type":"integer","minimum":1,"maximum":200}}))),
+        tool("runtime_introspection_show_event", "Analyze inline input and show one normalized event by event_id or zero-based index.", trace_query_schema(json!({"event_id":{"type":"string","minLength":1,"maxLength":512},"index":{"type":"integer","minimum":0,"maximum":499}}))),
         memory_tool("runtime_introspection_memory_status", "Show freshness, coverage, and incident counts from the canonical server-bound Site runtime observer store.", json!({"type":"object","properties":{},"additionalProperties":false}), &[]),
         memory_tool("runtime_introspection_memory_owners", "List bounded runtime resource owners and their latest process/worker measurements.", json!({"type":"object","properties":{"active_only":{"type":"boolean"},"limit":{"type":"integer","minimum":1,"maximum":200}},"additionalProperties":false}), &[]),
         memory_tool("runtime_introspection_memory_timeline", "Read a bounded process and worker memory timeline for one exact runtime owner.", json!({"type":"object","properties":{"owner_id":{"type":"string"},"before_ms":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":500}},"required":["owner_id"],"additionalProperties":false}), &["owner_id"]),
-        memory_tool("runtime_introspection_memory_attribution", "Explain current V8-attributed and residual process memory for one exact owner without double-counting ArrayBuffers.", json!({"type":"object","properties":{"owner_id":{"type":"string"}},"required":["owner_id"],"additionalProperties":false}), &["owner_id"]),
+        memory_tool("runtime_introspection_memory_attribution", "Explain current worker-runtime-attributed and residual process memory for one exact owner without double-counting ArrayBuffers.", json!({"type":"object","properties":{"owner_id":{"type":"string"}},"required":["owner_id"],"additionalProperties":false}), &["owner_id"]),
         memory_tool("runtime_introspection_memory_incidents", "List bounded memory incidents from the canonical observer store.", json!({"type":"object","properties":{"status":{"type":"string","enum":["open","reviewed","dismissed","all"]},"limit":{"type":"integer","minimum":1,"maximum":200}},"additionalProperties":false}), &[]),
         memory_tool("runtime_introspection_memory_incident_show", "Show one memory incident with sanitized evidence and artifact metadata.", json!({"type":"object","properties":{"incident_id":{"type":"string"}},"required":["incident_id"],"additionalProperties":false}), &["incident_id"]),
     ]
@@ -68,7 +68,7 @@ fn guidance(args: &Map<String, Value>) -> Value {
         "guidance_tool":"runtime_introspection_guidance",
         "purpose":"Analyze bounded runtime events and observer evidence without actuation.",
         "requested":{"workflow":args.get("workflow").cloned().unwrap_or(Value::Null),"tool":args.get("tool").cloned().unwrap_or(Value::Null)},
-        "first_use":["Select an explicit input format.","Analyze before ranking or showing a view.","Treat structuredContent as authoritative evidence."],
+        "first_use":["Select an explicit input format.","Use top, show, top_events, or show_event directly with the inline input; a separate analyze call is unnecessary.","Treat structuredContent as authoritative evidence."],
         "boundaries":["The surface is read-only.","Inputs are inline or server-bound observer evidence; no arbitrary commands are executed.","All list and timeline results are bounded."]
     })
 }
@@ -274,14 +274,6 @@ fn show_event(args: &Map<String, Value>) -> Result<Value, Value> {
 }
 
 fn analysis_from_args(args: &Map<String, Value>) -> Result<Value, Value> {
-    if let Some(analysis) = args.get("analysis").filter(|v| v.is_object()) {
-        let schema = analysis.get("schema").and_then(Value::as_str).unwrap_or("");
-        if schema == "narada.runtime_introspection.analysis.v0"
-            || schema == "narada.runtime_introspection.analysis.v1"
-        {
-            return Ok(analysis.clone());
-        }
-    }
     analyze(args)
 }
 
@@ -612,7 +604,63 @@ fn now_iso() -> String {
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
 }
 fn input_schema() -> Value {
-    json!({"type":"object","properties":{"analysis_id":{"type":"string"},"format":{"type":"string","enum":FORMATS},"events":{"type":"array","items":{"type":"object","additionalProperties":false}},"jsonl":{"type":"string"},"transcript":{"type":"array","items":{"type":"object","additionalProperties":false}}},"additionalProperties":false})
+    trace_query_schema(json!({}))
+}
+fn trace_query_schema(extra: Value) -> Value {
+    let mut properties = Map::new();
+    properties.insert(
+        "analysis_id".to_string(),
+        json!({"type":"string","minLength":1,"maxLength":512}),
+    );
+    properties.insert(
+        "format".to_string(),
+        json!({"type":"string","enum":FORMATS}),
+    );
+    properties.insert(
+        "events".to_string(),
+        json!({"type":"array","maxItems":500,"items":event_input_schema()}),
+    );
+    properties.insert(
+        "jsonl".to_string(),
+        json!({"type":"string","maxLength":1048576}),
+    );
+    properties.insert(
+        "transcript".to_string(),
+        json!({"type":"array","maxItems":500,"items":event_input_schema()}),
+    );
+    if let Some(extra) = extra.as_object() {
+        properties.extend(extra.clone());
+    }
+    json!({"type":"object","properties":properties,"additionalProperties":false})
+}
+fn event_input_schema() -> Value {
+    json!({
+        "type":"object",
+        "properties":{
+            "event_id":{"type":"string","maxLength":512},
+            "id":{"type":"string","maxLength":512},
+            "timestamp":{"type":"string","maxLength":128},
+            "input_adapter":{"type":"string","maxLength":256},
+            "source":{"type":"string","maxLength":256},
+            "kind":{"type":"string","maxLength":256},
+            "type":{"type":"string","maxLength":256},
+            "event":{"type":"string","maxLength":256},
+            "role":{"type":"string","maxLength":256},
+            "status":{"type":"string","maxLength":256},
+            "outcome":{"type":"string","maxLength":256},
+            "surface_id":{"type":"string","maxLength":512},
+            "tool_name":{"type":"string","maxLength":512},
+            "name":{"type":"string","maxLength":512},
+            "namespace":{"type":"string","maxLength":512},
+            "duration_ms":{"type":"number","minimum":0},
+            "duration":{"type":"number","minimum":0},
+            "elapsed_ms":{"type":"number","minimum":0},
+            "message":{"type":"string","maxLength":32768},
+            "content":{"type":"string","maxLength":32768},
+            "error":{"type":"string","maxLength":32768}
+        },
+        "additionalProperties":false
+    })
 }
 fn tool(name: &str, description: &str, schema: Value) -> Value {
     json!({"name":name,"description":description,"inputSchema":schema,"annotations":{"title":name,"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false},"outputSchema":{"type":"object","additionalProperties":true}})
@@ -653,16 +701,48 @@ fn open_database(root: &Path) -> Result<Connection, Value> {
     })
 }
 fn memory_status(root: &Path) -> Result<Value, Value> {
+    let path = database_path(root);
+    let database_updated_at = std::fs::metadata(&path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .map(OffsetDateTime::from)
+        .and_then(|instant| {
+            instant
+                .format(&time::format_description::well_known::Rfc3339)
+                .ok()
+        });
     let db = open_database(root)?;
     let process=query_one(&db,"SELECT COUNT(*) samples,MAX(sampled_at_ms) last_sample_at_ms,COUNT(DISTINCT owner_id) sampled_owners FROM process_samples",params![])?;
     let workers=query_one(&db,"SELECT COUNT(*) samples,MAX(sampled_at_ms) last_sample_at_ms,COUNT(DISTINCT owner_id) sampled_owners FROM worker_samples",params![])?;
     let owners=query_one(&db,"SELECT COUNT(*) owners,SUM(CASE WHEN active=1 THEN 1 ELSE 0 END) active_owners FROM owners",params![])?;
     let incidents=query_one(&db,"SELECT COUNT(*) incidents,SUM(CASE WHEN status='open' THEN 1 ELSE 0 END) open_incidents FROM incidents",params![])?;
+    let observer = observer_overhead(&db)?;
     let last = process["last_sample_at_ms"]
         .as_i64()
         .unwrap_or(0)
         .max(workers["last_sample_at_ms"].as_i64().unwrap_or(0));
-    let mut result = json!({"schema":"narada.runtime_introspection.memory_status.v1","status":if last==0 {"empty"} else {"ready"},"observed_at":now_iso(),"last_sample_at":if last>0 {json!(last)} else {Value::Null},"process":process,"workers":workers,"authority":"server_bound_site","response":"evidence_only_no_automatic_actuation"});
+    let now_ms = (OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
+    let status = if last == 0 {
+        "empty"
+    } else if now_ms.saturating_sub(last) > 30_000 {
+        "stale"
+    } else {
+        "ready"
+    };
+    let last_sample_at = if last > 0 {
+        OffsetDateTime::from_unix_timestamp_nanos(last as i128 * 1_000_000)
+            .ok()
+            .and_then(|instant| {
+                instant
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .ok()
+            })
+            .map(Value::String)
+            .unwrap_or(Value::Null)
+    } else {
+        Value::Null
+    };
+    let mut result = json!({"schema":"narada.runtime_introspection.memory_status.v1","status":status,"observed_at":now_iso(),"database_updated_at":database_updated_at,"last_sample_at":last_sample_at,"process":process,"workers":workers,"observer":observer,"authority":"server_bound_site","response":"evidence_only_no_automatic_actuation"});
     if let Some(obj) = result.as_object_mut() {
         obj.extend(owners);
         obj.extend(incidents);
@@ -677,7 +757,7 @@ fn memory_owners(args: &Map<String, Value>, root: &Path) -> Result<Value, Value>
     } else {
         1
     };
-    let items=query_rows(&db,"SELECT o.owner_id,o.site_id,o.authority_ref,o.owner_kind,o.pid,o.process_started_at,o.parent_owner_id,o.surface_id,o.instance_id,o.generation_id,o.carrier_session_id,o.executable_name,o.observed_at,o.active FROM owners o WHERE (?1=0 OR active=1) ORDER BY active DESC,observed_at DESC LIMIT ?2",params![active,limit])?;
+    let items=query_rows(&db,"SELECT o.owner_id,o.site_id,o.authority_ref,o.owner_kind,o.pid,o.process_started_at,CAST(o.process_creation_ticks AS TEXT) process_creation_ticks,o.parent_owner_id,o.surface_id,o.instance_id,o.generation_id,o.carrier_session_id,o.executable_name,o.observed_at,o.active,(SELECT private_bytes FROM process_samples p WHERE p.owner_id=COALESCE(o.parent_owner_id,o.owner_id) ORDER BY sampled_at_ms DESC LIMIT 1) private_bytes,(SELECT working_set_bytes FROM process_samples p WHERE p.owner_id=COALESCE(o.parent_owner_id,o.owner_id) ORDER BY sampled_at_ms DESC LIMIT 1) working_set_bytes,(SELECT heap_used_bytes FROM worker_samples w WHERE w.owner_id=o.owner_id ORDER BY sampled_at_ms DESC LIMIT 1) heap_used_bytes,(SELECT sampled_at_ms FROM process_samples p WHERE p.owner_id=COALESCE(o.parent_owner_id,o.owner_id) ORDER BY sampled_at_ms DESC LIMIT 1) last_sample_at_ms FROM owners o WHERE (?1=0 OR active=1) ORDER BY active DESC,last_sample_at_ms DESC LIMIT ?2",params![active,limit])?;
     Ok(
         json!({"schema":"narada.runtime_introspection.memory_owners.v1","items":items,"count":items.len(),"limit":limit}),
     )
@@ -698,7 +778,7 @@ fn memory_timeline(args: &Map<String, Value>, root: &Path) -> Result<Value, Valu
 fn memory_attribution(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     let db = open_database(root)?;
     let owner = require_string(args, "owner_id")?;
-    let process=query_one(&db,"SELECT * FROM process_samples WHERE owner_id IN (?1,COALESCE((SELECT parent_owner_id FROM owners WHERE owner_id=?1),?1)) ORDER BY sampled_at_ms DESC LIMIT 1",params![owner])?;
+    let process=query_one(&db,"SELECT * FROM process_samples WHERE owner_id IN (?1,COALESCE((SELECT parent_owner_id FROM owners WHERE owner_id=?1),?1)) ORDER BY CASE WHEN owner_id=?1 THEN 0 ELSE 1 END,sampled_at_ms DESC LIMIT 1",params![owner])?;
     let worker = query_one(
         &db,
         "SELECT * FROM worker_samples WHERE owner_id=?1 ORDER BY sampled_at_ms DESC LIMIT 1",
@@ -749,18 +829,113 @@ fn memory_incident_show(args: &Map<String, Value>, root: &Path) -> Result<Value,
         ));
     }
     let mut evidence=query_rows(&db,"SELECT evidence_id,created_at_ms,evidence_type,payload_json FROM evidence WHERE incident_id=?1 ORDER BY created_at_ms",params![id])?;
-    for item in &mut evidence { project_evidence_payload(item)?; }
+    for item in &mut evidence {
+        project_evidence_payload(item)?;
+    }
     let artifacts=query_rows(&db,"SELECT artifact_id,created_at_ms,path,kind,bytes FROM artifacts WHERE incident_id=?1 ORDER BY created_at_ms",params![id])?;
     Ok(
         json!({"schema":"narada.runtime_introspection.memory_incident.v1","incident":incident,"evidence":evidence,"artifacts":artifacts}),
     )
 }
 fn project_evidence_payload(item: &mut Value) -> Result<(), Value> {
-    let object = item.as_object_mut().ok_or_else(|| diagnostic("runtime_introspection_memory_evidence_corrupt","runtime_introspection_memory_evidence_corrupt"))?;
-    let text = object.remove("payload_json").and_then(|value|value.as_str().map(ToString::to_string)).ok_or_else(|| diagnostic("runtime_introspection_memory_evidence_corrupt","runtime_introspection_memory_evidence_corrupt"))?;
-    let payload = serde_json::from_str::<Value>(&text).map_err(|_| diagnostic("runtime_introspection_memory_evidence_corrupt","runtime_introspection_memory_evidence_corrupt"))?;
-    object.insert("payload".to_string(),payload);
+    let object = item.as_object_mut().ok_or_else(|| {
+        diagnostic(
+            "runtime_introspection_memory_evidence_corrupt",
+            "runtime_introspection_memory_evidence_corrupt",
+        )
+    })?;
+    let text = object
+        .remove("payload_json")
+        .and_then(|value| value.as_str().map(ToString::to_string))
+        .ok_or_else(|| {
+            diagnostic(
+                "runtime_introspection_memory_evidence_corrupt",
+                "runtime_introspection_memory_evidence_corrupt",
+            )
+        })?;
+    let payload = serde_json::from_str::<Value>(&text).map_err(|_| {
+        diagnostic(
+            "runtime_introspection_memory_evidence_corrupt",
+            "runtime_introspection_memory_evidence_corrupt",
+        )
+    })?;
+    object.insert("payload".to_string(), payload);
     Ok(())
+}
+fn table_exists(db: &Connection, name: &str) -> Result<bool, Value> {
+    let row = query_one(
+        db,
+        "SELECT 1 present FROM sqlite_master WHERE type='table' AND name=?1",
+        params![name],
+    )?;
+    Ok(row.get("present").and_then(Value::as_i64) == Some(1))
+}
+fn observer_overhead(db: &Connection) -> Result<Value, Value> {
+    if !table_exists(db, "observer_cycles")? {
+        return Ok(
+            json!({"cycles":0,"last_cycle_at_ms":Value::Null,"average_cycle_duration_ms":Value::Null,"p95_cycle_duration_ms":Value::Null,"maximum_cycle_duration_ms":Value::Null,"average_cpu_percent":Value::Null,"average_single_core_cpu_percent":Value::Null,"logical_processor_count":Value::Null,"private_bytes":Value::Null,"sampled_processes":Value::Null}),
+        );
+    }
+    let cutoff =
+        (OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64 - 60 * 60_000;
+    let cycles = query_rows(db, "SELECT started_at_ms,duration_ms,sampled_processes FROM observer_cycles WHERE started_at_ms>=?1 ORDER BY started_at_ms DESC LIMIT 360", params![cutoff])?;
+    let mut durations = cycles
+        .iter()
+        .filter_map(|row| {
+            row["duration_ms"]
+                .as_f64()
+                .or_else(|| row["duration_ms"].as_i64().map(|value| value as f64))
+        })
+        .collect::<Vec<_>>();
+    durations.sort_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal));
+    let process = query_rows(db, "SELECT sampled_at_ms,cpu_time_ms,private_bytes FROM process_samples WHERE owner_id='observer-overhead' AND sampled_at_ms>=?1 ORDER BY sampled_at_ms ASC", params![cutoff])?;
+    let first = process.first();
+    let last = process.last();
+    let elapsed = first
+        .zip(last)
+        .map(|(first, last)| {
+            number_field(last.as_object().unwrap_or(&Map::new()), "sampled_at_ms")
+                - number_field(first.as_object().unwrap_or(&Map::new()), "sampled_at_ms")
+        })
+        .unwrap_or(0);
+    let cpu = first
+        .zip(last)
+        .map(|(first, last)| {
+            number_field(last.as_object().unwrap_or(&Map::new()), "cpu_time_ms")
+                - number_field(first.as_object().unwrap_or(&Map::new()), "cpu_time_ms")
+        })
+        .unwrap_or(0);
+    let logical = std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(1);
+    let single_core = if elapsed > 0 {
+        Some(cpu as f64 / elapsed as f64 * 100.0)
+    } else {
+        None
+    };
+    let average = if durations.is_empty() {
+        None
+    } else {
+        Some((durations.iter().sum::<f64>() / durations.len() as f64).round() as i64)
+    };
+    let p95 = if durations.is_empty() {
+        None
+    } else {
+        Some(durations[((durations.len() as f64 * 0.95).ceil() as usize).saturating_sub(1)])
+    };
+    Ok(json!({
+        "cycles":cycles.len(),
+        "last_cycle_at_ms":cycles.first().map(|row|row["started_at_ms"].clone()).unwrap_or(Value::Null),
+        "average_cycle_duration_ms":average,
+        "p95_cycle_duration_ms":p95,
+        "maximum_cycle_duration_ms":durations.last().copied(),
+        "average_cpu_percent":single_core.map(|value| ((value / logical as f64) * 1000.0).round() / 1000.0),
+        "average_single_core_cpu_percent":single_core.map(|value| (value * 1000.0).round() / 1000.0),
+        "logical_processor_count":logical,
+        "private_bytes":last.map(|row|row["private_bytes"].clone()).unwrap_or(Value::Null),
+        "sampled_processes":cycles.first().map(|row|row["sampled_processes"].clone()).unwrap_or(Value::Null),
+        "window":"last_hour_bounded_to_360_cycles"
+    }))
 }
 fn number_field(value: &Map<String, Value>, key: &str) -> i64 {
     value
