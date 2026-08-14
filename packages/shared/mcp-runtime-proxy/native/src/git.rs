@@ -437,6 +437,14 @@ fn tool_input_schema(name: &str) -> Value {
     object["additionalProperties"] = json!(false);
     object["title"] = json!(format!("{name}.input"));
     object["maxProperties"] = json!(64);
+    if object.get("anyOf").is_some() {
+        object.as_object_mut().unwrap().remove("type");
+        if let Some(alternatives) = object.get_mut("anyOf").and_then(Value::as_array_mut) {
+            for alternative in alternatives {
+                alternative["type"] = json!("object");
+            }
+        }
+    }
     bound_schema(&mut object, Some(name));
     object
 }
@@ -2492,7 +2500,13 @@ mod tests {
         let tools = list_tools();
         assert_eq!(tools.len(), 17);
         for tool in &tools {
-            assert_eq!(tool["inputSchema"]["type"], "object");
+            if let Some(alternatives) = tool["inputSchema"]["anyOf"].as_array() {
+                assert!(alternatives
+                    .iter()
+                    .all(|alternative| alternative["type"] == "object"));
+            } else {
+                assert_eq!(tool["inputSchema"]["type"], "object");
+            }
             assert_eq!(tool["inputSchema"]["additionalProperties"], false);
         }
         let commit = tools
@@ -2548,6 +2562,17 @@ mod tests {
             assert_eq!(failure.code, "git_invalid_arguments");
             assert_eq!(failure.details["reason"], "unknown_field:unexpected");
         }
+    }
+
+    #[test]
+    fn output_reader_any_of_branches_own_their_object_types() {
+        let schema = tool_input_schema("git_output_show");
+        assert!(schema.get("type").is_none());
+        let alternatives = schema["anyOf"].as_array().expect("anyOf branches");
+        assert_eq!(alternatives.len(), 2);
+        assert!(alternatives
+            .iter()
+            .all(|alternative| alternative["type"] == "object"));
     }
 
     #[test]
