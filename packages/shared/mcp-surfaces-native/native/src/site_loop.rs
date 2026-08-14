@@ -111,6 +111,7 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<V
         "site_loop_attention_show" => attention_show(args, root),
         "site_loop_output_show" => output_show(args, root),
         "site_loop_proof_run" => proof_run(args, root),
+        "site_loop_recovery_drill" => recovery_drill(args, root),
         "site_test_run" => test_run(args, root),
         "site_loop_attention_ack" => attention_ack(args, root),
         "site_loop_control_set" => control_set(args, root),
@@ -189,7 +190,7 @@ fn resident_status(root: &Path, config: &Value) -> Result<Value, Value> {
             .filter(|path| path.file_name().and_then(|value| value.to_str()).is_some_and(|value| value.ends_with(".result.json")))
             .collect::<Vec<_>>()
     } else { Vec::new() };
-    result_paths.sort();
+    result_paths.sort_by_key(|path| fs::metadata(path).and_then(|metadata| metadata.modified()).ok());
     if result_paths.len() > MAX_RESIDENT_RECORDS { result_paths.drain(..result_paths.len() - MAX_RESIDENT_RECORDS); }
     result_paths.reverse();
     let searched_result_count = result_paths.len();
@@ -385,6 +386,41 @@ fn proof_task_report(root: &Path, directive_id: &str) -> Result<Option<Value>, V
     let Some(connection) = open_db(root)? else { return Ok(None); };
     if !table_exists(&connection, "task_reports") { return Ok(None); }
     connection.query_row("SELECT report_id,task_id,agent_id,summary,directive_id,submitted_at FROM task_reports WHERE directive_id=?1 ORDER BY submitted_at DESC LIMIT 1", [directive_id], row_value).optional().map_err(|cause| error("proof_task_report_query_failed", &cause.to_string()))
+}
+
+fn retire_resident(root: &Path, config: &Value, session_id: &str, reason: &str) -> Result<Value, Value> {
+    if !safe_record_id(session_id) { return Err(error("resident_carrier_id_invalid", "carrier session id is invalid")); }
+    let session_root = resident_session_roots(root, config).into_iter().find(|base| base.join(session_id).is_dir()).unwrap_or_else(|| resident_session_roots(root, config)[0].clone());
+    let path = session_root.join(session_id).join("retired.json");
+    let record = json!({"schema":"narada.site_loop.resident_carrier_retirement.v1","status":"retired","carrier_session_id":session_id,"retired_at":now_iso(),"reason":reason});
+    write_json_atomically(&path, &record)?;
+    Ok(json!({"schema":"narada.site_loop.resident_carrier_retirement.v1","status":"retired","record":record,"path":path}))
+}
+
+fn recovery_drill(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let reason = args.get("reason").and_then(Value::as_str).filter(|value| !value.trim().is_empty()).ok_or_else(|| error("recovery_drill_reason_required", "reason is required"))?;
+    let timeout_ms = args.get("timeout_ms").and_then(Value::as_u64).unwrap_or(120_000).min(120_000);
+    let config = load_config(root)?.ok_or_else(|| error("site_loop_config_missing", "site-loop config is required"))?;
+    let previous = resident_status(root, &config)?;
+    if previous.get("live").and_then(Value::as_bool) != Some(true) { return Err(error("recovery_drill_live_carrier_required", "a live resident carrier is required before the recovery drill")); }
+    let previous_id = previous.get("carrier_session_id").and_then(Value::as_str).ok_or_else(|| error("recovery_drill_carrier_invalid", "current carrier id is missing"))?.to_string();
+    let retirement = retire_resident(root, &config, &previous_id, reason)?;
+    let launch = ensure_resident(root, &config)?;
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms.max(1));
+    let replacement = loop {
+        let value = resident_status(root, &config)?;
+        if value.get("live").and_then(Value::as_bool)==Some(true) && value.get("carrier_session_id").and_then(Value::as_str).is_some_and(|value| value != previous_id) { break value; }
+        if Instant::now() >= deadline { return Ok(json!({"schema":"narada.site_loop.resident_recovery_drill.v1","status":"failed","reason":"replacement_carrier_not_live_before_timeout","previous":previous,"retirement":retirement,"launch":launch,"last_resident":value,"timeout_ms":timeout_ms})); }
+        thread::sleep(Duration::from_millis(100));
+    };
+    let remaining = deadline.saturating_duration_since(Instant::now()).as_millis().max(1).min(10_000) as u64;
+    let proof_id = args.get("id").and_then(Value::as_str).filter(|value| safe_record_id(value)).map(ToOwned::to_owned).unwrap_or_else(|| format!("resident_recovery_{}", &uuid::Uuid::new_v4().simple().to_string()[..12]));
+    let request_id = format!("resident_proof_request_{}", &uuid::Uuid::new_v4().simple().to_string()[..16]);
+    let request = json!({"schema":"narada.site_loop.resident_proof_request.v1","site_id":config.get("site_id"),"loop_id":config.get("loop_id"),"request_id":request_id,"fixture_id":proof_id,"title":args.get("title").cloned().unwrap_or_else(||json!("Resident recovery proof")),"summary":args.get("summary").cloned().unwrap_or_else(||json!("Proof executed by the replacement native resident carrier.")),"timeout_ms":remaining,"poll_ms":args.get("poll_ms").and_then(Value::as_u64).unwrap_or(100),"ensure_resident":false,"status":"queued","requested_at":now_iso(),"finished_at":Value::Null,"result":Value::Null});
+    write_json_atomically(&proof_request_dir(root).join(format!("{request_id}.json")), &request)?;
+    let proof = process_proof_request(root, request, remaining)?;
+    let passed = proof.get("status").and_then(Value::as_str)==Some("passed") && replacement.get("carrier_session_id") != previous.get("carrier_session_id");
+    Ok(json!({"schema":"narada.site_loop.resident_recovery_drill.v1","status":if passed{"passed"}else{"failed"},"production_proof":passed,"old_carrier_replaced":replacement.get("carrier_session_id")!=previous.get("carrier_session_id"),"previous":previous,"retirement":retirement,"launch":launch,"replacement":replacement,"proof":proof}))
 }
 
 fn open_db(root: &Path) -> Result<Option<Connection>, Value> {
@@ -932,7 +968,8 @@ mod tests {
         let completed = process_proof_request(&root, request, 1000).expect("completed proof");
         assert_eq!(completed["status"], "passed");
         assert_eq!(proof_status(&root).expect("completed status")["latest_request"]["status"], "passed");
-        fs::write(session.join("retired.json"), serde_json::to_vec(&json!({"status":"retired"})).expect("retired json")).expect("retired");
+        let test_config = load_config(&root).expect("config read").expect("config");
+        assert_eq!(retire_resident(&root, &test_config, session_id, "native recovery test").expect("retire")["status"], "retired");
         assert_eq!(unified_status(&root).expect("retired unified")["resident"]["live"], false);
         fs::remove_dir_all(root).expect("cleanup");
     }
