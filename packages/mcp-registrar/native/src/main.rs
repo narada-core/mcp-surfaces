@@ -3035,7 +3035,12 @@ fn site_mcp_fabric_validate(contract: &Value, args: &Value) -> Result<Value, Str
         let known = surface_catalog
             .iter()
             .find(|surface| surface["id"] == surface_id);
-        if known.is_none() && server["surface_descriptor_path"].is_null() {
+        let has_embedded_descriptor =
+            embedded_site_local_catalog(server, surface_id).is_some();
+        if known.is_none()
+            && server["surface_descriptor_path"].is_null()
+            && !has_embedded_descriptor
+        {
             add(
                 "error",
                 "registrar_site_local_descriptor_missing",
@@ -4434,6 +4439,26 @@ fn build_site_surface_registry(contract: &Value, site: &Value) -> Result<Value, 
     )
 }
 
+fn embedded_site_local_catalog(server: &Value, surface_id: &str) -> Option<Value> {
+    let projection = server.get("surface_projection")?;
+    let descriptor = projection.get("surface_descriptor")?;
+    if descriptor.get("surface_id").and_then(Value::as_str) != Some(surface_id) {
+        return None;
+    }
+    let mut local_projection = projection.clone();
+    if let Some(object) = local_projection.as_object_mut() {
+        object
+            .entry("id".to_string())
+            .or_insert_with(|| json!(projection["projection_id"].as_str().unwrap_or("default")));
+    }
+    Some(json!({
+        "id": surface_id,
+        "tools": projection.get("exposed_tools").cloned().unwrap_or_else(|| json!([])),
+        "projections": [local_projection],
+        "descriptor": descriptor
+    }))
+}
+
 fn registry_surface(
     contract: &Value,
     site: &Value,
@@ -4461,6 +4486,8 @@ fn registry_surface(
     let catalog = items
         .iter()
         .find(|surface| surface["id"] == surface_id)
+        .cloned()
+        .or_else(|| embedded_site_local_catalog(server, surface_id))
         .ok_or_else(|| format!("registrar_site_local_descriptor_missing:{surface_id}"))?;
     let projection_id = server["projection_id"]
         .as_str()
@@ -5026,6 +5053,40 @@ mod tests {
     #[test]
     fn embedded_native_contract_is_valid() {
         validate_contract(&embedded_contract()).unwrap();
+    }
+
+    #[test]
+    fn embedded_site_local_descriptor_normalizes_into_catalog_shape() {
+        let server = json!({
+            "surface_projection": {
+                "projection_id": "default",
+                "exposed_tools": ["local_read", "local_write"],
+                "surface_descriptor": {
+                    "surface_id": "local-domain",
+                    "tools": [
+                        {"name": "local_read", "effect": {"class": "read"}},
+                        {"name": "local_write", "effect": {"class": "local_write"}}
+                    ]
+                }
+            }
+        });
+        let catalog =
+            embedded_site_local_catalog(&server, "local-domain").expect("site-local catalog");
+        assert_eq!(catalog["id"], "local-domain");
+        assert_eq!(catalog["projections"][0]["id"], "default");
+        assert_eq!(catalog["tools"], json!(["local_read", "local_write"]));
+        assert_eq!(catalog["descriptor"]["surface_id"], "local-domain");
+    }
+
+    #[test]
+    fn embedded_site_local_descriptor_cannot_claim_another_surface() {
+        let server = json!({
+            "surface_projection": {
+                "projection_id": "default",
+                "surface_descriptor": {"surface_id": "other-domain"}
+            }
+        });
+        assert!(embedded_site_local_catalog(&server, "local-domain").is_none());
     }
 
     #[test]
