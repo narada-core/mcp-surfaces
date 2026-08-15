@@ -351,9 +351,10 @@ impl MaterializeOptions {
 }
 
 fn materialize(root: &Path, options: &MaterializeOptions) -> Result<Value, String> {
-    // Publish first so registry synchronization can resolve the current immutable
-    // artifact pointers. Synchronization changes launch references, therefore seal
-    // the graph again before asking the materializer to validate it.
+    // Publish once so registry synchronization resolves the same immutable artifact
+    // pointers that the materializer will validate. A second build here would be
+    // unsafe: native binaries may receive a new content fingerprint, leaving the
+    // synchronized registries pointing at an artifact absent from the sealed set.
     package(root)?;
     let home = options
         .home
@@ -373,7 +374,6 @@ fn materialize(root: &Path, options: &MaterializeOptions) -> Result<Value, Strin
         .clone()
         .unwrap_or_else(|| home.join(".narada/carriers/installed-carriers.json"));
     sync_site_registries(root, &contract)?;
-    package(root)?;
     let materializer = current_artifact(
         root,
         "packages/shared/mcp-materializer-native/dist/native",

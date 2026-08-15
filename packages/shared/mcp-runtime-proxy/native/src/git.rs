@@ -13,6 +13,7 @@ use std::sync::{
 };
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use sha2::{Digest, Sha256};
 use time::{format_description::well_known::Rfc3339, Duration as TimeDuration, OffsetDateTime};
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
@@ -26,6 +27,8 @@ const WORK_SCOPE_TTL_MINUTES: i64 = 15;
 struct WorkScope {
     reference: String,
     repository_root: String,
+    owner_id: String,
+    authority: String,
     allowed_paths: Vec<String>,
     base_state: Value,
     created_at: String,
@@ -304,6 +307,11 @@ fn list_tools() -> Vec<Value> {
             true,
         ),
         tool(
+            "git_end_work_scope",
+            "Release a live work-scope reference owned by the caller.",
+            false,
+        ),
+        tool(
             "git_workflow_record",
             "Record a bounded multi-repository workflow handoff in the local Git audit ledger.",
             false,
@@ -397,7 +405,10 @@ fn tool_input_schema(name: &str) -> Value {
         }
         "git_policy_inspect" => json!({"properties": {}}),
         "git_begin_work_scope" => {
-            json!({"properties": {"working_directory": working_directory, "allowed_paths": paths, "base_state": {"type": "object", "additionalProperties": false, "properties": {"head": {"type": ["string", "null"]}, "index_digest": {"type": ["string", "null"]}}}}, "required": ["allowed_paths"]})
+            json!({"properties": {"working_directory": working_directory, "owner_id": {"type": "string", "minLength": 1}, "scope_kind": {"type": "string", "enum": ["paths", "repository_topology"], "default": "paths"}, "allowed_paths": paths, "base_state": {"type": "object", "additionalProperties": false, "properties": {"head": {"type": ["string", "null"]}, "index_digest": {"type": ["string", "null"]}, "worktree_digest": {"type": ["string", "null"]}}}}, "required": ["owner_id"]})
+        }
+        "git_end_work_scope" => {
+            json!({"properties": {"working_directory": working_directory, "owner_id": {"type": "string", "minLength": 1}, "work_scope_ref": work_scope}, "required": ["owner_id", "work_scope_ref"]})
         }
         "git_workflow_record" => {
             json!({"properties": {"workflow_id": {"type": "string"}, "scope_label": {"type": "string"}, "summary": {"type":"string"}, "repositories": {"type": "array", "items": {"type": "object", "additionalProperties":false,"properties":{"working_directory":working_directory,"label":{"type":"string"},"staged_paths":{"type":"array","items":path},"committed_sha":{"type":["string","null"]},"pushed":{"type":"boolean"},"push_status":{"type":"string","enum":["pushed","not_attempted","failed","not_pushable"]},"push_reason":{"type":["string","null"]},"unrelated_dirty_paths_left":{"type":"array","items":path}},"required":["working_directory"]}, "minItems": 1}}, "required": ["scope_label","repositories"]})
@@ -674,6 +685,7 @@ fn call_tool(
         "git_guidance" => guidance(args),
         "git_policy_inspect" => Ok(policy(state)),
         "git_begin_work_scope" => git_begin_work_scope(state, args, cancellation),
+        "git_end_work_scope" => git_end_work_scope(state, args, cancellation),
         "git_workflow_record" => git_workflow_record(state, args, cancellation),
         "git_add" => git_add(state, args, cancellation),
         "git_unstage" => git_unstage(state, args, cancellation),
@@ -781,26 +793,61 @@ fn git_begin_work_scope(
     args: &Value,
     cancellation: Option<Arc<AtomicBool>>,
 ) -> Result<Value, GitError> {
+    if state.mode != "write" {
+        return Err(GitError::new(
+            "git_write_mode_required",
+            "git_write_mode_required",
+            json!({"tool_name": "git_begin_work_scope", "mode": state.mode, "mutation_started": false, "atomic": true}),
+        ));
+    }
     let cwd = resolve_cwd(state, args)?;
-    let requested = args
-        .get("allowed_paths")
-        .and_then(Value::as_array)
+    let owner_id = args
+        .get("owner_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
         .ok_or_else(|| {
             GitError::new(
-                "git_begin_work_scope_requires_allowed_paths",
-                "git_begin_work_scope_requires_allowed_paths",
+                "git_begin_work_scope_requires_owner_id",
+                "git_begin_work_scope_requires_owner_id",
                 json!({}),
             )
         })?;
-    if requested.is_empty() {
+    let authority = match args
+        .get("scope_kind")
+        .and_then(Value::as_str)
+        .unwrap_or("paths")
+    {
+        "paths" => "paths",
+        "repository_topology" => "repository_topology",
+        value => {
+            return Err(GitError::new(
+                "git_invalid_scope_kind",
+                "git_invalid_scope_kind",
+                json!({"scope_kind": value}),
+            ))
+        }
+    };
+    let requested = args.get("allowed_paths").and_then(Value::as_array);
+    if authority == "paths" && requested.is_none_or(|paths| paths.is_empty()) {
         return Err(GitError::new(
             "git_begin_work_scope_requires_allowed_paths",
             "git_begin_work_scope_requires_allowed_paths",
             json!({}),
         ));
     }
+    if authority == "repository_topology"
+        && requested.is_some_and(|paths| !paths.is_empty())
+    {
+        return Err(GitError::new(
+            "git_repository_scope_does_not_accept_paths",
+            "git_repository_scope_does_not_accept_paths",
+            json!({"mutation_started": false, "atomic": true}),
+        ));
+    }
     let mut allowed_paths = requested
-        .iter()
+        .into_iter()
+        .flatten()
         .map(|value| {
             let path = value.as_str().ok_or_else(|| {
                 GitError::new(
@@ -844,14 +891,23 @@ fn git_begin_work_scope(
         state,
         &cwd,
         &["write-tree"],
-        cancellation,
+        cancellation.clone(),
         "git_begin_work_scope_failed",
     )
     .ok()
     .map(|value| value.trim().to_string());
-    let base_state = json!({"head": head, "index_digest": index_digest});
+    let worktree_digest = git_text(
+        state,
+        &cwd,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        cancellation,
+        "git_begin_work_scope_failed",
+    )
+    .ok()
+    .map(|value| hex::encode(Sha256::digest(value.as_bytes())));
+    let base_state = json!({"head": head, "index_digest": index_digest, "worktree_digest": worktree_digest});
     if let Some(supplied) = args.get("base_state").and_then(Value::as_object) {
-        for field in ["head", "index_digest"] {
+        for field in ["head", "index_digest", "worktree_digest"] {
             if let Some(value) = supplied.get(field) {
                 if value != base_state.get(field).unwrap_or(&Value::Null) {
                     return Err(GitError::new(
@@ -869,26 +925,138 @@ fn git_begin_work_scope(
     let scope = WorkScope {
         reference: reference.clone(),
         repository_root: repository_root.clone(),
+        owner_id: owner_id.to_string(),
+        authority: authority.to_string(),
         allowed_paths: allowed_paths.clone(),
         base_state: base_state.clone(),
         created_at: created.format(&Rfc3339).unwrap_or_default(),
         expires_at: expires,
     };
-    state
-        .work_scopes
-        .lock()
-        .map_err(|_| {
-            GitError::new(
-                "git_work_scope_store_unavailable",
-                "git_work_scope_store_unavailable",
-                json!({}),
-            )
-        })?
-        .insert(reference.clone(), scope.clone());
+    let mut scopes = state.work_scopes.lock().map_err(|_| {
+        GitError::new(
+            "git_work_scope_store_unavailable",
+            "git_work_scope_store_unavailable",
+            json!({}),
+        )
+    })?;
+    scopes.retain(|_, existing| existing.expires_at > OffsetDateTime::now_utc());
+    for existing in scopes.values() {
+        let overlap = if authority == "repository_topology"
+            || existing.authority == "repository_topology"
+        {
+            vec!["<repository-topology>".to_string()]
+        } else {
+            allowed_paths
+                .iter()
+                .filter(|path| {
+                    existing
+                        .allowed_paths
+                        .iter()
+                        .any(|held| path_matches(path, held) || path_matches(held, path))
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        if !overlap.is_empty() {
+            return Err(GitError::new(
+                "git_work_scope_path_already_owned",
+                "git_work_scope_path_already_owned",
+                json!({"requested_owner_id": owner_id, "current_owner_id": existing.owner_id, "current_work_scope_ref": existing.reference, "paths": overlap, "expires_at": existing.expires_at.format(&Rfc3339).unwrap_or_default(), "mutation_started": false, "atomic": true}),
+            ));
+        }
+    }
+    scopes.insert(reference.clone(), scope.clone());
     Ok(
-        json!({"schema": "narada.git.work_scope.v1", "status": "ok", "working_directory": cwd.to_string_lossy(), "repository_root": repository_root, "work_scope_ref": reference, "allowed_paths": allowed_paths, "base_state": base_state, "created_at": scope.created_at, "expires_at": expires.format(&Rfc3339).unwrap_or_default(), "mutation_started": false, "summary": format!("work scope issued for {} path{}", scope.allowed_paths.len(), if scope.allowed_paths.len() == 1 { "" } else { "s" })}),
+        json!({"schema": "narada.git.work_scope.v1", "status": "ok", "working_directory": cwd.to_string_lossy(), "repository_root": repository_root, "work_scope_ref": reference, "owner_id": owner_id, "authority": authority, "allowed_paths": allowed_paths, "base_state": base_state, "created_at": scope.created_at, "expires_at": expires.format(&Rfc3339).unwrap_or_default(), "mutation_started": true, "summary": if authority == "repository_topology" { "repository topology scope leased".to_string() } else { format!("work scope issued for {} path{}", scope.allowed_paths.len(), if scope.allowed_paths.len() == 1 { "" } else { "s" }) }}),
     )
 }
+
+fn git_end_work_scope(
+    state: &State,
+    args: &Value,
+    _cancellation: Option<Arc<AtomicBool>>,
+) -> Result<Value, GitError> {
+    if state.mode != "write" {
+        return Err(GitError::new(
+            "git_write_mode_required",
+            "git_write_mode_required",
+            json!({"tool_name": "git_end_work_scope", "mode": state.mode, "mutation_started": false, "atomic": true}),
+        ));
+    }
+    let cwd = resolve_cwd(state, args)?;
+    let owner_id = args
+        .get("owner_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            GitError::new(
+                "git_end_work_scope_requires_owner_id",
+                "git_end_work_scope_requires_owner_id",
+                json!({}),
+            )
+        })?;
+    let reference = args
+        .get("work_scope_ref")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            GitError::new(
+                "git_end_work_scope_requires_work_scope_ref",
+                "git_end_work_scope_requires_work_scope_ref",
+                json!({}),
+            )
+        })?;
+    let repository_root = git_text(
+        state,
+        &cwd,
+        &["rev-parse", "--show-toplevel"],
+        None,
+        "git_end_work_scope_failed",
+    )?
+    .trim()
+    .to_string();
+    let mut scopes = state.work_scopes.lock().map_err(|_| {
+        GitError::new(
+            "git_work_scope_store_unavailable",
+            "git_work_scope_store_unavailable",
+            json!({}),
+        )
+    })?;
+    let Some(scope) = scopes.get(reference).cloned() else {
+        return Err(GitError::new(
+            "git_work_scope_ref_not_found",
+            "git_work_scope_ref_not_found",
+            json!({"work_scope_ref": reference, "mutation_started": false, "atomic": true}),
+        ));
+    };
+    if scope.expires_at <= OffsetDateTime::now_utc() {
+        scopes.remove(reference);
+        return Err(GitError::new(
+            "git_work_scope_ref_expired",
+            "git_work_scope_ref_expired",
+            json!({"work_scope_ref": reference, "mutation_started": false, "atomic": true}),
+        ));
+    }
+    if scope.repository_root != repository_root {
+        return Err(GitError::new(
+            "git_work_scope_repository_mismatch",
+            "git_work_scope_repository_mismatch",
+            json!({"work_scope_ref": reference, "repository_root": repository_root, "expected_repository_root": scope.repository_root, "mutation_started": false, "atomic": true}),
+        ));
+    }
+    if scope.owner_id != owner_id {
+        return Err(GitError::new(
+            "git_work_scope_owner_mismatch",
+            "git_work_scope_owner_mismatch",
+            json!({"work_scope_ref": reference, "expected_owner_id": scope.owner_id, "supplied_owner_id": owner_id, "mutation_started": false, "atomic": true}),
+        ));
+    }
+    scopes.remove(reference);
+    Ok(json!({"schema": "narada.git.work_scope_end.v1", "status": "released", "work_scope_ref": reference, "owner_id": owner_id, "authority": scope.authority, "released_paths": scope.allowed_paths, "mutation_started": true}))
+}
+
 
 fn apply_status_query(
     state: &State,
@@ -1667,12 +1835,21 @@ fn read_git_base_state(state: &State, cwd: &Path, cancellation: Option<Arc<Atomi
         state,
         cwd,
         &["write-tree"],
-        cancellation,
+        cancellation.clone(),
         "git_base_state_failed",
     )
     .ok()
     .map(|value| value.trim().to_string());
-    json!({"head": head, "index_digest": index_digest})
+    let worktree_digest = git_text(
+        state,
+        cwd,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        cancellation,
+        "git_base_state_failed",
+    )
+    .ok()
+    .map(|value| hex::encode(Sha256::digest(value.as_bytes())));
+    json!({"head": head, "index_digest": index_digest, "worktree_digest": worktree_digest})
 }
 
 fn git_sync_status(
@@ -1761,13 +1938,39 @@ fn git_branch_list(
     )
 }
 
-fn require_topology_mutation(state: &State, args: &Value, cwd: &Path, tool: &str) -> Result<String, GitError> {
+fn require_topology_mutation(
+    state: &State,
+    args: &Value,
+    cwd: &Path,
+    tool: &str,
+    cancellation: Option<Arc<AtomicBool>>,
+) -> Result<String, GitError> {
     if state.mode != "write" {
         return Err(GitError::new("git_write_mode_required", "git_write_mode_required", json!({"tool_name":tool,"mutation_started":false})));
     }
     let root = git_text(state, cwd, &["rev-parse","--show-toplevel"], None, "git_topology_preflight_failed")?.trim().to_string();
     let reference = args.get("work_scope_ref").and_then(Value::as_str).ok_or_else(|| GitError::new("git_work_scope_ref_required","git_work_scope_ref_required",json!({"tool_name":tool})))?;
-    resolve_work_scope(state, reference, &root)?;
+    let scope = resolve_work_scope(state, reference, &root)?;
+    if scope.authority != "repository_topology" {
+        return Err(GitError::new(
+            "git_repository_topology_scope_required",
+            "git_repository_topology_scope_required",
+            json!({"tool_name": tool, "work_scope_ref": reference, "supplied_authority": scope.authority, "mutation_started": false, "atomic": true, "remediation": "Acquire git_begin_work_scope with scope_kind=repository_topology and no allowed_paths."}),
+        ));
+    }
+    let current = read_git_base_state(state, cwd, cancellation);
+    let changed_fields = ["head", "index_digest", "worktree_digest"]
+        .iter()
+        .filter(|field| scope.base_state.get(**field) != current.get(**field))
+        .map(|field| (*field).to_string())
+        .collect::<Vec<_>>();
+    if !changed_fields.is_empty() {
+        return Err(GitError::new(
+            "git_repository_topology_scope_base_state_drift",
+            "git_repository_topology_scope_base_state_drift",
+            json!({"work_scope_ref": reference, "changed_fields": changed_fields, "expected_base_state": scope.base_state, "actual_base_state": current, "mutation_started": false, "atomic": true, "cooperative_boundary": true}),
+        ));
+    }
     Ok(root)
 }
 
@@ -1787,7 +1990,7 @@ fn git_worktree_list(state: &State, args: &Value, cancellation: Option<Arc<Atomi
     for field in output.split('\0').filter(|value|!value.is_empty()) {
         if let Some(path)=field.strip_prefix("worktree ") {
             if !current.is_empty(){worktrees.push(Value::Object(std::mem::take(&mut current)));}
-            current.insert("path".into(),json!(path));
+            current.insert("path".into(),json!(canonical_path_text(Path::new(path))));
         } else if let Some(head)=field.strip_prefix("HEAD ") { current.insert("head".into(),json!(head)); }
         else if let Some(branch)=field.strip_prefix("branch ") { current.insert("branch".into(),json!(branch.strip_prefix("refs/heads/").unwrap_or(branch))); }
         else if field=="bare" || field=="detached" || field=="locked" || field=="prunable" { current.insert(field.into(),json!(true)); }
@@ -1799,13 +2002,13 @@ fn git_worktree_list(state: &State, args: &Value, cancellation: Option<Arc<Atomi
 }
 
 fn git_worktree_add(state:&State,args:&Value,cancellation:Option<Arc<AtomicBool>>)->Result<Value,GitError>{
-    let cwd=resolve_cwd(state,args)?; let root=require_topology_mutation(state,args,&cwd,"git_worktree_add")?;
+    let cwd=resolve_cwd(state,args)?; let root=require_topology_mutation(state,args,&cwd,"git_worktree_add",cancellation.clone())?;
     let path=requested_worktree_path(state,&cwd,args,true)?;
     if path.exists(){return Err(GitError::new("git_worktree_path_exists","git_worktree_path_exists",json!({"path":path.to_string_lossy(),"mutation_started":false})));}
     let branch=args.get("branch").and_then(Value::as_str); let new_branch=args.get("new_branch").and_then(Value::as_str);
     if branch.is_some()==new_branch.is_some(){return Err(GitError::new("git_worktree_requires_exactly_one_branch_mode","git_worktree_requires_exactly_one_branch_mode",json!({"mutation_started":false})));}
     let start=args.get("start_point").and_then(Value::as_str).unwrap_or("HEAD");
-    let path_text=path.to_string_lossy().to_string(); let mut command=vec!["worktree","add"];
+    let path_text=canonical_path_text(&path); let mut command=vec!["worktree","add"];
     if let Some(name)=new_branch {command.extend(["-b",name]);command.push(&path_text);command.push(start);} else {command.push(&path_text);command.push(branch.unwrap());}
     let _guard=state.git_write_lock.lock().map_err(|_|GitError::new("git_write_lock_unavailable","git_write_lock_unavailable",json!({})))?;
     git_text(state,&cwd,&command,cancellation,"git_worktree_add_failed")?;
@@ -1813,8 +2016,8 @@ fn git_worktree_add(state:&State,args:&Value,cancellation:Option<Arc<AtomicBool>
 }
 
 fn git_worktree_remove(state:&State,args:&Value,cancellation:Option<Arc<AtomicBool>>)->Result<Value,GitError>{
-    let cwd=resolve_cwd(state,args)?; let root=require_topology_mutation(state,args,&cwd,"git_worktree_remove")?;
-    let path=requested_worktree_path(state,&cwd,args,false)?; let path_text=path.to_string_lossy().to_string();
+    let cwd=resolve_cwd(state,args)?; let root=require_topology_mutation(state,args,&cwd,"git_worktree_remove",cancellation.clone())?;
+    let path=requested_worktree_path(state,&cwd,args,false)?; let path_text=canonical_path_text(&path);
     let inventory=git_text(state,&cwd,&["worktree","list","--porcelain"],cancellation.clone(),"git_worktree_remove_failed")?;
     if !inventory.lines().any(|line|line.strip_prefix("worktree ").is_some_and(|value|path_key(Path::new(value))==path_key(&path))){
         return Err(GitError::new("git_worktree_not_registered","git_worktree_not_registered",json!({"path":path_text,"mutation_started":false})));
@@ -1827,7 +2030,7 @@ fn git_worktree_remove(state:&State,args:&Value,cancellation:Option<Arc<AtomicBo
 }
 
 fn git_worktree_prune(state:&State,args:&Value,cancellation:Option<Arc<AtomicBool>>)->Result<Value,GitError>{
-    let cwd=resolve_cwd(state,args)?; let root=require_topology_mutation(state,args,&cwd,"git_worktree_prune")?;
+    let cwd=resolve_cwd(state,args)?; let root=require_topology_mutation(state,args,&cwd,"git_worktree_prune",cancellation.clone())?;
     let before=git_worktree_list(state,args,cancellation.clone())?;
     let _guard=state.git_write_lock.lock().map_err(|_|GitError::new("git_write_lock_unavailable","git_write_lock_unavailable",json!({})))?;
     git_text(state,&cwd,&["worktree","prune"],cancellation.clone(),"git_worktree_prune_failed")?;
@@ -1836,7 +2039,7 @@ fn git_worktree_prune(state:&State,args:&Value,cancellation:Option<Arc<AtomicBoo
 }
 
 fn git_branch_delete(state:&State,args:&Value,cancellation:Option<Arc<AtomicBool>>)->Result<Value,GitError>{
-    let cwd=resolve_cwd(state,args)?; let root=require_topology_mutation(state,args,&cwd,"git_branch_delete")?;
+    let cwd=resolve_cwd(state,args)?; let root=require_topology_mutation(state,args,&cwd,"git_branch_delete",cancellation.clone())?;
     let branch=args["branch"].as_str().unwrap(); let base=args["merged_into"].as_str().unwrap();
     git_text(state,&cwd,&["merge-base","--is-ancestor",branch,base],cancellation.clone(),"git_branch_not_merged")?;
     let _guard=state.git_write_lock.lock().map_err(|_|GitError::new("git_write_lock_unavailable","git_write_lock_unavailable",json!({})))?;
@@ -1845,7 +2048,7 @@ fn git_branch_delete(state:&State,args:&Value,cancellation:Option<Arc<AtomicBool
 }
 
 fn git_branch_delete_remote(state:&State,args:&Value,cancellation:Option<Arc<AtomicBool>>)->Result<Value,GitError>{
-    let cwd=resolve_cwd(state,args)?; let root=require_topology_mutation(state,args,&cwd,"git_branch_delete_remote")?;
+    let cwd=resolve_cwd(state,args)?; let root=require_topology_mutation(state,args,&cwd,"git_branch_delete_remote",cancellation.clone())?;
     let remote=args["remote"].as_str().unwrap(); let branch=args["branch"].as_str().unwrap(); let base=args["merged_into"].as_str().unwrap();
     if !git_remotes_names(state,&cwd,cancellation.clone())?.iter().any(|value|value==remote){return Err(GitError::new("git_remote_not_configured","git_remote_not_configured",json!({"remote":remote})));}
     let remote_ref=format!("{remote}/{branch}");
@@ -2187,6 +2390,14 @@ fn path_key(path: &Path) -> String {
         .replace('\\', "/")
         .trim_end_matches('/')
         .to_ascii_lowercase()
+}
+
+fn canonical_path_text(path: &Path) -> String {
+    absolute(path.to_path_buf())
+        .to_string_lossy()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_string()
 }
 
 fn absolute(path: PathBuf) -> PathBuf {

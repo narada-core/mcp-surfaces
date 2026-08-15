@@ -37,6 +37,87 @@ function run(root: string, requests: JsonRecord[], mode = 'read', outputRoot = r
   });
 }
 
+type NativeSession = {
+  request: (request: JsonRecord) => Promise<JsonRecord>;
+  close: () => Promise<void>;
+};
+
+function openSession(root: string, mode = 'read', outputRoot = root): NativeSession {
+  const child = spawn(executable, ['git', '--mode', mode, '--allowed-root', root, '--output-root', outputRoot], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+  let buffer = '';
+  let closePromise: Promise<void> | null = null;
+  const pending = new Map<string, { resolve: (response: JsonRecord) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
+  let stderr = '';
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stdout.on('data', (chunk) => {
+    buffer += chunk;
+    let newline = buffer.indexOf('\n');
+    while (newline >= 0) {
+      const line = buffer.slice(0, newline).trim();
+      buffer = buffer.slice(newline + 1);
+      if (line) {
+        try {
+          const response = JSON.parse(line) as JsonRecord;
+          const key = String(response.id);
+          const waiter = pending.get(key);
+          if (waiter) {
+            pending.delete(key);
+            clearTimeout(waiter.timer);
+            waiter.resolve(response);
+          }
+        } catch (error) {
+          for (const waiter of pending.values()) {
+            clearTimeout(waiter.timer);
+            waiter.reject(new Error(`native_git_invalid_session_output:${String(error)}:${line.slice(0, 1000)}`));
+          }
+          pending.clear();
+        }
+      }
+      newline = buffer.indexOf('\n');
+    }
+  });
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  child.on('error', (error) => {
+    for (const waiter of pending.values()) {
+      clearTimeout(waiter.timer);
+      waiter.reject(error);
+    }
+    pending.clear();
+  });
+  child.on('close', (code) => {
+    if (code === 0) return;
+    const error = new Error(`native_git_session_exit:${code}:${stderr}`);
+    for (const waiter of pending.values()) {
+      clearTimeout(waiter.timer);
+      waiter.reject(error);
+    }
+    pending.clear();
+  });
+  return {
+    request(request) {
+      const key = String(request.id);
+      return new Promise<JsonRecord>((resolvePromise, rejectPromise) => {
+        const timer = setTimeout(() => {
+          pending.delete(key);
+          rejectPromise(new Error(`native_git_session_timeout:${stderr}`));
+          child.kill();
+        }, 20_000);
+        pending.set(key, { resolve: resolvePromise, reject: rejectPromise, timer });
+        child.stdin.write(`${JSON.stringify(request)}\n`);
+      });
+    },
+    close() {
+      if (closePromise) return closePromise;
+      closePromise = new Promise<void>((resolvePromise) => {
+        child.once('close', () => resolvePromise());
+        child.stdin.end();
+      });
+      return closePromise;
+    },
+  };
+}
+
 const root = mkdtempSync(join(tmpdir(), 'narada-native-git-'));
 const extraRoot = mkdtempSync(join(tmpdir(), 'narada-native-git-extra-'));
 const siteRoot = mkdtempSync(join(tmpdir(), 'narada-native-git-site-'));
@@ -64,7 +145,7 @@ try {
     { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} },
     { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'git_guidance', arguments: {} } },
     { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'git_policy_inspect', arguments: {} } },
-    { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'git_begin_work_scope', arguments: { working_directory: root, allowed_paths: ['src'] } } },
+    { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'git_begin_work_scope', arguments: { working_directory: root, owner_id: 'read-mode-canary', allowed_paths: ['src'] } } },
     { jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'git_status', arguments: { working_directory: root } } },
     { jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'git_sync_status', arguments: { working_directory: root } } },
     { jsonrpc: '2.0', id: 8, method: 'tools/call', params: { name: 'git_branch_list', arguments: { working_directory: root, scope: 'local' } } },
@@ -94,6 +175,7 @@ try {
     'git_guidance',
     'git_policy_inspect',
     'git_begin_work_scope',
+    'git_end_work_scope',
     'git_workflow_record',
     'git_add',
     'git_unstage',
@@ -119,9 +201,7 @@ try {
   assert.equal(byId.get(4)?.result?.structuredContent?.schema, 'narada.git.policy.v1');
   assert.equal(byId.get(4)?.result?.structuredContent?.mode, 'read');
   assert.equal(byId.get(4)?.result?.structuredContent?.allowed_roots?.includes(extraRoot), true);
-  const workScope = byId.get(5)?.result?.structuredContent;
-  assert.equal(workScope?.schema, 'narada.git.work_scope.v1');
-  assert.deepEqual(workScope?.allowed_paths, ['src']);
+  assert.equal(byId.get(5)?.error?.data?.code, 'git_write_mode_required');
   assert.equal(byId.get(6)?.result?.structuredContent?.schema, 'narada.git.status.v1');
   assert.equal(byId.get(6)?.result?.structuredContent?.clean, false);
   assert.equal(byId.get(6)?.result?.structuredContent?.untracked?.includes('untracked.txt'), true);
@@ -142,20 +222,62 @@ try {
   assert.equal(byId.get(15)?.error?.data?.code, 'git_write_mode_required');
   assert.equal(byId.get(16)?.error?.data?.code, 'git_write_mode_required');
 
-  const writeResponses = await run(root, [
+  const workflowResponses = await run(root, [
     { jsonrpc: '2.0', id: 30, method: 'tools/call', params: { name: 'git_workflow_record', arguments: { scope_label: 'native-write-canary', summary: 'bounded audit record', repositories: [{ working_directory: root, push_status: 'not_attempted' }] } } },
+  ], 'write', siteRoot);
+  const addResponses = await run(root, [
     { jsonrpc: '2.0', id: 31, method: 'tools/call', params: { name: 'git_add', arguments: { working_directory: root, paths: ['src/main.txt'] } } },
+  ], 'write', siteRoot);
+  const unstageResponses = await run(root, [
     { jsonrpc: '2.0', id: 32, method: 'tools/call', params: { name: 'git_unstage', arguments: { working_directory: root, paths: ['src/main.txt'] } } },
   ], 'write', siteRoot);
-  const workflow = writeResponses.find((response) => response.id === 30)?.result?.structuredContent;
+  const workflow = workflowResponses.find((response) => response.id === 30)?.result?.structuredContent;
   assert.equal(workflow?.schema, 'narada.git.workflow_record.v1');
   assert.equal(workflow?.status, 'recorded');
   assert.equal(existsSync(String(workflow?.ledger_path)), true);
   assert.match(readFileSync(String(workflow?.ledger_path), 'utf8'), /native-write-canary/);
-  assert.equal(writeResponses.find((response) => response.id === 31)?.result?.structuredContent?.schema, 'narada.git.add.v1', JSON.stringify(writeResponses.find((response) => response.id === 31)));
-  assert.equal(writeResponses.find((response) => response.id === 31)?.result?.structuredContent?.post_status?.staged?.includes('src/main.txt'), true);
-  assert.equal(writeResponses.find((response) => response.id === 32)?.result?.structuredContent?.schema, 'narada.git.unstage.v1', JSON.stringify(writeResponses.find((response) => response.id === 32)));
-  assert.equal(writeResponses.find((response) => response.id === 32)?.result?.structuredContent?.post_status?.staged?.includes('src/main.txt'), false, JSON.stringify(writeResponses.find((response) => response.id === 32)));
+  assert.equal(addResponses.find((response) => response.id === 31)?.result?.structuredContent?.schema, 'narada.git.add.v1', JSON.stringify(addResponses.find((response) => response.id === 31)));
+  assert.equal(addResponses.find((response) => response.id === 31)?.result?.structuredContent?.post_status?.staged?.includes('src/main.txt'), true);
+  assert.equal(unstageResponses.find((response) => response.id === 32)?.result?.structuredContent?.schema, 'narada.git.unstage.v1', JSON.stringify(unstageResponses.find((response) => response.id === 32)));
+  assert.equal(unstageResponses.find((response) => response.id === 32)?.result?.structuredContent?.post_status?.staged?.includes('src/main.txt'), false, JSON.stringify(unstageResponses.find((response) => response.id === 32)));
+
+  const topologyPath = join(extraRoot, 'native-topology-worktree');
+  const topologyBranch = 'native-test-topology';
+  let topologySession: NativeSession | null = null;
+  try {
+    topologySession = openSession(root, 'write', siteRoot);
+    const pathScope = await topologySession.request({ jsonrpc: '2.0', id: 40, method: 'tools/call', params: { name: 'git_begin_work_scope', arguments: { working_directory: root, owner_id: 'path-owner', allowed_paths: ['README.md'] } } });
+    const pathScopeRef = pathScope.result?.structuredContent?.work_scope_ref;
+    assert.equal(pathScope.result?.structuredContent?.authority, 'paths', JSON.stringify(pathScope));
+    const topologyRefusal = await topologySession.request({ jsonrpc: '2.0', id: 41, method: 'tools/call', params: { name: 'git_worktree_add', arguments: { working_directory: root, path: topologyPath, new_branch: topologyBranch, work_scope_ref: pathScopeRef } } });
+    assert.equal(topologyRefusal.error?.data?.code, 'git_repository_topology_scope_required', JSON.stringify(topologyRefusal));
+    const endedPathScope = await topologySession.request({ jsonrpc: '2.0', id: 42, method: 'tools/call', params: { name: 'git_end_work_scope', arguments: { working_directory: root, owner_id: 'path-owner', work_scope_ref: pathScopeRef } } });
+    assert.equal(endedPathScope.result?.structuredContent?.status, 'released', JSON.stringify(endedPathScope));
+
+    const topologyScope = await topologySession.request({ jsonrpc: '2.0', id: 43, method: 'tools/call', params: { name: 'git_begin_work_scope', arguments: { working_directory: root, owner_id: 'topology-owner', scope_kind: 'repository_topology' } } });
+    const topologyRef = topologyScope.result?.structuredContent?.work_scope_ref;
+    assert.equal(topologyScope.result?.structuredContent?.authority, 'repository_topology', JSON.stringify(topologyScope));
+    assert.deepEqual(topologyScope.result?.structuredContent?.allowed_paths, [], JSON.stringify(topologyScope));
+    const added = await topologySession.request({ jsonrpc: '2.0', id: 44, method: 'tools/call', params: { name: 'git_worktree_add', arguments: { working_directory: root, path: topologyPath, new_branch: topologyBranch, work_scope_ref: topologyRef } } });
+    assert.equal(added.result?.structuredContent?.status, 'added', JSON.stringify(added));
+    const canonicalTopologyPath = resolve(topologyPath).replace(/\\/g, '/').replace(/\/$/, '');
+    assert.equal(added.result?.structuredContent?.path, canonicalTopologyPath, JSON.stringify(added));
+    const inventory = await topologySession.request({ jsonrpc: '2.0', id: 45, method: 'tools/call', params: { name: 'git_worktree_list', arguments: { working_directory: root } } });
+    const inventoryPayload = JSON.parse(String(inventory.result?.content?.[0]?.text ?? '{}')) as JsonRecord;
+    assert.equal(inventoryPayload.worktrees?.some((worktree: JsonRecord) => String(worktree.path).toLowerCase() === canonicalTopologyPath.toLowerCase()), true, JSON.stringify(inventory));
+    const removed = await topologySession.request({ jsonrpc: '2.0', id: 46, method: 'tools/call', params: { name: 'git_worktree_remove', arguments: { working_directory: root, path: topologyPath, work_scope_ref: topologyRef } } });
+    assert.equal(removed.result?.structuredContent?.status, 'removed', JSON.stringify(removed));
+    const deleted = await topologySession.request({ jsonrpc: '2.0', id: 47, method: 'tools/call', params: { name: 'git_branch_delete', arguments: { working_directory: root, branch: topologyBranch, merged_into: 'HEAD', work_scope_ref: topologyRef } } });
+    assert.equal(deleted.result?.structuredContent?.status, 'deleted', JSON.stringify(deleted));
+    const endedTopologyScope = await topologySession.request({ jsonrpc: '2.0', id: 48, method: 'tools/call', params: { name: 'git_end_work_scope', arguments: { working_directory: root, owner_id: 'topology-owner', work_scope_ref: topologyRef } } });
+    assert.equal(endedTopologyScope.result?.structuredContent?.status, 'released', JSON.stringify(endedTopologyScope));
+    const reusedScope = await topologySession.request({ jsonrpc: '2.0', id: 49, method: 'tools/call', params: { name: 'git_worktree_prune', arguments: { working_directory: root, work_scope_ref: topologyRef } } });
+    assert.equal(reusedScope.error?.data?.code, 'git_work_scope_ref_not_found', JSON.stringify(reusedScope));
+  } finally {
+    await topologySession?.close();
+    try { if (existsSync(topologyPath)) git(root, ['worktree', 'remove', '--force', topologyPath]); } catch { /* temporary test cleanup */ }
+    try { git(root, ['branch', '-D', topologyBranch]); } catch { /* temporary test cleanup */ }
+  }
 
   const showResponses = await run(root, [
     { jsonrpc: '2.0', id: 12, method: 'tools/call', params: { name: 'git_show', arguments: { working_directory: root, commit, include_patch: false } } },

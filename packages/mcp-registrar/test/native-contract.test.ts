@@ -1,14 +1,17 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { gunzipSync } from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 
+const nativeRootUrl = existsSync(fileURLToPath(new URL('../../native/', import.meta.url)))
+  ? new URL('../../native/', import.meta.url)
+  : new URL('../native/', import.meta.url);
 const executable = fileURLToPath(new URL(
-  `../../native/target/release/narada-mcp-registrar${process.platform === 'win32' ? '.exe' : ''}`,
-  import.meta.url,
+  `target/release/narada-mcp-registrar${process.platform === 'win32' ? '.exe' : ''}`,
+  nativeRootUrl,
 ));
-const contractPath = fileURLToPath(new URL('../../native/tool-catalog.json.gz', import.meta.url));
+const contractPath = fileURLToPath(new URL('tool-catalog.json.gz', nativeRootUrl));
 const contract = JSON.parse(gunzipSync(readFileSync(contractPath)).toString('utf8'));
 
 assert.equal(contract.schema, 'narada.mcp_registrar.native_tool_catalog.v1');
@@ -20,6 +23,18 @@ assert.equal(
   new Set(contract.read_models.registrar_surface_list.items.map((surface: any) => surface.id)).size,
   contract.read_models.registrar_surface_list.items.length,
 );
+const gitSurface = contract.read_models.registrar_surface_list.items.find((surface: any) => surface.id === 'git');
+assert.deepEqual(gitSurface?.args, ['--allowed-root', '{workspace_root}', '--output-root', '{site_root}', '--mode', 'write']);
+assert.deepEqual(gitSurface?.projections?.[0]?.args, ['--allowed-root', '{workspace_root}', '--output-root', '{site_root}', '--mode', 'write']);
+assert.deepEqual(gitSurface?.descriptor?.projections?.[0]?.transport?.args, [
+  '{mcp_surfaces_root}/git-mcp/dist/src/main.js',
+  '--allowed-root',
+  '{workspace_root}',
+  '--output-root',
+  '{site_root}',
+  '--mode',
+  'write',
+]);
 
 const client = nativeClient(executable);
 try {

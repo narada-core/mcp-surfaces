@@ -658,7 +658,7 @@ export async function gitWorktreeList(args: Record<string, unknown>, state: GitM
   for (const field of result.output_text.split('\0').filter(Boolean)) {
     if (field.startsWith('worktree ')) {
       if (Object.keys(current).length) worktrees.push(current);
-      current = { path: field.slice(9) };
+      current = { path: canonicalWorktreePath(field.slice(9)) };
     } else if (field.startsWith('HEAD ')) current.head = field.slice(5);
     else if (field.startsWith('branch ')) current.branch = field.slice(7).replace(/^refs\/heads\//, '');
     else if (field === 'bare' || field === 'detached') current[field] = true;
@@ -675,19 +675,23 @@ export async function gitWorktreeList(args: Record<string, unknown>, state: GitM
 }
 
 function worktreePath(args: Record<string, unknown>, cwd: string, state: GitMcpState, requireAllowed: boolean): string {
-  const path = resolve(cwd, String(args.path ?? ''));
-  const key = process.platform === 'win32' ? path.toLowerCase() : path;
+  const path = canonicalWorktreePath(resolve(cwd, String(args.path ?? '')));
+  const key = worktreePathKey(path);
   const allowed = state.policy.allowedRoots.some((root) => {
-    const rootKey = process.platform === 'win32' ? root.toLowerCase() : root;
-    return key === rootKey || key.startsWith(rootKey + (process.platform === 'win32' ? '\\' : '/'));
+    const rootKey = worktreePathKey(root);
+    return key === rootKey || key.startsWith(rootKey + '/');
   });
   if (requireAllowed && !allowed) throw diagnosticError('git_worktree_path_outside_allowed_roots', undefined, { path, allowed_roots: state.policy.allowedRoots, mutation_started: false });
   return path;
 }
 
 function worktreePathKey(path: string): string {
-  const normalized = resolve(path).replace(/\\/g, '/').replace(/\/$/, '');
+  const normalized = canonicalWorktreePath(path);
   return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
+function canonicalWorktreePath(path: string): string {
+  return resolve(path).replace(/\\/g, '/').replace(/\/$/, '');
 }
 
 export async function gitWorktreeAdd(args: Record<string, unknown>, state: GitMcpState, context: GitRequestContext = {}) {

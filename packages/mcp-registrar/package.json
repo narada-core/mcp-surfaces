@@ -9,6 +9,7 @@
     "build:postcompile": "pnpm run build:native",
     "build:native": "tsx scripts/build-native.ts",
     "test:native:contract": "cargo test --locked --manifest-path native/Cargo.toml",
+    "test:native:node-contract": "pnpm run build && node dist/test/native-contract.test.js",
     "typecheck": "tsc -b --pretty false",
     "test": "cargo test --locked --manifest-path native/Cargo.toml"
   },

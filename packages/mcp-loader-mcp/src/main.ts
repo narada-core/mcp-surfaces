@@ -1911,7 +1911,7 @@ const SHARED_SURFACE_REGISTRY: Record<string, { entrypoint: string; args: string
   'operator-console-overlay': { entrypoint: MCP_SURFACES_ROOT + '/operator-console-overlay-mcp/dist/src/main.js', args: [] },
   'local-filesystem': { entrypoint: `${MCP_SURFACES_ROOT}/local-filesystem-mcp/dist/src/main.js`, args: ['--mode', 'write', '--allowed-root', '{site_root}', '--anchored-allowed-root', 'user_home:.codex', '--output-root', '{site_root}'] },
   'structured-command': { entrypoint: `${MCP_SURFACES_ROOT}/structured-command-mcp/dist/src/main.js`, args: ['--allowed-root', '{site_root}', '--allow-command', 'node', '--allow-command', 'pnpm', '--allow-command', 'npm'] },
-  'git': { entrypoint: `${MCP_SURFACES_ROOT}/git-mcp/dist/src/main.js`, args: ['--allowed-root', '{site_root}', '--mode', 'write'] },
+  'git': { entrypoint: `${MCP_SURFACES_ROOT}/git-mcp/dist/src/main.js`, args: ['--allowed-root', '{workspace_root}', '--output-root', '{site_root}', '--mode', 'write'] },
   'site-inbox': { entrypoint: `${MCP_SURFACES_ROOT}/site-inbox-mcp/dist/src/main.js`, args: ['--site-root', '{site_root}'] },
   'mailbox': { entrypoint: `${MCP_SURFACES_ROOT}/mailbox-mcp/dist/src/main.js`, args: ['--site-root', '{site_root}'] },
   'graph-mail': { entrypoint: `${MCP_SURFACES_ROOT}/graph-mail-mcp/dist/src/main.js`, args: ['--site-root', '{site_root}'] },
