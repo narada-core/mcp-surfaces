@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use time::OffsetDateTime;
 
 const SERVER_NAME: &str = "worker-delegation-mcp";
+const DEFAULT_COGNITION: &str = "low";
 const MAX_RUNS: usize = 200;
 const MAX_FILE_BYTES: usize = 256_000;
 const READ_TOOLS: &[(&str, &str)] = &[
@@ -842,8 +843,13 @@ fn worker_run(
             ));
         }
     }
-    let cognition = constraints.and_then(|value| value.get("cognition")).and_then(Value::as_str).map(str::trim).filter(|value| !value.is_empty());
-    if cognition.is_some_and(|value| !matches!(value, "low" | "medium" | "high")) {
+    let cognition = constraints
+        .and_then(|value| value.get("cognition"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_COGNITION);
+    if !matches!(cognition, "low" | "medium" | "high") {
         return Err(error("worker_cognition_invalid", "worker_cognition_invalid"));
     }
     let requested_plan_ref = constraints
@@ -868,7 +874,7 @@ fn worker_run(
             "worker_canonical_invocation_plan_invalid",
         ));
     }
-    let (plan_ref, provider_mode, provider_model, preflight_evidence_ref, reasoning_effort) = invocation_plan_binding(root, requested_plan_ref.as_deref(), cognition)?;
+    let (plan_ref, provider_mode, provider_model, preflight_evidence_ref, reasoning_effort) = invocation_plan_binding(root, requested_plan_ref.as_deref(), Some(cognition))?;
     let cwd = constraints
         .and_then(|v| v.get("cwd"))
         .and_then(Value::as_str)
@@ -1263,7 +1269,7 @@ fn input_schema(name: &str) -> Value {
         "type":"object",
         "properties":{
             "authority":{"type":"string","enum":["read","write","command"]},
-            "cognition":{"type":"string","enum":["low","medium","high"]},
+            "cognition":{"type":"string","enum":["low","medium","high"],"default":"low"},
             "cwd":{"type":"string","minLength":1,"maxLength":4096},
             "invocation_plan_ref":{"type":"string","minLength":6,"maxLength":512,"pattern":"^plan:[A-Za-z0-9._:-]+$"},
             "max_run_ms":{"type":"integer","minimum":1,"maximum":1800000,"default":300000,"description":"Hard worker runtime deadline enforced by the native authority."}
@@ -1306,6 +1312,14 @@ fn tool(name: &str, description: &str, schema: Value, read_only: bool) -> Value 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_run_schema_declares_low_cognition_default() {
+        assert_eq!(
+            input_schema("worker_run")["properties"]["constraints"]["properties"]["cognition"]["default"],
+            "low"
+        );
+    }
 
     #[test]
     fn every_public_tool_has_a_closed_bounded_input_contract() {
@@ -1371,13 +1385,13 @@ mod tests {
     #[ignore = "requires an explicit deployed Site root and native preflight binary"]
     fn live_native_preflight_resolves_without_caller_plan() {
         let site_root = std::env::var("NARADA_TEST_SITE_ROOT").expect("NARADA_TEST_SITE_ROOT");
-        for (cognition, expected_model) in [("low", "gpt-5.6-luna"), ("medium", "gpt-5.6-terra"), ("high", "gpt-5.6-sol")] {
+        for (cognition, expected_model, expected_effort) in [("low", "gpt-5.6-luna", "max"), ("medium", "gpt-5.6-sol", "low"), ("high", "gpt-5.6-sol", "max")] {
             let (plan_ref, provider_mode, model, evidence_ref, reasoning_effort) = invocation_plan_binding(Path::new(&site_root), None, Some(cognition)).expect("native preflight");
             assert!(plan_ref.starts_with("plan:cognition:"));
             assert_eq!(provider_mode, "codex-subscription");
             assert_eq!(model, expected_model);
             assert!(evidence_ref.starts_with("preflight-evidence:"));
-            assert_eq!(reasoning_effort.as_deref(), Some("max"));
+            assert_eq!(reasoning_effort.as_deref(), Some(expected_effort));
         }
     }
 

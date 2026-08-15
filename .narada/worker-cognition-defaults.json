@@ -1,11 +1,19 @@
 {
   "schema": "narada.worker.cognition_defaults.v1",
-  "version": 1,
+  "version": 2,
   "provider_cognition_defaults": {
     "codex-subscription": {
       "low": {
         "model": "gpt-5.6-luna",
+        "reasoning_effort": "max"
+      },
+      "medium": {
+        "model": "gpt-5.6-sol",
         "reasoning_effort": "low"
+      },
+      "high": {
+        "model": "gpt-5.6-sol",
+        "reasoning_effort": "max"
       }
     }
   },
@@ -13,19 +21,19 @@
     "low": {
       "provider": "codex-subscription",
       "model": "gpt-5.6-luna",
-      "reasoning_effort": "low"
+      "reasoning_effort": "max"
     },
     "medium": {
-      "provider": null,
-      "model": null,
-      "reasoning_effort": null
+      "provider": "codex-subscription",
+      "model": "gpt-5.6-sol",
+      "reasoning_effort": "low"
     },
     "high": {
-      "provider": null,
-      "model": null,
-      "reasoning_effort": null
+      "provider": "codex-subscription",
+      "model": "gpt-5.6-sol",
+      "reasoning_effort": "max"
     }
   },
-  "updated_at": "2026-08-15T01:19:17.8097388Z",
+  "updated_at": "2026-08-15T02:26:19.0481692Z",
   "updated_by": "codex-andrey"
 }

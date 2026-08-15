@@ -10,6 +10,7 @@ use std::sync::{
 use std::thread::JoinHandle;
 
 const SERVER_NAME: &str = "delegated-task-mcp";
+const DEFAULT_COGNITION: &str = "low";
 const MAX_ITEMS: usize = 200;
 const MAX_FILE_BYTES: u64 = 256_000;
 const MUTATING: &[&str] = &[
@@ -36,7 +37,7 @@ pub fn list_tools() -> Vec<Value> {
         (
             "delegated_task_validate",
             "Validate delegated task input without creating or running a task.",
-            json!({"type":"object","properties":{"objective":{"type":"string"},"workflow":{"type":"object"},"constraints":{"type":"object"},"acceptance":{"type":"object"},"execution":{"type":"object"},"execution_binding":{"type":"object"}},"additionalProperties":false}),
+            json!({"type":"object","properties":{"objective":{"type":"string"},"workflow":{"type":"object"},"constraints":constraints_schema(),"acceptance":{"type":"object"},"execution":{"type":"object"},"execution_binding":{"type":"object"}},"additionalProperties":false}),
         ),
         (
             "delegated_task_status",
@@ -89,7 +90,8 @@ fn mutation_schema(name: &str) -> Value {
     match name {
         "delegated_task_run" => {
             for field in ["objective","idempotency_key","task_id"] { properties.insert(field.into(),json!({"type":"string"})); }
-            for field in ["intent","workflow","constraints","acceptance","result_policy","execution","execution_binding","source_task_ref"] { properties.insert(field.into(),json!({"type":"object"})); }
+            for field in ["intent","workflow","acceptance","result_policy","execution","execution_binding","source_task_ref"] { properties.insert(field.into(),json!({"type":"object"})); }
+            properties.insert("constraints".into(), constraints_schema());
             for field in ["depends_on_task_ids","import_task_outputs","import_worker_refs"] { properties.insert(field.into(),json!({"type":"array","items":{"type":"string"}})); }
             json!({"type":"object","properties":properties,"anyOf":[{"required":["objective"]},{"required":["intent"]},{"required":["task_id"]}],"additionalProperties":false})
         }
@@ -931,14 +933,30 @@ fn normalized_execution(value: Option<&Value>) -> Value {
         == Some(true);
     json!({"start":input.and_then(|v|v.get("start")).and_then(Value::as_bool)!=Some(false),"wait_for_completion":wait,"timeout_ms":input.and_then(|v|v.get("timeout_ms")).and_then(Value::as_u64).unwrap_or(if wait{30000}else{0}).min(600000),"poll_ms":input.and_then(|v|v.get("poll_ms")).and_then(Value::as_u64).unwrap_or(500).clamp(50,30000),"resumable":input.and_then(|v|v.get("resumable")).and_then(Value::as_bool)!=Some(false),"exit_interview":input.and_then(|v|v.get("exit_interview")).and_then(Value::as_bool)==Some(true),"max_concurrency":input.and_then(|v|v.get("max_concurrency")).and_then(Value::as_u64).unwrap_or(10).clamp(1,32),"max_retries":input.and_then(|v|v.get("max_retries")).and_then(Value::as_u64).unwrap_or(0).min(10)})
 }
+fn normalized_constraints(value: Option<&Value>) -> Value {
+    let mut constraints = value
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let cognition = constraints
+        .get("cognition")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if cognition.is_none() {
+        constraints.insert("cognition".into(), json!(DEFAULT_COGNITION));
+    }
+    Value::Object(constraints)
+}
+fn constraints_schema() -> Value {
+    json!({"type":"object","properties":{"cognition":{"type":"string","enum":["low","medium","high"],"default":DEFAULT_COGNITION}},"additionalProperties":true})
+}
 fn request_fingerprint(args: &Map<String, Value>, root: &Path, id: &str) -> String {
     let mut material = Map::new();
     material.insert("objective".into(),json!({"objective":objective(args).unwrap_or_default(),"instructions":args.get("intent").and_then(|v|v.get("instructions")).cloned().unwrap_or(Value::Null),"behavior":args.get("intent").and_then(|v|v.get("behavior")).cloned().unwrap_or(Value::Null),"mode":args.get("intent").and_then(|v|v.get("mode")).cloned().unwrap_or(Value::Null)}));
     material.insert(
         "constraints".into(),
-        args.get("constraints")
-            .cloned()
-            .unwrap_or_else(|| json!({})),
+        normalized_constraints(args.get("constraints")),
     );
     for key in ["workflow", "acceptance", "result_policy"] {
         if let Some(value) = args.get(key) {
@@ -988,7 +1006,7 @@ fn task_run(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     let step_states = initial_step_states(&workflow);
     let site = current_site_id(root);
     let fingerprint = request_fingerprint(args, root, &id);
-    let mut task = json!({"schema":"narada.delegated_task.task.v1","task_id":id,"owner_site_id":site,"owner_site_root":if site.is_some(){json!(root.to_string_lossy())}else{Value::Null},"created_by_site_id":site,"visibility_scope":if site.is_some(){"site"}else{"user_global"},"task_root_scope":"site_root","status":"accepted_for_execution","objective":objective,"request_fingerprint":fingerprint,"created_at":created,"updated_at":created,"cancelled_at":null,"idempotency_key":args.get("idempotency_key"),"constraints":args.get("constraints").cloned().unwrap_or_else(||json!({})),"workflow":workflow,"execution":normalized_execution(args.get("execution")),"acceptance":args.get("acceptance").cloned().unwrap_or_else(||json!({})),"result":{"schema":"narada.delegated_task.handoff.v1","acceptance_verdict":"pending","step_states":step_states,"worker_refs":[],"residual_risks":[],"observed_incoherencies":[],"verification":[],"changed_files":[]},"summary":null});
+    let mut task = json!({"schema":"narada.delegated_task.task.v1","task_id":id,"owner_site_id":site,"owner_site_root":if site.is_some(){json!(root.to_string_lossy())}else{Value::Null},"created_by_site_id":site,"visibility_scope":if site.is_some(){"site"}else{"user_global"},"task_root_scope":"site_root","status":"accepted_for_execution","objective":objective,"request_fingerprint":fingerprint,"created_at":created,"updated_at":created,"cancelled_at":null,"idempotency_key":args.get("idempotency_key"),"constraints":normalized_constraints(args.get("constraints")),"workflow":workflow,"execution":normalized_execution(args.get("execution")),"acceptance":args.get("acceptance").cloned().unwrap_or_else(||json!({})),"result":{"schema":"narada.delegated_task.handoff.v1","acceptance_verdict":"pending","step_states":step_states,"worker_refs":[],"residual_risks":[],"observed_incoherencies":[],"verification":[],"changed_files":[]},"summary":null});
     write_task(root, &task)?;
     append_event(root, &id, "task_created", json!({"objective":objective}))?;
     if task.pointer("/execution/start").and_then(Value::as_bool) != Some(false) {
@@ -1570,11 +1588,11 @@ fn advance_value(mut task: Value, root: &Path) -> Result<Value, Value> {
                 .and_then(Value::as_str)
                 .or_else(|| task.get("objective").and_then(Value::as_str))
                 .unwrap_or_default();
-            let constraints = step.get("constraints").cloned().unwrap_or_else(|| {
-                task.get("constraints")
-                    .cloned()
-                    .unwrap_or_else(|| json!({}))
-            });
+            let constraints = if step.get("constraints").is_some() {
+                normalized_constraints(step.get("constraints"))
+            } else {
+                normalized_constraints(task.get("constraints"))
+            };
             let worker_args =
                 json!({"intent":{"instruction":instruction},"constraints":constraints});
             let run = crate::worker_delegation::call_tool(
@@ -1734,6 +1752,31 @@ fn tool(name: &str, description: &str, schema: Value, read_only: bool) -> Value 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delegated_task_defaults_cognition_to_low() {
+        assert_eq!(
+            list_tools()
+                .iter()
+                .find(|tool| tool["name"] == "delegated_task_validate")
+                .expect("validate tool")["inputSchema"]["properties"]["constraints"]["properties"]["cognition"]["default"],
+            "low"
+        );
+        let root = std::env::temp_dir().join(format!(
+            "narada-delegated-task-default-cognition-{}",
+            uuid::Uuid::new_v4()
+        ));
+        task_run(
+            json!({"task_id":"task_default_cognition","objective":"demo","execution":{"start":false}})
+                .as_object()
+                .unwrap(),
+            &root,
+        )
+        .expect("run");
+        let task = read_task(&root, "task_default_cognition").expect("task");
+        assert_eq!(task["constraints"]["cognition"], "low");
+        fs::remove_dir_all(root).expect("cleanup");
+    }
 
     #[test]
     fn mutating_tool_contracts_are_closed_named_and_callable() {
