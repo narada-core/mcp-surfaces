@@ -71,6 +71,12 @@ pub fn list_tools() -> Vec<Value> {
             true,
         ),
         tool(
+            "epistemic_graph_snapshot",
+            "Read a ledger-head-bound, independently paged node and edge snapshot for operator visualization.",
+            json!({"type":"object","properties":{"entity_offset":{"type":"integer","minimum":0},"relation_offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":1000},"expected_ledger_head":{"type":["string","null"]}},"additionalProperties":false}),
+            true,
+        ),
+        tool(
             "epistemic_graph_proposal_submit",
             "Persist an immutable atomic proposal of typed graph operations. Use guidance for a complete copyable example.",
             proposal_schema(),
@@ -135,6 +141,7 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, site_root: &Path) -> Res
         "epistemic_graph_query_batch" => query_batch(site_root, args),
         "epistemic_graph_source_inspect" => source_inspect(site_root, args),
         "epistemic_graph_neighborhood" => neighborhood(site_root, args),
+        "epistemic_graph_snapshot" => snapshot(site_root, args),
         "epistemic_graph_proposal_submit" => proposal_submit(site_root, args),
         "epistemic_graph_submit_review_admit" => submit_review_admit(site_root, args),
         "epistemic_graph_capture_sources" => capture_sources(site_root, args),
@@ -893,6 +900,116 @@ fn query(root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
     Ok(
         json!({"schema":"narada.epistemic.query.v1","status":"ok","result_kind":"entities","compact":compact,"items":items,"offset":offset,"limit":limit,"returned":items.len(),"bounded":true}),
     )
+}
+
+fn snapshot(root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
+    let mut snapshot_head = None;
+    let mut stable = false;
+    for _ in 0..3 {
+        let before = ledger_head(root)?;
+        rebuild_projection(root)?;
+        let after = ledger_head(root)?;
+        if before == after {
+            snapshot_head = after;
+            stable = true;
+            break;
+        }
+    }
+    let ledger_head = snapshot_head;
+    if !stable {
+        return Err(error(
+            "ledger_snapshot_unstable",
+            "The graph changed repeatedly while the query projection was rebuilt.",
+            Value::Null,
+        ));
+    }
+    if let Some(expected) = args.get("expected_ledger_head") {
+        let expected = expected.as_str();
+        if expected != ledger_head.as_deref() {
+            return Err(error(
+                "ledger_head_mismatch",
+                "The graph changed after the requested snapshot began.",
+                json!({"expected_ledger_head":expected,"actual_ledger_head":ledger_head}),
+            ));
+        }
+    }
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(500)
+        .clamp(1, 1000);
+    let entity_offset = args
+        .get("entity_offset")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let relation_offset = args
+        .get("relation_offset")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let db = Connection::open(projection_path(root)).map_err(db_error("projection_open_failed"))?;
+    let entity_count: i64 = db
+        .query_row("select count(*) from entities", [], |row| row.get(0))
+        .map_err(db_error("projection_count_failed"))?;
+    let relation_count: i64 = db
+        .query_row("select count(*) from relations", [], |row| row.get(0))
+        .map_err(db_error("projection_count_failed"))?;
+
+    let mut entity_statement = db
+        .prepare("select entity_id,kind,payload_json,event_id from entities order by entity_id limit ?1 offset ?2")
+        .map_err(db_error("projection_snapshot_entities_prepare_failed"))?;
+    let entities = entity_statement
+        .query_map(params![limit, entity_offset], |row| {
+            let payload =
+                serde_json::from_str::<Value>(&row.get::<_, String>(2)?).unwrap_or(Value::Null);
+            Ok(json!({
+                "entity_id":row.get::<_,String>(0)?,
+                "kind":row.get::<_,String>(1)?,
+                "title":payload.get("title"),
+                "payload":payload,
+                "event_id":row.get::<_,String>(3)?
+            }))
+        })
+        .map_err(db_error("projection_snapshot_entities_failed"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(db_error("projection_snapshot_entity_row_failed"))?;
+
+    let mut relation_statement = db
+        .prepare("select relation_id,relation_type,source_id,target_id,payload_json,event_id from relations order by relation_id limit ?1 offset ?2")
+        .map_err(db_error("projection_snapshot_relations_prepare_failed"))?;
+    let relations = relation_statement
+        .query_map(params![limit, relation_offset], |row| {
+            let payload =
+                serde_json::from_str::<Value>(&row.get::<_, String>(4)?).unwrap_or(Value::Null);
+            Ok(json!({
+                "relation_id":row.get::<_,String>(0)?,
+                "relation_type":row.get::<_,String>(1)?,
+                "source_id":row.get::<_,String>(2)?,
+                "target_id":row.get::<_,String>(3)?,
+                "payload":payload,
+                "event_id":row.get::<_,String>(5)?
+            }))
+        })
+        .map_err(db_error("projection_snapshot_relations_failed"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(db_error("projection_snapshot_relation_row_failed"))?;
+
+    let next_entity_offset = entity_offset + entities.len() as u64;
+    let next_relation_offset = relation_offset + relations.len() as u64;
+    Ok(json!({
+        "schema":"narada.epistemic.graph_snapshot.v1",
+        "status":"ok",
+        "ledger_head":ledger_head,
+        "entity_count":entity_count,
+        "relation_count":relation_count,
+        "entities":entities,
+        "relations":relations,
+        "entity_offset":entity_offset,
+        "relation_offset":relation_offset,
+        "next_entity_offset":(next_entity_offset < entity_count as u64).then_some(next_entity_offset),
+        "next_relation_offset":(next_relation_offset < relation_count as u64).then_some(next_relation_offset),
+        "limit":limit,
+        "bounded":true
+    }))
 }
 
 fn query_batch(root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
@@ -1693,10 +1810,20 @@ mod tests {
 
     #[test]
     fn guidance_schema_accepts_declared_routing_hints() {
-        let tool = list_tools().into_iter().find(|tool| tool["name"] == "epistemic_graph_guidance").unwrap();
+        let tool = list_tools()
+            .into_iter()
+            .find(|tool| tool["name"] == "epistemic_graph_guidance")
+            .unwrap();
         assert_eq!(tool["inputSchema"]["additionalProperties"], false);
-        assert_eq!(tool["inputSchema"]["properties"]["workflow"]["type"], "string");
-        let value = guidance_with_request(json!({"workflow":"query_current_frontier"}).as_object().unwrap());
+        assert_eq!(
+            tool["inputSchema"]["properties"]["workflow"]["type"],
+            "string"
+        );
+        let value = guidance_with_request(
+            json!({"workflow":"query_current_frontier"})
+                .as_object()
+                .unwrap(),
+        );
         assert_eq!(value["requested"]["workflow"], "query_current_frontier");
     }
 
@@ -1851,6 +1978,68 @@ mod tests {
                 .map(Vec::len),
             Some(1)
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn graph_snapshot_pages_nodes_and_edges_under_one_ledger_head() {
+        let root = std::env::temp_dir().join(format!("epistemic-snapshot-test-{}", Uuid::new_v4()));
+        let proposal = proposal_submit(
+            &root,
+            &Map::from_iter([
+                ("actor".into(), json!("tester")),
+                ("authority_basis".into(), json!({"kind":"test"})),
+                ("idempotency_key".into(), json!("snapshot-p1")),
+                ("expected_ledger_head".into(), Value::Null),
+                ("operations".into(), json!([
+                    {"op":"entity.declare","entity_id":"problem:snapshot","kind":"problem","title":"Snapshot problem"},
+                    {"op":"entity.declare","entity_id":"claim:snapshot","kind":"claim","title":"Snapshot claim"},
+                    {"op":"relation.declare","relation_id":"relation:snapshot","relation_type":"addresses","source_id":"claim:snapshot","target_id":"problem:snapshot"}
+                ])),
+            ]),
+        )
+        .expect("proposal");
+        proposal_admit(
+            &root,
+            &Map::from_iter([
+                ("proposal_id".into(), proposal["proposal_id"].clone()),
+                ("actor".into(), json!("tester")),
+                ("authority_basis".into(), json!({"kind":"test"})),
+                ("expected_ledger_head".into(), Value::Null),
+                ("idempotency_key".into(), json!("snapshot-a1")),
+            ]),
+        )
+        .expect("admit");
+
+        let first =
+            snapshot(&root, &Map::from_iter([("limit".into(), json!(1))])).expect("first page");
+        assert_eq!(first["entity_count"], 2);
+        assert_eq!(first["relation_count"], 1);
+        assert_eq!(first["entities"].as_array().map(Vec::len), Some(1));
+        assert_eq!(first["relations"].as_array().map(Vec::len), Some(1));
+        assert_eq!(first["next_entity_offset"], 1);
+        assert!(first["next_relation_offset"].is_null());
+
+        let second = snapshot(
+            &root,
+            &Map::from_iter([
+                ("limit".into(), json!(1)),
+                ("entity_offset".into(), json!(1)),
+                ("relation_offset".into(), json!(1)),
+                ("expected_ledger_head".into(), first["ledger_head"].clone()),
+            ]),
+        )
+        .expect("second page");
+        assert_eq!(second["entities"].as_array().map(Vec::len), Some(1));
+        assert!(second["next_entity_offset"].is_null());
+        assert!(second["relations"].as_array().is_some_and(Vec::is_empty));
+
+        let mismatch = snapshot(
+            &root,
+            &Map::from_iter([("expected_ledger_head".into(), json!("sha256:stale"))]),
+        )
+        .expect_err("stale snapshot");
+        assert_eq!(mismatch["code"], "ledger_head_mismatch");
         let _ = fs::remove_dir_all(root);
     }
 

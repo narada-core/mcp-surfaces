@@ -65,6 +65,7 @@ broaden command admission or allowed roots.
 Policy is configured at server launch. Common flags include:
 
 - `--allowed-root <path>`: admit a working-directory root; repeatable.
+- When `--site-root` is selected, native structured-command also consumes that Site's durable `.narada/allowed-roots.json` `extra_allowed_roots`. It deliberately does not consume `temp_allowed_roots`: command execution authority must not expand through a temporary handoff declaration. Restart the structured-command child after changing the Site contract.
 - `--allow-command <command>`: admit an executable name.
 - `--allow-prefix <prefix>`: admit a command plus leading argv prefix.
 - `--blocked-command <command>`: block an executable even if otherwise admitted.

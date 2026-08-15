@@ -1,4 +1,4 @@
-use crate::filesystem::{read_message, write_message};
+use crate::filesystem::{parse_site_extra_allowed_roots, read_message, write_message};
 use crate::protocol;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -374,7 +374,7 @@ fn parse_state(args: &[String]) -> Result<State, String> {
     if roots.is_empty() {
         return Err("structured_command_mcp_requires_at_least_one_allowed_root".to_string());
     }
-    let allowed_roots = roots
+    let mut allowed_roots = roots
         .into_iter()
         .map(|root| absolute(PathBuf::from(root)))
         .collect::<Vec<_>>();
@@ -382,6 +382,12 @@ fn parse_state(args: &[String]) -> Result<State, String> {
         absolute(PathBuf::from(site_root.unwrap_or_else(|| {
             allowed_roots[0].to_string_lossy().to_string()
         })));
+    for root in parse_site_extra_allowed_roots(&site_root) {
+        let root = absolute(PathBuf::from(root));
+        if !allowed_roots.iter().any(|candidate| candidate == &root) {
+            allowed_roots.push(root);
+        }
+    }
     let storage_root =
         absolute(PathBuf::from(storage_root.unwrap_or_else(|| {
             allowed_roots[0].to_string_lossy().to_string()
@@ -1949,6 +1955,38 @@ fn now_rfc3339() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn site_extra_allowed_roots_extend_structured_command_authority() {
+        let site_root = env::temp_dir().join(format!(
+            "narada-structured-command-site-roots-{}",
+            unique_id("test")
+        ));
+        let worktree_root = site_root.with_extension("worktrees");
+        fs::create_dir_all(site_root.join(".narada")).expect("control root");
+        fs::create_dir_all(&worktree_root).expect("worktree root");
+        fs::write(
+            site_root.join(".narada/allowed-roots.json"),
+            serde_json::to_vec(&json!({
+                "schema": "narada.site.allowed_roots.v1",
+                "extra_allowed_roots": [worktree_root.to_string_lossy()]
+            }))
+            .expect("config"),
+        )
+        .expect("write config");
+
+        let state = parse_state(&[
+            "--allowed-root".into(),
+            site_root.to_string_lossy().to_string(),
+            "--site-root".into(),
+            site_root.to_string_lossy().to_string(),
+        ])
+        .expect("state");
+        assert!(state.allowed_roots.iter().any(|root| root == &worktree_root));
+
+        fs::remove_dir_all(site_root).expect("cleanup site");
+        fs::remove_dir_all(worktree_root).expect("cleanup worktrees");
+    }
 
     #[test]
     fn command_tools_publish_closed_alternative_aware_schemas() {

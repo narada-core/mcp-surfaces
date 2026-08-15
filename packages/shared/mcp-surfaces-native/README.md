@@ -10,11 +10,14 @@ immutable, hash-linked proposal-admission events beneath the Site's tracked
 `.narada/epistemic/ledger` authority and rebuilds its SQLite query projection
 beneath ignored `.narada/.ai/epistemic-graph` state.
 
-The initial entity kinds are `problem`, `conjecture`, `criticism`, `test`, and
-`source`. Admission means a contribution satisfies structural and provenance
+The initial entity kinds are `problem`, `conjecture`, `claim`, `criticism`,
+`test`, and `source`. Admission means a contribution satisfies structural and provenance
 policy; it never means that a conjecture is true. External search remains
 outside the surface. JSON-LD export maps scholarly and provenance concepts to
 FaBiO, CiTO, and PROV-O without making those vocabularies storage authority.
+
+The complete tool workflow, authority boundary, snapshot pagination contract,
+and failure posture are documented in [docs/epistemic-graph.md](docs/epistemic-graph.md).
 
 ## Boundary
 
