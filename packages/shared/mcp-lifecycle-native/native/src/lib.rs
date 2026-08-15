@@ -1998,7 +1998,7 @@ impl LifecycleServer {
         } else {
             "open"
         };
-        let body = task_file_body(&self.options.site_root, number);
+        let body = task_file_body(&self.options.site_root, &task_id, number);
         let execution_binding = connection.query_row(
             "select binding_json,created_at,updated_at from narada_task_execution_bindings where task_id=?1",
             params![&task_id],
@@ -2543,8 +2543,8 @@ impl LifecycleServer {
             primitive_results.push(json!({"tool":"task_lifecycle_claim","result":result,"is_error":false}));
         }
         if !resume {
-            replace_task_markdown_section(&self.options.site_root, number, "Execution Notes", execution_notes.as_deref().unwrap_or_default())?;
-            replace_task_markdown_section(&self.options.site_root, number, "Verification", verification.as_deref().unwrap_or_default())?;
+            replace_task_markdown_section(&self.options.site_root, &task_id, number, "Execution Notes", execution_notes.as_deref().unwrap_or_default())?;
+            replace_task_markdown_section(&self.options.site_root, &task_id, number, "Verification", verification.as_deref().unwrap_or_default())?;
             primitive_results.push(json!({"tool":"task_lifecycle_submit_work.write_task_notes","result":{"status":"written","task_number":number,"sections":["Execution Notes","Verification"]},"is_error":false}));
         }
         let should_prove = args.get("prove_criteria").and_then(Value::as_bool).unwrap_or(!resume);
@@ -2676,7 +2676,7 @@ impl LifecycleServer {
             }
         }
         if let Some(text) = summary.as_deref() {
-            append_task_body(&site_root, number, text)?;
+            append_task_body(&site_root, &task_id, number, text)?;
         }
         if disposition_only {
             return Ok(json!({
@@ -4230,22 +4230,12 @@ fn task_file_path(root: &Path, task_id: &str) -> String {
         .to_string_lossy()
         .to_string()
 }
-fn task_file_body(root: &Path, number: i64) -> Option<String> {
-    let dir = root.join(".ai/do-not-open/tasks");
-    let entries = fs::read_dir(dir).ok()?;
-    for e in entries.flatten().take(200) {
-        let path = e.path();
-        if path.extension().and_then(|v| v.to_str()) == Some("md") {
-            let text = fs::read_to_string(path).ok()?;
-            if text
-                .lines()
-                .any(|l| l.trim() == format!("number: {number}"))
-            {
-                return Some(text);
-            }
-        }
-    }
-    None
+fn task_file_body(root: &Path, task_id: &str, number: i64) -> Option<String> {
+    let path = root.join(".ai/do-not-open/tasks").join(format!("{task_id}.md"));
+    let text = fs::read_to_string(path).ok()?;
+    text.lines()
+        .any(|line| line.trim() == format!("number: {number}"))
+        .then_some(text)
 }
 fn project_task_status(root: &Path, task_id: &str, number: i64, status: &str) -> Result<(), String> {
     let path = root.join(".ai/do-not-open/tasks").join(format!("{task_id}.md"));
@@ -4293,49 +4283,32 @@ fn write_task_file(
     let body=format!("---\nnumber: {number}\ngoverned_by: {}\nstatus: opened\n{}{}tags: {tags_text}\nidempotency_key: {idem}\n---\n# {title}\n\n## Goal\n{goal}\n\n## Required Work\n{work}\n\n## Non-Goals\n{non_goals}\n\n## Acceptance Criteria\n{}\n\n## Execution Notes\n\n## Verification\n",role.unwrap_or("unknown"),role.map(|v|format!("preferred_role: {v}\n")).unwrap_or_default(),if tags_text.is_empty(){String::new()}else{String::new()},criteria.as_array().map(|v|v.iter().filter_map(Value::as_str).map(|v|format!("- [ ] {v}\n")).collect::<String>()).unwrap_or_default());
     fs::write(path, body).map_err(|e| format!("task_projection_write_failed:{e}"))
 }
-fn append_task_body(root: &Path, number: i64, summary: &str) -> Result<(), String> {
-    let dir = root.join(".ai/do-not-open/tasks");
-    for e in fs::read_dir(dir)
-        .map_err(|e| e.to_string())?
-        .flatten()
-        .take(200)
-    {
-        let path = e.path();
-        if path.extension().and_then(|v| v.to_str()) == Some("md") {
-            let text = fs::read_to_string(&path).unwrap_or_default();
-            if text
-                .lines()
-                .any(|l| l.trim() == format!("number: {number}"))
-            {
-                let next = format!("{text}\n{summary}\n");
-                fs::write(path, next).map_err(|e| e.to_string())?;
-                return Ok(());
-            }
-        }
+fn append_task_body(root: &Path, task_id: &str, number: i64, summary: &str) -> Result<(), String> {
+    let path = root.join(".ai/do-not-open/tasks").join(format!("{task_id}.md"));
+    let text = fs::read_to_string(&path).map_err(|e| format!("task_file_read_failed:{e}"))?;
+    if !text.lines().any(|line| line.trim() == format!("number: {number}")) {
+        return Err(format!("task_projection_number_mismatch:{task_id}:{number}"));
     }
-    Ok(())
+    let next = format!("{text}\n{summary}\n");
+    fs::write(path, next).map_err(|e| format!("task_file_write_failed:{e}"))
 }
-fn replace_task_markdown_section(root: &Path, number: i64, heading: &str, body: &str) -> Result<(), String> {
-    let dir = root.join(".ai/do-not-open/tasks");
-    for entry in fs::read_dir(&dir).map_err(|error| format!("task_file_directory_read_failed:{error}"))?.flatten().take(200) {
-        let path = entry.path();
-        if path.extension().and_then(|value| value.to_str()) != Some("md") { continue; }
-        let original = fs::read_to_string(&path).map_err(|error| format!("task_file_read_failed:{error}"))?;
-        if !original.lines().any(|line| line.trim() == format!("number: {number}")) { continue; }
-        let marker = format!("## {heading}");
-        let Some(start) = original.find(&marker) else { return Err(format!("task_lifecycle_submit_work_section_missing:{heading}")); };
-        let content_start = start + marker.len();
-        let remainder = &original[content_start..];
-        let next_heading = remainder.find("\n## ").map(|offset| content_start + offset).unwrap_or(original.len());
-        let replacement = format!("{marker}\n\n{}\n", body.trim());
-        let mut updated = String::with_capacity(original.len() + replacement.len());
-        updated.push_str(&original[..start]);
-        updated.push_str(&replacement);
-        if next_heading < original.len() { updated.push_str(&original[next_heading..]); }
-        fs::write(&path, updated).map_err(|error| format!("task_file_write_failed:{error}"))?;
-        return Ok(());
+fn replace_task_markdown_section(root: &Path, task_id: &str, number: i64, heading: &str, body: &str) -> Result<(), String> {
+    let path = root.join(".ai/do-not-open/tasks").join(format!("{task_id}.md"));
+    let original = fs::read_to_string(&path).map_err(|error| format!("task_file_read_failed:{error}"))?;
+    if !original.lines().any(|line| line.trim() == format!("number: {number}")) {
+        return Err(format!("task_projection_number_mismatch:{task_id}:{number}"));
     }
-    Err(format!("task_file_not_found:{number}"))
+    let marker = format!("## {heading}");
+    let Some(start) = original.find(&marker) else { return Err(format!("task_lifecycle_submit_work_section_missing:{heading}")); };
+    let content_start = start + marker.len();
+    let remainder = &original[content_start..];
+    let next_heading = remainder.find("\n## ").map(|offset| content_start + offset).unwrap_or(original.len());
+    let replacement = format!("{marker}\n\n{}\n", body.trim());
+    let mut updated = String::with_capacity(original.len() + replacement.len());
+    updated.push_str(&original[..start]);
+    updated.push_str(&replacement);
+    if next_heading < original.len() { updated.push_str(&original[next_heading..]); }
+    fs::write(path, updated).map_err(|error| format!("task_file_write_failed:{error}"))
 }
 fn normalized_path_string(path: &Path) -> String {
     let absolute = if path.is_absolute() {
