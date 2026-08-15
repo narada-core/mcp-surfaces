@@ -367,12 +367,14 @@ export function listAgentStartSessions({
   substrate = null,
   now = new Date(),
   limit = 100,
+  offset = 0,
 } : any= {}) {
   if (!db) throw new Error('agent_context_db_not_available');
 
   const filters: any[] = [];
   const params: any = {};
   const normalizedLimit: any = Math.min(Math.max(parseInt(limit ?? '100', 10) || 100, 1), 500);
+  const normalizedOffset: any = Math.max(parseInt(offset ?? '0', 10) || 0, 0);
 
   if (identity) {
     filters.push('identity_id = @identity');
@@ -392,13 +394,20 @@ export function listAgentStartSessions({
   }
 
   const where: any = filters.length > 0 ? `WHERE ${filters.join(' AND ')}` : '';
+  const totalRow: any = db.prepare(`
+    SELECT COUNT(*) AS total_count
+    FROM agent_start_events
+    ${where}
+  `).get(params);
+  const totalCount: any = Number(totalRow?.total_count ?? 0);
   const rows: any = db.prepare(`
     SELECT event_id, identity_id, runtime, created_at, status, resume_command, bootstrap_artifact_uri
     FROM agent_start_events
     ${where}
     ORDER BY created_at DESC, event_id DESC
     LIMIT @limit
-  `).all({ ...params, limit: normalizedLimit });
+    OFFSET @offset
+  `).all({ ...params, limit: normalizedLimit, offset: normalizedOffset });
 
   const asOf: any = now instanceof Date ? now : new Date(now);
   const asOfIso: any = Number.isNaN(asOf.getTime()) ? new Date().toISOString() : asOf.toISOString();
@@ -419,8 +428,14 @@ export function listAgentStartSessions({
       date_to: dateTo ?? null,
       substrate: substrate ?? null,
       limit: normalizedLimit,
+      offset: normalizedOffset,
     },
     session_count: sessions.length,
+    total_count: totalCount,
+    has_more: normalizedOffset + sessions.length < totalCount,
+    next_offset: normalizedOffset + sessions.length < totalCount ? normalizedOffset + sessions.length : null,
+    truncated: normalizedOffset + sessions.length < totalCount,
+    truncation_reason: normalizedOffset + sessions.length < totalCount ? 'session_page_limit' : null,
     sessions,
     latest_session_per_identity: Object.fromEntries(latestByIdentity.entries()),
     duration_estimate_note: 'agent_start_events has no end timestamp; duration is elapsed time from created_at to generated_at.',
@@ -2405,4 +2420,3 @@ function deriveMcpServersFromFabric(siteRoot: any) {
 
   return servers;
 }
-

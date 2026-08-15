@@ -19,6 +19,10 @@
     "./mcp-payload-file": {
       "types": "./dist/src/mcp-payload-file.d.ts",
       "default": "./dist/src/mcp-payload-file.js"
+    },
+    "./bounded-collection": {
+      "types": "./dist/src/bounded-collection.d.ts",
+      "default": "./dist/src/bounded-collection.js"
     }
   },
   "files": [

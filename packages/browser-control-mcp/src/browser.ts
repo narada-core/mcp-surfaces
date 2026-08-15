@@ -9,6 +9,7 @@ import {
   normalizeAllowedOrigins,
   validateCdpEndpoint,
 } from './cdp.js';
+import { boundedCollection } from '@narada-core/mcp-transport/bounded-collection';
 
 const MAX_SELECTOR_LENGTH = 512;
 const MAX_TEXT_LENGTH = 4_000;
@@ -168,10 +169,16 @@ export class BrowserSession {
     const targets = await listCdpTargets(cdpEndpoint);
     const target = targets.find((candidate) => candidate.id === sessionId && candidate.type === 'page');
     if (!target) {
+      const availableSessionIds = targets.filter((candidate) => candidate.type === 'page').map((candidate) => candidate.id);
+      const availablePage = boundedCollection(availableSessionIds, {
+        limit: 50,
+        truncationReason: 'browser_target_diagnostic_limit',
+      });
       throw new BrowserControlError('browser_session_not_found', 'The explicitly selected browser session was not found.', {
         profile_id: profileId,
         session_id: sessionId,
-        available_session_ids: targets.filter((candidate) => candidate.type === 'page').map((candidate) => candidate.id).slice(0, 50),
+        available_session_ids: availablePage.items,
+        available_session_ids_page: availablePage,
       });
     }
     const connection = await CdpConnection.connect(String(target.webSocketDebuggerUrl));
@@ -220,13 +227,24 @@ export class BrowserSession {
 
   async accessibilitySnapshot(args: Record<string, unknown>): Promise<Record<string, unknown>> {
     const maxNodes = int(args.max_nodes, 200, 1, MAX_SNAPSHOT_NODES, 'max_nodes');
+    const offset = int(args.offset, 0, 0, Number.MAX_SAFE_INTEGER, 'offset');
     const result = await this.connection.call('Accessibility.getFullAXTree', {});
-    const nodes = Array.isArray(result.nodes) ? result.nodes.slice(0, maxNodes) : [];
+    const page = boundedCollection(Array.isArray(result.nodes) ? result.nodes : [], {
+      offset,
+      limit: maxNodes,
+      truncationReason: 'accessibility_node_page',
+    });
+    const nodes = page.items;
     return {
       schema: 'narada.browser_control.accessibility_snapshot.v1',
       session: this.info(),
       node_count: nodes.length,
-      truncated: Array.isArray(result.nodes) && result.nodes.length > nodes.length,
+      total_node_count: page.total_count,
+      offset: page.offset,
+      next_offset: page.next_offset,
+      has_more: page.has_more,
+      truncated: page.truncated,
+      truncation_reason: page.truncation_reason,
       nodes: nodes.map((node: any) => ({
         node_id: safeText(node.nodeId, 100),
         ignored: Boolean(node.ignored),

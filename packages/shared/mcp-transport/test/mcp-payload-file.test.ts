@@ -20,6 +20,7 @@ import {
   readOutputResource,
   resolveToolPayloadArgs,
 } from '../src/mcp-payload-file.js';
+import { boundedCollection } from '../src/bounded-collection.js';
 
 const exactly20000 = 'x'.repeat(20_000);
 const over20000 = 'x'.repeat(20_001);
@@ -54,6 +55,12 @@ assert.doesNotThrow(() => enforceInlinePayloadLimit({
 assert.equal(listOutputTools()[0].name, 'mcp_output_show');
 assert.equal('target_site_root' in listOutputTools()[0].inputSchema.properties, false);
 assert.equal(listOutputTools()[0].inputSchema.properties.limit.maximum, 20_000);
+const bounded = boundedCollection(['a', 'b', 'c'], { offset: 1, limit: 1 });
+assert.deepEqual(bounded.items, ['b']);
+assert.equal(bounded.total_count, 3);
+assert.equal(bounded.has_more, true);
+assert.equal(bounded.next_offset, 2);
+assert.equal(bounded.truncation_reason, 'page_limit');
 assert.throws(
   () => buildOutputRefToolContent({ value: { status: 'ok' }, limit: 30_000 }),
   /inline_output_limit_exceeds_transport_maximum/

@@ -728,6 +728,7 @@ function buildOutputPageEnvelope({ fullText, value, outputRef, payloadRef, outpu
       schema: 'narada.producer_output_page.v1',
       status: outputStatus(value, isError),
       truncated: true,
+      truncation_reason: 'inline_transport_bound',
       ...(payloadRef ? { payload_ref: payloadRef } : {}),
       output_ref: outputRef,
       ref: outputRef,

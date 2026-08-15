@@ -2,6 +2,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, relative, resolve } from 'node:path';
+import { boundedCollection } from '@narada-core/mcp-transport/bounded-collection';
 
 const CODEX_SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -19,14 +20,23 @@ export function discoverCodexSessionEvidence({
   identity,
   codexHome = defaultCodexHome(),
   limit = 200,
+  offset = 0,
+  candidateLimit = 20,
 }: any = {}) {
   if (!siteRoot) throw new Error('siteRoot is required');
   if (!admissionId) throw new Error('admission_id is required');
 
   const sessionsRoot = join(codexHome, 'sessions');
-  const files = existsSync(sessionsRoot)
-    ? listSessionFiles(sessionsRoot).slice(0, limit)
-    : [];
+  const allFiles = existsSync(sessionsRoot) ? listSessionFiles(sessionsRoot) : [];
+  const normalizedOffset = Math.max(Math.trunc(Number(offset) || 0), 0);
+  const normalizedLimit = Math.min(Math.max(Math.trunc(Number(limit) || 200), 1), 500);
+  const normalizedCandidateLimit = Math.min(Math.max(Math.trunc(Number(candidateLimit) || 20), 1), 100);
+  const filePage = boundedCollection(allFiles, {
+    offset: normalizedOffset,
+    limit: normalizedLimit,
+    truncationReason: 'codex_session_scan_page',
+  });
+  const files = filePage.items;
   const siteRootResolved = normalizePath(siteRoot);
   const candidates = [];
 
@@ -36,7 +46,10 @@ export function discoverCodexSessionEvidence({
   }
 
   const admissible = candidates.filter((candidate: any) => candidate.admissible);
-  const status = admissible.length === 1
+  const scanComplete = normalizedOffset === 0 && !filePage.has_more;
+  const status = !scanComplete
+    ? 'incomplete'
+    : admissible.length === 1
     ? 'admissible'
     : admissible.length > 1
       ? 'ambiguous'
@@ -51,8 +64,14 @@ export function discoverCodexSessionEvidence({
     sessions_root: sessionsRoot,
     candidate_count: candidates.length,
     admissible_count: admissible.length,
-    selected: admissible.length === 1 ? admissible[0] : null,
-    candidates: candidates.slice(0, 20),
+    selected: scanComplete && admissible.length === 1 ? admissible[0] : null,
+    candidates: candidates.slice(0, normalizedCandidateLimit),
+    scan: filePage,
+    candidate_page: boundedCollection(candidates, {
+      limit: normalizedCandidateLimit,
+      truncationReason: 'codex_session_candidate_limit',
+    }),
+    admissibility_complete: scanComplete,
     exact_resume_proof: {
       status: 'missing_mcp_capability',
       reason: 'Narada has no approved MCP capability to execute `codex resume <codex_session_id>` and verify exact resume without --last or picker state.',
@@ -101,6 +120,8 @@ export function extractCodexSessionEvidencePacket({
   searchText,
   outputPath = 'kb/operations/codex-session-evidence-packet.json',
   limit = 200,
+  offset = 0,
+  candidateLimit = 20,
 }: any = {}) {
   if (!siteRoot) throw new Error('siteRoot is required');
   if (!admissionId) throw new Error('admission_id is required');
@@ -109,7 +130,7 @@ export function extractCodexSessionEvidencePacket({
   }
 
   const outputAbsolute = resolveUnderSiteRoot(siteRoot, outputPath);
-  const discovery = discoverCodexSessionEvidence({ siteRoot, admissionId, identity, codexHome, limit });
+  const discovery = discoverCodexSessionEvidence({ siteRoot, admissionId, identity, codexHome, limit, offset, candidateLimit });
   if (discovery.status !== 'admissible' || !discovery.selected?.codex_session_file) {
     return {
       schema: 'narada.codex.session_evidence.extraction.v0',
@@ -315,4 +336,3 @@ function resolveUnderSiteRoot(siteRoot: any, outputPath: any) {
   }
   return absolute;
 }
-

@@ -25,6 +25,7 @@ import {
   outputShowAsync,
   readOutputResource,
 } from '@narada-core/mcp-transport';
+import { boundedCollection } from '@narada-core/mcp-transport/bounded-collection';
 import {
   buildOrientationOccupantBrief,
   buildOrientationReadyProjection,
@@ -691,10 +692,23 @@ function promptGet(params: any) {
 
 function completeArgument(params: any) {
   const argumentName = String((params.argument && typeof params.argument === 'object' ? params.argument.name : '') ?? '');
-  const values = argumentName === 'name'
-    ? listTools().map((tool: any) => tool.name).filter(Boolean).slice(0, 100)
+  const allValues = argumentName === 'name'
+    ? listTools().map((tool: any) => tool.name).filter(Boolean)
     : [];
-  return { completion: { values, total: values.length, hasMore: false } };
+  const context = params.context && typeof params.context === 'object' ? params.context : {};
+  const page = boundedCollection(allValues, {
+    offset: Number.isInteger(context._narada_offset) ? context._narada_offset : 0,
+    limit: 100,
+    truncationReason: 'tool_completion_page',
+  });
+  return {
+    completion: {
+      values: page.items,
+      total: page.total_count ?? allValues.length,
+      hasMore: page.has_more,
+    },
+    narada_paging: page,
+  };
 }
 
 function assistantTextContent(text: string) {
@@ -933,6 +947,7 @@ function rehydrate(toolArgs: any) {
   assertAgentContextIdentity(agentId);
   const checkpointId = optionalCheckpointId(toolArgs);
   const limit = Math.min(Math.max(Number(toolArgs.limit ?? 1), 1), 50);
+  const offset = Math.max(Math.trunc(Number(toolArgs.offset ?? 0)) || 0, 0);
 
   return withDb((db: any) => {
     if (checkpointId !== null) {
@@ -948,17 +963,29 @@ function rehydrate(toolArgs: any) {
       return { status: 'ok', ...rowToCheckpoint(row) };
     }
 
-    if (toolArgs.history === true || limit > 1) {
+    if (toolArgs.history === true || limit > 1 || offset > 0) {
+      const totalRow = db.prepare(`
+        SELECT COUNT(*) AS total_count FROM agent_checkpoint_history WHERE agent_id = ?
+      `).get(agentId);
+      const totalCount = Number(totalRow?.total_count ?? 0);
       const rows = db.prepare(`
         SELECT * FROM agent_checkpoint_history
         WHERE agent_id = ?
         ORDER BY archived_at DESC
         LIMIT ?
-      `).all(agentId, limit);
+        OFFSET ?
+      `).all(agentId, limit, offset);
+      const hasMore = offset + rows.length < totalCount;
       return {
         status: rows.length > 0 ? 'ok' : 'no_checkpoint_history',
         agent_id: agentId,
         count: rows.length,
+        offset,
+        total_count: totalCount,
+        has_more: hasMore,
+        next_offset: hasMore ? offset + rows.length : null,
+        truncated: hasMore,
+        truncation_reason: hasMore ? 'checkpoint_history_page_limit' : null,
         checkpoints: rows.map(rowToCheckpoint),
       };
     }
@@ -1679,6 +1706,7 @@ function listSessions(toolArgs: any = {}) {
     db,
     identity: toolArgs.identity ?? null,
     limit: toolArgs.limit ?? 100,
+    offset: toolArgs.offset ?? 0,
   }));
 }
 
