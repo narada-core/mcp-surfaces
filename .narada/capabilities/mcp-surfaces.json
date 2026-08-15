@@ -3,7 +3,7 @@
   "artifact_role": "site_capability_surface_registry_not_mcp_client_config",
   "site_id": "mcp-surfaces",
   "generated_by": "mcp-registrar",
-  "generated_at": "2026-08-15T01:13:16.1806311Z",
+  "generated_at": "2026-08-15T01:16:25.9622446Z",
   "generation_policy": {
     "source": ".ai/mcp + registrar surface catalog",
     "mode": "enabled_surface_tool_authority",
@@ -2606,6 +2606,4356 @@
       "evidence": {
         "source": "site_mcp_fabric",
         "path": ".ai/mcp/narada-mcp-surfaces-structured-command-mcp.json",
+        "projection_kind": "site_fabric"
+      }
+    },
+    {
+      "surface_id": "narada-mcp-surfaces-worker-delegation.local",
+      "surface_projection": {
+        "surface_id": "worker-delegation",
+        "projection_id": "default",
+        "injection_scope": "local_site",
+        "runtime_requirements": [],
+        "exposed_tools": [
+          "worker_guidance",
+          "worker_output_show",
+          "worker_operator_affordances",
+          "worker_policy_inspect",
+          "worker_cognition_defaults_inspect",
+          "worker_cognition_defaults_update",
+          "worker_config_resolve",
+          "worker_run",
+          "worker_edit",
+          "worker_resume",
+          "worker_run_status",
+          "worker_run_reap",
+          "worker_runs_list",
+          "worker_run_wait",
+          "worker_run_batch",
+          "worker_run_wait_batch",
+          "worker_runs_synthesize",
+          "worker_dashboard_describe"
+        ],
+        "execution": {
+          "adapter": "stdio",
+          "tenancy": "session_isolated",
+          "replacement": "manual"
+        },
+        "descriptor_digest": "4de73134e1afa4d50baa52c4771720c47dd8c26dd0de58362a873cd9fc606fb2",
+        "tool_contract_digest": "813381028a857d7f6983969a431fa47afa0d1ec58a0261d50664a6b3c598e088",
+        "surface_descriptor": {
+          "schema_version": "2.0",
+          "source": "native",
+          "surface_id": "worker-delegation",
+          "surface_version": "0.1.0",
+          "package": "@narada-core/worker-delegation-mcp",
+          "guidance_tool": "worker_guidance",
+          "tools": [
+            {
+              "name": "worker_guidance",
+              "description": "Show model-facing operating guidance for worker-delegation MCP workflows.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "workflow": {
+                    "type": "string",
+                    "description": "Optional workflow name or area to focus guidance on."
+                  },
+                  "tool": {
+                    "type": "string",
+                    "description": "Optional tool name for tool-specific guidance."
+                  }
+                },
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "annotations": {
+                "title": "worker_guidance",
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": true
+              },
+              "effect": {
+                "class": "read",
+                "idempotency": "replayable",
+                "confirmation": "never"
+              }
+            },
+            {
+              "name": "worker_output_show",
+              "description": "Read a materialized worker MCP output ref with offset/limit paging.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "ref": {
+                    "type": "string"
+                  },
+                  "output_ref": {
+                    "type": "string"
+                  },
+                  "offset": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "limit": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "annotations": {
+                "title": "worker_output_show",
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": true
+              },
+              "effect": {
+                "class": "read",
+                "idempotency": "replayable",
+                "confirmation": "never"
+              }
+            },
+            {
+              "name": "worker_operator_affordances",
+              "description": "Return UI-neutral operator affordances for rendering worker run dashboards, launch controls, artifact refs, and recovery actions.",
+              "input_schema": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "annotations": {
+                "title": "worker_operator_affordances",
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": true
+              },
+              "effect": {
+                "class": "read",
+                "idempotency": "replayable",
+                "confirmation": "never"
+              }
+            },
+            {
+              "name": "worker_policy_inspect",
+              "description": "Inspect the active worker delegation policy, including narada-agent-runtime-server Site binding markers and environment projection.",
+              "input_schema": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "properties": {
+                  "schema": {
+                    "type": "string",
+                    "const": "narada.worker.policy.v1"
+                  },
+                  "status": {
+                    "type": "string"
+                  },
+                  "implementation_identity": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "implementation_gate": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "default_runtime": {
+                    "type": "string"
+                  },
+                  "default_authority": {
+                    "type": "string"
+                  },
+                  "default_cognition": {
+                    "type": "string"
+                  },
+                  "allowed_authorities": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "allowed_cognition": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "run_root": {
+                    "type": "string"
+                  },
+                  "audit_log_dir": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "allowed_roots": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "roots_from_trust_config": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "allowed_runtimes": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "allowed_sandboxes": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "allowed_config_keys": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "allow_raw_config_overrides": {
+                    "type": "boolean"
+                  },
+                  "allow_danger_full_access": {
+                    "type": "boolean"
+                  },
+                  "nars_site_semantics": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "max_parallel_runs": {
+                    "type": "integer"
+                  },
+                  "max_prompt_bytes": {
+                    "type": "integer"
+                  },
+                  "max_output_bytes": {
+                    "type": "integer"
+                  },
+                  "max_run_ms": {
+                    "type": "integer"
+                  },
+                  "max_tool_rounds": {
+                    "type": "integer"
+                  },
+                  "cognition_defaults": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "runtimes": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                },
+                "required": [
+                  "schema",
+                  "status"
+                ],
+                "additionalProperties": false
+              },
+              "annotations": {
+                "title": "worker_policy_inspect",
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": true
+              },
+              "effect": {
+                "class": "read",
+                "idempotency": "replayable",
+                "confirmation": "never"
+              }
+            },
+            {
+              "name": "worker_cognition_defaults_inspect",
+              "description": "Inspect legacy provider-scoped low, medium, and high cognition defaults. Canonical narada-agent-runtime-server runs use capabilities from their immutable Narada invocation plan instead.",
+              "input_schema": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "annotations": {
+                "title": "worker_cognition_defaults_inspect",
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": true
+              },
+              "effect": {
+                "class": "read",
+                "idempotency": "replayable",
+                "confirmation": "never"
+              }
+            },
+            {
+              "name": "worker_cognition_defaults_update",
+              "description": "Atomically set a legacy provider-scoped cognition default for compatibility runtimes. Canonical narada-agent-runtime-server runs do not consume this registry.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "provider": {
+                    "type": "string"
+                  },
+                  "cognition": {
+                    "type": "string",
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high"
+                    ]
+                  },
+                  "model": {
+                    "type": "string"
+                  },
+                  "reasoning_effort": {
+                    "type": "string"
+                  },
+                  "actor": {
+                    "type": "string",
+                    "description": "Optional audit actor label."
+                  }
+                },
+                "required": [
+                  "provider",
+                  "cognition",
+                  "model",
+                  "reasoning_effort"
+                ],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "annotations": {
+                "title": "worker_cognition_defaults_update",
+                "readOnlyHint": false,
+                "destructiveHint": true,
+                "idempotentHint": false,
+                "openWorldHint": true
+              },
+              "effect": {
+                "class": "runtime_admin",
+                "idempotency": "non_idempotent",
+                "confirmation": "always"
+              }
+            },
+            {
+              "name": "worker_config_resolve",
+              "description": "Resolve worker run inputs without launching a worker, including narada-agent-runtime-server Site binding status.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "cwd": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096
+                  },
+                  "constraints": {
+                    "type": "object",
+                    "properties": {
+                      "authority": {
+                        "type": "string",
+                        "enum": [
+                          "read",
+                          "write",
+                          "command"
+                        ]
+                      },
+                      "cognition": {
+                        "type": "string",
+                        "enum": [
+                          "low",
+                          "medium",
+                          "high"
+                        ]
+                      },
+                      "cwd": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 4096
+                      },
+                      "invocation_plan_ref": {
+                        "type": "string",
+                        "minLength": 6,
+                        "maxLength": 512,
+                        "pattern": "^plan:[A-Za-z0-9._:-]+$"
+                      },
+                      "max_run_ms": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 1800000,
+                        "default": 300000,
+                        "description": "Hard worker runtime deadline enforced by the native authority."
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                },
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "properties": {
+                  "schema": {
+                    "type": "string",
+                    "const": "narada.worker.config_resolve.v1"
+                  },
+                  "status": {
+                    "type": "string",
+                    "const": "ok"
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "const": true
+                  },
+                  "requested_mode": {
+                    "type": "string",
+                    "enum": [
+                      "audit_only",
+                      "plan_only",
+                      "implement",
+                      "implement_and_verify"
+                    ]
+                  },
+                  "resume_worker_session_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "launchable": {
+                    "type": "boolean"
+                  },
+                  "launchability": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "resolved_worker_config": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "invocation": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "preflight": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "ok",
+                            "warning",
+                            "blocked"
+                          ]
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "name",
+                        "status",
+                        "message"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "requested_mcp_tools": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "mcp_tool_verification": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "output_contract": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "runtime_availability": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "config_resolution": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "implementation_identity": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "implementation_gate": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "warnings": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "schema",
+                  "status",
+                  "dry_run",
+                  "requested_mode",
+                  "resume_worker_session_id",
+                  "launchable",
+                  "launchability",
+                  "resolved_worker_config",
+                  "invocation",
+                  "preflight",
+                  "runtime_availability",
+                  "config_resolution",
+                  "warnings"
+                ],
+                "additionalProperties": false
+              },
+              "annotations": {
+                "title": "worker_config_resolve",
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": true
+              },
+              "effect": {
+                "class": "read",
+                "idempotency": "replayable",
+                "confirmation": "never"
+              }
+            },
+            {
+              "name": "worker_run",
+              "description": "Start one new worker run for one delegated instruction.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "intent": {
+                    "type": "object",
+                    "properties": {
+                      "instruction": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 65536
+                      },
+                      "task": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 65536
+                      },
+                      "goal": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 65536
+                      },
+                      "summary": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 65536
+                      },
+                      "mode": {
+                        "type": "string",
+                        "maxLength": 256
+                      }
+                    },
+                    "additionalProperties": false,
+                    "anyOf": [
+                      {
+                        "required": [
+                          "instruction"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "task"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "goal"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "summary"
+                        ]
+                      }
+                    ]
+                  },
+                  "constraints": {
+                    "type": "object",
+                    "properties": {
+                      "authority": {
+                        "type": "string",
+                        "enum": [
+                          "read",
+                          "write",
+                          "command"
+                        ]
+                      },
+                      "cognition": {
+                        "type": "string",
+                        "enum": [
+                          "low",
+                          "medium",
+                          "high"
+                        ]
+                      },
+                      "cwd": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 4096
+                      },
+                      "invocation_plan_ref": {
+                        "type": "string",
+                        "minLength": 6,
+                        "maxLength": 512,
+                        "pattern": "^plan:[A-Za-z0-9._:-]+$"
+                      },
+                      "max_run_ms": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 1800000,
+                        "default": 300000,
+                        "description": "Hard worker runtime deadline enforced by the native authority."
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "intent"
+                ],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "properties": {
+                  "schema": {
+                    "type": "string",
+                    "const": "narada.worker.run.v1"
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "running",
+                      "completed",
+                      "completed_with_errors",
+                      "failed",
+                      "cancelled"
+                    ]
+                  },
+                  "run_id": {
+                    "type": "string"
+                  },
+                  "run_dir": {
+                    "type": "string"
+                  },
+                  "runtime": {
+                    "type": "string",
+                    "enum": [
+                      "codex",
+                      "narada-agent-runtime-server"
+                    ]
+                  },
+                  "worker_session_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "idempotency_key": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "request_fingerprint": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "idempotency_replayed": {
+                    "type": "boolean"
+                  },
+                  "resolved_worker_config": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "executor_request": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "requested_mode": {
+                    "type": "string",
+                    "enum": [
+                      "audit_only",
+                      "plan_only",
+                      "implement",
+                      "implement_and_verify"
+                    ]
+                  },
+                  "edits_performed": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "target_state_changed": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "confidence": {
+                    "type": "string",
+                    "enum": [
+                      "complete",
+                      "partial",
+                      "pending"
+                    ]
+                  },
+                  "completion_state": {
+                    "type": "string",
+                    "enum": [
+                      "complete",
+                      "partial",
+                      "pending"
+                    ]
+                  },
+                  "blocked_paths": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "verification": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "runtime_warnings": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "requested_mcp_tools": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "mcp_tool_verification": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "output_contract": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "warning_count": {
+                    "type": "integer"
+                  },
+                  "preflight": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "ok",
+                            "warning",
+                            "blocked"
+                          ]
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "name",
+                        "status",
+                        "message"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "final_checklist": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "summary": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "deliverables": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "path": {
+                          "type": "string"
+                        },
+                        "description": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "path",
+                        "description"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "open_questions": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "next_actions": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "changes": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "path": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "type": "string"
+                        },
+                        "summary": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "path",
+                        "status",
+                        "summary"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "structured_outputs": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "verification_results": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "tool": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "command": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "status": {
+                          "type": "string"
+                        },
+                        "summary": {
+                          "type": "string"
+                        },
+                        "command_classification": {
+                          "type": "string",
+                          "enum": [
+                            "focused",
+                            "broad",
+                            "not_applicable"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "tool",
+                        "command",
+                        "status",
+                        "summary"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "verification_budget_respected": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "broad_unrelated_failures": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "command": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "status": {
+                          "type": "string"
+                        },
+                        "summary": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "command",
+                        "status",
+                        "summary"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "exit_interview": {
+                    "type": [
+                      "object",
+                      "null"
+                    ],
+                    "properties": {
+                      "ergonomics_feedback": {
+                        "type": "string"
+                      },
+                      "friction_points": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "missing_affordances": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "observed_incoherencies": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "suggested_improvements": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "progress": {
+                    "type": "object",
+                    "properties": {
+                      "event_count": {
+                        "type": "integer"
+                      },
+                      "latest_event_type": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "latest_event_preview": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "latest_event_at": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "readable": {
+                        "type": "boolean"
+                      },
+                      "tail_truncated": {
+                        "type": "boolean"
+                      },
+                      "error_preview": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "event_count",
+                      "latest_event_type",
+                      "latest_event_preview",
+                      "readable",
+                      "tail_truncated"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "artifacts": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "path": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "name",
+                        "path"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "artifact_readback": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "timing": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "error": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "worker_output_state": {
+                    "type": "string",
+                    "enum": [
+                      "pending",
+                      "available",
+                      "absent",
+                      "invalid_json",
+                      "invalid_shape"
+                    ]
+                  },
+                  "worker_authored_output_present": {
+                    "type": "boolean"
+                  },
+                  "worker_output_error": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "diagnostic_tail": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "error_classification": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "status_liveness": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "progress_state": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "budget_status": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "recent_activity": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  }
+                },
+                "required": [
+                  "schema",
+                  "status",
+                  "run_id",
+                  "run_dir",
+                  "resolved_worker_config",
+                  "summary",
+                  "deliverables",
+                  "open_questions",
+                  "next_actions"
+                ],
+                "additionalProperties": false
+              },
+              "annotations": {
+                "title": "worker_run",
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": true
+              },
+              "effect": {
+                "class": "runtime_admin",
+                "idempotency": "non_idempotent",
+                "confirmation": "always"
+              }
+            },
+            {
+              "name": "worker_edit",
+              "description": "Start one edit-capable worker run shortcut using write authority. The agent runtime resolves a canonical plan during preflight when no invocation_plan_ref is supplied.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "cwd": {
+                    "type": "string"
+                  },
+                  "site_root": {
+                    "type": "string",
+                    "description": "Explicit Narada Site root for narada-agent-runtime-server workers. Defaults to nearest Site marker above cwd."
+                  },
+                  "invocation_plan_ref": {
+                    "type": "string",
+                    "description": "Optional immutable canonical Narada invocation-plan reference. When omitted, narada-agent-runtime-server resolves and admits its plan during canonical preflight."
+                  },
+                  "provider": {
+                    "type": "string",
+                    "description": "Legacy compatibility provider selector. Rejected for runtime narada-agent-runtime-server; that runtime uses the canonical invocation plan."
+                  },
+                  "instruction": {
+                    "type": "string"
+                  },
+                  "required_mcp_tools": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Exact MCP tool names to project for narada-agent-runtime-server workers. Other runtimes report the request as unprojectable."
+                  },
+                  "resumable": {
+                    "type": "boolean"
+                  },
+                  "wait_for_completion": {
+                    "type": "boolean",
+                    "description": "When true, wait boundedly for completion. Defaults to false so delegation returns promptly with run_id."
+                  },
+                  "wait_timeout_ms": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 180000,
+                    "description": "Maximum synchronous wait before returning the recoverable running run_id. Defaults to 180000."
+                  },
+                  "exit_interview": {
+                    "type": "boolean",
+                    "description": "Ask the worker to include ergonomics feedback in its final output."
+                  },
+                  "overrides": {
+                    "type": "object",
+                    "properties": {
+                      "runtime": {
+                        "type": "string",
+                        "enum": [
+                          "codex",
+                          "narada-agent-runtime-server"
+                        ]
+                      },
+                      "sandbox": {
+                        "type": "string",
+                        "enum": [
+                          "read-only",
+                          "workspace-write",
+                          "danger-full-access"
+                        ]
+                      },
+                      "model": {
+                        "type": "string"
+                      },
+                      "reasoning_effort": {
+                        "type": "string"
+                      },
+                      "config": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "type": [
+                            "string",
+                            "number",
+                            "boolean"
+                          ]
+                        }
+                      },
+                      "skip_git_repo_check": {
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "cwd",
+                  "instruction"
+                ],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "properties": {
+                  "schema": {
+                    "type": "string",
+                    "const": "narada.worker.run.v1"
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "running",
+                      "completed",
+                      "completed_with_errors",
+                      "failed",
+                      "cancelled"
+                    ]
+                  },
+                  "run_id": {
+                    "type": "string"
+                  },
+                  "run_dir": {
+                    "type": "string"
+                  },
+                  "runtime": {
+                    "type": "string",
+                    "enum": [
+                      "codex",
+                      "narada-agent-runtime-server"
+                    ]
+                  },
+                  "worker_session_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "idempotency_key": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "request_fingerprint": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "idempotency_replayed": {
+                    "type": "boolean"
+                  },
+                  "resolved_worker_config": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "executor_request": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "requested_mode": {
+                    "type": "string",
+                    "enum": [
+                      "audit_only",
+                      "plan_only",
+                      "implement",
+                      "implement_and_verify"
+                    ]
+                  },
+                  "edits_performed": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "target_state_changed": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "confidence": {
+                    "type": "string",
+                    "enum": [
+                      "complete",
+                      "partial",
+                      "pending"
+                    ]
+                  },
+                  "completion_state": {
+                    "type": "string",
+                    "enum": [
+                      "complete",
+                      "partial",
+                      "pending"
+                    ]
+                  },
+                  "blocked_paths": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "verification": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "runtime_warnings": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "requested_mcp_tools": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "mcp_tool_verification": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "output_contract": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "warning_count": {
+                    "type": "integer"
+                  },
+                  "preflight": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "ok",
+                            "warning",
+                            "blocked"
+                          ]
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "name",
+                        "status",
+                        "message"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "final_checklist": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "summary": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "deliverables": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "path": {
+                          "type": "string"
+                        },
+                        "description": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "path",
+                        "description"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "open_questions": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "next_actions": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "changes": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "path": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "type": "string"
+                        },
+                        "summary": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "path",
+                        "status",
+                        "summary"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "structured_outputs": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "verification_results": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "tool": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "command": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "status": {
+                          "type": "string"
+                        },
+                        "summary": {
+                          "type": "string"
+                        },
+                        "command_classification": {
+                          "type": "string",
+                          "enum": [
+                            "focused",
+                            "broad",
+                            "not_applicable"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "tool",
+                        "command",
+                        "status",
+                        "summary"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "verification_budget_respected": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "broad_unrelated_failures": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "command": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "status": {
+                          "type": "string"
+                        },
+                        "summary": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "command",
+                        "status",
+                        "summary"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "exit_interview": {
+                    "type": [
+                      "object",
+                      "null"
+                    ],
+                    "properties": {
+                      "ergonomics_feedback": {
+                        "type": "string"
+                      },
+                      "friction_points": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "missing_affordances": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "observed_incoherencies": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "suggested_improvements": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "progress": {
+                    "type": "object",
+                    "properties": {
+                      "event_count": {
+                        "type": "integer"
+                      },
+                      "latest_event_type": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "latest_event_preview": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "latest_event_at": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "readable": {
+                        "type": "boolean"
+                      },
+                      "tail_truncated": {
+                        "type": "boolean"
+                      },
+                      "error_preview": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "event_count",
+                      "latest_event_type",
+                      "latest_event_preview",
+                      "readable",
+                      "tail_truncated"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "artifacts": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "path": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "name",
+                        "path"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "artifact_readback": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "timing": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "error": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "worker_output_state": {
+                    "type": "string",
+                    "enum": [
+                      "pending",
+                      "available",
+                      "absent",
+                      "invalid_json",
+                      "invalid_shape"
+                    ]
+                  },
+                  "worker_authored_output_present": {
+                    "type": "boolean"
+                  },
+                  "worker_output_error": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "diagnostic_tail": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "error_classification": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "status_liveness": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "progress_state": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "budget_status": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "recent_activity": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  }
+                },
+                "required": [
+                  "schema",
+                  "status",
+                  "run_id",
+                  "run_dir",
+                  "resolved_worker_config",
+                  "summary",
+                  "deliverables",
+                  "open_questions",
+                  "next_actions"
+                ],
+                "additionalProperties": false
+              },
+              "annotations": {
+                "title": "worker_edit",
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": true
+              },
+              "effect": {
+                "class": "runtime_admin",
+                "idempotency": "non_idempotent",
+                "confirmation": "always"
+              }
+            },
+            {
+              "name": "worker_resume",
+              "description": "Continue one existing worker session.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "worker_session_id": {
+                    "type": "string"
+                  },
+                  "intent": {
+                    "type": "object",
+                    "properties": {
+                      "instruction": {
+                        "type": "string"
+                      },
+                      "mode": {
+                        "type": "string",
+                        "enum": [
+                          "audit_only",
+                          "plan_only",
+                          "implement",
+                          "implement_and_verify"
+                        ],
+                        "description": "Non-mechanical task mode. Defaults to audit_only for read authority and implement for write/command authority."
+                      },
+                      "output_contract": {
+                        "type": "object",
+                        "additionalProperties": true,
+                        "description": "Optional caller-owned structured output contract merged into the worker output contract."
+                      }
+                    },
+                    "required": [
+                      "instruction"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "constraints": {
+                    "type": "object",
+                    "properties": {
+                      "cwd": {
+                        "type": "string"
+                      },
+                      "site_root": {
+                        "type": "string",
+                        "description": "Explicit Narada Site root for narada-agent-runtime-server workers. Defaults to nearest Site marker above cwd."
+                      },
+                      "invocation_plan_ref": {
+                        "type": "string",
+                        "description": "Optional immutable canonical Narada invocation-plan reference. When omitted, narada-agent-runtime-server resolves and admits its plan during canonical preflight."
+                      },
+                      "provider": {
+                        "type": "string",
+                        "description": "Legacy compatibility provider selector. Rejected for runtime narada-agent-runtime-server; that runtime uses the canonical invocation plan."
+                      },
+                      "authority": {
+                        "type": "string",
+                        "enum": [
+                          "read",
+                          "write",
+                          "command"
+                        ]
+                      },
+                      "cognition": {
+                        "type": "string",
+                        "enum": [
+                          "low",
+                          "medium",
+                          "high"
+                        ],
+                        "description": "Legacy compatibility cognition tier; canonical offerings declare their own plan-scoped capability vocabulary."
+                      },
+                      "resumable": {
+                        "type": "boolean"
+                      },
+                      "wait_for_completion": {
+                        "type": "boolean",
+                        "description": "When true, wait boundedly for completion. Defaults to false so delegation returns promptly with run_id."
+                      },
+                      "wait_timeout_ms": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 180000,
+                        "description": "Maximum synchronous wait before returning the recoverable running run_id. Defaults to 180000."
+                      },
+                      "max_run_ms": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 1800000,
+                        "description": "Maximum worker runtime. The effective value is capped by the worker policy."
+                      },
+                      "exit_interview": {
+                        "type": "boolean",
+                        "description": "Ask the worker to include ergonomics feedback in its final output."
+                      },
+                      "verification_budget": {
+                        "type": "object",
+                        "description": "Advisory verification budget. Workers classify commands as focused or broad, respect stop discipline, and report budget adherence.",
+                        "properties": {
+                          "focus": {
+                            "type": "string",
+                            "enum": [
+                              "focused",
+                              "broad"
+                            ],
+                            "description": "Default command scope expected for verification."
+                          },
+                          "max_commands": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 100
+                          },
+                          "max_minutes": {
+                            "type": "number",
+                            "minimum": 0
+                          },
+                          "stop_on_first_failure": {
+                            "type": "boolean"
+                          },
+                          "broad_commands_allowed": {
+                            "type": "boolean"
+                          },
+                          "notes": {
+                            "type": "string"
+                          }
+                        },
+                        "additionalProperties": false
+                      },
+                      "test_budget": {
+                        "type": "object",
+                        "description": "Advisory test budget. Use for focused package-local checks before broader suites; workers report broad unrelated failures separately.",
+                        "properties": {
+                          "focus": {
+                            "type": "string",
+                            "enum": [
+                              "focused",
+                              "broad"
+                            ],
+                            "description": "Default command scope expected for verification."
+                          },
+                          "max_commands": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 100
+                          },
+                          "max_minutes": {
+                            "type": "number",
+                            "minimum": 0
+                          },
+                          "stop_on_first_failure": {
+                            "type": "boolean"
+                          },
+                          "broad_commands_allowed": {
+                            "type": "boolean"
+                          },
+                          "notes": {
+                            "type": "string"
+                          }
+                        },
+                        "additionalProperties": false
+                      },
+                      "preflight_paths": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "path": {
+                              "type": "string"
+                            },
+                            "access": {
+                              "type": "string",
+                              "enum": [
+                                "read",
+                                "write",
+                                "create"
+                              ]
+                            },
+                            "label": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "path",
+                            "access"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "description": "Optional path capability checks recorded before the worker starts."
+                      },
+                      "required_mcp_tools": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        },
+                        "description": "Tool names the worker must have. For narada-agent-runtime-server, worker-delegation projects these through NARADA_WORKER_MCP_CONFIG; other runtimes record them as worker-verification requirements."
+                      },
+                      "overrides": {
+                        "type": "object",
+                        "properties": {
+                          "runtime": {
+                            "type": "string",
+                            "enum": [
+                              "codex",
+                              "narada-agent-runtime-server"
+                            ]
+                          },
+                          "sandbox": {
+                            "type": "string",
+                            "enum": [
+                              "read-only",
+                              "workspace-write",
+                              "danger-full-access"
+                            ]
+                          },
+                          "model": {
+                            "type": "string"
+                          },
+                          "reasoning_effort": {
+                            "type": "string"
+                          },
+                          "config": {
+                            "type": "object",
+                            "additionalProperties": {
+                              "type": [
+                                "string",
+                                "number",
+                                "boolean"
+                              ]
+                            }
+                          },
+                          "skip_git_repo_check": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "cwd"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "worker_session_id",
+                  "constraints"
+                ],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "properties": {
+                  "schema": {
+                    "type": "string",
+                    "const": "narada.worker.run.v1"
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "running",
+                      "completed",
+                      "completed_with_errors",
+                      "failed",
+                      "cancelled"
+                    ]
+                  },
+                  "run_id": {
+                    "type": "string"
+                  },
+                  "run_dir": {
+                    "type": "string"
+                  },
+                  "runtime": {
+                    "type": "string",
+                    "enum": [
+                      "codex",
+                      "narada-agent-runtime-server"
+                    ]
+                  },
+                  "worker_session_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "idempotency_key": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "request_fingerprint": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "idempotency_replayed": {
+                    "type": "boolean"
+                  },
+                  "resolved_worker_config": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "executor_request": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "requested_mode": {
+                    "type": "string",
+                    "enum": [
+                      "audit_only",
+                      "plan_only",
+                      "implement",
+                      "implement_and_verify"
+                    ]
+                  },
+                  "edits_performed": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "target_state_changed": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "confidence": {
+                    "type": "string",
+                    "enum": [
+                      "complete",
+                      "partial",
+                      "pending"
+                    ]
+                  },
+                  "completion_state": {
+                    "type": "string",
+                    "enum": [
+                      "complete",
+                      "partial",
+                      "pending"
+                    ]
+                  },
+                  "blocked_paths": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "verification": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "runtime_warnings": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "requested_mcp_tools": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "mcp_tool_verification": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "output_contract": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "warning_count": {
+                    "type": "integer"
+                  },
+                  "preflight": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "ok",
+                            "warning",
+                            "blocked"
+                          ]
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "name",
+                        "status",
+                        "message"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "final_checklist": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "summary": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "deliverables": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "path": {
+                          "type": "string"
+                        },
+                        "description": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "path",
+                        "description"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "open_questions": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "next_actions": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "changes": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "path": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "type": "string"
+                        },
+                        "summary": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "path",
+                        "status",
+                        "summary"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "structured_outputs": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "verification_results": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "tool": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "command": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "status": {
+                          "type": "string"
+                        },
+                        "summary": {
+                          "type": "string"
+                        },
+                        "command_classification": {
+                          "type": "string",
+                          "enum": [
+                            "focused",
+                            "broad",
+                            "not_applicable"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "tool",
+                        "command",
+                        "status",
+                        "summary"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "verification_budget_respected": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "broad_unrelated_failures": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "command": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "status": {
+                          "type": "string"
+                        },
+                        "summary": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "command",
+                        "status",
+                        "summary"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "exit_interview": {
+                    "type": [
+                      "object",
+                      "null"
+                    ],
+                    "properties": {
+                      "ergonomics_feedback": {
+                        "type": "string"
+                      },
+                      "friction_points": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "missing_affordances": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "observed_incoherencies": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "suggested_improvements": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "progress": {
+                    "type": "object",
+                    "properties": {
+                      "event_count": {
+                        "type": "integer"
+                      },
+                      "latest_event_type": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "latest_event_preview": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "latest_event_at": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "readable": {
+                        "type": "boolean"
+                      },
+                      "tail_truncated": {
+                        "type": "boolean"
+                      },
+                      "error_preview": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "event_count",
+                      "latest_event_type",
+                      "latest_event_preview",
+                      "readable",
+                      "tail_truncated"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "artifacts": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "path": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "name",
+                        "path"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "artifact_readback": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "timing": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "error": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "worker_output_state": {
+                    "type": "string",
+                    "enum": [
+                      "pending",
+                      "available",
+                      "absent",
+                      "invalid_json",
+                      "invalid_shape"
+                    ]
+                  },
+                  "worker_authored_output_present": {
+                    "type": "boolean"
+                  },
+                  "worker_output_error": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "diagnostic_tail": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "error_classification": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "status_liveness": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "progress_state": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "budget_status": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "recent_activity": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  }
+                },
+                "required": [
+                  "schema",
+                  "status",
+                  "run_id",
+                  "run_dir",
+                  "resolved_worker_config",
+                  "summary",
+                  "deliverables",
+                  "open_questions",
+                  "next_actions"
+                ],
+                "additionalProperties": false
+              },
+              "annotations": {
+                "title": "worker_resume",
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": true
+              },
+              "effect": {
+                "class": "runtime_admin",
+                "idempotency": "non_idempotent",
+                "confirmation": "always"
+              }
+            },
+            {
+              "name": "worker_run_status",
+              "description": "Inspect a worker run by run id without waiting for completion.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "run_id": {
+                    "type": "string"
+                  },
+                  "site_root": {
+                    "type": "string",
+                    "description": "Optional authorized Narada Site root whose worker run store should be inspected."
+                  }
+                },
+                "required": [
+                  "run_id"
+                ],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "properties": {
+                  "schema": {
+                    "type": "string",
+                    "const": "narada.worker.run.v1"
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "running",
+                      "completed",
+                      "completed_with_errors",
+                      "failed",
+                      "cancelled"
+                    ]
+                  },
+                  "run_id": {
+                    "type": "string"
+                  },
+                  "run_dir": {
+                    "type": "string"
+                  },
+                  "runtime": {
+                    "type": "string",
+                    "enum": [
+                      "codex",
+                      "narada-agent-runtime-server"
+                    ]
+                  },
+                  "worker_session_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "idempotency_key": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "request_fingerprint": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "idempotency_replayed": {
+                    "type": "boolean"
+                  },
+                  "resolved_worker_config": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "executor_request": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "requested_mode": {
+                    "type": "string",
+                    "enum": [
+                      "audit_only",
+                      "plan_only",
+                      "implement",
+                      "implement_and_verify"
+                    ]
+                  },
+                  "edits_performed": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "target_state_changed": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "confidence": {
+                    "type": "string",
+                    "enum": [
+                      "complete",
+                      "partial",
+                      "pending"
+                    ]
+                  },
+                  "completion_state": {
+                    "type": "string",
+                    "enum": [
+                      "complete",
+                      "partial",
+                      "pending"
+                    ]
+                  },
+                  "blocked_paths": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "verification": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "runtime_warnings": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "requested_mcp_tools": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "mcp_tool_verification": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "output_contract": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "warning_count": {
+                    "type": "integer"
+                  },
+                  "preflight": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "ok",
+                            "warning",
+                            "blocked"
+                          ]
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "name",
+                        "status",
+                        "message"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "final_checklist": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "summary": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "deliverables": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "path": {
+                          "type": "string"
+                        },
+                        "description": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "path",
+                        "description"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "open_questions": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "next_actions": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "changes": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "path": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "type": "string"
+                        },
+                        "summary": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "path",
+                        "status",
+                        "summary"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "structured_outputs": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "verification_results": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "tool": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "command": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "status": {
+                          "type": "string"
+                        },
+                        "summary": {
+                          "type": "string"
+                        },
+                        "command_classification": {
+                          "type": "string",
+                          "enum": [
+                            "focused",
+                            "broad",
+                            "not_applicable"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "tool",
+                        "command",
+                        "status",
+                        "summary"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "verification_budget_respected": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "broad_unrelated_failures": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "command": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "status": {
+                          "type": "string"
+                        },
+                        "summary": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "command",
+                        "status",
+                        "summary"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "exit_interview": {
+                    "type": [
+                      "object",
+                      "null"
+                    ],
+                    "properties": {
+                      "ergonomics_feedback": {
+                        "type": "string"
+                      },
+                      "friction_points": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "missing_affordances": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "observed_incoherencies": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "suggested_improvements": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "progress": {
+                    "type": "object",
+                    "properties": {
+                      "event_count": {
+                        "type": "integer"
+                      },
+                      "latest_event_type": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "latest_event_preview": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "latest_event_at": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "readable": {
+                        "type": "boolean"
+                      },
+                      "tail_truncated": {
+                        "type": "boolean"
+                      },
+                      "error_preview": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "event_count",
+                      "latest_event_type",
+                      "latest_event_preview",
+                      "readable",
+                      "tail_truncated"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "artifacts": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "path": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "name",
+                        "path"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "artifact_readback": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "timing": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "error": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "worker_output_state": {
+                    "type": "string",
+                    "enum": [
+                      "pending",
+                      "available",
+                      "absent",
+                      "invalid_json",
+                      "invalid_shape"
+                    ]
+                  },
+                  "worker_authored_output_present": {
+                    "type": "boolean"
+                  },
+                  "worker_output_error": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "diagnostic_tail": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "error_classification": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "status_liveness": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "progress_state": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "budget_status": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "recent_activity": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  }
+                },
+                "required": [
+                  "schema",
+                  "status",
+                  "run_id",
+                  "run_dir",
+                  "resolved_worker_config",
+                  "summary",
+                  "deliverables",
+                  "open_questions",
+                  "next_actions"
+                ],
+                "additionalProperties": false
+              },
+              "annotations": {
+                "title": "worker_run_status",
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": true
+              },
+              "effect": {
+                "class": "read",
+                "idempotency": "replayable",
+                "confirmation": "never"
+              }
+            },
+            {
+              "name": "worker_run_reap",
+              "description": "Governed cleanup for a running worker record: abort a managed active run when possible, or persist a terminal orphaned/cancelled result with evidence for a stale run.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "run_id": {
+                    "type": "string"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "description": "Required cleanup rationale."
+                  },
+                  "force": {
+                    "type": "boolean",
+                    "description": "Allow reaping a non-stale running run. Defaults false."
+                  },
+                  "site_root": {
+                    "type": "string",
+                    "description": "Optional authorized Narada Site root whose worker run store should be reaped."
+                  }
+                },
+                "required": [
+                  "run_id",
+                  "reason"
+                ],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "properties": {
+                  "schema": {
+                    "type": "string",
+                    "const": "narada.worker.run_reap.v1"
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "reaped",
+                      "already_terminal"
+                    ]
+                  },
+                  "run_id": {
+                    "type": "string"
+                  },
+                  "reaped": {
+                    "type": "boolean"
+                  },
+                  "evidence": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "run": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                },
+                "required": [
+                  "schema",
+                  "status",
+                  "run_id",
+                  "reaped",
+                  "evidence",
+                  "run"
+                ],
+                "additionalProperties": false
+              },
+              "annotations": {
+                "title": "worker_run_reap",
+                "readOnlyHint": false,
+                "destructiveHint": true,
+                "idempotentHint": false,
+                "openWorldHint": true
+              },
+              "effect": {
+                "class": "runtime_admin",
+                "idempotency": "non_idempotent",
+                "confirmation": "always"
+              }
+            },
+            {
+              "name": "worker_runs_list",
+              "description": "List recent worker runs so callers can rediscover outstanding run ids.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 200
+                  },
+                  "include_running": {
+                    "type": "boolean"
+                  },
+                  "include_completed": {
+                    "type": "boolean"
+                  },
+                  "include_summary": {
+                    "type": "boolean",
+                    "description": "Include full summaries in each compact list item."
+                  },
+                  "verbose": {
+                    "type": "boolean",
+                    "description": "Include full run path, timing object, session id, and full error fields."
+                  },
+                  "site_root": {
+                    "type": "string",
+                    "description": "Optional authorized Narada Site root whose worker run store should be listed."
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "properties": {
+                  "schema": {
+                    "type": "string",
+                    "const": "narada.worker.runs_list.v1"
+                  },
+                  "status": {
+                    "type": "string",
+                    "const": "ok"
+                  },
+                  "count": {
+                    "type": "integer"
+                  },
+                  "limit": {
+                    "type": "integer"
+                  },
+                  "scanned": {
+                    "type": "integer"
+                  },
+                  "scan_limit": {
+                    "type": "integer"
+                  },
+                  "scan_truncated": {
+                    "type": "boolean"
+                  },
+                  "verbose": {
+                    "type": "boolean"
+                  },
+                  "include_summary": {
+                    "type": "boolean"
+                  },
+                  "runs": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "run_id": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "type": "string"
+                        },
+                        "completion_state": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "enum": [
+                            "complete",
+                            "partial",
+                            "pending",
+                            null
+                          ]
+                        },
+                        "requested_mode": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "requested_mode_inferred": {
+                          "type": "boolean"
+                        },
+                        "authority": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "started_at": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "finished_at": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "duration_ms": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        },
+                        "worker_session_id": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "summary_preview": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "error_preview": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "error_classification": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "warning_count": {
+                          "type": "integer"
+                        },
+                        "progress_preview": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "latest_event_type": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "progress": {
+                          "type": "object",
+                          "properties": {
+                            "event_count": {
+                              "type": "integer"
+                            },
+                            "latest_event_type": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "latest_event_preview": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "latest_event_at": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "readable": {
+                              "type": "boolean"
+                            },
+                            "tail_truncated": {
+                              "type": "boolean"
+                            },
+                            "error_preview": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "event_count",
+                            "latest_event_type",
+                            "latest_event_preview",
+                            "readable",
+                            "tail_truncated"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "summary": {
+                          "type": "string"
+                        },
+                        "run_dir": {
+                          "type": "string"
+                        },
+                        "timing": {
+                          "type": "object",
+                          "additionalProperties": true
+                        },
+                        "error": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "diagnostic_tail": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "status_liveness": {
+                          "type": "object",
+                          "additionalProperties": true
+                        }
+                      },
+                      "required": [
+                        "run_id",
+                        "status"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": [
+                  "schema",
+                  "status",
+                  "runs",
+                  "scanned",
+                  "scan_limit",
+                  "scan_truncated"
+                ],
+                "additionalProperties": false
+              },
+              "annotations": {
+                "title": "worker_runs_list",
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": true
+              },
+              "effect": {
+                "class": "read",
+                "idempotency": "replayable",
+                "confirmation": "never"
+              }
+            },
+            {
+              "name": "worker_run_wait",
+              "description": "Wait briefly for one worker run to finish, returning the latest run status on timeout.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "run_id": {
+                    "type": "string"
+                  },
+                  "timeout_ms": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 300000
+                  },
+                  "poll_ms": {
+                    "type": "integer",
+                    "minimum": 25,
+                    "maximum": 10000
+                  },
+                  "summary_only": {
+                    "type": "boolean",
+                    "description": "Return only run id, status, summary, and error preview."
+                  },
+                  "verbose": {
+                    "type": "boolean",
+                    "description": "Include the full worker run payload as full_run."
+                  },
+                  "site_root": {
+                    "type": "string",
+                    "description": "Optional authorized Narada Site root whose worker run store should be read."
+                  }
+                },
+                "required": [
+                  "run_id"
+                ],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "properties": {
+                  "schema": {
+                    "type": "string",
+                    "const": "narada.worker.run_wait.v1"
+                  },
+                  "status": {
+                    "type": "string",
+                    "const": "ok"
+                  },
+                  "wait": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "run": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "full_run": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                },
+                "required": [
+                  "schema",
+                  "status",
+                  "wait",
+                  "run"
+                ],
+                "additionalProperties": false
+              },
+              "annotations": {
+                "title": "worker_run_wait",
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": true
+              },
+              "effect": {
+                "class": "read",
+                "idempotency": "replayable",
+                "confirmation": "never"
+              }
+            },
+            {
+              "name": "worker_run_batch",
+              "description": "Start multiple worker runs from one request and return compact per-run status plus launch diagnostics.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "requests": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 50,
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "intent": {
+                          "type": "object",
+                          "properties": {
+                            "instruction": {
+                              "type": "string"
+                            },
+                            "mode": {
+                              "type": "string",
+                              "enum": [
+                                "audit_only",
+                                "plan_only",
+                                "implement",
+                                "implement_and_verify"
+                              ],
+                              "description": "Non-mechanical task mode. Defaults to audit_only for read authority and implement for write/command authority."
+                            },
+                            "output_contract": {
+                              "type": "object",
+                              "additionalProperties": true,
+                              "description": "Optional caller-owned structured output contract merged into the worker output contract."
+                            }
+                          },
+                          "required": [
+                            "instruction"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "constraints": {
+                          "type": "object",
+                          "properties": {
+                            "cwd": {
+                              "type": "string"
+                            },
+                            "site_root": {
+                              "type": "string",
+                              "description": "Explicit Narada Site root for narada-agent-runtime-server workers. Defaults to nearest Site marker above cwd."
+                            },
+                            "invocation_plan_ref": {
+                              "type": "string",
+                              "description": "Optional immutable canonical Narada invocation-plan reference. When omitted, narada-agent-runtime-server resolves and admits its plan during canonical preflight."
+                            },
+                            "provider": {
+                              "type": "string",
+                              "description": "Legacy compatibility provider selector. Rejected for runtime narada-agent-runtime-server; that runtime uses the canonical invocation plan."
+                            },
+                            "authority": {
+                              "type": "string",
+                              "enum": [
+                                "read",
+                                "write",
+                                "command"
+                              ]
+                            },
+                            "cognition": {
+                              "type": "string",
+                              "enum": [
+                                "low",
+                                "medium",
+                                "high"
+                              ],
+                              "description": "Legacy compatibility cognition tier; canonical offerings declare their own plan-scoped capability vocabulary."
+                            },
+                            "resumable": {
+                              "type": "boolean"
+                            },
+                            "wait_for_completion": {
+                              "type": "boolean",
+                              "description": "When true, wait boundedly for completion. Defaults to false so delegation returns promptly with run_id."
+                            },
+                            "wait_timeout_ms": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 180000,
+                              "description": "Maximum synchronous wait before returning the recoverable running run_id. Defaults to 180000."
+                            },
+                            "max_run_ms": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 1800000,
+                              "description": "Maximum worker runtime. The effective value is capped by the worker policy."
+                            },
+                            "exit_interview": {
+                              "type": "boolean",
+                              "description": "Ask the worker to include ergonomics feedback in its final output."
+                            },
+                            "verification_budget": {
+                              "type": "object",
+                              "description": "Advisory verification budget. Workers classify commands as focused or broad, respect stop discipline, and report budget adherence.",
+                              "properties": {
+                                "focus": {
+                                  "type": "string",
+                                  "enum": [
+                                    "focused",
+                                    "broad"
+                                  ],
+                                  "description": "Default command scope expected for verification."
+                                },
+                                "max_commands": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 100
+                                },
+                                "max_minutes": {
+                                  "type": "number",
+                                  "minimum": 0
+                                },
+                                "stop_on_first_failure": {
+                                  "type": "boolean"
+                                },
+                                "broad_commands_allowed": {
+                                  "type": "boolean"
+                                },
+                                "notes": {
+                                  "type": "string"
+                                }
+                              },
+                              "additionalProperties": false
+                            },
+                            "test_budget": {
+                              "type": "object",
+                              "description": "Advisory test budget. Use for focused package-local checks before broader suites; workers report broad unrelated failures separately.",
+                              "properties": {
+                                "focus": {
+                                  "type": "string",
+                                  "enum": [
+                                    "focused",
+                                    "broad"
+                                  ],
+                                  "description": "Default command scope expected for verification."
+                                },
+                                "max_commands": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 100
+                                },
+                                "max_minutes": {
+                                  "type": "number",
+                                  "minimum": 0
+                                },
+                                "stop_on_first_failure": {
+                                  "type": "boolean"
+                                },
+                                "broad_commands_allowed": {
+                                  "type": "boolean"
+                                },
+                                "notes": {
+                                  "type": "string"
+                                }
+                              },
+                              "additionalProperties": false
+                            },
+                            "preflight_paths": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "path": {
+                                    "type": "string"
+                                  },
+                                  "access": {
+                                    "type": "string",
+                                    "enum": [
+                                      "read",
+                                      "write",
+                                      "create"
+                                    ]
+                                  },
+                                  "label": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "path",
+                                  "access"
+                                ],
+                                "additionalProperties": false
+                              },
+                              "description": "Optional path capability checks recorded before the worker starts."
+                            },
+                            "required_mcp_tools": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              },
+                              "description": "Tool names the worker must have. For narada-agent-runtime-server, worker-delegation projects these through NARADA_WORKER_MCP_CONFIG; other runtimes record them as worker-verification requirements."
+                            },
+                            "overrides": {
+                              "type": "object",
+                              "properties": {
+                                "runtime": {
+                                  "type": "string",
+                                  "enum": [
+                                    "codex",
+                                    "narada-agent-runtime-server"
+                                  ]
+                                },
+                                "sandbox": {
+                                  "type": "string",
+                                  "enum": [
+                                    "read-only",
+                                    "workspace-write",
+                                    "danger-full-access"
+                                  ]
+                                },
+                                "model": {
+                                  "type": "string"
+                                },
+                                "reasoning_effort": {
+                                  "type": "string"
+                                },
+                                "config": {
+                                  "type": "object",
+                                  "additionalProperties": {
+                                    "type": [
+                                      "string",
+                                      "number",
+                                      "boolean"
+                                    ]
+                                  }
+                                },
+                                "skip_git_repo_check": {
+                                  "type": "boolean"
+                                }
+                              },
+                              "required": [],
+                              "additionalProperties": false
+                            }
+                          },
+                          "required": [
+                            "cwd"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "intent",
+                        "constraints"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "max_parallel_runs": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 50
+                  }
+                },
+                "required": [
+                  "requests"
+                ],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "properties": {
+                  "schema": {
+                    "type": "string",
+                    "const": "narada.worker.run_batch.v1"
+                  },
+                  "status": {
+                    "type": "string"
+                  },
+                  "max_parallel_runs": {
+                    "type": "integer"
+                  },
+                  "requested_count": {
+                    "type": "integer"
+                  },
+                  "started_count": {
+                    "type": "integer"
+                  },
+                  "failed_count": {
+                    "type": "integer"
+                  },
+                  "finished_count": {
+                    "type": "integer"
+                  },
+                  "timed_out_count": {
+                    "type": "integer"
+                  },
+                  "errored_count": {
+                    "type": "integer"
+                  },
+                  "timeout_ms": {
+                    "type": "integer"
+                  },
+                  "elapsed_ms": {
+                    "type": "integer"
+                  },
+                  "runs": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  },
+                  "synthesis": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "failures": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  },
+                  "run_ids": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "timing": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                },
+                "required": [
+                  "schema",
+                  "status"
+                ],
+                "additionalProperties": false
+              },
+              "annotations": {
+                "title": "worker_run_batch",
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": true
+              },
+              "effect": {
+                "class": "runtime_admin",
+                "idempotency": "non_idempotent",
+                "confirmation": "always"
+              }
+            },
+            {
+              "name": "worker_run_wait_batch",
+              "description": "Wait briefly for multiple worker runs and return compact per-run statuses plus normalized synthesis.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "run_ids": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "timeout_ms": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 300000
+                  },
+                  "poll_ms": {
+                    "type": "integer",
+                    "minimum": 25,
+                    "maximum": 10000
+                  },
+                  "summary_only": {
+                    "type": "boolean"
+                  },
+                  "verbose": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "run_ids"
+                ],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "properties": {
+                  "schema": {
+                    "type": "string",
+                    "const": "narada.worker.run_wait_batch.v1"
+                  },
+                  "status": {
+                    "type": "string"
+                  },
+                  "max_parallel_runs": {
+                    "type": "integer"
+                  },
+                  "requested_count": {
+                    "type": "integer"
+                  },
+                  "started_count": {
+                    "type": "integer"
+                  },
+                  "failed_count": {
+                    "type": "integer"
+                  },
+                  "finished_count": {
+                    "type": "integer"
+                  },
+                  "timed_out_count": {
+                    "type": "integer"
+                  },
+                  "errored_count": {
+                    "type": "integer"
+                  },
+                  "timeout_ms": {
+                    "type": "integer"
+                  },
+                  "elapsed_ms": {
+                    "type": "integer"
+                  },
+                  "runs": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  },
+                  "synthesis": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "failures": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  },
+                  "run_ids": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "timing": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                },
+                "required": [
+                  "schema",
+                  "status"
+                ],
+                "additionalProperties": false
+              },
+              "annotations": {
+                "title": "worker_run_wait_batch",
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": true
+              },
+              "effect": {
+                "class": "read",
+                "idempotency": "replayable",
+                "confirmation": "never"
+              }
+            },
+            {
+              "name": "worker_runs_synthesize",
+              "description": "Return a normalized cross-worker synthesis for completed or running worker run ids.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "run_ids": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "run_ids"
+                ],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "properties": {
+                  "schema": {
+                    "type": "string",
+                    "const": "narada.worker.runs_synthesis.v1"
+                  },
+                  "status": {
+                    "type": "string"
+                  },
+                  "max_parallel_runs": {
+                    "type": "integer"
+                  },
+                  "requested_count": {
+                    "type": "integer"
+                  },
+                  "started_count": {
+                    "type": "integer"
+                  },
+                  "failed_count": {
+                    "type": "integer"
+                  },
+                  "finished_count": {
+                    "type": "integer"
+                  },
+                  "timed_out_count": {
+                    "type": "integer"
+                  },
+                  "errored_count": {
+                    "type": "integer"
+                  },
+                  "timeout_ms": {
+                    "type": "integer"
+                  },
+                  "elapsed_ms": {
+                    "type": "integer"
+                  },
+                  "runs": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  },
+                  "synthesis": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "failures": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  },
+                  "run_ids": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "timing": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                },
+                "required": [
+                  "schema",
+                  "status"
+                ],
+                "additionalProperties": false
+              },
+              "annotations": {
+                "title": "worker_runs_synthesize",
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": true
+              },
+              "effect": {
+                "class": "read",
+                "idempotency": "replayable",
+                "confirmation": "never"
+              }
+            },
+            {
+              "name": "worker_dashboard_describe",
+              "description": "Return a read-only local dashboard/API descriptor plus compact run topology, status, result refs, pending joins, and event stream data for one run or all active runs.",
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "all_active",
+                      "single_run"
+                    ],
+                    "description": "Defaults to single_run when run_id is provided, otherwise all_active."
+                  },
+                  "run_id": {
+                    "type": "string",
+                    "description": "Inspect one worker run."
+                  },
+                  "run_ids": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Optional explicit run set when mode is all_active. Defaults to all known runs filtered to active unless include_terminal is true."
+                  },
+                  "include_terminal": {
+                    "type": "boolean",
+                    "description": "Include completed, failed, cancelled, and completed_with_errors runs. Defaults to true for single_run and false for all_active."
+                  },
+                  "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 200
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              },
+              "output_schema": {
+                "type": "object",
+                "properties": {
+                  "schema": {
+                    "type": "string",
+                    "const": "narada.worker.dashboard.v1"
+                  },
+                  "status": {
+                    "type": "string",
+                    "const": "ok"
+                  },
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "all_active",
+                      "single_run"
+                    ]
+                  },
+                  "include_terminal": {
+                    "type": "boolean"
+                  },
+                  "dashboard": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "counts": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "runs": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  },
+                  "topology": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "steps": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  },
+                  "pending_join_gates": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  },
+                  "event_stream": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  }
+                },
+                "required": [
+                  "schema",
+                  "status",
+                  "mode",
+                  "include_terminal",
+                  "dashboard",
+                  "counts",
+                  "runs",
+                  "topology",
+                  "steps",
+                  "pending_join_gates",
+                  "event_stream"
+                ],
+                "additionalProperties": false
+              },
+              "annotations": {
+                "title": "worker_dashboard_describe",
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": true
+              },
+              "effect": {
+                "class": "read",
+                "idempotency": "replayable",
+                "confirmation": "never"
+              }
+            }
+          ],
+          "projections": [
+            {
+              "id": "default",
+              "transport": {
+                "kind": "stdio",
+                "command": "node",
+                "args": [
+                  "{mcp_surfaces_root}/worker-delegation-mcp/dist/src/main.js",
+                  "--site-root",
+                  "{site_root}",
+                  "--allowed-root",
+                  "{workspace_root}",
+                  "--run-root",
+                  "{site_runtime_root}/worker-delegation"
+                ],
+                "env": [
+                  "DEEPSEEK_API_KEY",
+                  "DEEPSEEK_API_BASE_URL",
+                  "NARADA_WORKER_MCP_CONFIG"
+                ]
+              },
+              "injection_scope": "local_site",
+              "default_injection": "disabled",
+              "runtime_requirements": [],
+              "authority_requirements": [
+                "scope.local_site"
+              ],
+              "lifecycle": {
+                "mode": "restart_required",
+                "restart_owner": "local_site",
+                "reason": "Active worker subprocess ownership is process-local; replacement requires the worker runtime owner."
+              }
+            }
+          ],
+          "metadata": {
+            "lifecycle_readback": {
+              "authority": "mcp-loader",
+              "availability": "loader-managed",
+              "discovery": {
+                "tool_name": "mcp_loader_connection_inventory",
+                "arguments": {},
+                "select": {
+                  "field": "surface_id",
+                  "equals": "worker-delegation",
+                  "result_field": "connection_id"
+                }
+              },
+              "status": {
+                "tool_name": "mcp_loader_surface_status",
+                "arguments": {
+                  "connection_id": "{connection_id}"
+                },
+                "connection_id_from": "discovery.selected.connection_id"
+              }
+            }
+          }
+        },
+        "lifecycle": {
+          "mode": "restart_required",
+          "restart_owner": "local_site",
+          "reason": "Active worker subprocess ownership is process-local; replacement requires the worker runtime owner."
+        }
+      },
+      "surface_type": "mcp_surface",
+      "display_name": "narada-mcp-surfaces-worker-delegation",
+      "server_name": "narada-mcp-surfaces-worker-delegation",
+      "runtime_binding": {
+        "runtime_kind": "rust-stdio",
+        "proxy_implementation": "native",
+        "entrypoint": "C:/Users/andrey/src/mcp-surfaces/packages/shared/mcp-surfaces-native/dist/native/versions/4ed65baf29d7710d3420ad5724e61a1c796e18e5db4934cbb0ce6aa89375b595/narada-mcp-surfaces.exe",
+        "owner_site_id": "mcp-surfaces",
+        "transport": {
+          "type": "stdio",
+          "command": "C:/Users/andrey/src/mcp-surfaces/packages/shared/mcp-runtime-proxy/dist/native/versions/edf3d455d2c20c2bbe9fd24dbf021ef808cf37322779d0bbf1e7369169537936/narada-mcp-runtime.exe",
+          "args": [
+            "proxy",
+            "--surface-id",
+            "worker-delegation",
+            "--child-command",
+            "C:/Users/andrey/src/mcp-surfaces/packages/shared/mcp-surfaces-native/dist/native/versions/4ed65baf29d7710d3420ad5724e61a1c796e18e5db4934cbb0ce6aa89375b595/narada-mcp-surfaces.exe",
+            "--artifact-manifest",
+            "C:/Users/andrey/src/mcp-surfaces/.ai/runtime/workspace-artifact-manifest.json",
+            "--runtime-contract-version",
+            "8",
+            "--entrypoint",
+            "C:/Users/andrey/src/mcp-surfaces/packages/shared/mcp-surfaces-native/dist/native/versions/4ed65baf29d7710d3420ad5724e61a1c796e18e5db4934cbb0ce6aa89375b595/narada-mcp-surfaces.exe",
+            "--child-invocation-kind",
+            "native_entrypoint",
+            "--",
+            "--surface-id",
+            "worker-delegation",
+            "--site-root",
+            "C:\\Users\\andrey\\src\\mcp-surfaces",
+            "--allowed-root",
+            "C:\\Users\\andrey\\src\\mcp-surfaces",
+            "--run-root",
+            "C:\\Users\\andrey\\src\\mcp-surfaces\\.narada\\runtime/worker-delegation"
+          ]
+        }
+      },
+      "authority_boundary": {
+        "posture": "registrar_generated_runtime_surface_registry",
+        "grants_tool_authority": true,
+        "granted_tool_authority_kind": "declared_enabled_mcp_surface_tools",
+        "source": "site_mcp_fabric_and_registrar_catalog"
+      },
+      "client_config": {
+        "generated_path": ".ai/mcp/narada-mcp-surfaces-worker-delegation-mcp.json",
+        "generated_file": "narada-mcp-surfaces-worker-delegation-mcp.json"
+      },
+      "tool_contract": {
+        "exposed_tools": [
+          "worker_guidance",
+          "worker_output_show",
+          "worker_operator_affordances",
+          "worker_policy_inspect",
+          "worker_cognition_defaults_inspect",
+          "worker_cognition_defaults_update",
+          "worker_config_resolve",
+          "worker_run",
+          "worker_edit",
+          "worker_resume",
+          "worker_run_status",
+          "worker_run_reap",
+          "worker_runs_list",
+          "worker_run_wait",
+          "worker_run_batch",
+          "worker_run_wait_batch",
+          "worker_runs_synthesize",
+          "worker_dashboard_describe"
+        ],
+        "semantic_operations": [],
+        "deprecated_aliases": {},
+        "read_only_tools": [
+          "worker_guidance",
+          "worker_output_show",
+          "worker_operator_affordances",
+          "worker_policy_inspect",
+          "worker_cognition_defaults_inspect",
+          "worker_config_resolve",
+          "worker_run_status",
+          "worker_runs_list",
+          "worker_run_wait",
+          "worker_run_wait_batch",
+          "worker_runs_synthesize",
+          "worker_dashboard_describe"
+        ],
+        "mutating_tools": [
+          "worker_cognition_defaults_update",
+          "worker_run",
+          "worker_edit",
+          "worker_resume",
+          "worker_run_reap",
+          "worker_run_batch"
+        ],
+        "refused_tools": []
+      },
+      "registered_live_tools": [
+        "worker_guidance",
+        "worker_output_show",
+        "worker_operator_affordances",
+        "worker_policy_inspect",
+        "worker_cognition_defaults_inspect",
+        "worker_cognition_defaults_update",
+        "worker_config_resolve",
+        "worker_run",
+        "worker_edit",
+        "worker_resume",
+        "worker_run_status",
+        "worker_run_reap",
+        "worker_runs_list",
+        "worker_run_wait",
+        "worker_run_batch",
+        "worker_run_wait_batch",
+        "worker_runs_synthesize",
+        "worker_dashboard_describe"
+      ],
+      "catalog_surface_id": "worker-delegation",
+      "evidence": {
+        "source": "site_mcp_fabric",
+        "path": ".ai/mcp/narada-mcp-surfaces-worker-delegation-mcp.json",
         "projection_kind": "site_fabric"
       }
     }
