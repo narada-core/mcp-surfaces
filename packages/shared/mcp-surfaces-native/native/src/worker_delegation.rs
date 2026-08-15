@@ -230,7 +230,7 @@ fn read_run(root: &Path, id: &str) -> Result<Value, Value> {
 }
 
 fn policy(root: &Path, allowed_roots: &[PathBuf]) -> Value {
-    json!({"schema":"narada.worker.policy.v1","status":"ok","server_name":SERVER_NAME,"run_root":run_root(root).to_string_lossy(),"site_root":root.to_string_lossy(),"allowed_roots":allowed_roots.iter().map(|allowed|allowed.to_string_lossy()).collect::<Vec<_>>(),"allowed_runtimes":["narada-agent-runtime-server"],"allowed_authorities":["read","write","command"],"native_execution":"rust_authority","secret_projection":"environment_only","windows_msvc_environment":{"inherited":true,"automatic_discovery":false,"remediation":"Initialize VsDevCmd or use Developer PowerShell before launching the carrier."}})
+    json!({"schema":"narada.worker.policy.v1","status":"ok","server_name":SERVER_NAME,"run_root":run_root(root).to_string_lossy(),"site_root":root.to_string_lossy(),"allowed_roots":allowed_roots.iter().map(|allowed|allowed.to_string_lossy()).collect::<Vec<_>>(),"allowed_runtimes":["narada-agent-runtime-server"],"allowed_authorities":["read","write","command"],"default_cognition":DEFAULT_COGNITION,"native_execution":"rust_authority","secret_projection":"environment_only","windows_msvc_environment":{"inherited":true,"automatic_discovery":false,"remediation":"Initialize VsDevCmd or use Developer PowerShell before launching the carrier."}})
 }
 fn capability_snapshot(authority: &str, cwd: &Path, allowed_roots: &[PathBuf], runtime_probe: Option<&Value>) -> Value {
     let writable = authority != "read";
@@ -276,7 +276,7 @@ fn cognition_defaults_for(root: &Path) -> Value {
         .unwrap_or_else(empty_defaults)
 }
 fn cognition_defaults(root: &Path) -> Value {
-    json!({"schema":"narada.worker.cognition_defaults.v1","status":"ok","defaults":cognition_defaults_for(root),"source":"native_contract","canonical_runtime":"narada-agent-runtime-server uses an immutable invocation plan","native_read_only":true})
+    json!({"schema":"narada.worker.cognition_defaults.v1","status":"ok","default_cognition":DEFAULT_COGNITION,"defaults":cognition_defaults_for(root),"source":"native_contract","canonical_runtime":"narada-agent-runtime-server uses an immutable invocation plan","native_read_only":true})
 }
 fn config_resolve(args: &Map<String, Value>, root: &Path, allowed_roots: &[PathBuf]) -> Result<Value, Value> {
     let resolved_authority = authority(args)?;
@@ -1319,6 +1319,7 @@ mod tests {
             input_schema("worker_run")["properties"]["constraints"]["properties"]["cognition"]["default"],
             "low"
         );
+        assert_eq!(cognition_defaults(Path::new("."))["default_cognition"], "low");
     }
 
     #[test]

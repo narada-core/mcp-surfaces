@@ -437,7 +437,7 @@ fn task_id(args: &Map<String, Value>) -> Result<String, Value> {
 }
 
 fn policy(root: &Path) -> Value {
-    json!({"schema":"narada.delegated_task.policy.v1","status":"ok","server_name":SERVER_NAME,"task_root":task_root(root).to_string_lossy(),"site_root":root.to_string_lossy(),"allowed_roots":[root.to_string_lossy()],"list_defaults":{"view":"active_queue","site_scope":"current_site"},"workflow_engine":"native_authority","worker_execution":"native_worker_authority","result_compaction":{"max_worker_refs":50,"max_list_items":200}})
+    json!({"schema":"narada.delegated_task.policy.v1","status":"ok","server_name":SERVER_NAME,"task_root":task_root(root).to_string_lossy(),"site_root":root.to_string_lossy(),"allowed_roots":[root.to_string_lossy()],"default_cognition":DEFAULT_COGNITION,"list_defaults":{"view":"active_queue","site_scope":"current_site"},"workflow_engine":"native_authority","worker_execution":"native_worker_authority","result_compaction":{"max_worker_refs":50,"max_list_items":200}})
 }
 
 fn assessment_output_schema() -> Value {
@@ -1755,6 +1755,7 @@ mod tests {
 
     #[test]
     fn delegated_task_defaults_cognition_to_low() {
+        assert_eq!(policy(Path::new("."))["default_cognition"], "low");
         assert_eq!(
             list_tools()
                 .iter()
