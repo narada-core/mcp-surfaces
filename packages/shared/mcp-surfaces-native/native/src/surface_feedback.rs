@@ -156,7 +156,6 @@ fn task_authority_root(root: &Path) -> PathBuf {
     std::env::var("NARADA_TASK_LIFECYCLE_ROOT")
         .ok()
         .filter(|value| !value.trim().is_empty())
-        .or_else(|| std::env::var("NARADA_SITE_ROOT").ok().filter(|value| !value.trim().is_empty()))
         .map(PathBuf::from)
         .unwrap_or_else(|| root.to_path_buf())
 }

@@ -1,4 +1,5 @@
 use serde_json::{json, Map, Value};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -733,8 +734,8 @@ fn provider_registry_candidates(root: &Path) -> Vec<PathBuf> {
     candidates
 }
 
-fn provider_models_from_registry(value: &Value) -> Map<String, Vec<String>> {
-    let mut result = Map::new();
+fn provider_models_from_registry(value: &Value) -> BTreeMap<String, Vec<String>> {
+    let mut result = BTreeMap::new();
     let Some(providers) = value.get("providers").and_then(Value::as_object) else {
         return result;
     };
@@ -761,7 +762,7 @@ fn provider_models_from_registry(value: &Value) -> Map<String, Vec<String>> {
     result
 }
 
-fn canonical_provider_models(root: &Path) -> Result<Map<String, Vec<String>>, Value> {
+fn canonical_provider_models(root: &Path) -> Result<BTreeMap<String, Vec<String>>, Value> {
     for path in provider_registry_candidates(root) {
         if !path.is_file() {
             continue;

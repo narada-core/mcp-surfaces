@@ -334,7 +334,10 @@ fn speech_public_protocol_is_native_complete_bounded_and_cancellable() {
         response(&blocked, 30)["error"]["data"]["code"],
         "speech_remote_audio_egress_not_admitted"
     );
-    let escaped_input = std::path::PathBuf::from(std::env::var("WINDIR").unwrap()).join("win.ini");
+    let windows_root = std::env::var_os("SystemRoot")
+        .or_else(|| std::env::var_os("WINDIR"))
+        .expect("SystemRoot or WINDIR");
+    let escaped_input = std::path::PathBuf::from(windows_root).join("win.ini");
     let confined = run(
         &root,
         &registry,
