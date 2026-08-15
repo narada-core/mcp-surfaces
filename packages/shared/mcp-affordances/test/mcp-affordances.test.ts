@@ -10,11 +10,11 @@ import {
 } from '../src/main.js';
 
 const document: NaradaMcpAffordanceDocument = createAffordanceDocument({
-  surface_id: 'site-loop',
+  surface_id: 'sop',
   generated_at: '2026-07-06T12:00:00.000Z',
-  title: 'Site Loop Operator',
+  title: 'SOP Operator',
   audience: ['operator'],
-  summary: 'Inspect and operate the site loop.',
+  summary: 'Inspect and operate SOP runs.',
   panels: [
     {
       id: 'status',
@@ -30,7 +30,7 @@ const document: NaradaMcpAffordanceDocument = createAffordanceDocument({
       id: 'refresh_status',
       label: 'Refresh',
       intent: 'refresh',
-      tool: 'site_loop_unified_status',
+      tool: 'sop_status',
       read_only: true,
       idempotent: true,
       danger_level: 'none',
@@ -39,19 +39,19 @@ const document: NaradaMcpAffordanceDocument = createAffordanceDocument({
       id: 'run_once',
       label: 'Run Once',
       intent: 'run',
-      tool: 'site_loop_run_once',
+      tool: 'sop_run_start',
       arguments: { dry_run: false, limit: 25 },
       read_only: false,
       idempotent: false,
       danger_level: 'medium',
-      confirmation: { required: true, message: 'Run one bounded site-loop pass.' },
+      confirmation: { required: true, message: 'Start one bounded SOP run.' },
     }),
   ],
   refs: [
-    affordanceResourceRef({ id: 'latest_run', label: 'Latest run', uri: 'site-loop-run:latest' }),
+    affordanceResourceRef({ id: 'latest_run', label: 'Latest run', uri: 'sop-run:latest' }),
   ],
   refresh: { mode: 'poll', interval_ms: 30000, actions: ['refresh_status'] },
-  source: { tool: 'site_loop_operator_affordances', site_id: 'narada-test', site_root: 'C:/workspace/narada.test' },
+  source: { tool: 'sop_operator_affordances', site_id: 'narada-test', site_root: 'C:/workspace/narada.test' },
 });
 
 assert.equal(document.schema, NARADA_MCP_AFFORDANCES_SCHEMA);

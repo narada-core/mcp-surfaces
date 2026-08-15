@@ -27,6 +27,16 @@ const DEFAULT_ALLOWED_PREFIXES: &[&[&str]] = &[
     &["pnpm", "build"],
     &["pnpm", "typecheck"],
     &["pnpm", "--filter"],
+    &["cargo", "fmt"],
+    &["cargo", "check"],
+    &["cargo", "test"],
+    &["cargo", "build"],
+    &["cargo", "native-build"],
+    &["cargo", "native-test"],
+    &["cargo", "native-package"],
+    &["cargo", "native-materialize"],
+    &["cargo", "native-release"],
+    &["cargo", "native-verify"],
     &["pwsh", "-file"],
     &["pwsh", "-noprofile", "-file"],
     &["pwsh", "-noprofile", "-executionpolicy", "bypass", "-file"],
@@ -2157,6 +2167,34 @@ mod tests {
 
         fs::remove_dir_all(site_root).expect("cleanup site");
         fs::remove_dir_all(worktree_root).expect("cleanup worktrees");
+    }
+
+    #[test]
+    fn default_policy_allows_native_cargo_workflows() {
+        let root = env::temp_dir().join(format!(
+            "narada-structured-command-cargo-policy-{}",
+            unique_id("test")
+        ));
+        fs::create_dir_all(&root).expect("root");
+        let state = parse_state(&[
+            "--allowed-root".into(),
+            root.to_string_lossy().to_string(),
+        ])
+        .expect("state");
+
+        for (subcommand, args) in [
+            ("fmt", vec!["--check"]),
+            ("check", vec!["--locked"]),
+            ("test", vec!["--locked"]),
+            ("native-release", Vec::<&str>::new()),
+        ] {
+            let mut argv = vec![subcommand.to_string()];
+            argv.extend(args.into_iter().map(String::from));
+            let decision = decide(&state, "cargo", &argv, &root);
+            assert_eq!(decision["status"], "allowed", "cargo {subcommand}: {decision}");
+        }
+
+        fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[cfg(windows)]

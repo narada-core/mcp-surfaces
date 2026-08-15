@@ -87,7 +87,7 @@ const canonicalScheduledEnvelope = {
   summary: 'Start SOP zenoti-sync-full-health-check through SOP MCP and retain the complete evidence.',
   target_role: 'operator',
   authority: { level: 'site_policy', principal: 'andrey-user.maintenance.scheduled_sops' },
-  source: { kind: 'site_loop_schedule', ref: 'zenoti-sync-full-health-check' },
+  source: { kind: 'scheduler_schedule', ref: 'zenoti-sync-full-health-check' },
   payload: {
     recommendation: 'escalate',
     preferred_agent_id: 'operator',

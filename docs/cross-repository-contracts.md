@@ -30,7 +30,7 @@ verified by this repository.
 | NARS session input and delivery semantics | Narada proper | `packages/nars-session-mcp` | `NARADA_REPO_ROOT/docs/architecture/nars-session-input-contract.md` |
 | Carrier admission neutralization concept | Narada proper domain model | `packages/mcp-registrar`, NARS/session adapters | `NARADA_REPO_ROOT/packages/domains/concepts/records/carrier-admission-neutralization.concept.json` |
 | Agent embodiment admission receipts and Orientation Manifest compilation | Narada proper domain model | `packages/agent-context-mcp` compatibility, persistence/readback, and diagnostic projection | `NARADA_REPO_ROOT/packages/orientation-manifest` |
-| Task executability and recovery operations | Narada proper control plane | delegated-task, task-lifecycle, site-loop integration tests | `NARADA_REPO_ROOT/docs/operations/task-executability-e2e-and-recovery.md` |
+| Task executability and recovery operations | Narada proper control plane | delegated-task and task-lifecycle integration tests | `NARADA_REPO_ROOT/docs/operations/task-executability-e2e-and-recovery.md` |
 | PC Site runtime observer and memory database | Narada proper / PC Site runtime | `packages/shared/mcp-runtime-observation`, `packages/runtime-introspection-mcp` | Narada proper PC Site runtime-observer package and its admitted observer schema |
 | Operator Console overlay lifecycle | Narada proper / PC Site host | `packages/operator-console-overlay-mcp`, quota-meter integration | Narada proper Operator Console overlay implementation |
 | Agent Web UI live delegated-task workflow | Narada proper Agent Web UI | delegated-task and worker-delegation E2E evidence | `NARADA_REPO_ROOT/packages/agent-web-ui/test/live-delegated-task-launcher-e2e.mjs` |

@@ -97,12 +97,12 @@
     },
     {
       "test_id": "worker-delegation.site-fabric.external-provider",
-      "package": "@narada-core/worker-delegation-mcp",
+      "surface": "worker-delegation",\n      "authority_package": "@narada-core/mcp-surfaces-native",
       "status": "not_run",
       "authority": "A1",
       "reason_code": "controlled_external_provider_not_configured",
       "execution_ref": "structured_command_execution:e_bfbf0c3efdac420694f172a0",
-      "artifact_path": "packages/worker-delegation-mcp/.tmp/e2e-results/worker-delegation.site-fabric.external-provider.json",
+      "artifact_path": "packages/shared/mcp-surfaces-native/native/worker-delegation.site-fabric.external-provider.json",
       "cleanup": "completed_after_finally"
     },
     {

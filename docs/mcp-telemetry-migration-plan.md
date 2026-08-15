@@ -42,7 +42,6 @@ optional telemetry event stream.
 | `graph-mail-mcp` | external-service audited mail draft lifecycle | errors_only for writes/refusals; all optional for reads | no body, recipients, upload URLs, attachment bytes, tokens | message/attachment redaction helper | 0.95 |
 | `calendar-mcp` | external-service audited calendar lifecycle | implemented | no event body/attendees/raw Graph result | none | 0.99 |
 | `task-lifecycle-mcp` | task lifecycle state machine | errors_only first | no task body/report bodies by default; ids/status/transitions only | task-domain redaction helper | 0.89 |
-| `site-loop-mcp` | site-loop operations | errors_only | operation/status only; no external output blobs | site-loop review | 0.82 |
 | `agent-context-mcp` | startup/context hydration | errors_only; all for startup diagnostics where enabled | identity/status only; no context bodies | context redaction helper | 0.86 |
 | `worker-delegation-mcp` | orchestration/runtime launch | errors_only | profile/run id/status only; no prompts/transcripts | worker redaction helper | 0.91 |
 | `delegated-task-mcp` | outcome-oriented orchestration | errors_only | task/run ids/status only; no instructions/results bodies | delegated-task redaction helper | 0.90 |

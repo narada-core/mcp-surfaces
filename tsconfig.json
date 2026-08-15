@@ -56,12 +56,6 @@
       "path": "./packages/git-mcp"
     },
     {
-      "path": "./packages/worker-delegation-mcp"
-    },
-    {
-      "path": "./packages/delegated-task-mcp"
-    },
-    {
       "path": "./packages/site-inbox-mcp"
     },
     {
@@ -78,9 +72,6 @@
     },
     {
       "path": "./packages/work-lifecycle-mcp"
-    },
-    {
-      "path": "./packages/site-loop-mcp"
     },
     {
       "path": "./packages/agent-context-mcp"

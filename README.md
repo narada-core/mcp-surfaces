@@ -16,10 +16,8 @@ Standalone MCP surface packages shared by Narada sites and carriers.
 - `@narada-core/graph-mail-mcp`: policy-gated Microsoft Graph mail surface for live reads and draft management. See `packages/graph-mail-mcp/README.md`.
 - `@narada-core/calendar-mcp`: policy-gated Microsoft Graph calendar surface for live reads and guarded event management. See `packages/calendar-mcp/README.md`.
 - `@narada-core/task-lifecycle-mcp`: task lifecycle MCP surface. See `packages/task-lifecycle-mcp/README.md`.
-- `@narada-core/site-loop-mcp`: config-governed site loop MCP surface. See `packages/site-loop-mcp/README.md`.
 - `@narada-core/agent-context-mcp`: agent context MCP surface. See `packages/agent-context-mcp/README.md`.
-- `@narada-core/worker-delegation-mcp`: policy-gated worker delegation MCP surface. See `packages/worker-delegation-mcp/README.md`.
-- `@narada-core/delegated-task-mcp`: outcome-oriented delegated task orchestration MCP surface. See `packages/delegated-task-mcp/README.md`.
+- `worker-delegation` and `delegated-task`: native Rust MCP surfaces hosted by `@narada-core/mcp-surfaces-native`.
 - `@narada-core/sop-mcp`: versioned standard operating procedure runbook engine with SQLite-backed execution. See `packages/sop-mcp/README.md`.
 - `@narada-core/scheduler-mcp`: Windows Task Scheduler MCP surface for governed task registration, inspection, and execution. See `packages/scheduler-mcp/README.md`.
 - `@narada-core/site-lifecycle-mcp`: governed Local Site lifecycle inspection and mutation surface. See `packages/site-lifecycle-mcp/README.md`.
@@ -64,8 +62,9 @@ cargo native-materialize
 ```
 
 See [Native distribution](docs/native-distribution.md) for its authority
-boundary. JavaScript/TypeScript implementations are separately built
-compatibility artifacts:
+boundary. The delegation MCPs have no TypeScript runtime entrypoint. Their
+remaining TypeScript helper is compile-time Site Loop compatibility code, not
+carrier authority:
 
 ```powershell
 pnpm install

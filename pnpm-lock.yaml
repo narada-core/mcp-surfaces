@@ -103,19 +103,6 @@ importers:
 
   ../narada/packages/process-launch-posture: {}
 
-  ../narada/packages/site-operating-loop:
-    dependencies:
-      '@narada-core/process-launch-posture':
-        specifier: workspace:*
-        version: link:../process-launch-posture
-    devDependencies:
-      tsx:
-        specifier: ^4.21.0
-        version: 4.23.1
-      typescript:
-        specifier: ^5.3.0
-        version: 5.9.3
-
   ../narada/packages/site-paths: {}
 
   packages/agent-context-mcp:
@@ -231,37 +218,6 @@ importers:
       '@types/node':
         specifier: ^22.15.3
         version: 22.19.19
-      typescript:
-        specifier: ^5.8.3
-        version: 5.9.3
-
-  packages/delegated-task-mcp:
-    dependencies:
-      '@narada-core/execution-contract':
-        specifier: workspace:*
-        version: link:../shared/execution-contract
-      '@narada-core/mcp-fabric-contracts':
-        specifier: workspace:*
-        version: link:../shared/mcp-fabric-contracts
-      '@narada-core/task-governance-core':
-        specifier: workspace:*
-        version: link:../../../narada-core/packages/task-governance-core
-      '@narada-core/worker-delegation-mcp':
-        specifier: workspace:*
-        version: link:../worker-delegation-mcp
-    devDependencies:
-      '@narada-core/mcp-e2e-harness':
-        specifier: workspace:*
-        version: link:../shared/mcp-e2e-harness
-      '@narada-core/sqlite':
-        specifier: workspace:*
-        version: link:../../../narada-core/packages/sqlite
-      '@types/node':
-        specifier: ^22.15.3
-        version: 22.19.19
-      c8:
-        specifier: ^11.0.0
-        version: 11.0.0
       typescript:
         specifier: ^5.8.3
         version: 5.9.3
@@ -803,49 +759,6 @@ importers:
         specifier: ^5.8.3
         version: 5.9.3
 
-  packages/site-loop-mcp:
-    dependencies:
-      '@narada-core/delegated-task-mcp':
-        specifier: workspace:*
-        version: link:../delegated-task-mcp
-      '@narada-core/mcp-affordances':
-        specifier: workspace:*
-        version: link:../shared/mcp-affordances
-      '@narada-core/mcp-fabric-contracts':
-        specifier: workspace:*
-        version: link:../shared/mcp-fabric-contracts
-      '@narada-core/mcp-transport':
-        specifier: workspace:*
-        version: link:../shared/mcp-transport
-      '@narada-core/site-operating-loop':
-        specifier: workspace:*
-        version: link:../../../narada/packages/site-operating-loop
-      '@narada-core/task-executability-orchestrator':
-        specifier: workspace:*
-        version: link:../../../narada-core/packages/task-executability-orchestrator
-      '@narada-core/task-governance-core':
-        specifier: workspace:*
-        version: link:../../../narada-core/packages/task-governance-core
-      '@narada-core/task-lifecycle-mcp':
-        specifier: workspace:*
-        version: link:../task-lifecycle-mcp
-      ajv:
-        specifier: ^8.20.0
-        version: 8.20.0
-    devDependencies:
-      '@narada-core/mcp-e2e-harness':
-        specifier: workspace:*
-        version: link:../shared/mcp-e2e-harness
-      '@narada-core/sqlite':
-        specifier: workspace:*
-        version: link:../../../narada-core/packages/sqlite
-      '@types/node':
-        specifier: ^22.15.3
-        version: 22.19.19
-      typescript:
-        specifier: ^5.8.3
-        version: 5.9.3
-
   packages/site-registry-mcp:
     dependencies:
       '@narada-core/mcp-e2e-harness':
@@ -1009,39 +922,6 @@ importers:
         specifier: ^5.8.3
         version: 5.9.3
 
-  packages/worker-delegation-mcp:
-    dependencies:
-      '@narada-core/mcp-affordances':
-        specifier: workspace:*
-        version: link:../shared/mcp-affordances
-      '@narada-core/mcp-fabric-contracts':
-        specifier: workspace:*
-        version: link:../shared/mcp-fabric-contracts
-      '@narada-core/mcp-transport':
-        specifier: workspace:*
-        version: link:../shared/mcp-transport
-      '@narada-core/sqlite':
-        specifier: workspace:*
-        version: link:../../../narada-core/packages/sqlite
-      zod:
-        specifier: ^4.4.3
-        version: 4.4.3
-    devDependencies:
-      '@narada-core/mcp-e2e-harness':
-        specifier: workspace:*
-        version: link:../shared/mcp-e2e-harness
-      '@narada-core/mcp-runtime-proxy':
-        specifier: workspace:*
-        version: link:../shared/mcp-runtime-proxy
-      '@types/node':
-        specifier: ^22.15.3
-        version: 22.19.19
-      c8:
-        specifier: ^11.0.0
-        version: 11.0.0
-      typescript:
-        specifier: ^5.8.3
-        version: 5.9.3
 
 packages:
 

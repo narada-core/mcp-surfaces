@@ -6,7 +6,6 @@ export const EXECUTOR_KINDS = Object.freeze([
   'operator',
   'worker_delegation',
   'delegated_task',
-  'site_loop',
 ] as const);
 
 const EXECUTION_BINDING_KEYS = new Set([

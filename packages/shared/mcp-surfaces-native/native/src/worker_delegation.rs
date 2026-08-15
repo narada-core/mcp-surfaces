@@ -1,4 +1,5 @@
 use serde_json::{json, Map, Value};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -122,7 +123,12 @@ pub fn auxiliary(method: &str, params: &Map<String, Value>) -> Result<Value, Val
     }
 }
 
-pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path, allowed_roots: &[PathBuf]) -> Result<Value, Value> {
+pub fn call_tool(
+    name: &str,
+    args: &Map<String, Value>,
+    root: &Path,
+    allowed_roots: &[PathBuf],
+) -> Result<Value, Value> {
     match name {
         "worker_guidance" => Ok(guidance(args)),
         "worker_policy_inspect" => Ok(policy(root, allowed_roots)),
@@ -155,7 +161,7 @@ fn guidance_tool() -> Value {
     )
 }
 fn guidance(args: &Map<String, Value>) -> Value {
-    json!({"schema":"narada.worker.guidance.v1","status":"ok","server_name":SERVER_NAME,"requested":{"workflow":args.get("workflow").cloned().unwrap_or(Value::Null),"tool":args.get("tool").cloned().unwrap_or(Value::Null)},"cognition":{"default":"low","omitted_constraint_behavior":"constraints.cognition resolves to low","mapping_tool":"worker_cognition_defaults_inspect"},"first_use":["Inspect worker_policy_inspect.","Omitted constraints.cognition resolves to low; use worker_cognition_defaults_inspect for the current model and reasoning-effort mapping.","Resolve worker inputs without launching with worker_config_resolve.","Launch with worker_run or worker_edit.","Read durable runs with worker_run_status or worker_run_wait.","Use worker_output_show for bounded artifact readback."],"windows_rust_toolchain":{"status":"caller_environment_required","remediation":"For MSVC Rust linking, launch the carrier from a Developer PowerShell or initialize VsDevCmd before starting the carrier so link.exe is inherited by workers.","probe":"worker_policy_inspect reports the inherited PATH boundary; workers do not perform open-ended Visual Studio discovery."},"boundaries":["The native Rust surface launches only the native Rust narada-agent-runtime-server.","Credentials remain environment-projected and are never returned.","Run records are bounded to the site worker-delegation root."]})
+    json!({"schema":"narada.worker.guidance.v1","status":"ok","server_name":SERVER_NAME,"requested":{"workflow":args.get("workflow").cloned().unwrap_or(Value::Null),"tool":args.get("tool").cloned().unwrap_or(Value::Null)},"cognition":{"default":"low","omitted_constraint_behavior":"constraints.cognition resolves to low","mapping_tool":"worker_cognition_defaults_inspect"},"first_use":["Inspect worker_policy_inspect.","Omitted constraints.cognition resolves to low; use worker_cognition_defaults_inspect for the current model and reasoning-effort mapping.","Resolve worker inputs without launching with worker_config_resolve.","Launch with worker_run or worker_edit.","Read durable runs with worker_run_status or worker_run_wait.","Use worker_output_show for bounded artifact readback."],"windows_rust_toolchain":{"status":"caller_environment_required","remediation":"For MSVC Rust linking, launch the carrier from a Developer PowerShell or initialize VsDevCmd before starting the carrier so link.exe is inherited by workers.","probe":"worker_policy_inspect reports the inherited PATH boundary; workers do not perform open-ended Visual Studio discovery."},"boundaries":["The native Rust surface launches only the native Rust narada-agent-runtime-server.","Credentials remain SecretStore-referenced and are never returned.","Run records are bounded to the site worker-delegation root."]})
 }
 
 fn run_root(root: &Path) -> PathBuf {
@@ -180,9 +186,19 @@ fn is_within(path: &Path, root: &Path) -> bool {
 }
 #[cfg(windows)]
 fn path_components_equal_or_child(path: &Path, root: &Path) -> bool {
-    let path = path.components().map(|component| component.as_os_str().to_string_lossy().to_lowercase()).collect::<Vec<_>>();
-    let root = root.components().map(|component| component.as_os_str().to_string_lossy().to_lowercase()).collect::<Vec<_>>();
-    path.len() >= root.len() && path.iter().zip(root.iter()).all(|(left, right)| left == right)
+    let path = path
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().to_lowercase())
+        .collect::<Vec<_>>();
+    let root = root
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().to_lowercase())
+        .collect::<Vec<_>>();
+    path.len() >= root.len()
+        && path
+            .iter()
+            .zip(root.iter())
+            .all(|(left, right)| left == right)
 }
 #[cfg(not(windows))]
 fn path_components_equal_or_child(path: &Path, root: &Path) -> bool {
@@ -230,11 +246,20 @@ fn read_run(root: &Path, id: &str) -> Result<Value, Value> {
 }
 
 fn policy(root: &Path, allowed_roots: &[PathBuf]) -> Value {
-    json!({"schema":"narada.worker.policy.v1","status":"ok","server_name":SERVER_NAME,"run_root":run_root(root).to_string_lossy(),"site_root":root.to_string_lossy(),"allowed_roots":allowed_roots.iter().map(|allowed|allowed.to_string_lossy()).collect::<Vec<_>>(),"allowed_runtimes":["narada-agent-runtime-server"],"allowed_authorities":["read","write","command"],"default_cognition":DEFAULT_COGNITION,"native_execution":"rust_authority","secret_projection":"environment_only","windows_msvc_environment":{"inherited":true,"automatic_discovery":false,"remediation":"Initialize VsDevCmd or use Developer PowerShell before launching the carrier."}})
+    json!({"schema":"narada.worker.policy.v1","status":"ok","server_name":SERVER_NAME,"run_root":run_root(root).to_string_lossy(),"site_root":root.to_string_lossy(),"allowed_roots":allowed_roots.iter().map(|allowed|allowed.to_string_lossy()).collect::<Vec<_>>(),"allowed_runtimes":["narada-agent-runtime-server"],"allowed_authorities":["read","write","command"],"default_cognition":DEFAULT_COGNITION,"native_execution":"rust_authority","secret_projection":"secret_store_reference_only","windows_msvc_environment":{"inherited":true,"automatic_discovery":false,"remediation":"Initialize VsDevCmd or use Developer PowerShell before launching the carrier."}})
 }
-fn capability_snapshot(authority: &str, cwd: &Path, allowed_roots: &[PathBuf], runtime_probe: Option<&Value>) -> Value {
+fn capability_snapshot(
+    authority: &str,
+    cwd: &Path,
+    allowed_roots: &[PathBuf],
+    runtime_probe: Option<&Value>,
+) -> Value {
     let writable = authority != "read";
-    let effective_mode = if writable { "workspace_write" } else { "read_only" };
+    let effective_mode = if writable {
+        "workspace_write"
+    } else {
+        "read_only"
+    };
     json!({
         "schema":"narada.worker.capability_snapshot.v1",
         "authority":authority,
@@ -256,12 +281,29 @@ fn capability_snapshot(authority: &str, cwd: &Path, allowed_roots: &[PathBuf], r
     })
 }
 fn scoped_write_probe(cwd: &Path) -> Result<Value, Value> {
-    let path = cwd.join(format!(".narada-worker-probe-{}", uuid::Uuid::new_v4().simple()));
-    fs::write(&path, b"probe").map_err(|failure| error("worker_write_preflight_failed", &format!("worker_write_preflight_failed:{failure}")))?;
-    let verified = fs::read(&path).map(|value| value == b"probe").unwrap_or(false);
+    let path = cwd.join(format!(
+        ".narada-worker-probe-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    fs::write(&path, b"probe").map_err(|failure| {
+        error(
+            "worker_write_preflight_failed",
+            &format!("worker_write_preflight_failed:{failure}"),
+        )
+    })?;
+    let verified = fs::read(&path)
+        .map(|value| value == b"probe")
+        .unwrap_or(false);
     let removed = fs::remove_file(&path).is_ok() && !path.exists();
-    if !verified || !removed { return Err(error("worker_write_preflight_failed", "worker_write_preflight_failed:verification_or_cleanup")); }
-    Ok(json!({"schema":"narada.worker.runtime_probe.v1","operation":"create_read_remove","status":"passed","cwd":cwd.to_string_lossy(),"cleanup_verified":true}))
+    if !verified || !removed {
+        return Err(error(
+            "worker_write_preflight_failed",
+            "worker_write_preflight_failed:verification_or_cleanup",
+        ));
+    }
+    Ok(
+        json!({"schema":"narada.worker.runtime_probe.v1","operation":"create_read_remove","status":"passed","cwd":cwd.to_string_lossy(),"cleanup_verified":true}),
+    )
 }
 fn defaults_path(root: &Path) -> PathBuf {
     root.join(".narada/worker-cognition-defaults.json")
@@ -272,13 +314,21 @@ fn empty_defaults() -> Value {
 fn cognition_defaults_for(root: &Path) -> Value {
     read_json(&defaults_path(root))
         .ok()
-        .and_then(|v| v.get("effective_cognition_defaults").or_else(|| v.get("defaults")).cloned())
+        .and_then(|v| {
+            v.get("effective_cognition_defaults")
+                .or_else(|| v.get("defaults"))
+                .cloned()
+        })
         .unwrap_or_else(empty_defaults)
 }
 fn cognition_defaults(root: &Path) -> Value {
     json!({"schema":"narada.worker.cognition_defaults.v1","status":"ok","default_cognition":DEFAULT_COGNITION,"defaults":cognition_defaults_for(root),"source":"native_contract","canonical_runtime":"narada-agent-runtime-server uses an immutable invocation plan","native_read_only":true})
 }
-fn config_resolve(args: &Map<String, Value>, root: &Path, allowed_roots: &[PathBuf]) -> Result<Value, Value> {
+fn config_resolve(
+    args: &Map<String, Value>,
+    root: &Path,
+    allowed_roots: &[PathBuf],
+) -> Result<Value, Value> {
     let resolved_authority = authority(args)?;
     let constraints = args.get("constraints").and_then(Value::as_object);
     let cognition = constraints
@@ -289,7 +339,10 @@ fn config_resolve(args: &Map<String, Value>, root: &Path, allowed_roots: &[PathB
         .unwrap_or(DEFAULT_COGNITION)
         .to_string();
     if !matches!(cognition.as_str(), "low" | "medium" | "high") {
-        return Err(error("worker_cognition_invalid", "worker_cognition_invalid"));
+        return Err(error(
+            "worker_cognition_invalid",
+            "worker_cognition_invalid",
+        ));
     }
     let defaults = cognition_defaults_for(root);
     let selected = defaults.get(&cognition).cloned().unwrap_or(Value::Null);
@@ -383,13 +436,19 @@ fn runs_list(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
 }
 fn run_wait(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     let id = run_id(args)?;
-    let timeout_ms = args.get("timeout_ms").and_then(Value::as_u64).unwrap_or(0).min(300_000);
+    let timeout_ms = args
+        .get("timeout_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        .min(300_000);
     let started = Instant::now();
     let mut run = read_run(root, &id)?;
     while run.get("status").and_then(Value::as_str) == Some("running")
         && started.elapsed() < Duration::from_millis(timeout_ms)
     {
-        thread::sleep(Duration::from_millis(100).min(Duration::from_millis(timeout_ms.saturating_sub(started.elapsed().as_millis() as u64))));
+        thread::sleep(Duration::from_millis(100).min(Duration::from_millis(
+            timeout_ms.saturating_sub(started.elapsed().as_millis() as u64),
+        )));
         run = read_run(root, &id)?;
     }
     let running = run.get("status").and_then(Value::as_str) == Some("running");
@@ -615,6 +674,8 @@ fn resolved_invocation(
     provider_model: &str,
     preflight_evidence_ref: &str,
     reasoning_effort: Option<&str>,
+    provider_binding: Option<&Value>,
+    provider_binding_path: Option<&Path>,
 ) -> Value {
     json!({
         "cognition": cognition,
@@ -622,6 +683,8 @@ fn resolved_invocation(
         "provider_mode": provider_mode,
         "provider_model": provider_model,
         "reasoning_effort": reasoning_effort,
+        "provider_binding": provider_binding,
+        "provider_binding_path": provider_binding_path.map(|path| path.to_string_lossy().to_string()),
         "preflight_evidence_ref": preflight_evidence_ref,
         "resolution_source":"worker_intelligence_preflight"
     })
@@ -657,6 +720,74 @@ fn write_json_atomic(path: &Path, value: &Value) -> Result<(), Value> {
     .map_err(|_| error("worker_write_failed", "worker_write_failed"))?;
     fs::rename(&temp, path).map_err(|_| error("worker_write_failed", "worker_write_failed"))
 }
+
+fn provider_registry_candidates(root: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(path) = std::env::var_os("NARADA_PROVIDER_REGISTRY_PATH") {
+        candidates.push(PathBuf::from(path));
+    }
+    candidates.push(root.join(".narada/provider-registry.json"));
+    let source_root = narada_source_root(root);
+    candidates.push(source_root.join(
+        "narada/packages/invokable-intelligence-management/assets/provider-registry.bootstrap.json",
+    ));
+    candidates
+}
+
+fn provider_models_from_registry(value: &Value) -> BTreeMap<String, Vec<String>> {
+    let mut result = BTreeMap::new();
+    let Some(providers) = value.get("providers").and_then(Value::as_object) else {
+        return result;
+    };
+    for (provider, record) in providers {
+        let mut models = record
+            .get("available_models")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        if models.is_empty() {
+            if let Some(model_map) = record.get("models").and_then(Value::as_object) {
+                models.extend(model_map.keys().cloned());
+            }
+        }
+        models.sort();
+        models.dedup();
+        if !models.is_empty() {
+            result.insert(provider.clone(), models);
+        }
+    }
+    result
+}
+
+fn canonical_provider_models(root: &Path) -> Result<BTreeMap<String, Vec<String>>, Value> {
+    for path in provider_registry_candidates(root) {
+        if !path.is_file() {
+            continue;
+        }
+        let value = read_json(&path).map_err(|_| {
+            error(
+                "worker_provider_registry_invalid",
+                "worker_provider_registry_invalid",
+            )
+        })?;
+        let models = provider_models_from_registry(&value);
+        if models.is_empty() {
+            return Err(error(
+                "worker_provider_registry_invalid",
+                "worker_provider_registry_invalid",
+            ));
+        }
+        return Ok(models);
+    }
+    Err(error(
+        "worker_provider_registry_unavailable",
+        "worker_provider_registry_unavailable",
+    ))
+}
+
 fn cognition_defaults_update(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     let provider = required_string(args, "provider", "worker_cognition_provider_required")?;
     let cognition = required_string(args, "cognition", "worker_cognition_required")?;
@@ -670,11 +801,26 @@ fn cognition_defaults_update(args: &Map<String, Value>, root: &Path) -> Result<V
     let effort = required_string(args, "reasoning_effort", "worker_reasoning_effort_required")?;
     let path = defaults_path(root);
     let mut record = read_json(&path).unwrap_or_else(|_| json!({"schema":"narada.worker.cognition_defaults.v1","version":0,"provider_cognition_defaults":{},"effective_cognition_defaults":empty_defaults()}));
+    let provider_models = canonical_provider_models(root)?;
+    let allowed_models = provider_models.get(provider).ok_or_else(|| {
+        error(
+            "worker_cognition_provider_not_allowed",
+            "worker_cognition_provider_not_allowed",
+        )
+    })?;
+    if !allowed_models.iter().any(|candidate| candidate == model) {
+        return Err(error(
+            "worker_cognition_model_not_allowed",
+            "worker_cognition_model_not_allowed",
+        ));
+    }
     record["version"] = json!(record.get("version").and_then(Value::as_u64).unwrap_or(0) + 1);
     record["updated_at"] = json!(now());
     record["updated_by"] = args.get("actor").cloned().unwrap_or(Value::Null);
-    record["provider_cognition_defaults"][provider][cognition] = json!({"model":model,"reasoning_effort":effort});
-    record["effective_cognition_defaults"][cognition] = json!({"provider":provider,"model":model,"reasoning_effort":effort});
+    record["provider_cognition_defaults"][provider][cognition] =
+        json!({"model":model,"reasoning_effort":effort});
+    record["effective_cognition_defaults"][cognition] =
+        json!({"provider":provider,"model":model,"reasoning_effort":effort});
     write_json_atomic(&path, &record)?;
     Ok(
         json!({"schema":"narada.worker.cognition_defaults.v1","status":"updated","cognition":cognition,"default":record["effective_cognition_defaults"][cognition],"defaults":record["effective_cognition_defaults"],"source":"native_rust_authority"}),
@@ -727,16 +873,117 @@ fn preflight_command(root: &Path) -> Result<PathBuf, Value> {
     .find(|path| path.is_file())
     .ok_or_else(|| error("worker_intelligence_preflight_unavailable", "worker_intelligence_preflight_unavailable"))
 }
-fn admitted_plan_binding(admission: &Value) -> Result<(String, String, String, String), Value> {
-    let plan_ref = admission.get("plan_ref").and_then(Value::as_str).ok_or_else(|| error("worker_canonical_invocation_plan_invalid", "worker_canonical_invocation_plan_invalid"))?;
-    let provider = admission.pointer("/selected/inference_provider/id").and_then(Value::as_str).ok_or_else(|| error("worker_canonical_invocation_provider_missing", "worker_canonical_invocation_provider_missing"))?;
+fn admitted_plan_binding(
+    admission: &Value,
+) -> Result<(String, String, String, String, Option<Value>), Value> {
+    let plan_ref = admission
+        .get("plan_ref")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            error(
+                "worker_canonical_invocation_plan_invalid",
+                "worker_canonical_invocation_plan_invalid",
+            )
+        })?;
+    let provider = admission
+        .pointer("/selected/inference_provider/id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            error(
+                "worker_canonical_invocation_provider_missing",
+                "worker_canonical_invocation_provider_missing",
+            )
+        })?;
+    let provider_binding = admission
+        .get("provider_binding")
+        .filter(|value| !value.is_null())
+        .cloned();
     let mode = match provider {
         "inference-provider:codex-subscription" => "codex-subscription",
-        _ => return Err(error("worker_native_provider_unsupported", "worker_native_provider_unsupported")),
+        "inference-provider:deepseek-api" | "inference-provider:openrouter-api" => {
+            validate_native_provider_binding(provider_binding.as_ref())?;
+            provider
+                .strip_prefix("inference-provider:")
+                .unwrap_or(provider)
+        }
+        _ => {
+            return Err(error(
+                "worker_native_provider_unsupported",
+                "worker_native_provider_unsupported",
+            ))
+        }
     };
-    let model = admission.pointer("/selected/model/id").and_then(Value::as_str).and_then(|value| value.strip_prefix("model:")).map(str::trim).filter(|value| !value.is_empty()).ok_or_else(|| error("worker_canonical_invocation_model_missing", "worker_canonical_invocation_model_missing"))?;
-    let evidence_ref = admission.get("evidence_ref").and_then(Value::as_str).unwrap_or_default().to_string();
-    Ok((plan_ref.to_string(), mode.to_string(), model.to_string(), evidence_ref))
+    let model = admission
+        .pointer("/selected/model/id")
+        .and_then(Value::as_str)
+        .and_then(|value| value.strip_prefix("model:"))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            error(
+                "worker_canonical_invocation_model_missing",
+                "worker_canonical_invocation_model_missing",
+            )
+        })?;
+    let evidence_ref = admission
+        .get("evidence_ref")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    Ok((
+        plan_ref.to_string(),
+        mode.to_string(),
+        model.to_string(),
+        evidence_ref,
+        provider_binding,
+    ))
+}
+
+fn validate_native_provider_binding(binding: Option<&Value>) -> Result<(), Value> {
+    let binding = binding.ok_or_else(|| {
+        error(
+            "worker_native_provider_binding_missing",
+            "worker_native_provider_binding_missing",
+        )
+    })?;
+    let provider = binding
+        .get("provider")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let expected_secret_ref = match provider {
+        "deepseek-api" => "narada/provider/deepseek-api/api-key",
+        "openrouter-api" => "narada/provider/openrouter-api/api-key",
+        _ => {
+            return Err(error(
+                "worker_native_provider_binding_invalid",
+                "worker_native_provider_binding_invalid",
+            ))
+        }
+    };
+    let endpoint = binding
+        .get("endpoint")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let endpoint_ok = match provider {
+        "deepseek-api" => endpoint.starts_with("https://api.deepseek.com/"),
+        "openrouter-api" => endpoint.starts_with("https://openrouter.ai/"),
+        _ => false,
+    };
+    if binding.get("schema").and_then(Value::as_str) != Some("narada.native.provider_binding.v1")
+        || binding.get("protocol").and_then(Value::as_str) != Some("openai/chat-completions/1")
+        || binding.get("credential_secret_ref").and_then(Value::as_str) != Some(expected_secret_ref)
+        || !endpoint_ok
+        || binding
+            .get("model")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+    {
+        return Err(error(
+            "worker_native_provider_binding_invalid",
+            "worker_native_provider_binding_invalid",
+        ));
+    }
+    Ok(())
 }
 fn resolve_intelligence_context_path(
     root: &Path,
@@ -757,8 +1004,7 @@ fn resolve_intelligence_context_path(
     if local.is_file() {
         return local;
     }
-    home
-        .map(|home| home.join("Narada/.narada/intelligence-launch-context.json"))
+    home.map(|home| home.join("Narada/.narada/intelligence-launch-context.json"))
         .filter(|path| path.is_file())
         .unwrap_or(local)
 }
@@ -770,15 +1016,28 @@ fn intelligence_context_path(root: &Path) -> PathBuf {
         std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from),
     )
 }
-fn invocation_plan_binding(root: &Path, requested_plan_ref: Option<&str>, cognition: Option<&str>) -> Result<(String, String, String, String, Option<String>), Value> {
+fn invocation_plan_binding(
+    root: &Path,
+    requested_plan_ref: Option<&str>,
+    cognition: Option<&str>,
+) -> Result<
+    (
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<Value>,
+    ),
+    Value,
+> {
     let context_path = intelligence_context_path(root);
-    let context =
-        read_json(&context_path).map_err(|_| {
-            error(
-                "worker_intelligence_context_required",
-                "worker_intelligence_context_required",
-            )
-        })?;
+    let context = read_json(&context_path).map_err(|_| {
+        error(
+            "worker_intelligence_context_required",
+            "worker_intelligence_context_required",
+        )
+    })?;
     let registry = context
         .get("registry_db_path")
         .and_then(Value::as_str)
@@ -796,7 +1055,15 @@ fn invocation_plan_binding(root: &Path, requested_plan_ref: Option<&str>, cognit
     } else {
         context_site_root.join(registry)
     };
-    let principal = context.get("principal_id").and_then(Value::as_str).ok_or_else(|| error("worker_intelligence_principal_required", "worker_intelligence_principal_required"))?;
+    let principal = context
+        .get("principal_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            error(
+                "worker_intelligence_principal_required",
+                "worker_intelligence_principal_required",
+            )
+        })?;
     let defaults_path = root.join(".narada/worker-cognition-defaults.json");
     let request = json!({
         "schema":"narada.invokable-intelligence.preflight-request.v1",
@@ -811,23 +1078,65 @@ fn invocation_plan_binding(root: &Path, requested_plan_ref: Option<&str>, cognit
         "cognition_defaults_path":if cognition.is_some(){json!(defaults_path)}else{Value::Null}
     });
     let executable = preflight_command(root)?;
-    let mut child = Command::new(executable).args(["--registry", &registry.to_string_lossy()])
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()
-        .map_err(|_| error("worker_intelligence_preflight_launch_failed", "worker_intelligence_preflight_launch_failed"))?;
+    let mut child = Command::new(executable)
+        .args(["--registry", &registry.to_string_lossy()])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|_| {
+            error(
+                "worker_intelligence_preflight_launch_failed",
+                "worker_intelligence_preflight_launch_failed",
+            )
+        })?;
     if let Some(mut stdin) = child.stdin.take() {
-        writeln!(stdin, "{request}").map_err(|_| error("worker_intelligence_preflight_write_failed", "worker_intelligence_preflight_write_failed"))?;
+        writeln!(stdin, "{request}").map_err(|_| {
+            error(
+                "worker_intelligence_preflight_write_failed",
+                "worker_intelligence_preflight_write_failed",
+            )
+        })?;
     }
-    let output = child.wait_with_output().map_err(|_| error("worker_intelligence_preflight_wait_failed", "worker_intelligence_preflight_wait_failed"))?;
+    let output = child.wait_with_output().map_err(|_| {
+        error(
+            "worker_intelligence_preflight_wait_failed",
+            "worker_intelligence_preflight_wait_failed",
+        )
+    })?;
     if output.stdout.len() > MAX_FILE_BYTES {
-        return Err(error("worker_intelligence_preflight_response_too_large", "worker_intelligence_preflight_response_too_large"));
+        return Err(error(
+            "worker_intelligence_preflight_response_too_large",
+            "worker_intelligence_preflight_response_too_large",
+        ));
     }
-    let admission: Value = serde_json::from_slice(&output.stdout).map_err(|_| error("worker_intelligence_preflight_response_invalid", "worker_intelligence_preflight_response_invalid"))?;
-    if !output.status.success() || admission.get("status").and_then(Value::as_str) != Some("admitted") {
-        return Err(json!({"schema":"narada.worker.error.v1","code":"worker_intelligence_preflight_refused","message":"worker_intelligence_preflight_refused","preflight":admission}));
+    let admission: Value = serde_json::from_slice(&output.stdout).map_err(|_| {
+        error(
+            "worker_intelligence_preflight_response_invalid",
+            "worker_intelligence_preflight_response_invalid",
+        )
+    })?;
+    if !output.status.success()
+        || admission.get("status").and_then(Value::as_str) != Some("admitted")
+    {
+        return Err(
+            json!({"schema":"narada.worker.error.v1","code":"worker_intelligence_preflight_refused","message":"worker_intelligence_preflight_refused","preflight":admission}),
+        );
     }
-    let (plan_ref, mode, model, evidence_ref) = admitted_plan_binding(&admission)?;
-    let reasoning_effort = admission.pointer("/options/reasoning_effort").and_then(Value::as_str).map(str::to_string);
-    Ok((plan_ref, mode, model, evidence_ref, reasoning_effort))
+    let (plan_ref, mode, model, evidence_ref, provider_binding) =
+        admitted_plan_binding(&admission)?;
+    let reasoning_effort = admission
+        .pointer("/options/reasoning_effort")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    Ok((
+        plan_ref,
+        mode,
+        model,
+        evidence_ref,
+        reasoning_effort,
+        provider_binding,
+    ))
 }
 fn codex_command() -> Option<PathBuf> {
     if let Some(command) = std::env::var_os("NARADA_NATIVE_CODEX_COMMAND") {
@@ -885,7 +1194,11 @@ fn worker_run(
     let prompt = instruction(args)?;
     let auth = authority(args)?.to_string();
     let constraints = args.get("constraints").and_then(Value::as_object);
-    let max_run_ms = constraints.and_then(|value| value.get("max_run_ms")).and_then(Value::as_u64).unwrap_or(300_000).clamp(1, 1_800_000);
+    let max_run_ms = constraints
+        .and_then(|value| value.get("max_run_ms"))
+        .and_then(Value::as_u64)
+        .unwrap_or(300_000)
+        .clamp(1, 1_800_000);
     for key in ["provider"] {
         if constraints.and_then(|value| value.get(key)).is_some() {
             return Err(error(
@@ -902,7 +1215,10 @@ fn worker_run(
         .unwrap_or(DEFAULT_COGNITION)
         .to_string();
     if !matches!(cognition.as_str(), "low" | "medium" | "high") {
-        return Err(error("worker_cognition_invalid", "worker_cognition_invalid"));
+        return Err(error(
+            "worker_cognition_invalid",
+            "worker_cognition_invalid",
+        ));
     }
     let requested_plan_ref = constraints
         .and_then(|value| value.get("invocation_plan_ref"))
@@ -914,27 +1230,26 @@ fn worker_run(
             std::env::var("NARADA_INTELLIGENCE_PLAN_REF")
                 .ok()
                 .filter(|value| !value.trim().is_empty())
-        })
-        ;
-    if requested_plan_ref.as_deref().is_some_and(|plan_ref| !plan_ref.starts_with("plan:")
-        || !plan_ref[5..].chars().all(|character| {
-            character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | ':' | '-')
-        }))
-    {
+        });
+    if requested_plan_ref.as_deref().is_some_and(|plan_ref| {
+        !plan_ref.starts_with("plan:")
+            || !plan_ref[5..].chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | ':' | '-')
+            })
+    }) {
         return Err(error(
             "worker_canonical_invocation_plan_invalid",
             "worker_canonical_invocation_plan_invalid",
         ));
     }
-    let (plan_ref, provider_mode, provider_model, preflight_evidence_ref, reasoning_effort) = invocation_plan_binding(root, requested_plan_ref.as_deref(), Some(&cognition))?;
-    let resolved_invocation = resolved_invocation(
-        &cognition,
-        &plan_ref,
-        &provider_mode,
-        &provider_model,
-        &preflight_evidence_ref,
-        reasoning_effort.as_deref(),
-    );
+    let (
+        plan_ref,
+        provider_mode,
+        provider_model,
+        preflight_evidence_ref,
+        reasoning_effort,
+        provider_binding,
+    ) = invocation_plan_binding(root, requested_plan_ref.as_deref(), Some(&cognition))?;
     let cwd = constraints
         .and_then(|v| v.get("cwd"))
         .and_then(Value::as_str)
@@ -947,13 +1262,34 @@ fn worker_run(
         ));
     }
     let runtime = runtime_command(root)?;
-    let runtime_probe = if auth == "read" { None } else { Some(scoped_write_probe(&cwd)?) };
+    let runtime_probe = if auth == "read" {
+        None
+    } else {
+        Some(scoped_write_probe(&cwd)?)
+    };
     let capabilities = capability_snapshot(&auth, &cwd, allowed_roots, runtime_probe.as_ref());
     let id = format!("run-{}", uuid::Uuid::new_v4().simple());
     let session = resume.clone().unwrap_or_else(|| id.clone());
     let dir = run_root(root).join(&id);
     fs::create_dir_all(&dir)
         .map_err(|_| error("worker_run_create_failed", "worker_run_create_failed"))?;
+    let provider_binding_path = provider_binding
+        .as_ref()
+        .map(|_| dir.join("provider-binding.json"));
+    if let (Some(binding), Some(path)) = (provider_binding.as_ref(), provider_binding_path.as_ref())
+    {
+        write_json_atomic(path, binding)?;
+    }
+    let resolved_invocation = resolved_invocation(
+        &cognition,
+        &plan_ref,
+        &provider_mode,
+        &provider_model,
+        &preflight_evidence_ref,
+        reasoning_effort.as_deref(),
+        provider_binding.as_ref(),
+        provider_binding_path.as_deref(),
+    );
     let started = now();
     let request = json!({"schema":"narada.worker.request.v1","run_id":id,"origin_tool":tool_name,"intent":args.get("intent"),"constraints":args.get("constraints"),"resume_worker_session_id":resume,"capability_snapshot":capabilities.clone(),"invocation_plan_ref":plan_ref,"preflight_evidence_ref":preflight_evidence_ref,"resolved_invocation":resolved_invocation.clone()});
     write_json_atomic(&dir.join("request.json"), &request)?;
@@ -987,6 +1323,7 @@ fn worker_run(
                 provider_mode,
                 provider_model,
                 reasoning_effort,
+                provider_binding_path,
                 allowed_roots_owned,
                 max_run_ms,
                 format!("Effective mode: {}. This reconciled state is injected at the provider process boundary through the permission profile, CLI sandbox, and writable-root arguments; ambient labels are advisory. CWD: {}. Writable roots: {}. Scoped create/read/remove preflight: {}. Command write effects: {}. First-class exact-byte lifecycle: one bounded shell command with explicit encoding for create/read-verify/remove/confirm-absent. On Windows assign literal path/content variables, use IO.File WriteAllBytes/ReadAllBytes, compare hex, delete, and test existence; avoid interpolated command strings. Use apply_patch for ordinary edits. Carrier MCP projection: none. On refusal return narada.worker.refusal.v1 with tool, operation, cwd, target_path, declared_capability, actual_refusal. Ergonomics ratings use narada.worker.observed_ergonomics.v1: lower a score only for observed failure, retry, human intervention, or ambiguity that changed execution; automatic contained review requires no human interaction and is not ceremony; put hypothetical improvements in non_scoring_observations.\n\nTask:\n{prompt}", capabilities["effective_mode"].as_str().unwrap_or("unknown"), capabilities["cwd"].as_str().unwrap_or("unknown"), capabilities["allowed_roots"].as_array().map(|roots| roots.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")).unwrap_or_default(), capabilities["runtime_probe"]["status"].as_str().unwrap_or("not_required"), capabilities["commands"]["write_effects"].as_bool().unwrap_or(false)),
@@ -995,7 +1332,11 @@ fn worker_run(
         .map_err(|_| error("worker_launch_failed", "worker_launch_failed"))?;
     Ok(running)
 }
-fn worker_edit(args: &Map<String, Value>, root: &Path, allowed_roots: &[PathBuf]) -> Result<Value, Value> {
+fn worker_edit(
+    args: &Map<String, Value>,
+    root: &Path,
+    allowed_roots: &[PathBuf],
+) -> Result<Value, Value> {
     let prompt =
         required_string(args, "instruction", "worker_edit_instruction_required")?.to_string();
     let mut constraints = args
@@ -1020,12 +1361,20 @@ fn worker_edit(args: &Map<String, Value>, root: &Path, allowed_roots: &[PathBuf]
         "worker_edit",
     )
 }
-fn worker_resume(args: &Map<String, Value>, root: &Path, allowed_roots: &[PathBuf]) -> Result<Value, Value> {
+fn worker_resume(
+    args: &Map<String, Value>,
+    root: &Path,
+    allowed_roots: &[PathBuf],
+) -> Result<Value, Value> {
     let session =
         required_string(args, "worker_session_id", "worker_session_id_required")?.to_string();
     worker_run(args, root, allowed_roots, Some(session), "worker_resume")
 }
-fn worker_run_batch(args: &Map<String, Value>, root: &Path, allowed_roots: &[PathBuf]) -> Result<Value, Value> {
+fn worker_run_batch(
+    args: &Map<String, Value>,
+    root: &Path,
+    allowed_roots: &[PathBuf],
+) -> Result<Value, Value> {
     let requests = args
         .get("requests")
         .and_then(Value::as_array)
@@ -1133,6 +1482,7 @@ fn complete_native_run(
     provider_mode: String,
     provider_model: String,
     reasoning_effort: Option<String>,
+    provider_binding_path: Option<PathBuf>,
     allowed_roots: Vec<PathBuf>,
     max_run_ms: u64,
     prompt: String,
@@ -1166,12 +1516,20 @@ fn complete_native_run(
         )
         .env(
             "NARADA_NATIVE_CODEX_WRITABLE_ROOTS",
-            serde_json::to_string(&allowed_roots.iter().map(|root| root.to_string_lossy().to_string()).collect::<Vec<_>>())
-                .unwrap_or_else(|_| "[]".to_string()),
+            serde_json::to_string(
+                &allowed_roots
+                    .iter()
+                    .map(|root| root.to_string_lossy().to_string())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap_or_else(|_| "[]".to_string()),
         )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some(binding_path) = provider_binding_path {
+        command.env("NARADA_NATIVE_PROVIDER_BINDING_PATH", binding_path);
+    }
     command.env("NARADA_NATIVE_CODEX_MODEL", provider_model);
     if let Some(reasoning_effort) = reasoning_effort {
         command.env("NARADA_NATIVE_CODEX_REASONING_EFFORT", reasoning_effort);
@@ -1223,7 +1581,8 @@ fn complete_native_run(
             });
             loop {
                 if started.elapsed() >= Duration::from_millis(max_run_ms) {
-                    runtime_error = Some(format!("worker_runtime_timed_out:max_run_ms={max_run_ms}"));
+                    runtime_error =
+                        Some(format!("worker_runtime_timed_out:max_run_ms={max_run_ms}"));
                     let _ = child.kill();
                     break;
                 }
@@ -1304,7 +1663,10 @@ fn complete_native_run(
                 &json!({"summary":message,"deliverables":[],"open_questions":[],"next_actions":[]}),
             );
         }
-        let snapshot = read_json(&dir.join("request.json")).ok().and_then(|request| request.get("capability_snapshot").cloned()).unwrap_or(Value::Null);
+        let snapshot = read_json(&dir.join("request.json"))
+            .ok()
+            .and_then(|request| request.get("capability_snapshot").cloned())
+            .unwrap_or(Value::Null);
         let payload = json!({"schema":"narada.worker.run.v1","run_id":id,"status":if successful{"completed"}else{"failed"},"completion_state":if assistant.is_some(){"complete"}else{"absent"},"runtime":"narada-agent-runtime-server","authority":authority,"cognition":cognition,"resolved_invocation":resolved_invocation,"capability_snapshot":snapshot,"worker_session_id":provider_session.unwrap_or(session),"pid":child.id(),"summary":assistant,"error":runtime_error.or_else(||if successful{None}else{Some(format!("worker_runtime_exit:{:?}",status.and_then(|v|v.code())))}),"timing":{"started_at":Value::Null,"finished_at":finished,"duration_ms":started.elapsed().as_millis() as u64},"artifacts":{"request":dir.join("request.json").to_string_lossy(),"events":events_path.to_string_lossy(),"diagnostic":diagnostic_path.to_string_lossy(),"last_message":dir.join("last_message.json").to_string_lossy()}});
         let _ = write_json_atomic(&result_path, &payload);
     }
@@ -1315,57 +1677,88 @@ fn error(code: &str, message: &str) -> Value {
 }
 fn input_schema(name: &str) -> Value {
     let short_string = || json!({"type":"string","minLength":1,"maxLength":512});
-    let run_id = || json!({"type":"string","minLength":5,"maxLength":160,"pattern":"^run-[A-Za-z0-9_-]+$"});
+    let run_id =
+        || json!({"type":"string","minLength":5,"maxLength":160,"pattern":"^run-[A-Za-z0-9_-]+$"});
     let run_ids = || json!({"type":"array","minItems":1,"maxItems":50,"items":run_id()});
-    let intent = || json!({
-        "type":"object",
-        "properties":{
-            "instruction":{"type":"string","minLength":1,"maxLength":65536},
-            "task":{"type":"string","minLength":1,"maxLength":65536},
-            "goal":{"type":"string","minLength":1,"maxLength":65536},
-            "summary":{"type":"string","minLength":1,"maxLength":65536},
-            "mode":short_string()
-        },
-        "additionalProperties":false,
-        "anyOf":[{"required":["instruction"]},{"required":["task"]},{"required":["goal"]},{"required":["summary"]}]
-    });
-    let constraints = || json!({
-        "type":"object",
-        "properties":{
-            "authority":{"type":"string","enum":["read","write","command"]},
-            "cognition":{"type":"string","enum":["low","medium","high"],"default":"low"},
-            "cwd":{"type":"string","minLength":1,"maxLength":4096},
-            "invocation_plan_ref":{"type":"string","minLength":6,"maxLength":512,"pattern":"^plan:[A-Za-z0-9._:-]+$"},
-            "max_run_ms":{"type":"integer","minimum":1,"maximum":1800000,"default":300000,"description":"Hard worker runtime deadline enforced by the native authority."}
-        },
-        "additionalProperties":false
-    });
-    let run_request = || json!({
-        "type":"object",
-        "properties":{"intent":intent(),"constraints":constraints()},
-        "required":["intent"],
-        "additionalProperties":false
-    });
+    let intent = || {
+        json!({
+            "type":"object",
+            "properties":{
+                "instruction":{"type":"string","minLength":1,"maxLength":65536},
+                "task":{"type":"string","minLength":1,"maxLength":65536},
+                "goal":{"type":"string","minLength":1,"maxLength":65536},
+                "summary":{"type":"string","minLength":1,"maxLength":65536},
+                "mode":short_string()
+            },
+            "additionalProperties":false,
+            "anyOf":[{"required":["instruction"]},{"required":["task"]},{"required":["goal"]},{"required":["summary"]}]
+        })
+    };
+    let constraints = || {
+        json!({
+            "type":"object",
+            "properties":{
+                "authority":{"type":"string","enum":["read","write","command"]},
+                "cognition":{"type":"string","enum":["low","medium","high"],"default":"low"},
+                "cwd":{"type":"string","minLength":1,"maxLength":4096},
+                "invocation_plan_ref":{"type":"string","minLength":6,"maxLength":512,"pattern":"^plan:[A-Za-z0-9._:-]+$"},
+                "max_run_ms":{"type":"integer","minimum":1,"maximum":1800000,"default":300000,"description":"Hard worker runtime deadline enforced by the native authority."}
+            },
+            "additionalProperties":false
+        })
+    };
+    let run_request = || {
+        json!({
+            "type":"object",
+            "properties":{"intent":intent(),"constraints":constraints()},
+            "required":["intent"],
+            "additionalProperties":false
+        })
+    };
     match name {
-        "worker_guidance" => json!({"type":"object","properties":{"workflow":short_string(),"tool":short_string()},"additionalProperties":false}),
-        "worker_policy_inspect" | "worker_cognition_defaults_inspect" | "worker_operator_affordances" => json!({"type":"object","additionalProperties":false}),
-        "worker_config_resolve" => json!({"type":"object","properties":{"cwd":{"type":"string","minLength":1,"maxLength":4096},"constraints":constraints()},"additionalProperties":false}),
-        "worker_run_status" => json!({"type":"object","properties":{"run_id":run_id()},"required":["run_id"],"additionalProperties":false}),
-        "worker_run_wait" => json!({"type":"object","properties":{"run_id":run_id(),"timeout_ms":{"type":"integer","minimum":0,"maximum":300000}},"required":["run_id"],"additionalProperties":false}),
-        "worker_runs_list" => json!({"type":"object","properties":{"limit":{"type":"integer","minimum":1,"maximum":200},"include_running":{"type":"boolean"},"include_completed":{"type":"boolean"}},"additionalProperties":false}),
+        "worker_guidance" => {
+            json!({"type":"object","properties":{"workflow":short_string(),"tool":short_string()},"additionalProperties":false})
+        }
+        "worker_policy_inspect"
+        | "worker_cognition_defaults_inspect"
+        | "worker_operator_affordances" => json!({"type":"object","additionalProperties":false}),
+        "worker_config_resolve" => {
+            json!({"type":"object","properties":{"cwd":{"type":"string","minLength":1,"maxLength":4096},"constraints":constraints()},"additionalProperties":false})
+        }
+        "worker_run_status" => {
+            json!({"type":"object","properties":{"run_id":run_id()},"required":["run_id"],"additionalProperties":false})
+        }
+        "worker_run_wait" => {
+            json!({"type":"object","properties":{"run_id":run_id(),"timeout_ms":{"type":"integer","minimum":0,"maximum":300000}},"required":["run_id"],"additionalProperties":false})
+        }
+        "worker_runs_list" => {
+            json!({"type":"object","properties":{"limit":{"type":"integer","minimum":1,"maximum":200},"include_running":{"type":"boolean"},"include_completed":{"type":"boolean"}},"additionalProperties":false})
+        }
         "worker_run_wait_batch" | "worker_runs_synthesize" => {
             json!({"type":"object","properties":{"run_ids":run_ids()},"required":["run_ids"],"additionalProperties":false})
         }
-        "worker_dashboard_describe" => json!({"type":"object","properties":{"mode":{"type":"string","enum":["all_active","single_run"]},"run_id":run_id(),"include_terminal":{"type":"boolean"},"limit":{"type":"integer","minimum":1,"maximum":200}},"additionalProperties":false}),
+        "worker_dashboard_describe" => {
+            json!({"type":"object","properties":{"mode":{"type":"string","enum":["all_active","single_run"]},"run_id":run_id(),"include_terminal":{"type":"boolean"},"limit":{"type":"integer","minimum":1,"maximum":200}},"additionalProperties":false})
+        }
         "worker_output_show" => {
             json!({"type":"object","properties":{"ref":{"type":"string","minLength":1,"maxLength":512},"output_ref":{"type":"string","minLength":1,"maxLength":512},"offset":{"type":"integer","minimum":0,"maximum":256000},"limit":{"type":"integer","minimum":1,"maximum":256000}},"anyOf":[{"required":["ref"]},{"required":["output_ref"]}],"additionalProperties":false})
         }
-        "worker_cognition_defaults_update" => json!({"type":"object","properties":{"provider":short_string(),"cognition":{"type":"string","enum":["low","medium","high"]},"model":short_string(),"reasoning_effort":short_string(),"actor":short_string()},"required":["provider","cognition","model","reasoning_effort"],"additionalProperties":false}),
+        "worker_cognition_defaults_update" => {
+            json!({"type":"object","properties":{"provider":short_string(),"cognition":{"type":"string","enum":["low","medium","high"]},"model":short_string(),"reasoning_effort":short_string(),"actor":short_string()},"required":["provider","cognition","model","reasoning_effort"],"additionalProperties":false})
+        }
         "worker_run" => run_request(),
-        "worker_edit" => json!({"type":"object","properties":{"instruction":{"type":"string","minLength":1,"maxLength":65536},"cwd":{"type":"string","minLength":1,"maxLength":4096},"invocation_plan_ref":{"type":"string","minLength":6,"maxLength":512,"pattern":"^plan:[A-Za-z0-9._:-]+$"},"constraints":constraints()},"required":["instruction"],"additionalProperties":false}),
-        "worker_resume" => json!({"type":"object","properties":{"worker_session_id":{"type":"string","minLength":1,"maxLength":512},"intent":intent(),"constraints":constraints()},"required":["worker_session_id","intent"],"additionalProperties":false}),
-        "worker_run_reap" => json!({"type":"object","properties":{"run_id":run_id(),"reason":{"type":"string","minLength":1,"maxLength":2048},"force":{"type":"boolean"}},"required":["run_id","reason","force"],"additionalProperties":false}),
-        "worker_run_batch" => json!({"type":"object","properties":{"requests":{"type":"array","minItems":1,"maxItems":50,"items":run_request()}},"required":["requests"],"additionalProperties":false}),
+        "worker_edit" => {
+            json!({"type":"object","properties":{"instruction":{"type":"string","minLength":1,"maxLength":65536},"cwd":{"type":"string","minLength":1,"maxLength":4096},"invocation_plan_ref":{"type":"string","minLength":6,"maxLength":512,"pattern":"^plan:[A-Za-z0-9._:-]+$"},"constraints":constraints()},"required":["instruction"],"additionalProperties":false})
+        }
+        "worker_resume" => {
+            json!({"type":"object","properties":{"worker_session_id":{"type":"string","minLength":1,"maxLength":512},"intent":intent(),"constraints":constraints()},"required":["worker_session_id","intent"],"additionalProperties":false})
+        }
+        "worker_run_reap" => {
+            json!({"type":"object","properties":{"run_id":run_id(),"reason":{"type":"string","minLength":1,"maxLength":2048},"force":{"type":"boolean"}},"required":["run_id","reason","force"],"additionalProperties":false})
+        }
+        "worker_run_batch" => {
+            json!({"type":"object","properties":{"requests":{"type":"array","minItems":1,"maxItems":50,"items":run_request()}},"required":["requests"],"additionalProperties":false})
+        }
         _ => json!({"type":"object","additionalProperties":false}),
     }
 }
@@ -1380,26 +1773,43 @@ mod tests {
     #[test]
     fn worker_run_schema_declares_low_cognition_default() {
         assert_eq!(
-            input_schema("worker_run")["properties"]["constraints"]["properties"]["cognition"]["default"],
+            input_schema("worker_run")["properties"]["constraints"]["properties"]["cognition"]
+                ["default"],
             "low"
         );
-        assert_eq!(cognition_defaults(Path::new("."))["default_cognition"], "low");
+        assert_eq!(
+            cognition_defaults(Path::new("."))["default_cognition"],
+            "low"
+        );
         assert_eq!(guidance(&Map::new())["cognition"]["default"], "low");
     }
 
     #[test]
+    fn policy_declares_secret_store_reference_projection() {
+        let value = policy(Path::new("."), &[PathBuf::from(".")]);
+        assert_eq!(value["secret_projection"], "secret_store_reference_only");
+        assert!(guidance(&Map::new())["boundaries"][1]
+            .as_str()
+            .is_some_and(|text| text.contains("SecretStore-referenced")));
+    }
+
+    #[test]
     fn config_resolve_reports_site_cognition_mapping_without_launching() {
-        let root = std::env::temp_dir().join(format!("narada-worker-config-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("narada-worker-config-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(root.join(".narada")).expect("site root");
         fs::write(
             defaults_path(&root),
             serde_json::to_vec(&json!({"effective_cognition_defaults":{"low":{"provider":"codex-subscription","model":"gpt-5.6-luna","reasoning_effort":"max"},"medium":{"provider":"codex-subscription","model":"gpt-5.6-sol","reasoning_effort":"low"},"high":{"provider":"codex-subscription","model":"gpt-5.6-sol","reasoning_effort":"max"}}})).expect("encode defaults"),
         ).expect("defaults");
         let resolved = config_resolve(
-            &json!({"constraints":{"cognition":"medium"}}).as_object().unwrap(),
+            &json!({"constraints":{"cognition":"medium"}})
+                .as_object()
+                .unwrap(),
             &root,
             std::slice::from_ref(&root),
-        ).expect("resolve");
+        )
+        .expect("resolve");
         assert_eq!(resolved["resolved"]["cognition"], "medium");
         assert_eq!(resolved["resolved"]["provider_mode"], "codex-subscription");
         assert_eq!(resolved["resolved"]["model"], "gpt-5.6-sol");
@@ -1410,9 +1820,14 @@ mod tests {
 
     #[test]
     fn compact_run_preserves_effective_invocation_provenance() {
-        let compact = compact_run(&json!({"run_id":"run-test","status":"completed","resolved_invocation":{"cognition":"low","provider_model":"gpt-5.6-luna"}}));
+        let compact = compact_run(
+            &json!({"run_id":"run-test","status":"completed","resolved_invocation":{"cognition":"low","provider_model":"gpt-5.6-luna"}}),
+        );
         assert_eq!(compact["resolved_invocation"]["cognition"], "low");
-        assert_eq!(compact["resolved_invocation"]["provider_model"], "gpt-5.6-luna");
+        assert_eq!(
+            compact["resolved_invocation"]["provider_model"],
+            "gpt-5.6-luna"
+        );
     }
 
     #[test]
@@ -1420,32 +1835,68 @@ mod tests {
         for tool in list_tools() {
             let name = tool["name"].as_str().expect("tool name");
             let schema = &tool["inputSchema"];
-            assert_eq!(schema["additionalProperties"], false, "{name} must be closed");
-            if !["worker_policy_inspect", "worker_cognition_defaults_inspect", "worker_operator_affordances"].contains(&name) {
-                assert_ne!(schema, &json!({"type":"object","additionalProperties":false}), "{name} unexpectedly has no declared arguments");
+            assert_eq!(
+                schema["additionalProperties"], false,
+                "{name} must be closed"
+            );
+            if ![
+                "worker_policy_inspect",
+                "worker_cognition_defaults_inspect",
+                "worker_operator_affordances",
+            ]
+            .contains(&name)
+            {
+                assert_ne!(
+                    schema,
+                    &json!({"type":"object","additionalProperties":false}),
+                    "{name} unexpectedly has no declared arguments"
+                );
             }
         }
-        for name in ["worker_policy_inspect", "worker_cognition_defaults_inspect", "worker_operator_affordances"] {
-            assert_eq!(input_schema(name), json!({"type":"object","additionalProperties":false}));
+        for name in [
+            "worker_policy_inspect",
+            "worker_cognition_defaults_inspect",
+            "worker_operator_affordances",
+        ] {
+            assert_eq!(
+                input_schema(name),
+                json!({"type":"object","additionalProperties":false})
+            );
         }
     }
 
     #[test]
     fn containment_is_path_component_aware() {
-        assert!(path_components_equal_or_child(Path::new("C:/Users/Andrey/Narada/project"), Path::new("C:/Users/Andrey/Narada")));
-        assert!(!path_components_equal_or_child(Path::new("C:/Users/Andrey/Narada-other"), Path::new("C:/Users/Andrey/Narada")));
+        assert!(path_components_equal_or_child(
+            Path::new("C:/Users/Andrey/Narada/project"),
+            Path::new("C:/Users/Andrey/Narada")
+        ));
+        assert!(!path_components_equal_or_child(
+            Path::new("C:/Users/Andrey/Narada-other"),
+            Path::new("C:/Users/Andrey/Narada")
+        ));
     }
 
     #[test]
     fn wait_and_windows_toolchain_contracts_are_explicit() {
-        assert_eq!(input_schema("worker_run_wait")["properties"]["timeout_ms"]["maximum"], 300_000);
-        assert_eq!(guidance(&Map::new())["windows_rust_toolchain"]["status"], "caller_environment_required");
-        assert_eq!(policy(Path::new("."), &[])["windows_msvc_environment"]["inherited"], true);
+        assert_eq!(
+            input_schema("worker_run_wait")["properties"]["timeout_ms"]["maximum"],
+            300_000
+        );
+        assert_eq!(
+            guidance(&Map::new())["windows_rust_toolchain"]["status"],
+            "caller_environment_required"
+        );
+        assert_eq!(
+            policy(Path::new("."), &[])["windows_msvc_environment"]["inherited"],
+            true
+        );
     }
 
     #[test]
     fn project_site_falls_back_to_user_site_intelligence_context() {
-        let base = std::env::temp_dir().join(format!("narada-worker-context-{}", uuid::Uuid::new_v4()));
+        let base =
+            std::env::temp_dir().join(format!("narada-worker-context-{}", uuid::Uuid::new_v4()));
         let project = base.join("src/marici");
         let user_site = base.join("Narada");
         let expected = user_site.join(".narada/intelligence-launch-context.json");
@@ -1460,7 +1911,8 @@ mod tests {
 
     #[test]
     fn project_site_discovers_sibling_narada_source_root() {
-        let base = std::env::temp_dir().join(format!("narada-worker-source-{}", uuid::Uuid::new_v4()));
+        let base =
+            std::env::temp_dir().join(format!("narada-worker-source-{}", uuid::Uuid::new_v4()));
         let source_root = base.join("src");
         let project = source_root.join("marici");
         fs::create_dir_all(source_root.join("narada")).expect("narada source dir");
@@ -1472,20 +1924,30 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn containment_ignores_windows_path_case() {
-        assert!(path_components_equal_or_child(Path::new("c:/users/andrey/narada/project"), Path::new("C:/Users/Andrey/Narada")));
+        assert!(path_components_equal_or_child(
+            Path::new("c:/users/andrey/narada/project"),
+            Path::new("C:/Users/Andrey/Narada")
+        ));
     }
 
     #[test]
     #[ignore = "requires an explicit deployed Site root and native preflight binary"]
     fn live_native_preflight_resolves_without_caller_plan() {
         let site_root = std::env::var("NARADA_TEST_SITE_ROOT").expect("NARADA_TEST_SITE_ROOT");
-        for (cognition, expected_model, expected_effort) in [("low", "gpt-5.6-luna", "max"), ("medium", "gpt-5.6-sol", "low"), ("high", "gpt-5.6-sol", "max")] {
-            let (plan_ref, provider_mode, model, evidence_ref, reasoning_effort) = invocation_plan_binding(Path::new(&site_root), None, Some(cognition)).expect("native preflight");
+        for (cognition, expected_model, expected_effort) in [
+            ("low", "gpt-5.6-luna", "max"),
+            ("medium", "gpt-5.6-sol", "low"),
+            ("high", "gpt-5.6-sol", "max"),
+        ] {
+            let (plan_ref, provider_mode, model, evidence_ref, reasoning_effort, provider_binding) =
+                invocation_plan_binding(Path::new(&site_root), None, Some(cognition))
+                    .expect("native preflight");
             assert!(plan_ref.starts_with("plan:cognition:"));
             assert_eq!(provider_mode, "codex-subscription");
             assert_eq!(model, expected_model);
             assert!(evidence_ref.starts_with("preflight-evidence:"));
             assert_eq!(reasoning_effort.as_deref(), Some(expected_effort));
+            assert!(provider_binding.is_none() || provider_binding.as_ref().is_some_and(|value| value["schema"] == "narada.native.provider_binding.v1"));
         }
     }
 
@@ -1494,6 +1956,44 @@ mod tests {
         let admission = json!({"status":"admitted","plan_ref":"plan:test","selected":{"inference_provider":{"id":"inference-provider:codex-subscription"},"model":null},"evidence_ref":"preflight-evidence:test"});
         let refusal = admitted_plan_binding(&admission).expect_err("missing model must refuse");
         assert_eq!(refusal["code"], "worker_canonical_invocation_model_missing");
+    }
+
+    #[test]
+    fn native_worker_requires_valid_http_binding_for_api_provider() {
+        let admission = json!({
+            "status":"admitted",
+            "plan_ref":"plan:test",
+            "selected":{
+                "inference_provider":{"id":"inference-provider:deepseek-api"},
+                "model":{"id":"model:deepseek-v4-flash"}
+            },
+            "evidence_ref":"preflight-evidence:test"
+        });
+        let refusal = admitted_plan_binding(&admission).expect_err("binding must be required");
+        assert_eq!(refusal["code"], "worker_native_provider_binding_missing");
+
+        let mut valid = admission.clone();
+        valid["provider_binding"] = json!({
+            "schema":"narada.native.provider_binding.v1",
+            "provider":"deepseek-api",
+            "protocol":"openai/chat-completions/1",
+            "endpoint":"https://api.deepseek.com/v1/chat/completions",
+            "model":"deepseek-v4-flash",
+            "credential_secret_ref":"narada/provider/deepseek-api/api-key"
+        });
+        assert!(admitted_plan_binding(&valid).is_ok());
+
+        let mut env_binding = valid;
+        env_binding["provider_binding"] = json!({
+            "schema":"narada.native.provider_binding.v1",
+            "provider":"deepseek-api",
+            "protocol":"openai/chat-completions/1",
+            "endpoint":"https://api.deepseek.com/v1/chat/completions",
+            "model":"deepseek-v4-flash",
+            "credential_env":"DEEPSEEK_API_KEY"
+        });
+        let refusal = admitted_plan_binding(&env_binding).expect_err("env binding must refuse");
+        assert_eq!(refusal["code"], "worker_native_provider_binding_invalid");
     }
 
     #[test]
@@ -1591,12 +2091,51 @@ mod tests {
     fn native_worker_updates_cognition_defaults_atomically() {
         let root =
             std::env::temp_dir().join(format!("narada-worker-defaults-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join(".narada")).expect("site root");
+        fs::write(
+            root.join(".narada/provider-registry.json"),
+            serde_json::to_vec(&json!({
+                "schema":"narada.carrier.provider_registry.v1",
+                "providers":{"fixture":{"available_models":["fixture-model"]}}
+            }))
+            .expect("registry"),
+        )
+        .expect("registry write");
         let updated = cognition_defaults_update(json!({"provider":"fixture","cognition":"high","model":"fixture-model","reasoning_effort":"max","actor":"test"}).as_object().unwrap(), &root).expect("update");
         assert_eq!(updated["status"], "updated");
         assert_eq!(
             cognition_defaults(&root)["defaults"]["high"]["model"],
             "fixture-model"
         );
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn native_worker_rejects_provider_and_model_outside_registry() {
+        let root =
+            std::env::temp_dir().join(format!("narada-worker-defaults-reject-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join(".narada")).expect("site root");
+        fs::write(
+            root.join(".narada/provider-registry.json"),
+            br#"{"schema":"narada.carrier.provider_registry.v1","providers":{"fixture":{"available_models":["fixture-model"]}}}"#,
+        )
+        .expect("registry write");
+        let unknown_provider = cognition_defaults_update(
+            json!({"provider":"unknown","cognition":"low","model":"fixture-model","reasoning_effort":"low"})
+                .as_object()
+                .unwrap(),
+            &root,
+        )
+        .expect_err("unknown provider must be refused");
+        assert_eq!(unknown_provider["code"], "worker_cognition_provider_not_allowed");
+        let unknown_model = cognition_defaults_update(
+            json!({"provider":"fixture","cognition":"low","model":"unknown-model","reasoning_effort":"low"})
+                .as_object()
+                .unwrap(),
+            &root,
+        )
+        .expect_err("unknown model must be refused");
+        assert_eq!(unknown_model["code"], "worker_cognition_model_not_allowed");
         fs::remove_dir_all(root).expect("cleanup");
     }
 

@@ -3732,7 +3732,6 @@ fn site_fabric_diagnostics(
         "graph-mail",
         "calendar",
         "task-lifecycle",
-        "site-loop",
         "agent-context",
         "catalog-observation",
         "runtime-introspection",

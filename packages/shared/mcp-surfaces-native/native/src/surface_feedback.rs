@@ -156,7 +156,6 @@ fn task_authority_root(root: &Path) -> PathBuf {
     std::env::var("NARADA_TASK_LIFECYCLE_ROOT")
         .ok()
         .filter(|value| !value.trim().is_empty())
-        .or_else(|| std::env::var("NARADA_SITE_ROOT").ok().filter(|value| !value.trim().is_empty()))
         .map(PathBuf::from)
         .unwrap_or_else(|| root.to_path_buf())
 }
@@ -493,13 +492,13 @@ mod tests {
         assert_eq!(doctor["read_only_native"], false);
         assert_eq!(doctor["capabilities"]["read_scopes"]["all_authorized"]["available"], true);
         assert_eq!(doctor["capabilities"]["read_scopes"]["authority_visible"]["available"], false);
-        let submitted = call_tool("surface_feedback_submit", &json!({"surface_id":"site-loop","submitter_site_id":"site-a","submitter_principal":"agent-a","kind":"observation","summary":"native write"}).as_object().unwrap(), &root).expect("submit");
+        let submitted = call_tool("surface_feedback_submit", &json!({"surface_id":"calendar","submitter_site_id":"site-a","submitter_principal":"agent-a","kind":"observation","summary":"native write"}).as_object().unwrap(), &root).expect("submit");
         assert_eq!(submitted["status"], "submitted");
-        let retry_args=json!({"surface_id":"site-loop","submitter_site_id":"site-a","submitter_principal":"agent-a","kind":"observation","summary":"retry safe","idempotency_key":"retry-1"});
+        let retry_args=json!({"surface_id":"calendar","submitter_site_id":"site-a","submitter_principal":"agent-a","kind":"observation","summary":"retry safe","idempotency_key":"retry-1"});
         let first=call_tool("surface_feedback_submit",retry_args.as_object().unwrap(),&root).expect("first");
         let replay=call_tool("surface_feedback_submit",retry_args.as_object().unwrap(),&root).expect("replay");
         assert_eq!(first["feedback_id"],replay["feedback_id"]); assert_eq!(replay["idempotency_replay"],true);
-        let conflict=call_tool("surface_feedback_submit",&json!({"surface_id":"site-loop","submitter_site_id":"site-a","submitter_principal":"agent-a","kind":"bug","summary":"different","idempotency_key":"retry-1"}).as_object().unwrap(),&root).expect_err("conflict");
+        let conflict=call_tool("surface_feedback_submit",&json!({"surface_id":"calendar","submitter_site_id":"site-a","submitter_principal":"agent-a","kind":"bug","summary":"different","idempotency_key":"retry-1"}).as_object().unwrap(),&root).expect_err("conflict");
         assert_eq!(conflict["code"],"feedback_idempotency_conflict");
         std::fs::remove_dir_all(root).expect("cleanup");
     }
@@ -516,7 +515,7 @@ mod tests {
         drop(db);
         let source = Connection::open(source_root.join(".feedback/surface-feedback.db")).expect("source db");
         source.execute_batch(schema).expect("source schema");
-        source.execute("INSERT INTO feedback_entries (feedback_id,surface_id,submitter_site_id,submitter_principal,kind,summary,details,status,created_at,updated_at) VALUES ('f2','site-loop','site-a','agent-a','observation','import me','details','submitted','2026-01-01','2026-01-01')", []).expect("source row");
+        source.execute("INSERT INTO feedback_entries (feedback_id,surface_id,submitter_site_id,submitter_principal,kind,summary,details,status,created_at,updated_at) VALUES ('f2','calendar','site-a','agent-a','observation','import me','details','submitted','2026-01-01','2026-01-01')", []).expect("source row");
         drop(source);
         std::env::set_var("NARADA_SITE_ID", "site-a");
         std::env::set_var("NARADA_AGENT_ID", "agent-a");

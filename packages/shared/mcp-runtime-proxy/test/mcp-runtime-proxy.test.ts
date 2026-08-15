@@ -523,7 +523,7 @@ try {
   ].join('\n'), 'utf8');
   const oversizedProxy = spawnProxy([
     '--surface-id',
-    'site-loop',
+    'sop',
     '--entrypoint',
     oversizedChildEntrypoint,
     '--',
@@ -531,7 +531,7 @@ try {
   let oversizedStdout = '';
   oversizedProxy.stdout.setEncoding('utf8');
   oversizedProxy.stdout.on('data', (chunk) => { oversizedStdout += chunk; });
-  oversizedProxy.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 'oversized-1', method: 'tools/call', params: { name: 'site_loop_proof_run', arguments: {} } })}\n`);
+  oversizedProxy.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 'oversized-1', method: 'tools/call', params: { name: 'sop_synthetic_output', arguments: {} } })}\n`);
   await waitForOutput(() => oversizedStdout.includes('"oversized-1"'), 2_000);
   const oversizedFirst = JSON.parse(oversizedStdout.trim()) as {
     id: string;
@@ -543,7 +543,7 @@ try {
   assert.equal(oversizedFirst.result.structuredContent.output_text.length, 14000);
   assert.equal(oversizedProxy.exitCode, null);
   oversizedStdout = '';
-  oversizedProxy.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 'oversized-2', method: 'tools/call', params: { name: 'site_loop_proof_run', arguments: {} } })}\n`);
+  oversizedProxy.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 'oversized-2', method: 'tools/call', params: { name: 'sop_synthetic_output', arguments: {} } })}\n`);
   await waitForOutput(() => oversizedStdout.includes('"oversized-2"'), 2_000);
   const oversizedLines = oversizedStdout.trim().split(/\r?\n/).filter(Boolean);
   assert.equal(oversizedLines.length, 1);

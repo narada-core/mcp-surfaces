@@ -4129,7 +4129,7 @@ fn normalize_execution_binding(root: &Path, value: Option<&Value>, correlation_k
     let workspace_root = absolute_binding_path(&workspace_root, "execution_binding_workspace_root")?;
     let executor_kind = binding_string(&input, "executor_kind", true)?
         .unwrap_or_else(|| "manual".to_string());
-    if !matches!(executor_kind.as_str(), "manual" | "operator" | "worker_delegation" | "delegated_task" | "site_loop") {
+    if !matches!(executor_kind.as_str(), "manual" | "operator" | "worker_delegation" | "delegated_task") {
         return Err(format!("execution_binding_executor_kind_invalid: {executor_kind}"));
     }
     let correlation_key = binding_string(&input, "correlation_key", true)?

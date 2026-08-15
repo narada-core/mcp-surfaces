@@ -122,7 +122,7 @@ assert.equal(defaultPwshExecutionPolicyFile.status, 'allowed');
 assert.deepEqual(defaultPwshExecutionPolicyFile.reasons, []);
 
 const cmdWrapper = decideStructuredCommandExecution({
-  command: join(root, '.ai', 'tmp', 'site-loop-focused-tests.cmd'),
+  command: join(root, '.ai', 'tmp', 'native-focused-tests.cmd'),
   workingDirectory: root,
 }, stateWithDefaultCommands.policy);
 assert.equal(cmdWrapper.status, 'refused');
@@ -140,7 +140,7 @@ assert.equal(canonicalBatch.reasons.some((reason) => String(reason).startsWith('
 
 const transientPowerShellWrapper = decideStructuredCommandExecution({
   command: 'pwsh',
-  args: ['-NoProfile', '-File', join(root, '.ai', 'tmp', 'site-loop-focused-tests.ps1')],
+  args: ['-NoProfile', '-File', join(root, '.ai', 'tmp', 'native-focused-tests.ps1')],
   workingDirectory: root,
 }, stateWithDefaultCommands.policy);
 assert.equal(transientPowerShellWrapper.status, 'refused');

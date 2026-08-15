@@ -32,10 +32,9 @@ Current packages:
 - `@narada-core/graph-mail-mcp`: policy-gated Microsoft Graph mail MCP surface for live reads and draft management.
 - `@narada-core/calendar-mcp`: policy-gated Microsoft Graph calendar MCP surface for live calendar reads and guarded event management.
 - `@narada-core/task-lifecycle-mcp`: task lifecycle MCP surface.
-- `@narada-core/site-loop-mcp`: config-governed site loop MCP surface.
 - `@narada-core/agent-context-mcp`: agent context MCP surface.
-- `@narada-core/worker-delegation-mcp`: policy-gated worker delegation MCP surface.
-- `@narada-core/delegated-task-mcp`: outcome-oriented delegated task orchestration MCP surface.
+- `worker-delegation` surface: native Rust policy-gated worker delegation hosted by `@narada-core/mcp-surfaces-native`.
+- `delegated-task` surface: native Rust outcome-oriented task orchestration hosted by `@narada-core/mcp-surfaces-native`.
 - `@narada-core/sop-mcp`: versioned standard operating procedure runbook engine with SQLite-backed execution.
 - `@narada-core/scheduler-mcp`: Windows Task Scheduler MCP surface for governed task registration, inspection, and execution.
 - `@narada-core/mcp-registrar`: MCP surface registrar for binding/unbinding surfaces across Narada sites and carriers.
@@ -56,7 +55,7 @@ Current packages:
 - `@narada-core/quota-meter-mcp`: host-level quota-meter glide status and desktop overlay lifecycle surface.
 - `@narada-core/browser-control-mcp`: bounded host-level browser-control surface for authenticated UX verification.
 
-Site Loop doctrine and boundaries are documented in `docs/site-loop-doctrine.md`.
+SOP execution and scheduler activation are separate authorities: `@narada-core/sop-mcp` owns procedure runs and `@narada-core/scheduler-mcp` owns activation.
 
 Site-root convention is documented in `docs/site-root-contract.md`: the
 workspace is the canonical Site root, `.narada` is the control root, and
@@ -73,7 +72,7 @@ workspace is the canonical Site root, `.narada` is the control root, and
 - Layout: runnable MCP surfaces live in `packages/*`, shared libraries in `packages/shared/*`, design and doctrine docs in `docs/`, and the root UI-neutrality boundary test in `test/`.
 - Root `pnpm test` runs the boundary gates and every package under this repository's `./packages/**`; linked sibling workspaces may provide dependencies but their own test suites remain owned by those repositories.
 - The root `README.md` gives repo-level framing; each package has its own `README.md` with setup details.
-- Key docs: `docs/mcp-taxonomy.md` (generic versus Narada-specific split), `docs/mcp-wiring.md` and `docs/mcp-injection-scopes.md` (how surfaces reach carriers and sites), `docs/mcp-surfaces-target-shape.md` (target architecture), `docs/mcp-runtime-memory-observation.md` (authority-bound memory attribution), `docs/site-loop-doctrine.md` (Site Loop doctrine), `docs/mcp-output-refusal-conventions.md` (output-ref and refusal patterns).
+- Key docs: `docs/mcp-taxonomy.md` (generic versus Narada-specific split), `docs/mcp-wiring.md` and `docs/mcp-injection-scopes.md` (how surfaces reach carriers and sites), `docs/mcp-surfaces-target-shape.md` (target architecture), `docs/mcp-runtime-memory-observation.md` (authority-bound memory attribution), `docs/mcp-output-refusal-conventions.md` (output-ref and refusal patterns).
 - Task Lifecycle MCP runtime startup is prepared-only: run `task-lifecycle-mcp --prepare --site-root <site-root>` explicitly before attaching a stateful runtime; see `docs/task-lifecycle-preparation.md` for the readiness contract and remediation path.
 
 ## Carrier and Site MCP Fabric
@@ -177,7 +176,6 @@ pnpm test:mailbox
 pnpm test:graph-mail
 pnpm test:calendar
 pnpm test:task-lifecycle
-pnpm test:site-loop
 pnpm test:site-registry
 pnpm test:project-state
 pnpm test:site-lifecycle
