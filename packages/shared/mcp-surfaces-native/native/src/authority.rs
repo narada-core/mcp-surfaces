@@ -1,8 +1,11 @@
 use serde_json::{json, Map, Value};
 use std::io::Write;
 use std::process::{Command, Stdio};
+use std::time::Duration;
+use wait_timeout::ChildExt;
 
 pub const MAX_AUTHORITY_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
+const DEFAULT_AUTHORITY_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A bounded, explicit adapter boundary for a Rust surface to invoke an
 /// owning MCP authority. The adapter is deliberately one-shot: the authority
@@ -37,6 +40,7 @@ pub struct StdioAuthorityAdapter {
     args: Vec<String>,
     site_root: Option<String>,
     label: String,
+    timeout: Duration,
 }
 
 impl StdioAuthorityAdapter {
@@ -65,6 +69,7 @@ impl StdioAuthorityAdapter {
             args,
             site_root,
             label: surface_id.to_string(),
+            timeout: DEFAULT_AUTHORITY_TIMEOUT,
         })
     }
 
@@ -74,7 +79,14 @@ impl StdioAuthorityAdapter {
             args,
             site_root: None,
             label: label.into(),
+            timeout: DEFAULT_AUTHORITY_TIMEOUT,
         }
+    }
+
+    #[cfg(test)]
+    fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
     }
 }
 
@@ -101,6 +113,14 @@ impl AuthorityAdapter for StdioAuthorityAdapter {
                 .write_all(&body)
                 .and_then(|_| stdin.write_all(b"\n"))
                 .map_err(|error| unavailable(&self.label, "authority_request_write_failed", &error.to_string()))?;
+        }
+        let status = child
+            .wait_timeout(self.timeout)
+            .map_err(|error| unavailable(&self.label, "authority_wait_failed", &error.to_string()))?;
+        if status.is_none() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(unavailable(&self.label, "authority_timed_out", &format!("deadline_ms={}", self.timeout.as_millis())));
         }
         let output = child
             .wait_with_output()
@@ -167,5 +187,16 @@ mod tests {
         assert_eq!(value["status"], "unavailable");
         assert_eq!(value["surface_id"], "calendar");
         assert!(value["remediation"].as_str().unwrap().contains("adapter"));
+    }
+
+    #[test]
+    fn adapter_terminates_authority_that_does_not_exit() {
+        #[cfg(windows)]
+        let adapter = StdioAuthorityAdapter::new("powershell.exe", vec!["-NoProfile".into(), "-Command".into(), "$input | Out-Null; Start-Sleep -Seconds 5".into()], "test-authority");
+        #[cfg(not(windows))]
+        let adapter = StdioAuthorityAdapter::new("sh", vec!["-c".into(), "cat >/dev/null; sleep 5".into()], "test-authority");
+        let error = adapter.with_timeout(Duration::from_millis(100)).call("tools/call", &Map::new()).unwrap_err();
+        assert_eq!(error["reason"], "authority_timed_out");
+        assert_eq!(error["detail"], "deadline_ms=100");
     }
 }

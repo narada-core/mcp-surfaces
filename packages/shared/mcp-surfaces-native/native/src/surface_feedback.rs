@@ -1,7 +1,7 @@
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use crate::authority::{AuthorityAdapter, StdioAuthorityAdapter};
+use narada_mcp_lifecycle::{LifecycleServer, Options as LifecycleOptions, Surface as LifecycleSurface};
 use std::path::{Path, PathBuf};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -141,34 +141,24 @@ fn feedback_update_status(args: &Map<String, Value>, root: &Path) -> Result<Valu
 }
 
 fn configured_task_call(root: &Path, name: &str, arguments: Value) -> Result<Option<Value>, Value> {
-    let Some(adapter) = task_authority_adapter(root) else { return Ok(None); };
-    let params = json!({"name": name, "arguments": arguments});
-    let value = adapter.call("tools/call", params.as_object().expect("task authority params"))?;
+    let options = LifecycleOptions { surface: LifecycleSurface::Task, site_root: task_authority_root(root), site_root_source: "surface-feedback-authority".to_string(), prepare: false, migrate_legacy: false, source_database_path: None };
+    let mut authority = LifecycleServer::new(options).map_err(|detail| error("task_lifecycle_authority_unavailable", &detail))?;
+    let response = authority.handle_request(json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":arguments}})).ok_or_else(|| error("task_lifecycle_authority_no_response", "task_lifecycle_authority_no_response"))?;
+    if let Some(authority_error) = response.get("error") { return Err(json!({"schema":"narada.authority_adapter.error.v1","status":"error","authority":"task-lifecycle","error":authority_error})); }
+    let value = response.get("result").cloned().unwrap_or(response);
     if value.get("isError").and_then(Value::as_bool) == Some(true) {
         return Err(error("task_lifecycle_tool_refused", "task_lifecycle_tool_refused"));
     }
     Ok(Some(value.get("structuredContent").cloned().unwrap_or(value)))
 }
 
-fn task_authority_adapter(root: &Path) -> Option<StdioAuthorityAdapter> {
-    let configured = std::env::var("NARADA_SURFACE_FEEDBACK_TASK_AUTHORITY_ENTRYPOINT")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| std::env::var("NARADA_TASK_LIFECYCLE_NATIVE_ENTRYPOINT").ok().filter(|value| !value.trim().is_empty()));
-    let executable = configured.map(PathBuf::from).or_else(|| {
-        let current = std::env::current_exe().ok()?;
-        let shared_root = current.parent()?.parent()?.parent()?.parent()?;
-        let candidate = shared_root.join("mcp-lifecycle-native").join("dist").join("native").join(if cfg!(windows) { "narada-task-lifecycle-mcp.exe" } else { "narada-task-lifecycle-mcp" });
-        candidate.is_file().then_some(candidate)
-    })?;
-    let site_root = std::env::var("NARADA_TASK_LIFECYCLE_ROOT")
+fn task_authority_root(root: &Path) -> PathBuf {
+    std::env::var("NARADA_TASK_LIFECYCLE_ROOT")
         .ok()
         .filter(|value| !value.trim().is_empty())
         .or_else(|| std::env::var("NARADA_SITE_ROOT").ok().filter(|value| !value.trim().is_empty()))
         .map(PathBuf::from)
-        .unwrap_or_else(|| root.to_path_buf());
-    let args = vec!["--site-root".to_string(), site_root.to_string_lossy().to_string()];
-    Some(StdioAuthorityAdapter::new(executable.to_string_lossy().to_string(), args, "task-lifecycle"))
+        .unwrap_or_else(|| root.to_path_buf())
 }
 
 fn feedback_convert_to_task(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
@@ -358,7 +348,7 @@ fn doctor(root: &Path) -> Result<Value, Value> {
 
 fn capabilities(root: &Path, store_ready: bool) -> Value {
     let authority_configured = authority().is_ok();
-    let task_handoff_configured = task_authority_adapter(root).is_some();
+    let task_handoff_configured = task_authority_root(root).join(".ai/task-lifecycle.db").is_file();
     let unavailable = |reason: &str| json!({"available":false,"reason":reason});
     json!({"read_scopes":{"all_authorized":{"available":store_ready,"purpose":"canonical local feedback store"},"store_reconciliation":{"available":store_ready,"purpose":"explicit source/store reconciliation"},"authority_visible":unavailable("native_authority_scope_projection_not_implemented"),"owned_surfaces":unavailable("native_authority_scope_projection_not_implemented"),"authority_site_submissions":unavailable("native_authority_scope_projection_not_implemented")},"mutations":{"submit":{"available":store_ready},"import":{"available":store_ready},"status_update":{"available":store_ready && authority_configured,"reason":if authority_configured{Value::Null}else{json!("feedback_authority_unconfigured")}},"task_handoff":{"available":store_ready && authority_configured && task_handoff_configured,"reason":if authority_configured && task_handoff_configured{Value::Null}else{json!("task_or_site_authority_unconfigured")}}}})
 }
@@ -538,5 +528,23 @@ mod tests {
         assert_eq!(imported["imported_count"], 1);
         std::fs::remove_dir_all(root).expect("cleanup");
         std::fs::remove_dir_all(source_root).expect("source cleanup");
+    }
+
+    #[test]
+    fn feedback_conversion_uses_in_process_task_authority() {
+        let root = std::env::temp_dir().join(format!("narada-feedback-convert-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join(".feedback")).expect("feedback root");
+        let feedback = Connection::open(root.join(".feedback/surface-feedback.db")).expect("db");
+        feedback.execute_batch("CREATE TABLE feedback_entries (feedback_id TEXT PRIMARY KEY,surface_id TEXT,submitter_site_id TEXT,submitter_principal TEXT,kind TEXT,summary TEXT,details TEXT,status TEXT,resolution_note TEXT,resolved_by TEXT,task_ref TEXT,task_status TEXT,created_at TEXT,updated_at TEXT); INSERT INTO feedback_entries VALUES ('f-convert','worker-delegation','site-a','agent-a','bug','bounded worker stalls','details','submitted',NULL,NULL,NULL,NULL,'2026-01-01','2026-01-01');").expect("feedback schema");
+        drop(feedback);
+        let lifecycle_options = LifecycleOptions { surface: LifecycleSurface::Task, site_root: root.clone(), site_root_source: "test".to_string(), prepare: true, migrate_legacy: false, source_database_path: None };
+        LifecycleServer::prepare_database(&lifecycle_options).expect("task database");
+        let result = feedback_convert_to_task(json!({"feedback_id":"f-convert","task_title":"Fix bounded worker stalls"}).as_object().unwrap(), &root).expect("conversion");
+        assert_eq!(result["status"], "converted");
+        assert!(result["task_ref"].as_str().is_some());
+        let replay = feedback_convert_to_task(json!({"feedback_id":"f-convert"}).as_object().unwrap(), &root).expect("idempotent replay");
+        assert_eq!(replay["status"], "already_linked");
+        assert_eq!(replay["task_ref"], result["task_ref"]);
+        std::fs::remove_dir_all(root).expect("cleanup");
     }
 }
