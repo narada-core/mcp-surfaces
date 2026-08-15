@@ -17,6 +17,25 @@ A surface is complete only when the ledger records evidence for all applicable i
 
 Builds during review are permitted. Carrier materialization and restart are deferred until all pre-restart rows are complete.
 
+## Cognition defaults
+
+Both native delegation surfaces resolve an omitted `constraints.cognition` to `low`. Agents can discover this without reading source:
+
+1. `delegated_task_guidance` and `worker_guidance` state the omission rule and point to the inspection tool.
+2. `delegated_task_policy_inspect` and `worker_policy_inspect` return `default_cognition: "low"`.
+3. `worker_cognition_defaults_inspect` returns the current site-effective model/reasoning-effort mapping.
+4. The `worker_run`, `delegated_task_validate`, and `delegated_task_run` schemas declare `constraints.cognition.default = "low"`.
+
+The current Narada user-site effective mapping is:
+
+| Cognition | Model | Reasoning effort |
+|---|---|---|
+| low | `gpt-5.6-luna` | `max` |
+| medium | `gpt-5.6-sol` | `low` |
+| high | `gpt-5.6-sol` | `max` |
+
+The mapping is site configuration, so agents should inspect it at runtime rather than treat this table as immutable.
+
 ## Surface ledger
 
 `re-audit` means prior work exists but has not yet been re-proven against this completion contract.
