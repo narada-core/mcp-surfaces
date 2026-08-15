@@ -280,9 +280,20 @@ fn cognition_defaults(root: &Path) -> Value {
 }
 fn config_resolve(args: &Map<String, Value>, root: &Path, allowed_roots: &[PathBuf]) -> Result<Value, Value> {
     let resolved_authority = authority(args)?;
-    let cwd = args
-        .get("constraints")
-        .and_then(Value::as_object)
+    let constraints = args.get("constraints").and_then(Value::as_object);
+    let cognition = constraints
+        .and_then(|value| value.get("cognition"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_COGNITION)
+        .to_string();
+    if !matches!(cognition.as_str(), "low" | "medium" | "high") {
+        return Err(error("worker_cognition_invalid", "worker_cognition_invalid"));
+    }
+    let defaults = cognition_defaults_for(root);
+    let selected = defaults.get(&cognition).cloned().unwrap_or(Value::Null);
+    let cwd = constraints
         .and_then(|v| v.get("cwd"))
         .and_then(Value::as_str)
         .or_else(|| args.get("cwd").and_then(Value::as_str));
@@ -293,9 +304,30 @@ fn config_resolve(args: &Map<String, Value>, root: &Path, allowed_roots: &[PathB
             "worker_cwd_outside_allowed_roots",
         ));
     }
-    Ok(
-        json!({"schema":"narada.worker.config_resolve.v1","status":"ok","resolved":{"cwd":cwd.to_string_lossy(),"site_root":root.to_string_lossy(),"runtime":"narada-agent-runtime-server","authority":resolved_authority,"launch":false},"capability_snapshot":capability_snapshot(resolved_authority,&cwd,allowed_roots,None),"diagnostics":[{"name":"native_execution","status":"boundary","message":"worker launch is delegated to the owning worker authority"}],"native_read_only":true}),
-    )
+    Ok(json!({
+        "schema":"narada.worker.config_resolve.v1",
+        "status":"ok",
+        "resolved":{
+            "cwd":cwd.to_string_lossy(),
+            "site_root":root.to_string_lossy(),
+            "runtime":"narada-agent-runtime-server",
+            "authority":resolved_authority,
+            "cognition":cognition,
+            "provider":selected.get("provider").cloned().unwrap_or(Value::Null),
+            "provider_mode":selected.get("provider").cloned().unwrap_or(Value::Null),
+            "model":selected.get("model").cloned().unwrap_or(Value::Null),
+            "reasoning_effort":selected.get("reasoning_effort").cloned().unwrap_or(Value::Null),
+            "resolution_source":"site_cognition_defaults",
+            "canonical_plan_preflight":"deferred_to_worker_run",
+            "launch":false
+        },
+        "capability_snapshot":capability_snapshot(resolved_authority,&cwd,allowed_roots,None),
+        "diagnostics":[
+            {"name":"native_execution","status":"boundary","message":"worker launch is delegated to the owning worker authority"},
+            {"name":"invocation_plan","status":"deferred","message":"canonical provider/model/reasoning binding is finalized by worker_run preflight"}
+        ],
+        "native_read_only":true
+    }))
 }
 fn run_status(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     let id = run_id(args)?;
@@ -573,7 +605,26 @@ fn affordances() -> Value {
 }
 fn compact_run(run: &Value) -> Value {
     let o = run.as_object().cloned().unwrap_or_default();
-    json!({"run_id":o.get("run_id"),"status":o.get("status"),"completion_state":o.get("completion_state"),"authority":o.get("authority"),"capability_snapshot":o.get("capability_snapshot"),"worker_session_id":o.get("worker_session_id"),"started_at":o.get("timing").and_then(|v|v.get("started_at")),"finished_at":o.get("timing").and_then(|v|v.get("finished_at")),"summary_preview":o.get("summary").or_else(||o.get("last_message")),"error_preview":o.get("error"),"updated_at":o.get("updated_at").or_else(||o.get("timing").and_then(|v|v.get("finished_at")))})
+    json!({"run_id":o.get("run_id"),"status":o.get("status"),"completion_state":o.get("completion_state"),"authority":o.get("authority"),"resolved_invocation":o.get("resolved_invocation"),"capability_snapshot":o.get("capability_snapshot"),"worker_session_id":o.get("worker_session_id"),"started_at":o.get("timing").and_then(|v|v.get("started_at")),"finished_at":o.get("timing").and_then(|v|v.get("finished_at")),"summary_preview":o.get("summary").or_else(||o.get("last_message")),"error_preview":o.get("error"),"updated_at":o.get("updated_at").or_else(||o.get("timing").and_then(|v|v.get("finished_at")))})
+}
+
+fn resolved_invocation(
+    cognition: &str,
+    plan_ref: &str,
+    provider_mode: &str,
+    provider_model: &str,
+    preflight_evidence_ref: &str,
+    reasoning_effort: Option<&str>,
+) -> Value {
+    json!({
+        "cognition": cognition,
+        "invocation_plan_ref": plan_ref,
+        "provider_mode": provider_mode,
+        "provider_model": provider_model,
+        "reasoning_effort": reasoning_effort,
+        "preflight_evidence_ref": preflight_evidence_ref,
+        "resolution_source":"worker_intelligence_preflight"
+    })
 }
 
 fn now() -> String {
@@ -848,8 +899,9 @@ fn worker_run(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(DEFAULT_COGNITION);
-    if !matches!(cognition, "low" | "medium" | "high") {
+        .unwrap_or(DEFAULT_COGNITION)
+        .to_string();
+    if !matches!(cognition.as_str(), "low" | "medium" | "high") {
         return Err(error("worker_cognition_invalid", "worker_cognition_invalid"));
     }
     let requested_plan_ref = constraints
@@ -874,7 +926,15 @@ fn worker_run(
             "worker_canonical_invocation_plan_invalid",
         ));
     }
-    let (plan_ref, provider_mode, provider_model, preflight_evidence_ref, reasoning_effort) = invocation_plan_binding(root, requested_plan_ref.as_deref(), Some(cognition))?;
+    let (plan_ref, provider_mode, provider_model, preflight_evidence_ref, reasoning_effort) = invocation_plan_binding(root, requested_plan_ref.as_deref(), Some(&cognition))?;
+    let resolved_invocation = resolved_invocation(
+        &cognition,
+        &plan_ref,
+        &provider_mode,
+        &provider_model,
+        &preflight_evidence_ref,
+        reasoning_effort.as_deref(),
+    );
     let cwd = constraints
         .and_then(|v| v.get("cwd"))
         .and_then(Value::as_str)
@@ -895,11 +955,11 @@ fn worker_run(
     fs::create_dir_all(&dir)
         .map_err(|_| error("worker_run_create_failed", "worker_run_create_failed"))?;
     let started = now();
-    let request = json!({"schema":"narada.worker.request.v1","run_id":id,"origin_tool":tool_name,"intent":args.get("intent"),"constraints":args.get("constraints"),"resume_worker_session_id":resume,"capability_snapshot":capabilities.clone(),"invocation_plan_ref":plan_ref,"preflight_evidence_ref":preflight_evidence_ref});
+    let request = json!({"schema":"narada.worker.request.v1","run_id":id,"origin_tool":tool_name,"intent":args.get("intent"),"constraints":args.get("constraints"),"resume_worker_session_id":resume,"capability_snapshot":capabilities.clone(),"invocation_plan_ref":plan_ref,"preflight_evidence_ref":preflight_evidence_ref,"resolved_invocation":resolved_invocation.clone()});
     write_json_atomic(&dir.join("request.json"), &request)?;
     fs::write(dir.join("worker_prompt.txt"), &prompt)
         .map_err(|_| error("worker_write_failed", "worker_write_failed"))?;
-    let running = json!({"schema":"narada.worker.run.v1","run_id":id,"status":"running","completion_state":"pending","runtime":"narada-agent-runtime-server","authority":auth,"capability_snapshot":capabilities.clone(),"worker_session_id":session,"origin_tool":tool_name,"pid":null,"summary":null,"error":null,"timing":{"started_at":started,"finished_at":null,"duration_ms":null},"artifacts":{"request":dir.join("request.json").to_string_lossy(),"events":dir.join("events.jsonl").to_string_lossy(),"diagnostic":dir.join("diagnostic.log").to_string_lossy(),"last_message":dir.join("last_message.json").to_string_lossy()}});
+    let running = json!({"schema":"narada.worker.run.v1","run_id":id,"status":"running","completion_state":"pending","runtime":"narada-agent-runtime-server","authority":auth,"resolved_invocation":resolved_invocation.clone(),"capability_snapshot":capabilities.clone(),"worker_session_id":session,"origin_tool":tool_name,"pid":null,"summary":null,"error":null,"timing":{"started_at":started,"finished_at":null,"duration_ms":null},"artifacts":{"request":dir.join("request.json").to_string_lossy(),"events":dir.join("events.jsonl").to_string_lossy(),"diagnostic":dir.join("diagnostic.log").to_string_lossy(),"last_message":dir.join("last_message.json").to_string_lossy()}});
     write_json_atomic(&dir.join("result.json"), &running)?;
     let root_owned = root.to_path_buf();
     let dir_owned = dir.clone();
@@ -921,6 +981,8 @@ fn worker_run(
                 session_owned,
                 resume_owned,
                 auth_owned,
+                cognition,
+                resolved_invocation,
                 plan_ref,
                 provider_mode,
                 provider_model,
@@ -1065,6 +1127,8 @@ fn complete_native_run(
     session: String,
     resume_session: Option<String>,
     authority: String,
+    cognition: String,
+    resolved_invocation: Value,
     plan_ref: String,
     provider_mode: String,
     provider_model: String,
@@ -1121,7 +1185,7 @@ fn complete_native_run(
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(err) => {
-            let failed = json!({"schema":"narada.worker.run.v1","run_id":id,"status":"failed","completion_state":"absent","runtime":"narada-agent-runtime-server","authority":authority,"worker_session_id":session,"summary":null,"error":format!("worker_launch_failed:{err}"),"timing":{"started_at":now(),"finished_at":now(),"duration_ms":0}});
+            let failed = json!({"schema":"narada.worker.run.v1","run_id":id,"status":"failed","completion_state":"absent","runtime":"narada-agent-runtime-server","authority":authority,"cognition":cognition,"resolved_invocation":resolved_invocation,"worker_session_id":session,"summary":null,"error":format!("worker_launch_failed:{err}"),"timing":{"started_at":now(),"finished_at":now(),"duration_ms":0}});
             let _ = write_json_atomic(&result_path, &failed);
             return;
         }
@@ -1241,7 +1305,7 @@ fn complete_native_run(
             );
         }
         let snapshot = read_json(&dir.join("request.json")).ok().and_then(|request| request.get("capability_snapshot").cloned()).unwrap_or(Value::Null);
-        let payload = json!({"schema":"narada.worker.run.v1","run_id":id,"status":if successful{"completed"}else{"failed"},"completion_state":if assistant.is_some(){"complete"}else{"absent"},"runtime":"narada-agent-runtime-server","authority":authority,"capability_snapshot":snapshot,"worker_session_id":provider_session.unwrap_or(session),"pid":child.id(),"summary":assistant,"error":runtime_error.or_else(||if successful{None}else{Some(format!("worker_runtime_exit:{:?}",status.and_then(|v|v.code())))}),"timing":{"started_at":Value::Null,"finished_at":finished,"duration_ms":started.elapsed().as_millis() as u64},"artifacts":{"request":dir.join("request.json").to_string_lossy(),"events":events_path.to_string_lossy(),"diagnostic":diagnostic_path.to_string_lossy(),"last_message":dir.join("last_message.json").to_string_lossy()}});
+        let payload = json!({"schema":"narada.worker.run.v1","run_id":id,"status":if successful{"completed"}else{"failed"},"completion_state":if assistant.is_some(){"complete"}else{"absent"},"runtime":"narada-agent-runtime-server","authority":authority,"cognition":cognition,"resolved_invocation":resolved_invocation,"capability_snapshot":snapshot,"worker_session_id":provider_session.unwrap_or(session),"pid":child.id(),"summary":assistant,"error":runtime_error.or_else(||if successful{None}else{Some(format!("worker_runtime_exit:{:?}",status.and_then(|v|v.code())))}),"timing":{"started_at":Value::Null,"finished_at":finished,"duration_ms":started.elapsed().as_millis() as u64},"artifacts":{"request":dir.join("request.json").to_string_lossy(),"events":events_path.to_string_lossy(),"diagnostic":diagnostic_path.to_string_lossy(),"last_message":dir.join("last_message.json").to_string_lossy()}});
         let _ = write_json_atomic(&result_path, &payload);
     }
 }
@@ -1321,6 +1385,34 @@ mod tests {
         );
         assert_eq!(cognition_defaults(Path::new("."))["default_cognition"], "low");
         assert_eq!(guidance(&Map::new())["cognition"]["default"], "low");
+    }
+
+    #[test]
+    fn config_resolve_reports_site_cognition_mapping_without_launching() {
+        let root = std::env::temp_dir().join(format!("narada-worker-config-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join(".narada")).expect("site root");
+        fs::write(
+            defaults_path(&root),
+            serde_json::to_vec(&json!({"effective_cognition_defaults":{"low":{"provider":"codex-subscription","model":"gpt-5.6-luna","reasoning_effort":"max"},"medium":{"provider":"codex-subscription","model":"gpt-5.6-sol","reasoning_effort":"low"},"high":{"provider":"codex-subscription","model":"gpt-5.6-sol","reasoning_effort":"max"}}})).expect("encode defaults"),
+        ).expect("defaults");
+        let resolved = config_resolve(
+            &json!({"constraints":{"cognition":"medium"}}).as_object().unwrap(),
+            &root,
+            std::slice::from_ref(&root),
+        ).expect("resolve");
+        assert_eq!(resolved["resolved"]["cognition"], "medium");
+        assert_eq!(resolved["resolved"]["provider_mode"], "codex-subscription");
+        assert_eq!(resolved["resolved"]["model"], "gpt-5.6-sol");
+        assert_eq!(resolved["resolved"]["reasoning_effort"], "low");
+        assert_eq!(resolved["resolved"]["launch"], false);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn compact_run_preserves_effective_invocation_provenance() {
+        let compact = compact_run(&json!({"run_id":"run-test","status":"completed","resolved_invocation":{"cognition":"low","provider_model":"gpt-5.6-luna"}}));
+        assert_eq!(compact["resolved_invocation"]["cognition"], "low");
+        assert_eq!(compact["resolved_invocation"]["provider_model"], "gpt-5.6-luna");
     }
 
     #[test]

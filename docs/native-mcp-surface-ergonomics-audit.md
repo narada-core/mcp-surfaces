@@ -36,6 +36,13 @@ The current Narada user-site effective mapping is:
 
 The mapping is site configuration, so agents should inspect it at runtime rather than treat this table as immutable.
 
+### Delegation readback invariants
+
+- `worker_config_resolve` is read-only and reports the site-effective cognition, provider, model, and reasoning effort. It labels canonical invocation-plan preflight as deferred; it does not claim that a worker was launched.
+- Every worker request and durable run record carries `resolved_invocation`, including cognition, invocation-plan reference, provider mode/model, reasoning effort, and preflight evidence reference. `worker_run_status` and list views preserve this object.
+- `delegated_task_validate` returns `resolved_constraints`, so an omitted cognition is visible as `low` before creation.
+- Delegated-task constraint objects are closed and recursively bounded. Unknown top-level or nested override fields are rejected before execution. Legacy task records are normalized to persist the low-cognition default when they are advanced or read back through the mutation path.
+
 ## Surface ledger
 
 `re-audit` means prior work exists but has not yet been re-proven against this completion contract.

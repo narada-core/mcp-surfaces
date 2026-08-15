@@ -567,6 +567,15 @@ fn validate(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
         .filter(|v| !v.is_empty());
     let workflow = normalize_workflow(args.get("workflow"));
     let mut diagnostics = workflow_diagnostics(&workflow);
+    diagnostics.extend(constraint_diagnostics(args.get("constraints"), "constraints"));
+    if let Some(steps) = workflow.get("steps").and_then(Value::as_array) {
+        for (index, step) in steps.iter().enumerate() {
+            diagnostics.extend(constraint_diagnostics(
+                step.get("constraints"),
+                &format!("workflow.steps[{index}].constraints"),
+            ));
+        }
+    }
     if objective.is_none() {
         diagnostics.push(json!({"severity":"error","code":"objective_required"}));
     }
@@ -581,9 +590,18 @@ fn validate(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
         .iter()
         .filter_map(|item| item.get("code").and_then(Value::as_str))
         .collect::<Vec<_>>();
-    Ok(
-        json!({"schema":"narada.delegated_task.validate.v1","status":if diagnostics.is_empty(){"ok"}else{"rejected"},"dry_run":true,"diagnostics":diagnostics,"valid":errors.is_empty(),"task_root":task_root(root).to_string_lossy(),"errors":errors,"objective":objective,"worker_execution":"not_run"}),
-    )
+    Ok(json!({
+        "schema":"narada.delegated_task.validate.v1",
+        "status":if diagnostics.is_empty(){"ok"}else{"rejected"},
+        "dry_run":true,
+        "diagnostics":diagnostics,
+        "valid":errors.is_empty(),
+        "task_root":task_root(root).to_string_lossy(),
+        "errors":errors,
+        "objective":objective,
+        "resolved_constraints":normalized_constraints(args.get("constraints")),
+        "worker_execution":"not_run"
+    }))
 }
 fn is_within(path: &Path, root: &Path) -> bool {
     let p = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
@@ -948,8 +966,138 @@ fn normalized_constraints(value: Option<&Value>) -> Value {
     }
     Value::Object(constraints)
 }
+const CONSTRAINT_FIELDS: &[&str] = &[
+    "authority",
+    "cwd",
+    "site_root",
+    "provider",
+    "profile",
+    "cognition",
+    "model",
+    "sandbox",
+    "runtime",
+    "invocation_plan_ref",
+    "skip_git_repo_check",
+    "resumable",
+    "wait_for_completion",
+    "wait_timeout_ms",
+    "max_run_ms",
+    "exit_interview",
+    "max_concurrency",
+    "max_retries",
+    "repair_policy",
+    "authority_gates",
+    "required_mcp_tools",
+    "preflight_paths",
+    "overrides",
+];
 fn constraints_schema() -> Value {
-    json!({"type":"object","properties":{"cognition":{"type":"string","enum":["low","medium","high"],"default":DEFAULT_COGNITION}},"additionalProperties":true})
+    json!({
+        "type":"object",
+        "properties":{
+            "authority":{"type":"string","enum":["read","write","command"]},
+            "cwd":{"type":"string","minLength":1,"maxLength":4096},
+            "site_root":{"type":"string","minLength":1,"maxLength":4096},
+            "provider":{"type":"string","minLength":1,"maxLength":256},
+            "profile":{"type":"string","minLength":1,"maxLength":256},
+            "cognition":{"type":"string","enum":["low","medium","high"],"default":DEFAULT_COGNITION},
+            "model":{"type":"string","minLength":1,"maxLength":256},
+            "sandbox":{"type":"string","enum":["read-only","workspace-write","danger-full-access"]},
+            "runtime":{"type":"string","minLength":1,"maxLength":256},
+            "invocation_plan_ref":{"type":"string","minLength":6,"maxLength":512,"pattern":"^plan:[A-Za-z0-9._:-]+$"},
+            "skip_git_repo_check":{"type":"boolean"},
+            "resumable":{"type":"boolean"},
+            "wait_for_completion":{"type":"boolean"},
+            "wait_timeout_ms":{"type":"integer","minimum":1,"maximum":180000},
+            "max_run_ms":{"type":"integer","minimum":1,"maximum":1800000},
+            "exit_interview":{"type":"boolean"},
+            "max_concurrency":{"type":"integer","minimum":1,"maximum":32},
+            "max_retries":{"type":"integer","minimum":0,"maximum":10},
+            "repair_policy":{"type":"object","properties":{"strategy":{"type":"string","enum":["retry_same_step","named_repair_step"]},"repair_step_id":{"type":"string","minLength":1,"maxLength":256},"require_review_after_repair":{"type":"boolean"}},"additionalProperties":false},
+            "authority_gates":{"type":"object","properties":{"commit":{"type":"object","properties":{"operation":{"type":"string","enum":["commit","push"]},"mode":{"type":"string","enum":["disallowed","requires_explicit_authority","allowed"]},"reason":{"type":"string","maxLength":2048},"required_authority":{"type":"string","enum":["write","command"]}},"additionalProperties":false},"push":{"type":"object","properties":{"operation":{"type":"string","enum":["commit","push"]},"mode":{"type":"string","enum":["disallowed","requires_explicit_authority","allowed"]},"reason":{"type":"string","maxLength":2048},"required_authority":{"type":"string","enum":["write","command"]}},"additionalProperties":false}},"additionalProperties":false},
+            "required_mcp_tools":{"type":"array","maxItems":64,"items":{"type":"string","minLength":1,"maxLength":256}},
+            "preflight_paths":{"type":"array","maxItems":64,"items":{"type":"object","properties":{"path":{"type":"string","minLength":1,"maxLength":4096},"access":{"type":"string","enum":["read","write","create"]},"label":{"type":"string","maxLength":256}},"required":["path","access"],"additionalProperties":false}},
+            "overrides":{"type":"object","properties":{"runtime":{"type":"string","minLength":1,"maxLength":256},"sandbox":{"type":"string","enum":["read-only","workspace-write","danger-full-access"]},"model":{"type":"string","minLength":1,"maxLength":256},"reasoning_effort":{"type":"string","minLength":1,"maxLength":64},"config":{"type":"object","additionalProperties":{"oneOf":[{"type":"string"},{"type":"number"},{"type":"boolean"}]}},"skip_git_repo_check":{"type":"boolean"}},"additionalProperties":false}
+        },
+        "additionalProperties":false
+    })
+}
+fn constraint_diagnostics(value: Option<&Value>, locus: &str) -> Vec<Value> {
+    let Some(value) = value else { return Vec::new(); };
+    let Some(object) = value.as_object() else {
+        return vec![json!({"severity":"error","code":"constraints_must_be_object","locus":locus})];
+    };
+    let mut diagnostics = Vec::new();
+    for key in object.keys() {
+        if !CONSTRAINT_FIELDS.contains(&key.as_str()) {
+            diagnostics.push(json!({"severity":"error","code":"unknown_constraint","locus":locus,"field":key}));
+        }
+    }
+    if let Some(cognition) = object.get("cognition") {
+        if !matches!(cognition.as_str(), Some("low" | "medium" | "high")) {
+            diagnostics.push(json!({"severity":"error","code":"constraint_cognition_invalid","locus":format!("{locus}.cognition")}));
+        }
+    }
+    if let Some(paths) = object.get("preflight_paths") {
+        match paths.as_array() {
+            Some(items) => for (index, item) in items.iter().enumerate() {
+                let item_locus = format!("{locus}.preflight_paths[{index}]");
+                let Some(path) = item.as_object() else {
+                    diagnostics.push(json!({"severity":"error","code":"constraint_preflight_path_must_be_object","locus":item_locus}));
+                    continue;
+                };
+                if path.get("path").and_then(Value::as_str).is_none_or(|value| value.trim().is_empty()) {
+                    diagnostics.push(json!({"severity":"error","code":"constraint_preflight_path_requires_path","locus":item_locus}));
+                }
+                if !matches!(path.get("access").and_then(Value::as_str), Some("read" | "write" | "create")) {
+                    diagnostics.push(json!({"severity":"error","code":"constraint_preflight_path_access_invalid","locus":item_locus}));
+                }
+            },
+            None => diagnostics.push(json!({"severity":"error","code":"constraints_preflight_paths_must_be_array","locus":format!("{locus}.preflight_paths")})),
+        }
+    }
+    if let Some(tools) = object.get("required_mcp_tools") {
+        match tools.as_array() {
+            Some(items) => for (index, item) in items.iter().enumerate() {
+                if item.as_str().is_none_or(|value| value.trim().is_empty()) {
+                    diagnostics.push(json!({"severity":"error","code":"constraint_required_mcp_tool_invalid","locus":format!("{locus}.required_mcp_tools[{index}]" )}));
+                }
+            },
+            None => diagnostics.push(json!({"severity":"error","code":"constraints_required_mcp_tools_must_be_array","locus":format!("{locus}.required_mcp_tools")})),
+        }
+    }
+    if let Some(overrides) = object.get("overrides") {
+        if let Some(overrides) = overrides.as_object() {
+            for key in overrides.keys() {
+                if !["runtime", "sandbox", "model", "reasoning_effort", "config", "skip_git_repo_check"].contains(&key.as_str()) {
+                    diagnostics.push(json!({"severity":"error","code":"unknown_constraint_override","locus":format!("{locus}.overrides"),"field":key}));
+                }
+            }
+        } else {
+            diagnostics.push(json!({"severity":"error","code":"constraints_overrides_must_be_object","locus":format!("{locus}.overrides")}));
+        }
+    }
+    diagnostics
+}
+fn normalize_persisted_constraints(task: &mut Value) -> bool {
+    let mut changed = false;
+    let normalized = normalized_constraints(task.get("constraints"));
+    if task.get("constraints") != Some(&normalized) {
+        task["constraints"] = normalized;
+        changed = true;
+    }
+    if let Some(steps) = task.pointer_mut("/workflow/steps").and_then(Value::as_array_mut) {
+        for step in steps {
+            if step.get("constraints").is_some() {
+                let normalized = normalized_constraints(step.get("constraints"));
+                if step.get("constraints") != Some(&normalized) {
+                    step["constraints"] = normalized;
+                    changed = true;
+                }
+            }
+        }
+    }
+    changed
 }
 fn request_fingerprint(args: &Map<String, Value>, root: &Path, id: &str) -> String {
     let mut material = Map::new();
@@ -1395,10 +1543,15 @@ fn ready_step_ids(task: &Value) -> Vec<String> {
         .collect()
 }
 fn advance_value(mut task: Value, root: &Path) -> Result<Value, Value> {
+    let constraints_changed = normalize_persisted_constraints(&mut task);
     if matches!(
         task.get("status").and_then(Value::as_str),
         Some("completed" | "failed" | "cancelled")
     ) {
+        if constraints_changed {
+            task["updated_at"] = json!(now());
+            write_task(root, &task)?;
+        }
         return Ok(task);
     }
     let id = task["task_id"].as_str().unwrap_or_default().to_string();
@@ -1776,6 +1929,37 @@ mod tests {
         )
         .expect("run");
         let task = read_task(&root, "task_default_cognition").expect("task");
+        assert_eq!(task["constraints"]["cognition"], "low");
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn delegated_task_constraints_are_closed_and_validation_reports_resolution() {
+        let schema = constraints_schema();
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(schema["properties"]["preflight_paths"]["items"]["additionalProperties"], false);
+        let root = std::env::temp_dir().join(format!("narada-delegated-task-validate-{}", uuid::Uuid::new_v4()));
+        let invalid = validate(
+            &json!({"objective":"probe","constraints":{"unknown_field":"x"}}).as_object().unwrap(),
+            &root,
+        ).expect("validation response");
+        assert_eq!(invalid["valid"], false);
+        assert_eq!(invalid["diagnostics"][0]["code"], "unknown_constraint");
+        let defaulted = validate(&json!({"objective":"probe"}).as_object().unwrap(), &root).expect("default validation");
+        assert_eq!(defaulted["valid"], true);
+        assert_eq!(defaulted["resolved_constraints"]["cognition"], "low");
+    }
+
+    #[test]
+    fn legacy_task_constraints_are_normalized_on_durable_readback() {
+        let root = std::env::temp_dir().join(format!("narada-delegated-task-legacy-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("tasks/legacy_task")).expect("task root");
+        fs::write(
+            root.join("tasks/legacy_task/task.json"),
+            serde_json::to_vec(&json!({"task_id":"legacy_task","status":"completed","objective":"legacy","constraints":{},"updated_at":"2026-01-01T00:00:00Z","result":{}})).expect("encode legacy task"),
+        ).expect("legacy task");
+        task_run(&json!({"task_id":"legacy_task","allow_cross_site":true}).as_object().unwrap(), &root).expect("normalize");
+        let task = read_task(&root, "legacy_task").expect("readback");
         assert_eq!(task["constraints"]["cognition"], "low");
         fs::remove_dir_all(root).expect("cleanup");
     }
