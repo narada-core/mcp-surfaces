@@ -1,10 +1,8 @@
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
-import {
-  createServerState,
-  delegatedTaskResult,
-  delegatedTaskRun,
-} from '@narada-core/delegated-task-mcp/internal';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { requireNativeArtifact } from '@narada-core/mcp-runtime-proxy/native-artifact';
+import { McpProcessClient, unwrapToolCallResult } from '@narada-core/mcp-runtime-client';
 import {
   admitTaskExecutabilityAssessment,
   assembleDeclaredEnvironment,
@@ -312,6 +310,52 @@ function resultIdentity(result: JsonRecord): { delegated_task_id: string | null;
   };
 }
 
+function siteLoopPackageRoot(): string {
+  let candidate = resolve(dirname(fileURLToPath(import.meta.url)));
+  for (let depth = 0; depth < 8; depth += 1) {
+    if (existsSync(join(candidate, 'package.json'))) return candidate;
+    const parent = dirname(candidate);
+    if (parent === candidate) break;
+    candidate = parent;
+  }
+  throw new Error('site_loop_package_root_not_found');
+}
+
+function nativeDelegatedTaskEntrypoint(): string {
+  const nativePackageRoot = resolve(siteLoopPackageRoot(), '..', 'shared', 'mcp-surfaces-native');
+  return requireNativeArtifact(
+    nativePackageRoot,
+    process.platform === 'win32' ? 'narada-mcp-surfaces.exe' : 'narada-mcp-surfaces',
+  );
+}
+
+async function nativeDelegatedTaskCall(
+  siteRoot: string,
+  toolName: string,
+  arguments_: JsonRecord,
+  timeoutMs: number,
+): Promise<JsonRecord> {
+  const client = await McpProcessClient.start({
+    executable: nativeDelegatedTaskEntrypoint(),
+    args: [
+      '--surface-id', 'delegated-task',
+      '--task-root', siteRoot,
+      '--site-root', siteRoot,
+      '--allowed-root', siteRoot,
+    ],
+    protocolMode: 'modern',
+    cwd: siteRoot,
+    env: { ...process.env, NARADA_SITE_ROOT: siteRoot },
+    requestTimeoutMs: timeoutMs,
+    clientName: 'narada-site-loop-native-client',
+  });
+  try {
+    return unwrapToolCallResult(await client.callTool(toolName, arguments_, timeoutMs));
+  } finally {
+    await client.close();
+  }
+}
+
 function mapDelegatedResult(result: JsonRecord, request: TaskExecutabilityRequest): DelegatedTaskResult {
   const identity = resultIdentity(result);
   const taskStatus = String(result.task_status ?? result.execution_status ?? '');
@@ -326,14 +370,14 @@ function mapDelegatedResult(result: JsonRecord, request: TaskExecutabilityReques
 }
 
 function makeDelegatedTaskPort(
-  state: ReturnType<typeof createServerState>,
+  siteRoot: string,
   requestContexts: Map<string, TaskExecutabilityRequest>,
 ): DelegatedTaskPort {
-    return {
+  return {
     async run(args: DelegatedTaskInvocation) {
       const request = requestContexts.get(args.idempotency_key);
       if (!request) return { status: 'failed', error: { kind: 'request_context_missing', message: 'No leased Task Lifecycle request was found for the dispatch.' } };
-      const response = await delegatedTaskRun({
+      const response = await nativeDelegatedTaskCall(siteRoot, 'delegated_task_run', {
         objective: `Assess executability of task ${args.task_number}.`,
         request_id: args.idempotency_key,
         intent: {
@@ -344,8 +388,8 @@ function makeDelegatedTaskPort(
           authority: 'read',
           cognition: 'low',
           runtime: 'narada-agent-runtime-server',
-          cwd: state.siteRoot,
-          site_root: state.siteRoot,
+          cwd: siteRoot,
+          site_root: siteRoot,
           max_run_ms: args.constraints.max_run_ms,
           max_retries: 0,
           max_concurrency: 1,
@@ -367,21 +411,25 @@ function makeDelegatedTaskPort(
           max_retries: 0,
         },
         execution_binding: {
-          workspace_root: state.siteRoot,
-          site_root: state.siteRoot,
+          workspace_root: siteRoot,
+          site_root: siteRoot,
           executor_kind: 'site_loop',
           correlation_key: args.idempotency_key,
         },
         idempotency_key: args.idempotency_key,
-      }, state);
-      return mapDelegatedResult(record(response), request);
+      }, args.constraints.max_run_ms);
+      return mapDelegatedResult(response, request);
     },
     async poll(args: DelegatedTaskPoll) {
       if (!args.delegated_task_id) return { status: 'failed', error: { kind: 'delegated_task_identity_missing', message: 'No delegated task id was persisted for the assessment.' } };
       const request = requestContexts.get(args.idempotency_key);
       if (!request) return { status: 'failed', error: { kind: 'request_context_missing', message: 'No leased Task Lifecycle request was found for the poll.' } };
-      const response = await delegatedTaskResult({ task_id: args.delegated_task_id, refresh: true, include_diagnostics: true }, state);
-      return mapDelegatedResult(record(response), request);
+      const response = await nativeDelegatedTaskCall(siteRoot, 'delegated_task_result', {
+        task_id: args.delegated_task_id,
+        refresh: true,
+        include_diagnostics: true,
+      }, 30_000);
+      return mapDelegatedResult(response, request);
     },
   };
 }
@@ -398,22 +446,10 @@ export function createTaskExecutabilityOrchestratorForSiteLoop(args: {
   const lifecycleStore = new SqliteTaskLifecycleStore({ db });
   const requestContexts = new Map<string, TaskExecutabilityRequest>();
   const lifecycle = makeLifecyclePort(lifecycleStore, args.siteRoot, requestContexts);
-  const workerPolicyConfig = join(args.siteRoot, '.narada', 'worker-policy.toml');
-  const delegatedState = createServerState({
-    taskRoot: args.siteRoot,
-    siteRoot: args.siteRoot,
-    outputRoot: args.siteRoot,
-    allowedRoots: [args.siteRoot],
-    ...(existsSync(workerPolicyConfig) ? { workerPolicy: { config: workerPolicyConfig } } : {}),
-  });
-  // The Site Loop already owns the disciplined lifecycle connection for this
-  // run. Bind the delegated-task gate to that connection instead of letting
-  // it open a second connection to the same database while the loop holds its
-  // write lease. A second synchronous SQLite connection can block the
-  // Site Loop event loop before the worker completion supervisor can observe
-  // the child NARS terminal event.
-  delegatedState.taskLifecycleStore = lifecycleStore;
-  const delegated = makeDelegatedTaskPort(delegatedState, requestContexts);
+  // Site Loop remains a TypeScript orchestrator, but its delegated authority
+  // is reached only through the native Rust MCP surface. There is no
+  // in-process TypeScript delegation implementation to drift from Rust.
+  const delegated = makeDelegatedTaskPort(args.siteRoot, requestContexts);
   return new TaskExecutabilityOrchestrator(lifecycle, delegated, {
     consumer_id: `site-loop:${args.siteRoot}`,
     max_attempts: args.maxAttempts ?? 3,

@@ -34,8 +34,8 @@ Current packages:
 - `@narada-core/task-lifecycle-mcp`: task lifecycle MCP surface.
 - `@narada-core/site-loop-mcp`: config-governed site loop MCP surface.
 - `@narada-core/agent-context-mcp`: agent context MCP surface.
-- `@narada-core/worker-delegation-mcp`: policy-gated worker delegation MCP surface.
-- `@narada-core/delegated-task-mcp`: outcome-oriented delegated task orchestration MCP surface.
+- `worker-delegation` surface: native Rust policy-gated worker delegation hosted by `@narada-core/mcp-surfaces-native`.
+- `delegated-task` surface: native Rust outcome-oriented task orchestration hosted by `@narada-core/mcp-surfaces-native`.
 - `@narada-core/sop-mcp`: versioned standard operating procedure runbook engine with SQLite-backed execution.
 - `@narada-core/scheduler-mcp`: Windows Task Scheduler MCP surface for governed task registration, inspection, and execution.
 - `@narada-core/mcp-registrar`: MCP surface registrar for binding/unbinding surfaces across Narada sites and carriers.

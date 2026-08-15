@@ -235,37 +235,6 @@ importers:
         specifier: ^5.8.3
         version: 5.9.3
 
-  packages/delegated-task-mcp:
-    dependencies:
-      '@narada-core/execution-contract':
-        specifier: workspace:*
-        version: link:../shared/execution-contract
-      '@narada-core/mcp-fabric-contracts':
-        specifier: workspace:*
-        version: link:../shared/mcp-fabric-contracts
-      '@narada-core/task-governance-core':
-        specifier: workspace:*
-        version: link:../../../narada-core/packages/task-governance-core
-      '@narada-core/worker-delegation-mcp':
-        specifier: workspace:*
-        version: link:../worker-delegation-mcp
-    devDependencies:
-      '@narada-core/mcp-e2e-harness':
-        specifier: workspace:*
-        version: link:../shared/mcp-e2e-harness
-      '@narada-core/sqlite':
-        specifier: workspace:*
-        version: link:../../../narada-core/packages/sqlite
-      '@types/node':
-        specifier: ^22.15.3
-        version: 22.19.19
-      c8:
-        specifier: ^11.0.0
-        version: 11.0.0
-      typescript:
-        specifier: ^5.8.3
-        version: 5.9.3
-
   packages/git-mcp:
     dependencies:
       '@narada-core/mcp-fabric-contracts':
@@ -805,9 +774,6 @@ importers:
 
   packages/site-loop-mcp:
     dependencies:
-      '@narada-core/delegated-task-mcp':
-        specifier: workspace:*
-        version: link:../delegated-task-mcp
       '@narada-core/mcp-affordances':
         specifier: workspace:*
         version: link:../shared/mcp-affordances
@@ -817,6 +783,12 @@ importers:
       '@narada-core/mcp-transport':
         specifier: workspace:*
         version: link:../shared/mcp-transport
+      '@narada-core/mcp-runtime-client':
+        specifier: workspace:*
+        version: link:../shared/mcp-runtime-client
+      '@narada-core/mcp-runtime-proxy':
+        specifier: workspace:*
+        version: link:../shared/mcp-runtime-proxy
       '@narada-core/site-operating-loop':
         specifier: workspace:*
         version: link:../../../narada/packages/site-operating-loop
@@ -1009,39 +981,6 @@ importers:
         specifier: ^5.8.3
         version: 5.9.3
 
-  packages/worker-delegation-mcp:
-    dependencies:
-      '@narada-core/mcp-affordances':
-        specifier: workspace:*
-        version: link:../shared/mcp-affordances
-      '@narada-core/mcp-fabric-contracts':
-        specifier: workspace:*
-        version: link:../shared/mcp-fabric-contracts
-      '@narada-core/mcp-transport':
-        specifier: workspace:*
-        version: link:../shared/mcp-transport
-      '@narada-core/sqlite':
-        specifier: workspace:*
-        version: link:../../../narada-core/packages/sqlite
-      zod:
-        specifier: ^4.4.3
-        version: 4.4.3
-    devDependencies:
-      '@narada-core/mcp-e2e-harness':
-        specifier: workspace:*
-        version: link:../shared/mcp-e2e-harness
-      '@narada-core/mcp-runtime-proxy':
-        specifier: workspace:*
-        version: link:../shared/mcp-runtime-proxy
-      '@types/node':
-        specifier: ^22.15.3
-        version: 22.19.19
-      c8:
-        specifier: ^11.0.0
-        version: 11.0.0
-      typescript:
-        specifier: ^5.8.3
-        version: 5.9.3
 
 packages:
 

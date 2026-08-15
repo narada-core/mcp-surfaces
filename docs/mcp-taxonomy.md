@@ -35,8 +35,8 @@ The V2 runtime observation and reconciliation contracts are also transport-neutr
 - `@narada-core/task-lifecycle-mcp`
 - `@narada-core/site-loop-mcp`
 - `@narada-core/agent-context-mcp`
-- `@narada-core/worker-delegation-mcp`
-- `@narada-core/delegated-task-mcp`
+- native `worker-delegation` surface (`@narada-core/mcp-surfaces-native`)
+- native `delegated-task` surface (`@narada-core/mcp-surfaces-native`)
 - `@narada-core/sop-mcp`
 - `@narada-core/scheduler-mcp`
 - `@narada-core/mcp-registrar`

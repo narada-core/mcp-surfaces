@@ -18,7 +18,6 @@ Review revision: `eeb464249eda123f844997481aaaf26d3b7a5880`
 | `packages/calendar-mcp` | `@narada-core/calendar-mcp` | Policy-gated Microsoft Graph calendar reads and guarded event management. | [README](../packages/calendar-mcp/README.md) |
 | `packages/catalog-observation-mcp` | `@narada-core/catalog-observation-mcp` | Read-only provider catalog observation boundary. | [README](../packages/catalog-observation-mcp/README.md) |
 | `packages/cloudflare-carrier-mcp` | `@narada-core/cloudflare-carrier-mcp` | Cloudflare-carrier product, session, and continuity operations. | [README](../packages/cloudflare-carrier-mcp/README.md) |
-| `packages/delegated-task-mcp` | `@narada-core/delegated-task-mcp` | Private internal compatibility library; the `delegated-task` MCP surface is native Rust. | [README](../packages/delegated-task-mcp/README.md) |
 | `packages/git-mcp` | `@narada-core/git-mcp` | Structured, policy-gated Git management. | [README](../packages/git-mcp/README.md) |
 | `packages/graph-mail-mcp` | `@narada-core/graph-mail-mcp` | Policy-gated Microsoft Graph mail reads and draft management. | [README](../packages/graph-mail-mcp/README.md) |
 | `packages/launcher-mcp` | `@narada-core/launcher-mcp` | Read-only launcher registry, option, plan, and coherence projections. | [README](../packages/launcher-mcp/README.md) |
@@ -44,7 +43,6 @@ Review revision: `eeb464249eda123f844997481aaaf26d3b7a5880`
 | `packages/surface-feedback-mcp` | `@narada-core/surface-feedback-mcp` | Cross-site MCP surface feedback intake and routing. | [README](../packages/surface-feedback-mcp/README.md) |
 | `packages/task-lifecycle-mcp` | `@narada-core/task-lifecycle-mcp` | Task lifecycle runtime and tool dispatch. | [README](../packages/task-lifecycle-mcp/README.md) |
 | `packages/work-lifecycle-mcp` | `@narada-core/work-lifecycle-mcp` | Site-scoped ticket and task lifecycle authority. | [README](../packages/work-lifecycle-mcp/README.md) |
-| `packages/worker-delegation-mcp` | `@narada-core/worker-delegation-mcp` | Private internal compatibility library; the `worker-delegation` MCP surface is native Rust. | [README](../packages/worker-delegation-mcp/README.md) |
 
 ## Shared libraries
 
