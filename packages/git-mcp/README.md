@@ -68,6 +68,7 @@ Read tools:
 - `git_status`: branch, upstream, remotes, push readiness, and working tree status.
 - `git_sync_status`: whether a rebase or merge is in progress, conflict paths, and recovery actions.
 - `git_branch_list`: list local and remote branches with current/upstream metadata.
+- `git_worktree_list`: list registered worktrees, including branch, HEAD, lock, and prune metadata.
 - `git_diff`: paged working, staged, or commit diff. Pass `offset`, `limit`, and the returned `next_offset` to continue reading. Pass `include_untracked: true` with `scope: "working"` to append bounded untracked-file patches.
 - `git_log`: recent commits, optionally scoped by pathspec.
 - `git_show`: one commit with metadata and optional patch.
@@ -90,6 +91,9 @@ Write-mode tools:
 - `git_merge`: merge one explicit target with dirty-worktree guards and structured conflict results.
 - `git_merge_continue` / `git_merge_abort`: complete after resolving and staging conflicts, or abort safely.
 - `git_branch_create`: create a local branch from `HEAD` or an explicit start point without checking it out.
+- `git_worktree_add`: create a worktree at an explicit path under an allowed root; exactly one existing or new branch mode is required.
+- `git_worktree_remove`: remove only an explicitly registered clean worktree; force removal is unavailable.
+- `git_worktree_prune`: prune stale administrative records without deleting live worktrees.
 - `git_branch_switch`: switch to an existing local branch without discard or force behavior.
 - `git_branch_rename`: rename an existing local branch.
 - `git_branch_delete`: delete a local branch only after a merged-only base check.

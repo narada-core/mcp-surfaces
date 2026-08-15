@@ -49,6 +49,10 @@ export async function callGitTool(name: string, args: Record<string, unknown>, s
   if (name === 'git_end_work_scope') return gitEndWorkScope(args, state, runContext);
   if (name === 'git_sync_status') return gitSyncStatus(args, state, runContext);
   if (name === 'git_branch_list') return gitBranchList(args, state, runContext);
+  if (name === 'git_worktree_list') return gitWorktreeList(args, state, runContext);
+  if (name === 'git_worktree_add') return gitWorktreeAdd(args, state, runContext);
+  if (name === 'git_worktree_remove') return gitWorktreeRemove(args, state, runContext);
+  if (name === 'git_worktree_prune') return gitWorktreePrune(args, state, runContext);
   if (name === 'git_branch_create') return gitBranchCreate(args, state, runContext);
   if (name === 'git_branch_switch') return gitBranchSwitch(args, state, runContext);
   if (name === 'git_branch_rename') return gitBranchRename(args, state, runContext);
@@ -643,6 +647,97 @@ export async function gitBranchList(args: Record<string, unknown>, state: GitMcp
     returned: branches.length,
     branches,
   };
+}
+
+export async function gitWorktreeList(args: Record<string, unknown>, state: GitMcpState, context: GitRequestContext = {}) {
+  const cwd = resolveWorkingDirectory(args, state);
+  const result = await runGit(cwd, ['worktree', 'list', '--porcelain', '-z'], state.policy, context);
+  ensureGitOk(result, 'git_worktree_list_failed');
+  const worktrees: Array<Record<string, unknown>> = [];
+  let current: Record<string, unknown> = {};
+  for (const field of result.output_text.split('\0').filter(Boolean)) {
+    if (field.startsWith('worktree ')) {
+      if (Object.keys(current).length) worktrees.push(current);
+      current = { path: field.slice(9) };
+    } else if (field.startsWith('HEAD ')) current.head = field.slice(5);
+    else if (field.startsWith('branch ')) current.branch = field.slice(7).replace(/^refs\/heads\//, '');
+    else if (field === 'bare' || field === 'detached') current[field] = true;
+    else if (field === 'locked' || field.startsWith('locked ')) {
+      current.locked = true;
+      if (field.length > 6) current.lock_reason = field.slice(7);
+    } else if (field === 'prunable' || field.startsWith('prunable ')) {
+      current.prunable = true;
+      if (field.length > 8) current.prune_reason = field.slice(9);
+    }
+  }
+  if (Object.keys(current).length) worktrees.push(current);
+  return { schema: 'narada.git.worktree_list.v1', status: 'ok', working_directory: cwd, count: worktrees.length, worktrees };
+}
+
+function worktreePath(args: Record<string, unknown>, cwd: string, state: GitMcpState, requireAllowed: boolean): string {
+  const path = resolve(cwd, String(args.path ?? ''));
+  const key = process.platform === 'win32' ? path.toLowerCase() : path;
+  const allowed = state.policy.allowedRoots.some((root) => {
+    const rootKey = process.platform === 'win32' ? root.toLowerCase() : root;
+    return key === rootKey || key.startsWith(rootKey + (process.platform === 'win32' ? '\\' : '/'));
+  });
+  if (requireAllowed && !allowed) throw diagnosticError('git_worktree_path_outside_allowed_roots', undefined, { path, allowed_roots: state.policy.allowedRoots, mutation_started: false });
+  return path;
+}
+
+function worktreePathKey(path: string): string {
+  const normalized = resolve(path).replace(/\\/g, '/').replace(/\/$/, '');
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
+export async function gitWorktreeAdd(args: Record<string, unknown>, state: GitMcpState, context: GitRequestContext = {}) {
+  requireWriteMode(state.policy, 'git_worktree_add');
+  const cwd = resolveWorkingDirectory(args, state);
+  await requireTopologyScopeForMutation(cwd, args, state, context);
+  const path = worktreePath(args, cwd, state, true);
+  if (existsSync(path)) throw diagnosticError('git_worktree_path_exists', undefined, { path, mutation_started: false });
+  const branch = args.branch === undefined ? null : requiredBranchName(args.branch, 'branch');
+  const newBranch = args.new_branch === undefined ? null : requiredBranchName(args.new_branch, 'new_branch');
+  if ((branch === null) === (newBranch === null)) throw diagnosticError('git_worktree_requires_exactly_one_branch_mode');
+  const startPoint = args.start_point === undefined ? 'HEAD' : requireCommitish(args.start_point);
+  const argv = newBranch ? ['worktree', 'add', '-b', newBranch, path, startPoint] : ['worktree', 'add', path, branch!];
+  const result = await runGit(cwd, argv, state.policy, context);
+  ensureGitOk(result, 'git_worktree_add_failed');
+  const payload = { schema: 'narada.git.worktree_mutation.v1', status: 'added', working_directory: cwd, path, branch, new_branch: newBranch, start_point: startPoint, force: false };
+  audit(state, payload);
+  return payload;
+}
+
+export async function gitWorktreeRemove(args: Record<string, unknown>, state: GitMcpState, context: GitRequestContext = {}) {
+  requireWriteMode(state.policy, 'git_worktree_remove');
+  const cwd = resolveWorkingDirectory(args, state);
+  await requireTopologyScopeForMutation(cwd, args, state, context);
+  const path = worktreePath(args, cwd, state, false);
+  const inventory = await gitWorktreeList({ working_directory: cwd }, state, context);
+  if (!(inventory.worktrees as Array<Record<string, unknown>>).some((item) => worktreePathKey(String(item.path)) === worktreePathKey(path))) {
+    throw diagnosticError('git_worktree_not_registered', undefined, { path, mutation_started: false });
+  }
+  const dirty = await runGit(path, ['status', '--porcelain=v1', '--untracked-files=all'], state.policy, context);
+  ensureGitOk(dirty, 'git_worktree_remove_preflight_failed');
+  if (dirty.output_text.trim()) throw diagnosticError('git_worktree_not_clean', undefined, { path, dirty_entries: dirty.output_text.trim().split(/\r?\n/), mutation_started: false });
+  const result = await runGit(cwd, ['worktree', 'remove', path], state.policy, context);
+  ensureGitOk(result, 'git_worktree_remove_failed');
+  const payload = { schema: 'narada.git.worktree_mutation.v1', status: 'removed', working_directory: cwd, path, force: false };
+  audit(state, payload);
+  return payload;
+}
+
+export async function gitWorktreePrune(args: Record<string, unknown>, state: GitMcpState, context: GitRequestContext = {}) {
+  requireWriteMode(state.policy, 'git_worktree_prune');
+  const cwd = resolveWorkingDirectory(args, state);
+  await requireTopologyScopeForMutation(cwd, args, state, context);
+  const before = await gitWorktreeList({ working_directory: cwd }, state, context);
+  const result = await runGit(cwd, ['worktree', 'prune'], state.policy, context);
+  ensureGitOk(result, 'git_worktree_prune_failed');
+  const after = await gitWorktreeList({ working_directory: cwd }, state, context);
+  const payload = { schema: 'narada.git.worktree_prune.v1', status: 'ok', working_directory: cwd, before_count: before.count, after_count: after.count };
+  audit(state, payload);
+  return payload;
 }
 
 export async function gitBranchCreate(args: Record<string, unknown>, state: GitMcpState, context: GitRequestContext = {}) {

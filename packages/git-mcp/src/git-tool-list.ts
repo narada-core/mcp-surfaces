@@ -102,6 +102,13 @@ export function listTools(mode: string = 'read'): Array<Record<string, any>> {
       }),
     },
     {
+      name: 'git_worktree_list',
+      description: 'List registered worktrees with branch, HEAD, lock, and prune metadata.',
+      inputSchema: objectSchema({
+        working_directory: { type: 'string', description: WORKING_DIRECTORY_DESCRIPTION },
+      }),
+    },
+    {
       name: 'git_output_show',
       description: 'Read a materialized Git MCP output_ref produced when a large structured result exceeds inline transport limits. Use the original git_diff next_offset inside the materialized result for diff paging; output_show offset pages the materialized JSON wrapper.',
       inputSchema: objectSchema({
@@ -280,6 +287,35 @@ export function listTools(mode: string = 'read'): Array<Record<string, any>> {
         expected_commit: { type: 'string', description: 'Optional commit SHA or commit_ref returned by git_commit; push refuses if HEAD differs.' },
         work_scope_ref: topologyScopeProperty(),
         scope_label: { type: 'string', description: 'Optional caller-supplied audit label for this mutation.' },
+      }, ['work_scope_ref']),
+    },
+    {
+      name: 'git_worktree_add',
+      description: 'Create a worktree at an explicitly allowed path under an exclusive topology scope.',
+      inputSchema: objectSchema({
+        working_directory: { type: 'string', description: WORKING_DIRECTORY_DESCRIPTION },
+        path: { type: 'string', description: 'Absolute or repository-relative target path under an allowed root.' },
+        branch: { type: 'string', description: 'Existing local branch to check out; mutually exclusive with new_branch.' },
+        new_branch: { type: 'string', description: 'New local branch to create; mutually exclusive with branch.' },
+        start_point: { type: 'string', description: 'Start point for new_branch; defaults to HEAD.' },
+        work_scope_ref: topologyScopeProperty(),
+      }, ['path', 'work_scope_ref']),
+    },
+    {
+      name: 'git_worktree_remove',
+      description: 'Remove one explicitly registered clean worktree without force.',
+      inputSchema: objectSchema({
+        working_directory: { type: 'string', description: WORKING_DIRECTORY_DESCRIPTION },
+        path: { type: 'string' },
+        work_scope_ref: topologyScopeProperty(),
+      }, ['path', 'work_scope_ref']),
+    },
+    {
+      name: 'git_worktree_prune',
+      description: 'Prune stale worktree administrative records under an exclusive topology scope.',
+      inputSchema: objectSchema({
+        working_directory: { type: 'string', description: WORKING_DIRECTORY_DESCRIPTION },
+        work_scope_ref: topologyScopeProperty(),
       }, ['work_scope_ref']),
     },
     {

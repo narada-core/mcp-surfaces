@@ -97,9 +97,17 @@ try {
     'git_workflow_record',
     'git_add',
     'git_unstage',
+    'git_commit',
+    'git_push',
     'git_status',
     'git_sync_status',
     'git_branch_list',
+    'git_worktree_list',
+    'git_worktree_add',
+    'git_worktree_remove',
+    'git_worktree_prune',
+    'git_branch_delete',
+    'git_branch_delete_remote',
     'git_output_show',
     'git_changed_summary',
     'git_repositories_summary',
@@ -123,7 +131,7 @@ try {
   assert.equal(byId.get(8)?.result?.structuredContent?.returned >= 1, true);
   assert.equal(byId.get(9)?.result?.structuredContent?.schema, 'narada.git.changed_summary.v1');
   assert.equal(byId.get(9)?.result?.structuredContent?.relevant_changed_count, 0);
-  assert.equal(byId.get(10)?.result?.structuredContent?.repository_count, 1);
+  assert.equal(byId.get(10)?.result?.structuredContent?.repository_count, 1, JSON.stringify(byId.get(10)));
   assert.equal(byId.get(11)?.result?.structuredContent?.schema, 'narada.git.diff.v1');
   assert.match(String(byId.get(11)?.result?.structuredContent?.diff), /two/);
   assert.equal(byId.get(12)?.result?.structuredContent?.schema, 'narada.git.log.v1');

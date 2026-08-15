@@ -40,6 +40,7 @@ const result = spawnSync('cargo', [
   join(nativeRoot, 'Cargo.toml'),
 ], {
   cwd: packageRoot,
+  env: { ...process.env, CARGO_TARGET_DIR: join(nativeRoot, 'target') },
   stdio: 'inherit',
   windowsHide: true,
 });
@@ -60,6 +61,7 @@ if (process.platform === 'win32') {
     boaManifest,
   ], {
     cwd: packageRoot,
+    env: { ...process.env, CARGO_TARGET_DIR: join(nativeRoot, 'boa-fixture', 'target') },
     stdio: 'inherit',
     windowsHide: true,
   });

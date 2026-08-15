@@ -343,6 +343,12 @@ fn list_tools() -> Vec<Value> {
             "List local and/or remote branches with object ids and upstream metadata.",
             true,
         ),
+        tool("git_worktree_list", "List registered worktrees with branch, HEAD, lock, and prune metadata.", true),
+        tool("git_worktree_add", "Create a worktree at an explicitly allowed path.", false),
+        tool("git_worktree_remove", "Remove an explicitly registered clean worktree without force.", false),
+        tool("git_worktree_prune", "Prune stale worktree administrative records.", false),
+        tool("git_branch_delete", "Delete one merged local branch without force.", false),
+        tool("git_branch_delete_remote", "Delete one merged remote branch without force.", false),
         tool(
             "git_output_show",
             "Read a materialized Git MCP output ref with offset/limit paging.",
@@ -394,7 +400,7 @@ fn tool_input_schema(name: &str) -> Value {
             json!({"properties": {"working_directory": working_directory, "allowed_paths": paths, "base_state": {"type": "object", "additionalProperties": false, "properties": {"head": {"type": ["string", "null"]}, "index_digest": {"type": ["string", "null"]}}}}, "required": ["allowed_paths"]})
         }
         "git_workflow_record" => {
-            json!({"properties": {"workflow_id": {"type": "string"}, "scope_label": {"type": "string"}, "summary": {"type":"object","additionalProperties":true,"maxProperties":64}, "repositories": {"type": "array", "items": {"type": "object", "additionalProperties":false,"properties":{"working_directory":working_directory,"label":{"type":"string"},"staged_paths":{"type":"array","items":path},"committed_sha":{"type":["string","null"]},"pushed":{"type":"boolean"},"push_status":{"type":"string","enum":["pushed","not_attempted","failed","not_pushable"]},"push_reason":{"type":["string","null"]},"unrelated_dirty_paths_left":{"type":"array","items":path}},"required":["working_directory"]}, "minItems": 1}}, "required": ["scope_label","repositories"]})
+            json!({"properties": {"workflow_id": {"type": "string"}, "scope_label": {"type": "string"}, "summary": {"type":"string"}, "repositories": {"type": "array", "items": {"type": "object", "additionalProperties":false,"properties":{"working_directory":working_directory,"label":{"type":"string"},"staged_paths":{"type":"array","items":path},"committed_sha":{"type":["string","null"]},"pushed":{"type":"boolean"},"push_status":{"type":"string","enum":["pushed","not_attempted","failed","not_pushable"]},"push_reason":{"type":["string","null"]},"unrelated_dirty_paths_left":{"type":"array","items":path}},"required":["working_directory"]}, "minItems": 1}}, "required": ["scope_label","repositories"]})
         }
         "git_add" | "git_unstage" => {
             json!({"properties": {"working_directory": working_directory, "paths": paths, "work_scope_ref": work_scope}, "required": ["paths"]})
@@ -406,12 +412,18 @@ fn tool_input_schema(name: &str) -> Value {
             json!({"properties": {"working_directory": working_directory, "remote": {"type": "string"}, "branch": {"type": "string"}, "expected_commit": {"type": "string", "description": "Expected SHA or git_commit:<sha>."}, "work_scope_ref": work_scope}, "required": ["work_scope_ref"]})
         }
         "git_status" => {
-            json!({"properties": {"working_directory": working_directory, "work_scope_ref": work_scope, "pathspecs": paths, "staged_only": {"type": "boolean"}, "include_untracked": {"type": "boolean"}, "format": {"type": "string", "enum": ["full", "paths", "summary"]}}})
+            json!({"properties": {"working_directory": working_directory, "work_scope_ref": work_scope, "pathspec": path, "pathspecs": paths, "staged_only": {"type": "boolean"}, "include_untracked": {"type": "boolean"}, "format": {"type": "string", "enum": ["full", "paths", "summary"]}}})
         }
         "git_sync_status" => json!({"properties": {"working_directory": working_directory}}),
         "git_branch_list" => {
             json!({"properties": {"working_directory": working_directory, "scope": {"type": "string", "enum": ["local", "remote", "all"]}}})
         }
+        "git_worktree_list" => json!({"properties": {"working_directory": working_directory}}),
+        "git_worktree_add" => json!({"properties": {"working_directory": working_directory, "path": {"type":"string"}, "branch": {"type":"string"}, "new_branch": {"type":"string"}, "start_point": {"type":"string"}, "work_scope_ref": work_scope}, "required":["path","work_scope_ref"]}),
+        "git_worktree_remove" => json!({"properties": {"working_directory": working_directory, "path": {"type":"string"}, "work_scope_ref": work_scope}, "required":["path","work_scope_ref"]}),
+        "git_worktree_prune" => json!({"properties": {"working_directory": working_directory, "work_scope_ref": work_scope}, "required":["work_scope_ref"]}),
+        "git_branch_delete" => json!({"properties": {"working_directory": working_directory, "branch": {"type":"string"}, "merged_into": {"type":"string"}, "work_scope_ref": work_scope}, "required":["branch","merged_into","work_scope_ref"]}),
+        "git_branch_delete_remote" => json!({"properties": {"working_directory": working_directory, "remote": {"type":"string"}, "branch": {"type":"string"}, "merged_into": {"type":"string"}, "work_scope_ref": work_scope}, "required":["remote","branch","merged_into","work_scope_ref"]}),
         "git_output_show" => {
             json!({"properties": {"ref": {"type": "string"}, "output_ref": {"type": "string"}, "offset": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 20000}}, "anyOf": [{"required": ["ref"]}, {"required": ["output_ref"]}]})
         }
@@ -419,7 +431,7 @@ fn tool_input_schema(name: &str) -> Value {
             json!({"properties": {"working_directory": working_directory, "pathspecs": paths, "relevance_filters": paths}})
         }
         "git_repositories_summary" => {
-            json!({"properties": {"repositories": {"type": "array", "items": {"type": "object", "additionalProperties": false, "properties": {"working_directory": working_directory, "label": {"type": "string"}}, "required": ["working_directory"]}, "minItems": 1}}, "required": ["repositories"]})
+            json!({"properties": {"working_directories": {"type": "array", "items": working_directory, "minItems": 1}, "scope_label": {"type":"string"}}, "required": ["working_directories"]})
         }
         "git_diff" => {
             json!({"properties": {"working_directory": working_directory, "scope": {"type": "string", "enum": ["working", "staged", "commit"]}, "commit": {"type": "string"}, "pathspec": path, "pathspecs": paths, "include_untracked": {"type": "boolean","description":"With working scope, append patches for matched untracked files."}, "offset": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 50000,"default":4000,"description":"Character page size. Large structured results may be materialized by the transport and read with git_output_show."}}})
@@ -670,6 +682,12 @@ fn call_tool(
         "git_status" => git_status(state, args, cancellation),
         "git_sync_status" => git_sync_status(state, args, cancellation),
         "git_branch_list" => git_branch_list(state, args, cancellation),
+        "git_worktree_list" => git_worktree_list(state, args, cancellation),
+        "git_worktree_add" => git_worktree_add(state, args, cancellation),
+        "git_worktree_remove" => git_worktree_remove(state, args, cancellation),
+        "git_worktree_prune" => git_worktree_prune(state, args, cancellation),
+        "git_branch_delete" => git_branch_delete(state, args, cancellation),
+        "git_branch_delete_remote" => git_branch_delete_remote(state, args, cancellation),
         "git_changed_summary" => git_changed_summary(state, args, cancellation),
         "git_repositories_summary" => git_repositories_summary(state, args, cancellation),
         "git_diff" => git_diff(state, args, cancellation),
@@ -1741,6 +1759,100 @@ fn git_branch_list(
     Ok(
         json!({"schema": "narada.git.branch_list.v1", "status": "ok", "working_directory": cwd.to_string_lossy(), "scope": scope, "limit": limit, "current_branch": if current.is_empty() { Value::Null } else { json!(current) }, "returned": branches.len(), "branches": branches}),
     )
+}
+
+fn require_topology_mutation(state: &State, args: &Value, cwd: &Path, tool: &str) -> Result<String, GitError> {
+    if state.mode != "write" {
+        return Err(GitError::new("git_write_mode_required", "git_write_mode_required", json!({"tool_name":tool,"mutation_started":false})));
+    }
+    let root = git_text(state, cwd, &["rev-parse","--show-toplevel"], None, "git_topology_preflight_failed")?.trim().to_string();
+    let reference = args.get("work_scope_ref").and_then(Value::as_str).ok_or_else(|| GitError::new("git_work_scope_ref_required","git_work_scope_ref_required",json!({"tool_name":tool})))?;
+    resolve_work_scope(state, reference, &root)?;
+    Ok(root)
+}
+
+fn requested_worktree_path(state: &State, cwd: &Path, args: &Value, require_allowed: bool) -> Result<PathBuf, GitError> {
+    let raw = args.get("path").and_then(Value::as_str).unwrap_or_default();
+    let path = absolute(if Path::new(raw).is_absolute() { PathBuf::from(raw) } else { cwd.join(raw) });
+    if require_allowed && !inside_any_root(&path, &state.allowed_roots) {
+        return Err(GitError::new("git_worktree_path_outside_allowed_roots","git_worktree_path_outside_allowed_roots",json!({"path":path.to_string_lossy(),"allowed_roots":state.allowed_roots.iter().map(|root|root.to_string_lossy().to_string()).collect::<Vec<_>>(),"mutation_started":false})));
+    }
+    Ok(path)
+}
+
+fn git_worktree_list(state: &State, args: &Value, cancellation: Option<Arc<AtomicBool>>) -> Result<Value, GitError> {
+    let cwd = resolve_cwd(state,args)?;
+    let output = git_text(state,&cwd,&["worktree","list","--porcelain","-z"],cancellation,"git_worktree_list_failed")?;
+    let mut worktrees=vec![]; let mut current=serde_json::Map::new();
+    for field in output.split('\0').filter(|value|!value.is_empty()) {
+        if let Some(path)=field.strip_prefix("worktree ") {
+            if !current.is_empty(){worktrees.push(Value::Object(std::mem::take(&mut current)));}
+            current.insert("path".into(),json!(path));
+        } else if let Some(head)=field.strip_prefix("HEAD ") { current.insert("head".into(),json!(head)); }
+        else if let Some(branch)=field.strip_prefix("branch ") { current.insert("branch".into(),json!(branch.strip_prefix("refs/heads/").unwrap_or(branch))); }
+        else if field=="bare" || field=="detached" || field=="locked" || field=="prunable" { current.insert(field.into(),json!(true)); }
+        else if let Some(reason)=field.strip_prefix("locked ") { current.insert("locked".into(),json!(true)); current.insert("lock_reason".into(),json!(reason)); }
+        else if let Some(reason)=field.strip_prefix("prunable ") { current.insert("prunable".into(),json!(true)); current.insert("prune_reason".into(),json!(reason)); }
+    }
+    if !current.is_empty(){worktrees.push(Value::Object(current));}
+    Ok(json!({"schema":"narada.git.worktree_list.v1","status":"ok","working_directory":cwd.to_string_lossy(),"count":worktrees.len(),"worktrees":worktrees}))
+}
+
+fn git_worktree_add(state:&State,args:&Value,cancellation:Option<Arc<AtomicBool>>)->Result<Value,GitError>{
+    let cwd=resolve_cwd(state,args)?; let root=require_topology_mutation(state,args,&cwd,"git_worktree_add")?;
+    let path=requested_worktree_path(state,&cwd,args,true)?;
+    if path.exists(){return Err(GitError::new("git_worktree_path_exists","git_worktree_path_exists",json!({"path":path.to_string_lossy(),"mutation_started":false})));}
+    let branch=args.get("branch").and_then(Value::as_str); let new_branch=args.get("new_branch").and_then(Value::as_str);
+    if branch.is_some()==new_branch.is_some(){return Err(GitError::new("git_worktree_requires_exactly_one_branch_mode","git_worktree_requires_exactly_one_branch_mode",json!({"mutation_started":false})));}
+    let start=args.get("start_point").and_then(Value::as_str).unwrap_or("HEAD");
+    let path_text=path.to_string_lossy().to_string(); let mut command=vec!["worktree","add"];
+    if let Some(name)=new_branch {command.extend(["-b",name]);command.push(&path_text);command.push(start);} else {command.push(&path_text);command.push(branch.unwrap());}
+    let _guard=state.git_write_lock.lock().map_err(|_|GitError::new("git_write_lock_unavailable","git_write_lock_unavailable",json!({})))?;
+    git_text(state,&cwd,&command,cancellation,"git_worktree_add_failed")?;
+    Ok(json!({"schema":"narada.git.worktree_mutation.v1","status":"added","repository_root":root,"path":path_text,"branch":branch,"new_branch":new_branch,"start_point":start}))
+}
+
+fn git_worktree_remove(state:&State,args:&Value,cancellation:Option<Arc<AtomicBool>>)->Result<Value,GitError>{
+    let cwd=resolve_cwd(state,args)?; let root=require_topology_mutation(state,args,&cwd,"git_worktree_remove")?;
+    let path=requested_worktree_path(state,&cwd,args,false)?; let path_text=path.to_string_lossy().to_string();
+    let inventory=git_text(state,&cwd,&["worktree","list","--porcelain"],cancellation.clone(),"git_worktree_remove_failed")?;
+    if !inventory.lines().any(|line|line.strip_prefix("worktree ").is_some_and(|value|path_key(Path::new(value))==path_key(&path))){
+        return Err(GitError::new("git_worktree_not_registered","git_worktree_not_registered",json!({"path":path_text,"mutation_started":false})));
+    }
+    let dirty=git_text(state,&path,&["status","--porcelain=v1","--untracked-files=all"],cancellation.clone(),"git_worktree_remove_preflight_failed")?;
+    if !dirty.trim().is_empty(){return Err(GitError::new("git_worktree_not_clean","git_worktree_not_clean",json!({"path":path_text,"dirty_entries":dirty.lines().collect::<Vec<_>>(),"mutation_started":false})));}
+    let _guard=state.git_write_lock.lock().map_err(|_|GitError::new("git_write_lock_unavailable","git_write_lock_unavailable",json!({})))?;
+    git_text(state,&cwd,&["worktree","remove",&path_text],cancellation,"git_worktree_remove_failed")?;
+    Ok(json!({"schema":"narada.git.worktree_mutation.v1","status":"removed","repository_root":root,"path":path_text}))
+}
+
+fn git_worktree_prune(state:&State,args:&Value,cancellation:Option<Arc<AtomicBool>>)->Result<Value,GitError>{
+    let cwd=resolve_cwd(state,args)?; let root=require_topology_mutation(state,args,&cwd,"git_worktree_prune")?;
+    let before=git_worktree_list(state,args,cancellation.clone())?;
+    let _guard=state.git_write_lock.lock().map_err(|_|GitError::new("git_write_lock_unavailable","git_write_lock_unavailable",json!({})))?;
+    git_text(state,&cwd,&["worktree","prune"],cancellation.clone(),"git_worktree_prune_failed")?;
+    let after=git_worktree_list(state,args,cancellation)?;
+    Ok(json!({"schema":"narada.git.worktree_prune.v1","status":"ok","repository_root":root,"before_count":before["count"],"after_count":after["count"]}))
+}
+
+fn git_branch_delete(state:&State,args:&Value,cancellation:Option<Arc<AtomicBool>>)->Result<Value,GitError>{
+    let cwd=resolve_cwd(state,args)?; let root=require_topology_mutation(state,args,&cwd,"git_branch_delete")?;
+    let branch=args["branch"].as_str().unwrap(); let base=args["merged_into"].as_str().unwrap();
+    git_text(state,&cwd,&["merge-base","--is-ancestor",branch,base],cancellation.clone(),"git_branch_not_merged")?;
+    let _guard=state.git_write_lock.lock().map_err(|_|GitError::new("git_write_lock_unavailable","git_write_lock_unavailable",json!({})))?;
+    git_text(state,&cwd,&["branch","-d",branch],cancellation,"git_branch_delete_failed")?;
+    Ok(json!({"schema":"narada.git.branch_delete.v1","status":"deleted","repository_root":root,"branch":branch,"merged_into":base,"force":false}))
+}
+
+fn git_branch_delete_remote(state:&State,args:&Value,cancellation:Option<Arc<AtomicBool>>)->Result<Value,GitError>{
+    let cwd=resolve_cwd(state,args)?; let root=require_topology_mutation(state,args,&cwd,"git_branch_delete_remote")?;
+    let remote=args["remote"].as_str().unwrap(); let branch=args["branch"].as_str().unwrap(); let base=args["merged_into"].as_str().unwrap();
+    if !git_remotes_names(state,&cwd,cancellation.clone())?.iter().any(|value|value==remote){return Err(GitError::new("git_remote_not_configured","git_remote_not_configured",json!({"remote":remote})));}
+    let remote_ref=format!("{remote}/{branch}");
+    git_text(state,&cwd,&["merge-base","--is-ancestor",&remote_ref,base],cancellation.clone(),"git_branch_not_merged")?;
+    let _guard=state.git_write_lock.lock().map_err(|_|GitError::new("git_write_lock_unavailable","git_write_lock_unavailable",json!({})))?;
+    git_text(state,&cwd,&["push",remote,"--delete",branch],cancellation,"git_branch_delete_remote_failed")?;
+    Ok(json!({"schema":"narada.git.branch_delete.v1","status":"deleted_remote","repository_root":root,"remote":remote,"branch":branch,"merged_into":base,"force":false}))
 }
 
 fn git_changed_summary(

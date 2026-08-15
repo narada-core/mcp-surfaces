@@ -39,6 +39,10 @@ export {
   gitStatus,
   gitSyncStatus,
   gitUnstage,
+  gitWorktreeAdd,
+  gitWorktreeList,
+  gitWorktreePrune,
+  gitWorktreeRemove,
   gitWorkflowRecord,
 } from './git-tools.js';
 export {

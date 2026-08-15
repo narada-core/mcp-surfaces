@@ -35,6 +35,10 @@ import {
   gitStatus,
   gitSyncStatus,
   gitUnstage,
+  gitWorktreeAdd,
+  gitWorktreeList,
+  gitWorktreePrune,
+  gitWorktreeRemove,
   gitWorkflowRecord,
   handleRequest,
 } from '../src/main.js';
@@ -126,6 +130,10 @@ assert.deepEqual(toolNames.filter((tool: any) => tool.startsWith('git_')), [
   'git_sync_status',
   'git_unstage',
   'git_workflow_record',
+  'git_worktree_add',
+  'git_worktree_list',
+  'git_worktree_prune',
+  'git_worktree_remove',
 ]);
 const gitStatusTool = tools.result?.tools.find((tool: any) => tool.name === 'git_status');
 assert.match(gitStatusTool.inputSchema.properties.working_directory.description, /explicit relative/);
@@ -196,6 +204,9 @@ assert.deepEqual(guidanceContent.tool_inventory.write, [
   'git_merge',
   'git_merge_continue',
   'git_merge_abort',
+  'git_worktree_add',
+  'git_worktree_remove',
+  'git_worktree_prune',
   'git_branch_create',
   'git_branch_switch',
   'git_branch_rename',
@@ -627,6 +638,30 @@ async function topologyMutation<T>(workingDirectory: string, ownerId: string, mu
     await gitEndWorkScope({ working_directory: workingDirectory, owner_id: ownerId, work_scope_ref: scope.work_scope_ref }, state);
   }
 }
+
+const worktreePath = join(root, 'worktree-feature');
+const addedWorktree = await topologyMutation(repo, 'worktree-add', (work_scope_ref) => gitWorktreeAdd({
+  working_directory: repo,
+  path: worktreePath,
+  new_branch: 'feature/worktree',
+  start_point: baseBranch,
+  work_scope_ref,
+}, state));
+assert.equal(addedWorktree.status, 'added');
+assert.equal(existsSync(worktreePath), true);
+const worktreeInventory = await gitWorktreeList({ working_directory: repo }, state);
+assert.equal((worktreeInventory.worktrees as any[]).some((worktree) => String(worktree.path).replace(/\\/g, '/').toLowerCase() === worktreePath.replace(/\\/g, '/').toLowerCase()), true);
+writeFileSync(join(worktreePath, 'dirty.txt'), 'dirty\n', 'utf8');
+await assert.rejects(
+  () => topologyMutation(repo, 'worktree-refuse-dirty-remove', (work_scope_ref) => gitWorktreeRemove({ working_directory: repo, path: worktreePath, work_scope_ref }, state)),
+  (error: any) => error.codeName === 'git_worktree_not_clean',
+);
+rmSync(join(worktreePath, 'dirty.txt'));
+const removedWorktree = await topologyMutation(repo, 'worktree-remove', (work_scope_ref) => gitWorktreeRemove({ working_directory: repo, path: worktreePath, work_scope_ref }, state));
+assert.equal(removedWorktree.status, 'removed');
+assert.equal(existsSync(worktreePath), false);
+const prunedWorktrees = await topologyMutation(repo, 'worktree-prune', (work_scope_ref) => gitWorktreePrune({ working_directory: repo, work_scope_ref }, state));
+assert.equal(prunedWorktrees.status, 'ok');
 
 const createdBranch = await topologyMutation(repo, 'branch-create-feature', (work_scope_ref) => gitBranchCreate({ working_directory: repo, name: 'feature/mcp', work_scope_ref }, state));
 assert.equal(createdBranch.checked_out, false);
