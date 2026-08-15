@@ -49,13 +49,13 @@ pub fn list_tools() -> Vec<Value> {
         tool(
             "epistemic_graph_query",
             "List bounded entities, or set record_kind to read assessments, test outcomes, or sweeps.",
-            json!({"type":"object","properties":{"kind":{"type":"string","enum":ENTITY_KINDS,"description":"Entity kind filter."},"record_kind":{"type":"string","enum":["assessment.record","test_outcome.record","sweep.record"],"description":"When present, query durable non-entity records instead of entities."},"text":{"type":"string"},"compact":{"type":"boolean","default":false,"description":"Return identity and summary fields without full stored payloads."},"limit":{"type":"integer","minimum":1,"maximum":100},"offset":{"type":"integer","minimum":0}},"additionalProperties":false}),
+            json!({"type":"object","properties":{"kind":{"type":"string","description":"Entity kind filter; core kinds or namespaced extension kinds such as cintamani:experiment."},"record_kind":{"type":"string","enum":["assessment.record","test_outcome.record","sweep.record"],"description":"When present, query durable non-entity records instead of entities."},"text":{"type":"string"},"compact":{"type":"boolean","default":false,"description":"Return identity and summary fields without full stored payloads."},"limit":{"type":"integer","minimum":1,"maximum":100},"offset":{"type":"integer","minimum":0}},"additionalProperties":false}),
             true,
         ),
         tool(
             "epistemic_graph_query_batch",
             "Run several compact bounded graph queries in one call.",
-            json!({"type":"object","properties":{"queries":{"type":"array","minItems":1,"maxItems":20,"items":{"type":"object","properties":{"text":{"type":"string"},"kind":{"type":"string","enum":ENTITY_KINDS},"record_kind":{"type":"string","enum":["assessment.record","test_outcome.record","sweep.record"]}},"additionalProperties":false}},"limit_per_query":{"type":"integer","minimum":1,"maximum":20}},"required":["queries"],"additionalProperties":false}),
+            json!({"type":"object","properties":{"queries":{"type":"array","minItems":1,"maxItems":20,"items":{"type":"object","properties":{"text":{"type":"string"},"kind":{"type":"string","description":"Core entity kind (problem, conjecture, claim, criticism, test, source) or a namespaced extension kind such as cintamani:experiment."},"record_kind":{"type":"string","enum":["assessment.record","test_outcome.record","sweep.record"]}},"additionalProperties":false}},"limit_per_query":{"type":"integer","minimum":1,"maximum":20}},"required":["queries"],"additionalProperties":false}),
             true,
         ),
         tool(
@@ -1467,11 +1467,11 @@ fn validate_operations(ops: &[Value], require_evidence: bool) -> Result<(), Valu
             "entity.declare" => {
                 let id = required(obj, "entity_id")?;
                 let typ = required(obj, "kind")?;
-                if !ENTITY_KINDS.contains(&typ.as_str()) {
+                if !ENTITY_KINDS.contains(&typ.as_str()) && !typ.contains(':') {
                     return Err(error(
                         "invalid_entity_kind",
-                        "unsupported entity kind",
-                        json!({"kind":typ}),
+                        "extension entity kinds must be namespaced",
+                        json!({"kind":typ,"core_entity_kinds":ENTITY_KINDS,"extension_pattern":"<namespace>:<kind>","examples":["cintamani:experiment","cintamani:equipment_type"]}),
                     ));
                 }
                 required(obj, "title")?;
@@ -1686,6 +1686,7 @@ fn guidance() -> Value {
         "entity_kinds":ENTITY_KINDS,
         "core_relations":CORE_RELATIONS,
         "extension_relation_rule":"Any relation outside core_relations must be namespaced, for example marici:refines or marici:generalizes.",
+        "extension_entity_kind_rule":"Any entity kind outside entity_kinds must be namespaced, for example cintamani:experiment or cintamani:equipment_type. Extension kinds carry their full structured record in additional payload fields; the version/locator requirement applies only to the source kind.",
         "identity_rule":{"relations":"Omit relation_id to derive it deterministically from relation_type, source_id, and target_id. Supply an override only when parallel duplicate relations are intentional.","idempotency":"Omit idempotency_key for deterministic content-hash retry identity; supply one only to name a wider caller-defined retry scope."},
         "revision_pattern":{"entity_title_correction":"Declare a successor entity with the corrected title and connect it to the prior entity using supersedes. Keep the prior identity as immutable history.","discovery":"Query or inspect the predecessor neighborhood before declaring the successor.","reason":"The graph is append-only; revision is explicit explanation, not silent record mutation."},
         "operation_kinds":["entity.declare","relation.declare","assessment.record","test_outcome.record","sweep.record"],
@@ -1722,7 +1723,7 @@ fn evidence_schema() -> Value {
 }
 fn operation_schema() -> Value {
     json!({"oneOf":[
-        {"title":"Declare entity","type":"object","properties":{"op":{"const":"entity.declare"},"entity_id":{"type":"string","minLength":1,"description":"Optional override; omit for deterministic identity from kind, title, version, and locator."},"local_ref":{"type":"string","minLength":1,"description":"Optional proposal-local name for relation source_ref/target_ref."},"kind":{"type":"string","enum":ENTITY_KINDS},"title":non_empty_string(),"version":non_empty_string(),"locator":non_empty_string()},"required":["op","kind","title"],"allOf":[{"if":{"properties":{"kind":{"const":"source"}},"required":["kind"]},"then":{"required":["version","locator"]}}],"additionalProperties":true},
+        {"title":"Declare entity","type":"object","properties":{"op":{"const":"entity.declare"},"entity_id":{"type":"string","minLength":1,"description":"Optional override; omit for deterministic identity from kind, title, version, and locator."},"local_ref":{"type":"string","minLength":1,"description":"Optional proposal-local name for relation source_ref/target_ref."},"kind":{"type":"string","description":"Core entity kind (problem, conjecture, claim, criticism, test, source) or a namespaced extension kind such as cintamani:experiment."},"title":non_empty_string(),"version":non_empty_string(),"locator":non_empty_string()},"required":["op","kind","title"],"allOf":[{"if":{"properties":{"kind":{"const":"source"}},"required":["kind"]},"then":{"required":["version","locator"]}}],"additionalProperties":true},
         {"title":"Declare relation","type":"object","properties":{"op":{"const":"relation.declare"},"relation_id":{"type":"string","minLength":1,"description":"Optional override. Omit to derive a deterministic id from relation_type, source_id, and target_id."},"relation_type":{"oneOf":[{"type":"string","enum":CORE_RELATIONS},{"type":"string","pattern":"^[A-Za-z][A-Za-z0-9_.-]*:[A-Za-z][A-Za-z0-9_.-]*$"}],"description":"Use a listed core relation, or namespace an extension such as marici:refines."},"source_id":non_empty_string(),"target_id":non_empty_string(),"source_ref":non_empty_string(),"target_ref":non_empty_string()},"required":["op","relation_type"],"allOf":[{"anyOf":[{"required":["source_id"]},{"required":["source_ref"]}]},{"anyOf":[{"required":["target_id"]},{"required":["target_ref"]}]}],"additionalProperties":true},
         {"title":"Record assessment","type":"object","properties":{"op":{"const":"assessment.record"},"assessment_id":non_empty_string(),"subject_id":non_empty_string(),"judgment":non_empty_string(),"actor":non_empty_string(),"reason":non_empty_string(),"evidence":{"type":"array","minItems":1,"items":evidence_schema()}},"required":["op","assessment_id","subject_id","judgment","actor","reason","evidence"],"additionalProperties":true},
         {"title":"Record test outcome","type":"object","properties":{"op":{"const":"test_outcome.record"},"outcome_id":non_empty_string(),"test_id":non_empty_string(),"actor":non_empty_string(),"outcome":non_empty_string(),"evidence":{"type":"array","minItems":1,"items":evidence_schema()}},"required":["op","outcome_id","test_id","actor","outcome","evidence"],"additionalProperties":true},
@@ -1834,6 +1835,17 @@ mod tests {
             validate_operations(&[operation], false).expect_err("unlocated source must refuse");
         assert_eq!(failure["code"], "required_argument_missing");
         assert_eq!(failure["details"]["field"], "locator");
+    }
+
+    #[test]
+    fn extension_entity_kinds_must_be_namespaced() {
+        let extension = json!({"op":"entity.declare","entity_id":"exp:demo","kind":"cintamani:experiment","title":"Demo experiment","version":"1","payload":{"intent":"falsification"}});
+        validate_operations(&[extension], false).expect("namespaced extension kind must validate");
+        let bare = json!({"op":"entity.declare","entity_id":"exp:demo","kind":"experiment","title":"Demo experiment"});
+        let failure =
+            validate_operations(&[bare], false).expect_err("unnamespaced extension kind must refuse");
+        assert_eq!(failure["code"], "invalid_entity_kind");
+        assert_eq!(failure["details"]["kind"], "experiment");
     }
 
     #[test]

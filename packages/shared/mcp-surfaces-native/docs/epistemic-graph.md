@@ -10,6 +10,10 @@ Clients must not write either location. They call the Site-bound authority throu
 
 Admission proves only structural validity, provenance, and policy compliance. It does not establish that a conjecture is true.
 
+## Extension kinds
+
+Entity kinds are not limited to the six core kinds (`problem`, `conjecture`, `claim`, `criticism`, `test`, `source`). An extension kind must be namespaced, for example `cintamani:experiment` or `cintamani:equipment_type`, mirroring the namespaced relation rule. Extension entities carry their full structured record in additional operation fields, which the ledger and projection store verbatim; the `version`/`locator` requirement applies only to the `source` kind. Projections and public read-models (for example a site SPA fed by `epistemic_graph_export`) are responsible for interpreting extension payloads.
+
 ## Read workflow
 
 1. Call `epistemic_graph_status` and retain `ledger_head`.
