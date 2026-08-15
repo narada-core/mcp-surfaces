@@ -249,7 +249,7 @@ pub fn run_background(args: &[String]) -> Result<(), String> {
             .map(PathBuf::from),
         site_root: cwd.clone(),
         storage_root,
-        env: env::vars().collect(),
+        env: execution_environment(),
     };
     let result = run_process(
         command,
@@ -402,8 +402,176 @@ fn parse_state(args: &[String]) -> Result<State, String> {
         audit_log_dir: audit_log_dir.map(|path| absolute(PathBuf::from(path))),
         site_root,
         storage_root,
-        env: env::vars().collect(),
+        env: execution_environment(),
     })
+}
+
+fn execution_environment() -> std::collections::HashMap<String, String> {
+    let mut environment = env::vars().collect::<std::collections::HashMap<_, _>>();
+    #[cfg(windows)]
+    augment_windows_msvc_environment(&mut environment);
+    environment
+}
+
+#[cfg(windows)]
+fn augment_windows_msvc_environment(environment: &mut std::collections::HashMap<String, String>) {
+    let program_files_x86 = environment_value(environment, "ProgramFiles(x86)")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files (x86)"));
+    let visual_studio_root = program_files_x86
+        .join("Microsoft Visual Studio")
+        .join("2022")
+        .join("BuildTools");
+    let msvc_versions = visual_studio_root.join("VC").join("Tools").join("MSVC");
+    let Some(msvc_root) = latest_child_directory(&msvc_versions, |candidate| {
+        candidate
+            .join("bin")
+            .join("Hostx64")
+            .join("x64")
+            .join("link.exe")
+            .is_file()
+            && candidate.join("lib").join("x64").is_dir()
+            && candidate.join("include").is_dir()
+    }) else {
+        return;
+    };
+
+    let sdk_root = program_files_x86.join("Windows Kits").join("10");
+    let sdk_include_root = sdk_root.join("Include");
+    let Some(sdk_version_root) = latest_child_directory(&sdk_include_root, |candidate| {
+        let version = candidate.file_name().unwrap_or_default();
+        let lib = sdk_root.join("Lib").join(version);
+        candidate.join("ucrt").is_dir()
+            && candidate.join("shared").is_dir()
+            && candidate.join("um").is_dir()
+            && lib.join("ucrt").join("x64").is_dir()
+            && lib.join("um").join("x64").join("kernel32.lib").is_file()
+    }) else {
+        return;
+    };
+    let sdk_version = sdk_version_root.file_name().unwrap_or_default();
+    let sdk_lib_root = sdk_root.join("Lib").join(sdk_version);
+    let sdk_bin = sdk_root.join("bin").join(sdk_version).join("x64");
+
+    prepend_environment_paths(
+        environment,
+        "PATH",
+        &[msvc_root.join("bin").join("Hostx64").join("x64"), sdk_bin],
+    );
+    prepend_environment_paths(
+        environment,
+        "LIB",
+        &[
+            msvc_root.join("lib").join("x64"),
+            sdk_lib_root.join("ucrt").join("x64"),
+            sdk_lib_root.join("um").join("x64"),
+        ],
+    );
+    prepend_environment_paths(
+        environment,
+        "INCLUDE",
+        &[
+            msvc_root.join("include"),
+            sdk_version_root.join("ucrt"),
+            sdk_version_root.join("shared"),
+            sdk_version_root.join("um"),
+            sdk_version_root.join("winrt"),
+            sdk_version_root.join("cppwinrt"),
+        ],
+    );
+    set_environment_value(
+        environment,
+        "VCINSTALLDIR",
+        visual_studio_root.join("VC").to_string_lossy().to_string(),
+    );
+    set_environment_value(
+        environment,
+        "VCToolsInstallDir",
+        msvc_root.to_string_lossy().to_string(),
+    );
+    set_environment_value(
+        environment,
+        "WindowsSdkDir",
+        sdk_root.to_string_lossy().to_string(),
+    );
+    set_environment_value(
+        environment,
+        "WindowsSDKVersion",
+        format!("{}\\", sdk_version.to_string_lossy()),
+    );
+}
+
+#[cfg(windows)]
+fn latest_child_directory(root: &Path, admitted: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    let mut candidates = fs::read_dir(root)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir() && admitted(path))
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        left.file_name()
+            .unwrap_or_default()
+            .cmp(right.file_name().unwrap_or_default())
+    });
+    candidates.pop()
+}
+
+#[cfg(windows)]
+fn environment_value<'a>(
+    environment: &'a std::collections::HashMap<String, String>,
+    name: &str,
+) -> Option<&'a str> {
+    environment
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
+}
+
+#[cfg(windows)]
+fn set_environment_value(
+    environment: &mut std::collections::HashMap<String, String>,
+    name: &str,
+    value: String,
+) {
+    if let Some(key) = environment
+        .keys()
+        .find(|key| key.eq_ignore_ascii_case(name))
+        .cloned()
+    {
+        environment.insert(key, value);
+    } else {
+        environment.insert(name.to_string(), value);
+    }
+}
+
+#[cfg(windows)]
+fn prepend_environment_paths(
+    environment: &mut std::collections::HashMap<String, String>,
+    name: &str,
+    required: &[PathBuf],
+) {
+    let mut paths = required
+        .iter()
+        .filter(|path| path.is_dir())
+        .cloned()
+        .collect::<Vec<_>>();
+    if let Some(existing) = environment_value(environment, name) {
+        paths.extend(env::split_paths(existing));
+    }
+    let mut deduplicated = Vec::<PathBuf>::new();
+    for path in paths {
+        if !deduplicated.iter().any(|candidate| {
+            candidate
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&path.to_string_lossy())
+        }) {
+            deduplicated.push(path);
+        }
+    }
+    if let Ok(value) = env::join_paths(deduplicated) {
+        set_environment_value(environment, name, value.to_string_lossy().to_string());
+    }
 }
 
 fn parse_bounded_u64(
@@ -1982,10 +2150,76 @@ mod tests {
             site_root.to_string_lossy().to_string(),
         ])
         .expect("state");
-        assert!(state.allowed_roots.iter().any(|root| root == &worktree_root));
+        assert!(state
+            .allowed_roots
+            .iter()
+            .any(|root| root == &worktree_root));
 
         fs::remove_dir_all(site_root).expect("cleanup site");
         fs::remove_dir_all(worktree_root).expect("cleanup worktrees");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_execution_environment_hydrates_complete_x64_msvc_toolchain() {
+        let root = env::temp_dir().join(format!(
+            "narada-structured-command-msvc-{}",
+            unique_id("test")
+        ));
+        let visual_studio = root
+            .join("Microsoft Visual Studio")
+            .join("2022")
+            .join("BuildTools");
+        let msvc = visual_studio
+            .join("VC")
+            .join("Tools")
+            .join("MSVC")
+            .join("14.44.35207");
+        let msvc_bin = msvc.join("bin").join("Hostx64").join("x64");
+        fs::create_dir_all(&msvc_bin).expect("msvc bin");
+        fs::create_dir_all(msvc.join("lib").join("x64")).expect("msvc lib");
+        fs::create_dir_all(msvc.join("include")).expect("msvc include");
+        fs::write(msvc_bin.join("link.exe"), b"fixture").expect("link fixture");
+
+        let sdk = root.join("Windows Kits").join("10");
+        let version = "10.0.26100.0";
+        for include in ["ucrt", "shared", "um", "winrt", "cppwinrt"] {
+            fs::create_dir_all(sdk.join("Include").join(version).join(include))
+                .expect("sdk include");
+        }
+        fs::create_dir_all(sdk.join("Lib").join(version).join("ucrt").join("x64"))
+            .expect("sdk ucrt lib");
+        let sdk_um = sdk.join("Lib").join(version).join("um").join("x64");
+        fs::create_dir_all(&sdk_um).expect("sdk um lib");
+        fs::write(sdk_um.join("kernel32.lib"), b"fixture").expect("kernel fixture");
+        fs::create_dir_all(sdk.join("bin").join(version).join("x64")).expect("sdk bin");
+
+        let mut environment = std::collections::HashMap::from([
+            (
+                "ProgramFiles(x86)".to_string(),
+                root.to_string_lossy().to_string(),
+            ),
+            ("Path".to_string(), r"C:\existing".to_string()),
+        ]);
+        augment_windows_msvc_environment(&mut environment);
+
+        let path = environment_value(&environment, "PATH").expect("path");
+        assert_eq!(
+            env::split_paths(path).next().as_deref(),
+            Some(msvc_bin.as_path())
+        );
+        let lib = environment_value(&environment, "LIB").expect("lib");
+        assert!(env::split_paths(lib).any(|path| path == sdk_um));
+        assert_eq!(
+            environment_value(&environment, "VCToolsInstallDir"),
+            Some(msvc.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            environment_value(&environment, "WindowsSDKVersion"),
+            Some("10.0.26100.0\\")
+        );
+
+        fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[test]
