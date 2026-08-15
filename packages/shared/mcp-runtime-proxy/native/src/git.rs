@@ -422,7 +422,7 @@ fn tool_input_schema(name: &str) -> Value {
             json!({"properties": {"repositories": {"type": "array", "items": {"type": "object", "additionalProperties": false, "properties": {"working_directory": working_directory, "label": {"type": "string"}}, "required": ["working_directory"]}, "minItems": 1}}, "required": ["repositories"]})
         }
         "git_diff" => {
-            json!({"properties": {"working_directory": working_directory, "scope": {"type": "string", "enum": ["working", "staged", "commit"]}, "commit": {"type": "string"}, "pathspec": path, "pathspecs": paths, "include_untracked": {"type": "boolean"}, "offset": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 20000}}})
+            json!({"properties": {"working_directory": working_directory, "scope": {"type": "string", "enum": ["working", "staged", "commit"]}, "commit": {"type": "string"}, "pathspec": path, "pathspecs": paths, "include_untracked": {"type": "boolean","description":"With working scope, append patches for matched untracked files."}, "offset": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 50000,"default":4000,"description":"Character page size. Large structured results may be materialized by the transport and read with git_output_show."}}})
         }
         "git_log" => {
             json!({"properties": {"working_directory": working_directory, "limit": {"type": "integer", "minimum": 1, "maximum": 100}, "pathspec": path}})
@@ -1878,10 +1878,31 @@ fn git_diff(
         command.push("--");
         command.extend(pathspecs.iter().map(String::as_str));
     }
-    let full = git_text(state, &cwd, &command, cancellation, "git_diff_failed")?;
+    let include_untracked = args.get("include_untracked").and_then(Value::as_bool).unwrap_or(false);
+    if include_untracked && scope != "working" {
+        return Err(GitError::new("git_diff_include_untracked_requires_working_scope", "git_diff_include_untracked_requires_working_scope", json!({"scope":scope})));
+    }
+    let mut full = git_text(state, &cwd, &command, cancellation.clone(), "git_diff_failed")?;
+    let mut untracked_included = false;
+    if include_untracked {
+        let mut list = vec!["ls-files", "--others", "--exclude-standard"];
+        if !pathspecs.is_empty() {
+            list.push("--");
+            list.extend(pathspecs.iter().map(String::as_str));
+        }
+        for path in git_text(state, &cwd, &list, cancellation.clone(), "git_diff_untracked_list_failed")?.lines().filter(|value| !value.trim().is_empty()) {
+            let result = run_git(state, &cwd, &["diff", "--no-index", "--", "/dev/null", path], cancellation.clone());
+            if matches!(result.exit_code, Some(0) | Some(1)) && !result.timed_out && !result.cancelled {
+                full.push_str(&result.output_text);
+                untracked_included = true;
+            } else {
+                return Err(GitError::new("git_diff_untracked_failed", "git_diff_untracked_failed", json!({"path":path,"diagnostic":result.diagnostic_text})));
+            }
+        }
+    }
     let (diff, next) = page_text(&full, offset, limit);
     Ok(
-        json!({"schema": "narada.git.diff.v1", "status": "ok", "working_directory": cwd.to_string_lossy(), "scope": scope, "pathspec": if pathspecs.len() == 1 { json!(pathspecs[0]) } else { Value::Null }, "pathspecs": pathspecs, "offset": offset, "limit": limit, "next_offset": next.map(|value| json!(value)).unwrap_or(Value::Null), "include_untracked": false, "untracked_diff_included": false, "diff": diff, "diff_preview": full.chars().take(PREVIEW_CHAR_LIMIT).collect::<String>(), "diff_omitted": false, "diff_truncated": next.is_some(), "diff_char_length": full.chars().count()}),
+        json!({"schema": "narada.git.diff.v1", "status": "ok", "working_directory": cwd.to_string_lossy(), "scope": scope, "pathspec": if pathspecs.len() == 1 { json!(pathspecs[0]) } else { Value::Null }, "pathspecs": pathspecs, "offset": offset, "limit": limit, "next_offset": next.map(|value| json!(value)).unwrap_or(Value::Null), "include_untracked": include_untracked, "untracked_diff_included": untracked_included, "diff": diff, "diff_preview": full.chars().take(PREVIEW_CHAR_LIMIT).collect::<String>(), "diff_omitted": false, "diff_truncated": next.is_some(), "diff_char_length": full.chars().count()}),
     )
 }
 
@@ -2561,6 +2582,14 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("authoritative"));
+    }
+
+    #[test]
+    fn diff_schema_publishes_runtime_bounds_and_untracked_contract() {
+        let tool = list_tools().into_iter().find(|tool| tool["name"] == "git_diff").unwrap();
+        assert_eq!(tool["inputSchema"]["properties"]["limit"]["maximum"], 50_000);
+        assert_eq!(tool["inputSchema"]["properties"]["limit"]["default"], 4_000);
+        assert!(tool["inputSchema"]["properties"]["include_untracked"]["description"].as_str().unwrap().contains("untracked"));
     }
 
     #[test]

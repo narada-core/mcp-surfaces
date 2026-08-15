@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use time::OffsetDateTime;
 
 const SERVER_NAME: &str = "worker-delegation-mcp";
@@ -154,7 +154,7 @@ fn guidance_tool() -> Value {
     )
 }
 fn guidance(args: &Map<String, Value>) -> Value {
-    json!({"schema":"narada.worker.guidance.v1","status":"ok","server_name":SERVER_NAME,"requested":{"workflow":args.get("workflow").cloned().unwrap_or(Value::Null),"tool":args.get("tool").cloned().unwrap_or(Value::Null)},"first_use":["Inspect worker_policy_inspect.","Resolve worker inputs without launching with worker_config_resolve.","Launch with worker_run or worker_edit.","Read durable runs with worker_run_status or worker_run_wait.","Use worker_output_show for bounded artifact readback."],"boundaries":["The native Rust surface launches only the native Rust narada-agent-runtime-server.","Credentials remain environment-projected and are never returned.","Run records are bounded to the site worker-delegation root."]})
+    json!({"schema":"narada.worker.guidance.v1","status":"ok","server_name":SERVER_NAME,"requested":{"workflow":args.get("workflow").cloned().unwrap_or(Value::Null),"tool":args.get("tool").cloned().unwrap_or(Value::Null)},"first_use":["Inspect worker_policy_inspect.","Resolve worker inputs without launching with worker_config_resolve.","Launch with worker_run or worker_edit.","Read durable runs with worker_run_status or worker_run_wait.","Use worker_output_show for bounded artifact readback."],"windows_rust_toolchain":{"status":"caller_environment_required","remediation":"For MSVC Rust linking, launch the carrier from a Developer PowerShell or initialize VsDevCmd before starting the carrier so link.exe is inherited by workers.","probe":"worker_policy_inspect reports the inherited PATH boundary; workers do not perform open-ended Visual Studio discovery."},"boundaries":["The native Rust surface launches only the native Rust narada-agent-runtime-server.","Credentials remain environment-projected and are never returned.","Run records are bounded to the site worker-delegation root."]})
 }
 
 fn run_root(root: &Path) -> PathBuf {
@@ -229,7 +229,7 @@ fn read_run(root: &Path, id: &str) -> Result<Value, Value> {
 }
 
 fn policy(root: &Path, allowed_roots: &[PathBuf]) -> Value {
-    json!({"schema":"narada.worker.policy.v1","status":"ok","server_name":SERVER_NAME,"run_root":run_root(root).to_string_lossy(),"site_root":root.to_string_lossy(),"allowed_roots":allowed_roots.iter().map(|allowed|allowed.to_string_lossy()).collect::<Vec<_>>(),"allowed_runtimes":["narada-agent-runtime-server"],"allowed_authorities":["read","write","command"],"native_execution":"rust_authority","secret_projection":"environment_only"})
+    json!({"schema":"narada.worker.policy.v1","status":"ok","server_name":SERVER_NAME,"run_root":run_root(root).to_string_lossy(),"site_root":root.to_string_lossy(),"allowed_roots":allowed_roots.iter().map(|allowed|allowed.to_string_lossy()).collect::<Vec<_>>(),"allowed_runtimes":["narada-agent-runtime-server"],"allowed_authorities":["read","write","command"],"native_execution":"rust_authority","secret_projection":"environment_only","windows_msvc_environment":{"inherited":true,"automatic_discovery":false,"remediation":"Initialize VsDevCmd or use Developer PowerShell before launching the carrier."}})
 }
 fn capability_snapshot(authority: &str, cwd: &Path, allowed_roots: &[PathBuf], runtime_probe: Option<&Value>) -> Value {
     let writable = authority != "read";
@@ -350,10 +350,19 @@ fn runs_list(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
 }
 fn run_wait(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     let id = run_id(args)?;
-    let run = read_run(root, &id)?;
+    let timeout_ms = args.get("timeout_ms").and_then(Value::as_u64).unwrap_or(0).min(300_000);
+    let started = Instant::now();
+    let mut run = read_run(root, &id)?;
+    while run.get("status").and_then(Value::as_str) == Some("running")
+        && started.elapsed() < Duration::from_millis(timeout_ms)
+    {
+        thread::sleep(Duration::from_millis(100).min(Duration::from_millis(timeout_ms.saturating_sub(started.elapsed().as_millis() as u64))));
+        run = read_run(root, &id)?;
+    }
     let running = run.get("status").and_then(Value::as_str) == Some("running");
+    let waited_ms = started.elapsed().as_millis() as u64;
     Ok(
-        json!({"schema":"narada.worker.run_wait.v1","status":"ok","wait":{"status":if running{"timed_out"}else{"finished"},"waited":false,"timeout_ms":args.get("timeout_ms").cloned().unwrap_or(json!(0)),"native_execution":"not_polled"},"run":compact_run(&run),"native_read_only":true}),
+        json!({"schema":"narada.worker.run_wait.v1","status":"ok","wait":{"status":if running{"timed_out"}else{"finished"},"waited":waited_ms>0,"waited_ms":waited_ms,"timeout_ms":timeout_ms,"native_execution":"bounded_poll"},"run":compact_run(&run),"native_read_only":true}),
     )
 }
 fn run_wait_batch(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
@@ -824,6 +833,7 @@ fn worker_run(
     let prompt = instruction(args)?;
     let auth = authority(args)?.to_string();
     let constraints = args.get("constraints").and_then(Value::as_object);
+    let max_run_ms = constraints.and_then(|value| value.get("max_run_ms")).and_then(Value::as_u64).unwrap_or(300_000).clamp(1, 1_800_000);
     for key in ["provider"] {
         if constraints.and_then(|value| value.get(key)).is_some() {
             return Err(error(
@@ -910,6 +920,7 @@ fn worker_run(
                 provider_model,
                 reasoning_effort,
                 allowed_roots_owned,
+                max_run_ms,
                 format!("Effective mode: {}. This reconciled state is injected at the provider process boundary through the permission profile, CLI sandbox, and writable-root arguments; ambient labels are advisory. CWD: {}. Writable roots: {}. Scoped create/read/remove preflight: {}. Command write effects: {}. First-class exact-byte lifecycle: one bounded shell command with explicit encoding for create/read-verify/remove/confirm-absent. On Windows assign literal path/content variables, use IO.File WriteAllBytes/ReadAllBytes, compare hex, delete, and test existence; avoid interpolated command strings. Use apply_patch for ordinary edits. Carrier MCP projection: none. On refusal return narada.worker.refusal.v1 with tool, operation, cwd, target_path, declared_capability, actual_refusal. Ergonomics ratings use narada.worker.observed_ergonomics.v1: lower a score only for observed failure, retry, human intervention, or ambiguity that changed execution; automatic contained review requires no human interaction and is not ceremony; put hypothetical improvements in non_scoring_observations.\n\nTask:\n{prompt}", capabilities["effective_mode"].as_str().unwrap_or("unknown"), capabilities["cwd"].as_str().unwrap_or("unknown"), capabilities["allowed_roots"].as_array().map(|roots| roots.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")).unwrap_or_default(), capabilities["runtime_probe"]["status"].as_str().unwrap_or("not_required"), capabilities["commands"]["write_effects"].as_bool().unwrap_or(false)),
             )
         })
@@ -1053,6 +1064,7 @@ fn complete_native_run(
     provider_model: String,
     reasoning_effort: Option<String>,
     allowed_roots: Vec<PathBuf>,
+    max_run_ms: u64,
     prompt: String,
 ) {
     let result_path = dir.join("result.json");
@@ -1140,6 +1152,11 @@ fn complete_native_run(
                 }
             });
             loop {
+                if started.elapsed() >= Duration::from_millis(max_run_ms) {
+                    runtime_error = Some(format!("worker_runtime_timed_out:max_run_ms={max_run_ms}"));
+                    let _ = child.kill();
+                    break;
+                }
                 if read_json(&result_path)
                     .ok()
                     .and_then(|v| v.get("status").and_then(Value::as_str).map(str::to_string))
@@ -1248,7 +1265,8 @@ fn input_schema(name: &str) -> Value {
             "authority":{"type":"string","enum":["read","write","command"]},
             "cognition":{"type":"string","enum":["low","medium","high"]},
             "cwd":{"type":"string","minLength":1,"maxLength":4096},
-            "invocation_plan_ref":{"type":"string","minLength":6,"maxLength":512,"pattern":"^plan:[A-Za-z0-9._:-]+$"}
+            "invocation_plan_ref":{"type":"string","minLength":6,"maxLength":512,"pattern":"^plan:[A-Za-z0-9._:-]+$"},
+            "max_run_ms":{"type":"integer","minimum":1,"maximum":1800000,"default":300000,"description":"Hard worker runtime deadline enforced by the native authority."}
         },
         "additionalProperties":false
     });
@@ -1308,6 +1326,13 @@ mod tests {
     fn containment_is_path_component_aware() {
         assert!(path_components_equal_or_child(Path::new("C:/Users/Andrey/Narada/project"), Path::new("C:/Users/Andrey/Narada")));
         assert!(!path_components_equal_or_child(Path::new("C:/Users/Andrey/Narada-other"), Path::new("C:/Users/Andrey/Narada")));
+    }
+
+    #[test]
+    fn wait_and_windows_toolchain_contracts_are_explicit() {
+        assert_eq!(input_schema("worker_run_wait")["properties"]["timeout_ms"]["maximum"], 300_000);
+        assert_eq!(guidance(&Map::new())["windows_rust_toolchain"]["status"], "caller_environment_required");
+        assert_eq!(policy(Path::new("."), &[])["windows_msvc_environment"]["inherited"], true);
     }
 
     #[test]

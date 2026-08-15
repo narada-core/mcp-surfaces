@@ -89,6 +89,7 @@ fn dispatch(request: &Value) -> Value {
         Err(e) => return error(id, format!("mcp_registrar_native_contract_invalid:{e}")),
     };
     extend_epistemic_catalog(&mut contract);
+    align_native_surface_descriptor_schemas(&mut contract);
     if let Err(e) = validate_contract(&contract) {
         return error(id, format!("mcp_registrar_native_contract_invalid:{e}"));
     }
@@ -377,6 +378,26 @@ fn extend_epistemic_catalog(contract: &mut Value) {
         contract.pointer_mut("/read_models/registrar_surface_list/count"),
     ) {
         *slot = json!(count);
+    }
+}
+
+fn align_native_surface_descriptor_schemas(contract: &mut Value) {
+    let Some(items) = contract.pointer_mut("/read_models/registrar_surface_list/items").and_then(Value::as_array_mut) else { return; };
+    let intent = || json!({"type":"object","properties":{"instruction":{"type":"string","minLength":1,"maxLength":65536},"task":{"type":"string","minLength":1,"maxLength":65536},"goal":{"type":"string","minLength":1,"maxLength":65536},"summary":{"type":"string","minLength":1,"maxLength":65536},"mode":{"type":"string","maxLength":256}},"additionalProperties":false,"anyOf":[{"required":["instruction"]},{"required":["task"]},{"required":["goal"]},{"required":["summary"]}]});
+    let constraints = || json!({"type":"object","properties":{"authority":{"type":"string","enum":["read","write","command"]},"cognition":{"type":"string","enum":["low","medium","high"]},"cwd":{"type":"string","minLength":1,"maxLength":4096},"invocation_plan_ref":{"type":"string","minLength":6,"maxLength":512,"pattern":"^plan:[A-Za-z0-9._:-]+$"},"max_run_ms":{"type":"integer","minimum":1,"maximum":1800000,"default":300000,"description":"Hard worker runtime deadline enforced by the native authority."}},"additionalProperties":false});
+    for item in items {
+        let id = item.get("id").and_then(Value::as_str).unwrap_or_default();
+        let Some(tools) = item.pointer_mut("/descriptor/tools").and_then(Value::as_array_mut) else { continue; };
+        for tool in tools {
+            let name = tool.get("name").and_then(Value::as_str).unwrap_or_default();
+            let schema = match (id, name) {
+                ("epistemic-graph", "epistemic_graph_guidance") => Some(json!({"type":"object","properties":{"workflow":{"type":"string","maxLength":256},"tool":{"type":"string","maxLength":256}},"additionalProperties":false})),
+                ("worker-delegation", "worker_run") => Some(json!({"type":"object","properties":{"intent":intent(),"constraints":constraints()},"required":["intent"],"additionalProperties":false})),
+                ("worker-delegation", "worker_config_resolve") => Some(json!({"type":"object","properties":{"cwd":{"type":"string","minLength":1,"maxLength":4096},"constraints":constraints()},"additionalProperties":false})),
+                _ => None,
+            };
+            if let Some(schema) = schema { tool["input_schema"] = schema; }
+        }
     }
 }
 
@@ -5189,6 +5210,22 @@ mod tests {
                 "{name}: {failure}"
             );
         }
+    }
+
+    #[test]
+    fn native_descriptor_schemas_match_live_worker_and_epistemic_contracts() {
+        let mut contract = embedded_contract();
+        extend_epistemic_catalog(&mut contract);
+        align_native_surface_descriptor_schemas(&mut contract);
+        let items = contract.pointer("/read_models/registrar_surface_list/items").and_then(Value::as_array).unwrap();
+        let schema = |surface: &str, name: &str| {
+            items.iter().find(|item| item["id"] == surface).unwrap()
+                .pointer("/descriptor/tools").and_then(Value::as_array).unwrap()
+                .iter().find(|tool| tool["name"] == name).unwrap()["input_schema"].clone()
+        };
+        assert!(schema("worker-delegation", "worker_run").pointer("/properties/constraints/properties/site_root").is_none());
+        assert_eq!(schema("worker-delegation", "worker_config_resolve")["additionalProperties"], false);
+        assert_eq!(schema("epistemic-graph", "epistemic_graph_guidance")["properties"]["workflow"]["type"], "string");
     }
 
     #[test]

@@ -567,6 +567,11 @@ fn call_tool(state: &mut State, params: &Value) -> Result<Value, FsError> {
             json!({"tool_name": name, "mode": state.mode}),
         )),
     }?;
+    if is_write_tool(name) {
+        state.cache.clear();
+        state.snapshots.clear();
+        state.snapshot_order.clear();
+    }
     if let (Some(source), Some(object)) = (payload_source, value.as_object_mut()) {
         object.insert("payload_source".into(), source);
     }
@@ -3686,7 +3691,7 @@ fn list_tools(mode: &str) -> Vec<Value> {
         let mut properties = Map::new();
         match *name {
             "fs_guidance" => { properties.insert("workflow".into(), json!({"type":"string"})); properties.insert("tool".into(), json!({"type":"string"})); }
-            "fs_read_file" => { properties.insert("path".into(), json!({"type":"string"})); properties.insert("offset".into(), json!({"type":"integer","minimum":1,"maximum":10_000_000,"default":1})); properties.insert("limit".into(), json!({"type":"integer","minimum":1,"maximum":1_000,"default":400})); properties.insert("timeout_ms".into(), json!({"type":"integer","minimum":1,"maximum":60_000,"default":READ_TIMEOUT_MS})); }
+            "fs_read_file" => { properties.insert("path".into(), json!({"type":"string"})); properties.insert("offset".into(), json!({"type":"integer","minimum":1,"maximum":10_000_000,"default":1,"description":"One-based first line to return."})); properties.insert("limit".into(), json!({"type":"integer","minimum":1,"maximum":1_000,"default":400,"description":"Maximum lines returned; paginate requests over 1,000 lines."})); properties.insert("timeout_ms".into(), json!({"type":"integer","minimum":1,"maximum":60_000,"default":READ_TIMEOUT_MS})); }
             "fs_read_file_range" => { properties.insert("path".into(), json!({"type":"string"})); properties.insert("start_line".into(), json!({"type":"integer","minimum":1,"maximum":10_000_000,"description":"Inclusive logical start line."})); properties.insert("end_line".into(), json!({"type":"integer","minimum":1,"maximum":10_000_000,"description":"Inclusive logical end line. Requests spanning over 1,000 lines return a bounded page; follow continuation.arguments until has_more is false."})); properties.insert("timeout_ms".into(), json!({"type":"integer","minimum":1,"maximum":60_000,"default":READ_TIMEOUT_MS})); }
             "fs_stat" => { properties.insert("path".into(), json!({"type":"string"})); properties.insert("timeout_ms".into(),json!({"type":"integer","minimum":1,"maximum":300_000,"default":60_000})); }
             "fs_glob_search" => { properties.insert("pattern".into(), json!({"type":"string"})); properties.insert("directory".into(), json!({"type":"string","default":"."})); properties.insert("ignore".into(), json!({"type":"array","items":{"type":"string"}})); properties.insert("offset".into(), json!({"type":"integer","minimum":0,"maximum":10_000_000,"default":0})); properties.insert("limit".into(), json!({"type":"integer","minimum":1,"maximum":500,"default":100})); properties.insert("timeout_ms".into(), json!({"type":"integer","minimum":1,"maximum":300_000,"default":SEARCH_TIMEOUT_MS})); properties.insert("cache_policy".into(), json!({"type":"string","enum":["auto","snapshot","refresh","bypass"],"default":"auto"})); properties.insert("snapshot_id".into(), json!({"type":"string"})); }

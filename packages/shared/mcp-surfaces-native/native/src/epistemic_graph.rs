@@ -37,7 +37,7 @@ pub fn list_tools() -> Vec<Value> {
         tool(
             "epistemic_graph_guidance",
             "Explain the problem-situation graph workflow.",
-            object(&[]),
+            json!({"type":"object","properties":{"workflow":{"type":"string","maxLength":256},"tool":{"type":"string","maxLength":256}},"additionalProperties":false}),
             true,
         ),
         tool(
@@ -129,7 +129,7 @@ pub fn list_tools() -> Vec<Value> {
 
 pub fn call_tool(name: &str, args: &Map<String, Value>, site_root: &Path) -> Result<Value, Value> {
     match name {
-        "epistemic_graph_guidance" => Ok(guidance()),
+        "epistemic_graph_guidance" => Ok(guidance_with_request(args)),
         "epistemic_graph_status" => status(site_root),
         "epistemic_graph_query" => query(site_root, args),
         "epistemic_graph_query_batch" => query_batch(site_root, args),
@@ -1591,6 +1591,12 @@ fn guidance() -> Value {
         "problem_policy":"Transform apparent solutions into successor problems; record closure only as an attributed assessment."
     })
 }
+
+fn guidance_with_request(args: &Map<String, Value>) -> Value {
+    let mut value = guidance();
+    value["requested"] = json!({"workflow":args.get("workflow").cloned().unwrap_or(Value::Null),"tool":args.get("tool").cloned().unwrap_or(Value::Null)});
+    value
+}
 fn non_empty_string() -> Value {
     json!({"type":"string","minLength":1})
 }
@@ -1683,6 +1689,15 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .contains("ledger_head"));
+    }
+
+    #[test]
+    fn guidance_schema_accepts_declared_routing_hints() {
+        let tool = list_tools().into_iter().find(|tool| tool["name"] == "epistemic_graph_guidance").unwrap();
+        assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+        assert_eq!(tool["inputSchema"]["properties"]["workflow"]["type"], "string");
+        let value = guidance_with_request(json!({"workflow":"query_current_frontier"}).as_object().unwrap());
+        assert_eq!(value["requested"]["workflow"], "query_current_frontier");
     }
 
     #[test]
