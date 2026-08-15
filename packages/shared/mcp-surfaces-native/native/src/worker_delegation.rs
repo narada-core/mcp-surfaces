@@ -686,12 +686,12 @@ fn narada_source_root(root: &Path) -> PathBuf {
         return path;
     }
     let parent = root.parent().unwrap_or(root);
-    if parent.join("narada").is_dir() {
-        return parent.to_path_buf();
-    }
     let conventional = parent.join("src");
     if conventional.join("narada").is_dir() {
         return conventional;
+    }
+    if parent.join("narada").is_dir() {
+        return parent.to_path_buf();
     }
     conventional
 }
