@@ -39,9 +39,9 @@ assert.equal(diagnosticOnly.status, 'diagnostic_only');
 assert.equal(diagnosticOnly.verification_eligible, false);
 
 const rejected = validateGovernedTestEvidenceRefs([
-  'C:\\\\Users\\\\Andrey\\\\.ai\\\\tmp\\\\site-loop-focused-tests.cmd',
-  'C:\\\\Users\\\\Andrey\\\\.ai\\\\tmp\\\\site-loop-focused-tests.log',
-  'C:\\\\Users\\\\Andrey\\\\.ai\\\\tmp\\\\site-loop-focused-tests.exit',
+  'C:\\\\Users\\\\Andrey\\\\.ai\\\\tmp\\\\native-focused-tests.cmd',
+  'C:\\\\Users\\\\Andrey\\\\.ai\\\\tmp\\\\native-focused-tests.log',
+  'C:\\\\Users\\\\Andrey\\\\.ai\\\\tmp\\\\native-focused-tests.exit',
   'test:untyped-narrative',
 ]);
 assert.equal(rejected.status, 'rejected');
@@ -49,7 +49,7 @@ assert.equal(rejected.verification_eligible, false);
 assert.equal(rejected.rejected_refs.length, 4);
 assert.match(rejected.remediation, /structured_command_execution/);
 
-const transientPath = 'C:\\Users\\Andrey\\.ai\\tmp\\site-loop-focused-tests.ps1';
+const transientPath = 'C:\\Users\\Andrey\\.ai\\tmp\\native-focused-tests.ps1';
 const transient = validateGovernedTestEvidenceRefs([transientPath]);
 assert.equal(transient.status, 'rejected');
 assert.deepEqual(transient.rejected_refs, [{ ref: transientPath, reason: 'transient_path_not_admissible' }]);

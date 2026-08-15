@@ -35,7 +35,6 @@ Review revision: `eeb464249eda123f844997481aaaf26d3b7a5880`
 | `packages/site-coherence-mcp` | `@narada-core/site-coherence-mcp` | Local-versus-Cloudflare continuity coherence readback. | [README](../packages/site-coherence-mcp/README.md) |
 | `packages/site-inbox-mcp` | `@narada-core/site-inbox-mcp` | Governed inbox intake and triage. | [README](../packages/site-inbox-mcp/README.md) |
 | `packages/site-lifecycle-mcp` | `@narada-core/site-lifecycle-mcp` | Governed Site lifecycle planning and inspection. | [README](../packages/site-lifecycle-mcp/README.md) |
-| `packages/site-loop-mcp` | `@narada-core/site-loop-mcp` | Config-governed Site Loop runtime and operations. | [README](../packages/site-loop-mcp/README.md) |
 | `packages/site-registry-mcp` | `@narada-core/site-registry-mcp` | Canonical User Site Registry projection. | [README](../packages/site-registry-mcp/README.md) |
 | `packages/sop-mcp` | `@narada-core/sop-mcp` | Versioned procedure templates and durable run execution. | [README](../packages/sop-mcp/README.md) |
 | `packages/speech-mcp` | `@narada-core/speech-mcp` | Policy-gated speech, capture, and transcription. | [README](../packages/speech-mcp/README.md) |

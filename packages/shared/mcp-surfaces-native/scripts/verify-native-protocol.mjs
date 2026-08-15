@@ -64,7 +64,6 @@ const allSurfaces = [
   'mailbox',
   'graph-mail',
   'calendar',
-  'site-loop',
   'worker-delegation',
   'delegated-task',
   'sop',
@@ -1422,63 +1421,6 @@ function runSurfaceFeedbackParity() {
   }
 }
 
-function runSiteLoopParity() {
-  const root = mkdtempSync(join(tmpdir(), 'narada-site-loop-native-parity-'));
-  try {
-    const configDir = join(root, '.narada', 'capabilities');
-    mkdirSync(configDir, { recursive: true });
-    writeFileSync(join(configDir, 'site-loop-config.json'), JSON.stringify({
-      schema: 'narada.site_loop.config.v2',
-      loop_id: 'fixture.loop',
-      site_id: 'fixture-site',
-      display_name: 'Fixture Loop',
-      resident: { agent_id: 'fixture-agent', role: 'resident' },
-      scheduler: { default_task_name: 'Fixture-Loop' },
-      docs: [{ path: 'README.md', description: 'Fixture documentation' }],
-      tests: { rust_version: { command: 'rustc', args: ['--version'] } },
-      policy: {},
-      persistence: {
-        schema: 'narada.site_loop.persistence.v2',
-        evidence_root: '.ai/evidence',
-        raw_retention_days: 1,
-        summary_retention_days: 1,
-        inline_summary_bytes: 1024,
-        compression: 'gzip',
-      },
-    }), 'utf8');
-    writeFileSync(join(root, 'README.md'), 'Fixture Site Loop documentation.\n', 'utf8');
-    const requests = [{ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'site_loop_config_validate', arguments: {} } }, {
-      jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'site_docs_list', arguments: {} },
-    }, {
-      jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'site_docs_show', arguments: { path: 'README.md' } },
-    }, {
-      jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'site_test_list', arguments: {} },
-    }, {
-      jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'site_loop_status', arguments: {} },
-    }, {
-      jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'site_test_run', arguments: { selector: 'rust_version' } },
-    }];
-    const rust = runMailbox(executable, ['--surface-id', 'site-loop', '--site-root', root], requests, root);
-    const validation = mailboxStructured(rust, 1, 'rust');
-    if (validation.status !== 'ok' || validation.valid !== true || validation.loop_id !== 'fixture.loop') throw new Error('site_loop.config_validate.native_invalid');
-    const docs = mailboxStructured(rust, 2, 'rust');
-    if (docs.status !== 'ok' || docs.docs?.length !== 1) throw new Error('site_loop.docs_list.native_invalid');
-    const shown = mailboxStructured(rust, 3, 'rust');
-    if (shown.status !== 'ok' || shown.content !== 'Fixture Site Loop documentation.\n') throw new Error('site_loop.docs_show.native_invalid');
-    const tests = mailboxStructured(rust, 4, 'rust');
-    if (tests.status !== 'ok' || tests.tests?.[0]?.selector !== 'rust_version') throw new Error('site_loop.tests_list.native_invalid');
-    const status = mailboxStructured(rust, 5, 'rust');
-    if (status.status !== 'ok' && status.schema !== 'narada.site_operating_loop.status.v1') throw new Error('site_loop.status.native_invalid');
-    const rustTest = mailboxStructured(rust, 6, 'rust');
-    if (rustTest.status !== 'passed' || rustTest.selector !== 'rust_version' || rustTest.exit_code !== 0) throw new Error('site_loop.test_run.native_invalid');
-    if (!String(rustTest.stdout ?? '').startsWith('rustc ')) throw new Error('site_loop.test_run.native_stdout_missing');
-    if (rustTest.stdout_truncated !== false || rustTest.stderr_truncated !== false) throw new Error('site_loop.test_run.native_output_bounds_invalid');
-    return { status: 'passed', fixture: 'native_config_docs_tests_status_and_configured_execution', verified: ['config_validate', 'docs_list', 'docs_show', 'tests_list', 'status', 'test_run'] };
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-}
-
 function runOperatorRoutingParity() {
   const root = mkdtempSync(join(tmpdir(), 'narada-operator-routing-native-'));
   const logRoot = join(root, 'routing-log');
@@ -2669,7 +2611,6 @@ const sopOutboxParity = runSlice('sop', runSopOutboxParity);
 const sopDurabilityMutationParity = runSlice('sop', runSopDurabilityMutationParity);
 const sopEngineParity = runSlice('sop', () => runSopEngineParity({ executable, workspaceRoot: resolve(packageRoot, '..', '..', '..') }));
 const surfaceFeedbackParity = runSlice('surface-feedback', runSurfaceFeedbackParity);
-const siteLoopParity = runSlice('site-loop', runSiteLoopParity);
 const operatorRoutingParity = runSlice('operator-routing', runOperatorRoutingParity);
 const siteInboxParity = runSlice('site-inbox', runSiteInboxParity);
 const siteLifecycleAuthorityParity = runSlice('site-lifecycle', runSiteLifecycleAuthorityParity);
@@ -2711,7 +2652,6 @@ process.stdout.write(JSON.stringify({
   sop_durability_mutation_parity: sopDurabilityMutationParity,
   sop_engine_parity: sopEngineParity,
   surface_feedback_parity: surfaceFeedbackParity,
-  site_loop_parity: siteLoopParity,
   operator_routing_parity: operatorRoutingParity,
   site_inbox_parity: siteInboxParity,
   site_lifecycle_authority_parity: siteLifecycleAuthorityParity,

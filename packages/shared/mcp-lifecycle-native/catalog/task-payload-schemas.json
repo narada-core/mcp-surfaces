@@ -170,7 +170,7 @@
           "workspace_root": "<absolute workspace root; defaults to this Site root>",
           "repository_root": "<absolute repository root when the task executes repository work>",
           "site_root": "<absolute destination Site root; defaults to this task-lifecycle surface Site>",
-          "executor_kind": "manual | operator | worker_delegation | delegated_task | site_loop",
+          "executor_kind": "manual | operator | worker_delegation | delegated_task",
           "correlation_key": "<stable result correlation key; defaults to idempotency_key>"
         }
       },

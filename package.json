@@ -7,7 +7,7 @@
   "scripts": {
     "build": "pnpm run build:compat",
     "build:compat": "pnpm guard:registrar-native-authority && pnpm run build:node",
-    "build:node": "node --import tsx scripts/prepare-workspace-build.ts && pnpm --filter @narada-core/process-launch-posture build && pnpm --filter @narada-core/site-operating-loop build && pnpm --filter @narada-core/sqlite build && tsc -b --force && pnpm -r --filter \"./packages/**\" --if-present run build:postcompile && node --import tsx scripts/build-workspace-artifact-manifest.ts",
+    "build:node": "node --import tsx scripts/prepare-workspace-build.ts && pnpm --filter @narada-core/process-launch-posture build && pnpm --filter @narada-core/sqlite build && tsc -b --force && pnpm -r --filter \"./packages/**\" --if-present run build:postcompile && node --import tsx scripts/build-workspace-artifact-manifest.ts",
     "build:carrier-artifacts": "cargo native-package",
     "build:carrier-artifacts:compat": "node --import tsx scripts/build-carrier-artifacts.ts",
     "materialize:carrier": "cargo native-materialize",
@@ -52,7 +52,6 @@
     "test:calendar": "pnpm --filter @narada-core/calendar-mcp test",
     "test:task-lifecycle": "pnpm --filter @narada-core/task-lifecycle-mcp test",
     "test:work-lifecycle": "pnpm --filter @narada-core/work-lifecycle-mcp test",
-    "test:site-loop": "pnpm --filter @narada-core/site-loop-mcp test",
     "test:agent-context": "pnpm --filter @narada-core/agent-context-mcp test",
     "test:sop": "pnpm --filter @narada-core/sop-mcp test",
     "test:scheduler": "pnpm --filter @narada-core/scheduler-mcp test",

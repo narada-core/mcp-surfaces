@@ -61,7 +61,7 @@ function firstEnvelopeOrPayloadString(envelope: any, field: any) {
 
 function isCanonicalScheduledSopReplacement(envelope: any) {
   return envelope?.kind === 'command_request'
-    && envelope?.source?.kind === 'site_loop_schedule'
+    && envelope?.source?.kind === 'scheduler_schedule'
     && normalizedNonEmptyString(envelope?.supersedes_envelope_id) !== null
     && normalizedNonEmptyString(envelope?.payload?.sop_id) !== null;
 }

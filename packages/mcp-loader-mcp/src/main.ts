@@ -1917,7 +1917,6 @@ const SHARED_SURFACE_REGISTRY: Record<string, { entrypoint: string; args: string
   'graph-mail': { entrypoint: `${MCP_SURFACES_ROOT}/graph-mail-mcp/dist/src/main.js`, args: ['--site-root', '{site_root}'] },
   'calendar': { entrypoint: `${MCP_SURFACES_ROOT}/calendar-mcp/dist/src/main.js`, args: ['--site-root', '{site_root}'] },
   'task-lifecycle': { entrypoint: `${MCP_SURFACES_ROOT}/task-lifecycle-mcp/dist/src/task-lifecycle/task-mcp-server.js`, args: ['--site-root', '{site_root}'] },
-  'site-loop': { entrypoint: `${MCP_SURFACES_ROOT}/site-loop-mcp/dist/src/site-loop-mcp-server.js`, args: ['--site-root', '{site_root}'] },
   'agent-context': { entrypoint: `${MCP_SURFACES_ROOT}/agent-context-mcp/dist/src/main.js`, args: ['--site-root', '{site_root}'] },
   'catalog-observation': { entrypoint: `${MCP_SURFACES_ROOT}/catalog-observation-mcp/dist/src/main.js`, args: [] },
   'runtime-introspection': { entrypoint: `${MCP_SURFACES_ROOT}/runtime-introspection-mcp/dist/src/main.js`, args: [] },

@@ -159,7 +159,7 @@ process.stdin.on('data', (chunk) => {
 }), 'utf8');
 writeFileSync(join(aggregateRoot, '.ai', 'mcp', 'narada-sonar-mcp.json'), JSON.stringify({
   mcpServers: {
-    'site-loop': {
+    scheduler: {
       command: 'node',
       args: ['--version'],
     },
@@ -337,7 +337,7 @@ try {
   const aggregateListResult = await call('tools/call', { name: 'mcp_loader_list_site_surfaces', arguments: { site_root: aggregateRoot } }, 10);
   assert.equal(aggregateListResult?.schema, 'narada.mcp_loader.site_surfaces.v1');
   const aggregateSurfaces = aggregateListResult?.surfaces as { surface_id: string }[];
-  assert.ok(aggregateSurfaces.some((s) => s.surface_id === 'site-loop'), `expected site-loop in ${JSON.stringify(aggregateSurfaces)}`);
+  assert.ok(aggregateSurfaces.some((s) => s.surface_id === 'scheduler'), `expected scheduler in ${JSON.stringify(aggregateSurfaces)}`);
 
   const fragmentedListResult = await call('tools/call', { name: 'mcp_loader_list_site_surfaces', arguments: { site_root: fragmentedRoot } }, 21);
   assert.equal(fragmentedListResult?.schema, 'narada.mcp_loader.site_surfaces.v1');

@@ -30,7 +30,6 @@ mod operator_console;
 mod operator_console_runtime;
 mod project_state_authority;
 mod quota_authority;
-mod resident_host;
 mod runtime_introspection;
 mod scheduler;
 mod scheduler_activation;
@@ -38,7 +37,6 @@ mod simple_surfaces;
 mod site_coherence;
 mod site_inbox;
 mod site_lifecycle_authority;
-mod site_loop;
 mod site_registry_authority;
 mod sop;
 mod sop_authority;
@@ -65,20 +63,6 @@ fn main() {
     let arguments = env::args().skip(1).collect::<Vec<_>>();
     if quota_authority::is_query_mode(&arguments) {
         if let Err(error) = quota_authority::run_query_mode(&arguments) {
-            let _ = writeln!(io::stderr(), "{error}");
-            std::process::exit(1);
-        }
-        return;
-    }
-    if site_loop::is_supervisor_mode(&arguments) {
-        if let Err(error) = site_loop::run_supervisor(&arguments) {
-            let _ = writeln!(io::stderr(), "{error}");
-            std::process::exit(1);
-        }
-        return;
-    }
-    if resident_host::is_host_mode(&arguments) {
-        if let Err(error) = resident_host::run(&arguments) {
             let _ = writeln!(io::stderr(), "{error}");
             std::process::exit(1);
         }
@@ -362,15 +346,6 @@ fn handle_request(request: &Value, options: &Options) -> Option<Value> {
                 calendar::auxiliary(method, &params).map(|value| modern_result(value, options))
             }
             method
-                if options.surface_id == "site-loop"
-                    && matches!(
-                        method,
-                        "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel"
-                    ) =>
-            {
-                site_loop::auxiliary(method, &params).map(|value| modern_result(value, options))
-            }
-            method
                 if options.surface_id == "surface-feedback"
                     && matches!(
                         method,
@@ -511,15 +486,6 @@ fn handle_request(request: &Value, options: &Options) -> Option<Value> {
                     ) =>
             {
                 calendar::auxiliary(method, &params)
-            }
-            method
-                if options.surface_id == "site-loop"
-                    && matches!(
-                        method,
-                        "prompts/list" | "prompts/get" | "completion/complete" | "logging/setLevel"
-                    ) =>
-            {
-                site_loop::auxiliary(method, &params)
             }
             method
                 if options.surface_id == "surface-feedback"
@@ -696,7 +662,6 @@ fn server_name(options: &Options) -> String {
     match options.surface_id.as_str() {
         "site-inbox" => "narada-site-inbox-mcp".to_string(),
         "calendar" => "narada-calendar-mcp".to_string(),
-        "site-loop" => "narada-site-loop-mcp".to_string(),
         "surface-feedback" => "surface-feedback-mcp".to_string(),
         "sop" => "sop-mcp".to_string(),
         "delegated-task" => "delegated-task-mcp".to_string(),
@@ -726,7 +691,6 @@ fn capabilities(surface_id: &str) -> Value {
         surface_id,
         "site-inbox"
             | "calendar"
-            | "site-loop"
             | "surface-feedback"
             | "sop"
             | "delegated-task"
@@ -805,7 +769,6 @@ fn raw_list_tools(surface_id: &str) -> Vec<Value> {
     match surface_id {
         "site-inbox" => site_inbox::list_tools(),
         "calendar" => calendar::list_tools(),
-        "site-loop" => site_loop::list_tools(),
         "surface-feedback" => surface_feedback::list_tools(),
         "sop" => sop::list_tools(),
         "delegated-task" => delegated_task::list_tools(),
@@ -972,7 +935,6 @@ fn call_tool(
         ("operator-routing", "operator_route_request") => operator_route_request(&args, options),
         ("site-inbox", name) => site_inbox::call_tool(name, &args, &options.site_root),
         ("calendar", name) => calendar::call_tool(name, &args, &options.site_root),
-        ("site-loop", name) => site_loop::call_tool(name, &args, &options.site_root),
         ("surface-feedback", name) => surface_feedback::call_tool(name, &args, &options.site_root),
         ("sop", name) => sop::call_tool(name, &args, &options.site_root),
         ("delegated-task", name) => delegated_task::call_tool(name, &args, &options.site_root),
@@ -1638,8 +1600,6 @@ mod tests {
             "andrey-user",
             "--owned-surface-id",
             "calendar",
-            "--owned-surface-id",
-            "site-loop",
         ]);
         assert_eq!(feedback.site_root, PathBuf::from("feedback"));
         assert_eq!(
@@ -1656,7 +1616,7 @@ mod tests {
         );
         assert_eq!(
             environment_value(&feedback, "NARADA_OWNED_SURFACE_IDS"),
-            Some("calendar,site-loop")
+            Some("calendar")
         );
 
         let worker = parsed_options(&[
@@ -1795,7 +1755,6 @@ mod tests {
             "mailbox",
             "graph-mail",
             "calendar",
-            "site-loop",
             "site-lifecycle",
             "site-registry",
             "worker-delegation",

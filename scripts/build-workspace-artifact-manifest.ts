@@ -8,7 +8,6 @@ const packageRoots = [
   ...directPackageRoots(join(workspaceRoot, 'packages')),
   ...directPackageRoots(join(workspaceRoot, 'packages', 'shared')),
   resolve(workspaceRoot, '..', 'narada', 'packages', 'process-launch-posture'),
-  resolve(workspaceRoot, '..', 'narada', 'packages', 'site-operating-loop'),
 ];
 const outputPath = join(workspaceRoot, '.ai', 'runtime', 'workspace-artifact-manifest.json');
 mkdirSync(resolve(outputPath, '..'), { recursive: true });
