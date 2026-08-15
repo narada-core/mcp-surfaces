@@ -6,7 +6,7 @@
   "scripts": {
     "build:native": "node scripts/build-native.mjs",
     "test:native": "pnpm --filter @narada-core/mcp-protocol build && pnpm exec tsc -b ../mcp-runtime-proxy/tsconfig.json && pnpm --filter @narada-core/mcp-runtime-client build && pnpm --filter @narada-core/sop-mcp build && pnpm --filter @narada-core/scheduler-mcp build && pnpm run build:native && node scripts/verify-native-protocol.mjs",
-    "test:native:delegation": "pnpm --filter @narada-core/process-launch-posture build && pnpm --filter @narada-core/worker-delegation-mcp build && pnpm --filter @narada-core/delegated-task-mcp build && pnpm run build:native && node scripts/verify-native-protocol.mjs delegated-task && node scripts/verify-native-protocol.mjs worker-delegation",
+    "test:native:delegation": "cargo test --locked --manifest-path native/Cargo.toml worker_delegation && cargo test --locked --manifest-path native/Cargo.toml delegated_task",
     "build": "pnpm run build:native"
   },
   "naradaRuntimeArtifacts": {

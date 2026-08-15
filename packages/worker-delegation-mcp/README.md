@@ -1,4 +1,9 @@
-# @narada-core/worker-delegation-mcp
+# @narada-core/worker-delegation-mcp (internal library)
+
+This package is not an MCP server. The `worker-delegation` surface is hosted
+by the native Rust executable in `@narada-core/mcp-surfaces-native`. Its
+TypeScript sources are non-authoritative compatibility code for the Site Loop
+only; they have no `bin`, `surface-definition`, or carrier entrypoint.
 
 Policy-gated MCP authority for bounded delegated worker runs.
 
@@ -45,4 +50,4 @@ The default package test exercises the native Rust authority:
 cargo test --locked --manifest-path packages/shared/mcp-surfaces-native/native/Cargo.toml worker_delegation
 ```
 
-Legacy TypeScript/Bun/Node scripts are retained only for explicit compatibility comparison and are not evidence for the admitted carrier runtime.
+No TypeScript, Bun, or Node runtime path is admitted or tested for this MCP surface.

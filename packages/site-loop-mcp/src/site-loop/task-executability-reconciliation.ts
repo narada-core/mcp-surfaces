@@ -4,7 +4,7 @@ import {
   createServerState,
   delegatedTaskResult,
   delegatedTaskRun,
-} from '@narada-core/delegated-task-mcp';
+} from '@narada-core/delegated-task-mcp/internal';
 import {
   admitTaskExecutabilityAssessment,
   assembleDeclaredEnvironment,

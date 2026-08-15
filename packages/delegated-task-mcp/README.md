@@ -1,4 +1,9 @@
-# @narada-core/delegated-task-mcp
+# @narada-core/delegated-task-mcp (internal library)
+
+This package is not an MCP server. The `delegated-task` surface is hosted by
+the native Rust executable in `@narada-core/mcp-surfaces-native`. Its
+TypeScript sources are non-authoritative compatibility code for the Site Loop
+only; they have no `bin`, `surface-definition`, or carrier entrypoint.
 
 Outcome-oriented delegated task orchestration MCP surface.
 
@@ -146,8 +151,10 @@ ownership and revision evidence.
 
 ## Verification
 
+The admitted surface is verified through the native Rust implementation:
+
 ```powershell
-pnpm --filter @narada-core/delegated-task-mcp test
-pnpm --filter @narada-core/delegated-task-mcp test:live
-pnpm --filter @narada-core/delegated-task-mcp test:e2e:site-fabric
+cargo test --locked --manifest-path packages/shared/mcp-surfaces-native/native/Cargo.toml delegated_task
 ```
+
+This package has no standalone MCP runtime or compatibility test suite.

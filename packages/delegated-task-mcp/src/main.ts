@@ -1,12 +1,10 @@
-#!/usr/bin/env node
 import { buildGuidanceResult } from './guidance.js';
 import { guidanceToolDefinition } from './guidance.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { pathToFileURL } from 'node:url';
-import { callWorkerTool, createWorkerPolicy, providerRegistryResolution, providerRuntimeMetadataFromRegistry, readProviderRegistryDocument, publicWorkerPolicy, type WorkerMcpState } from '@narada-core/worker-delegation-mcp';
+import { callWorkerTool, createWorkerPolicy, providerRegistryResolution, providerRuntimeMetadataFromRegistry, readProviderRegistryDocument, publicWorkerPolicy, type WorkerMcpState } from '@narada-core/worker-delegation-mcp/internal';
 import { executionBindingSchema, executionRequestFingerprint, normalizeExecutionBinding, type ExecutionBinding } from '@narada-core/execution-contract';
 import { TASK_EXECUTABILITY_ASSESSMENT_PROFILE_VERSION, TASK_EXECUTABILITY_ASSESSMENT_SCHEMA, TASK_EXECUTABILITY_ASSESSMENT_TEMPLATE_ID, taskExecutabilityAssessmentIdempotencyKey, taskExecutabilityAssessmentOutputSchema, taskExecutabilityAssessmentTemplate, validateTaskExecutabilityAssessment } from './task-executability-assessment.js';
 import { checkCanonicalTaskLifecycleDispatch, type TaskLifecycleDispatchGateState } from './task-lifecycle-executability-gate.js';
@@ -3136,7 +3134,3 @@ function drainJsonRpcFrames(buffer: string) { const requests: JsonRecord[] = [];
 function writeJsonRpcResponse(response: JsonRecord, { framed }: { framed: boolean }) { const body = JSON.stringify(response); if (framed) process.stdout.write(`Content-Length: ${Buffer.byteLength(body, 'utf8')}\r\n\r\n${body}`); else process.stdout.write(`${body}\n`); }
 function parseArgs(argv: string[]) { const options: JsonRecord = {}; const allowedRoots: string[] = []; for (let i = 0; i < argv.length; i += 1) { const arg = argv[i]; if (arg === '--task-root') options.taskRoot = argv[++i]; else if (arg === '--output-root') options.outputRoot = argv[++i]; else if (arg === '--site-root') options.siteRoot = argv[++i]; else if (arg === '--site-id') options.siteId = argv[++i]; else if (arg === '--allowed-root') allowedRoots.push(argv[++i]); else if (arg === '--worker-policy-config') { const value = argv[++i]; if (!value || value.startsWith('--')) throw new Error('missing value for --worker-policy-config'); options.workerPolicyConfig = value; } else throw new Error(`unknown_argument:${arg}`); } if (allowedRoots.length) options.allowedRoots = allowedRoots; return options; }
 function sleep(ms: number): Promise<void> { return new Promise((resolveDelay) => setTimeout(resolveDelay, ms)); }
-
-export async function runStdioServer(options: JsonRecord = {}): Promise<void> { const state = createServerState(options); let buffer = ''; let framed = false; process.stdin.setEncoding('utf8'); for await (const chunk of process.stdin) { buffer += chunk; const drained = /^Content-Length:/i.test(buffer) ? drainJsonRpcFrames(buffer) : drainJsonLines(buffer); framed ||= drained.framed; buffer = drained.remaining; for (const request of drained.requests) { const response = await handleRequest(request, state); if (response) writeJsonRpcResponse(response, { framed }); } } }
-export { parseArgs };
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) runStdioServer(parseArgs(process.argv.slice(2))).catch((error) => { process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`); process.exit(1); });

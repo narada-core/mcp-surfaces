@@ -160,7 +160,7 @@ fn guidance_tool() -> Value {
     )
 }
 fn guidance(args: &Map<String, Value>) -> Value {
-    json!({"schema":"narada.worker.guidance.v1","status":"ok","server_name":SERVER_NAME,"requested":{"workflow":args.get("workflow").cloned().unwrap_or(Value::Null),"tool":args.get("tool").cloned().unwrap_or(Value::Null)},"cognition":{"default":"low","omitted_constraint_behavior":"constraints.cognition resolves to low","mapping_tool":"worker_cognition_defaults_inspect"},"first_use":["Inspect worker_policy_inspect.","Omitted constraints.cognition resolves to low; use worker_cognition_defaults_inspect for the current model and reasoning-effort mapping.","Resolve worker inputs without launching with worker_config_resolve.","Launch with worker_run or worker_edit.","Read durable runs with worker_run_status or worker_run_wait.","Use worker_output_show for bounded artifact readback."],"windows_rust_toolchain":{"status":"caller_environment_required","remediation":"For MSVC Rust linking, launch the carrier from a Developer PowerShell or initialize VsDevCmd before starting the carrier so link.exe is inherited by workers.","probe":"worker_policy_inspect reports the inherited PATH boundary; workers do not perform open-ended Visual Studio discovery."},"boundaries":["The native Rust surface launches only the native Rust narada-agent-runtime-server.","Credentials remain environment-projected and are never returned.","Run records are bounded to the site worker-delegation root."]})
+    json!({"schema":"narada.worker.guidance.v1","status":"ok","server_name":SERVER_NAME,"requested":{"workflow":args.get("workflow").cloned().unwrap_or(Value::Null),"tool":args.get("tool").cloned().unwrap_or(Value::Null)},"cognition":{"default":"low","omitted_constraint_behavior":"constraints.cognition resolves to low","mapping_tool":"worker_cognition_defaults_inspect"},"first_use":["Inspect worker_policy_inspect.","Omitted constraints.cognition resolves to low; use worker_cognition_defaults_inspect for the current model and reasoning-effort mapping.","Resolve worker inputs without launching with worker_config_resolve.","Launch with worker_run or worker_edit.","Read durable runs with worker_run_status or worker_run_wait.","Use worker_output_show for bounded artifact readback."],"windows_rust_toolchain":{"status":"caller_environment_required","remediation":"For MSVC Rust linking, launch the carrier from a Developer PowerShell or initialize VsDevCmd before starting the carrier so link.exe is inherited by workers.","probe":"worker_policy_inspect reports the inherited PATH boundary; workers do not perform open-ended Visual Studio discovery."},"boundaries":["The native Rust surface launches only the native Rust narada-agent-runtime-server.","Credentials remain SecretStore-referenced and are never returned.","Run records are bounded to the site worker-delegation root."]})
 }
 
 fn run_root(root: &Path) -> PathBuf {
@@ -245,7 +245,7 @@ fn read_run(root: &Path, id: &str) -> Result<Value, Value> {
 }
 
 fn policy(root: &Path, allowed_roots: &[PathBuf]) -> Value {
-    json!({"schema":"narada.worker.policy.v1","status":"ok","server_name":SERVER_NAME,"run_root":run_root(root).to_string_lossy(),"site_root":root.to_string_lossy(),"allowed_roots":allowed_roots.iter().map(|allowed|allowed.to_string_lossy()).collect::<Vec<_>>(),"allowed_runtimes":["narada-agent-runtime-server"],"allowed_authorities":["read","write","command"],"default_cognition":DEFAULT_COGNITION,"native_execution":"rust_authority","secret_projection":"environment_only","windows_msvc_environment":{"inherited":true,"automatic_discovery":false,"remediation":"Initialize VsDevCmd or use Developer PowerShell before launching the carrier."}})
+    json!({"schema":"narada.worker.policy.v1","status":"ok","server_name":SERVER_NAME,"run_root":run_root(root).to_string_lossy(),"site_root":root.to_string_lossy(),"allowed_roots":allowed_roots.iter().map(|allowed|allowed.to_string_lossy()).collect::<Vec<_>>(),"allowed_runtimes":["narada-agent-runtime-server"],"allowed_authorities":["read","write","command"],"default_cognition":DEFAULT_COGNITION,"native_execution":"rust_authority","secret_projection":"secret_store_reference_only","windows_msvc_environment":{"inherited":true,"automatic_discovery":false,"remediation":"Initialize VsDevCmd or use Developer PowerShell before launching the carrier."}})
 }
 fn capability_snapshot(
     authority: &str,
@@ -719,6 +719,74 @@ fn write_json_atomic(path: &Path, value: &Value) -> Result<(), Value> {
     .map_err(|_| error("worker_write_failed", "worker_write_failed"))?;
     fs::rename(&temp, path).map_err(|_| error("worker_write_failed", "worker_write_failed"))
 }
+
+fn provider_registry_candidates(root: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(path) = std::env::var_os("NARADA_PROVIDER_REGISTRY_PATH") {
+        candidates.push(PathBuf::from(path));
+    }
+    candidates.push(root.join(".narada/provider-registry.json"));
+    let source_root = narada_source_root(root);
+    candidates.push(source_root.join(
+        "narada/packages/invokable-intelligence-management/assets/provider-registry.bootstrap.json",
+    ));
+    candidates
+}
+
+fn provider_models_from_registry(value: &Value) -> Map<String, Vec<String>> {
+    let mut result = Map::new();
+    let Some(providers) = value.get("providers").and_then(Value::as_object) else {
+        return result;
+    };
+    for (provider, record) in providers {
+        let mut models = record
+            .get("available_models")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        if models.is_empty() {
+            if let Some(model_map) = record.get("models").and_then(Value::as_object) {
+                models.extend(model_map.keys().cloned());
+            }
+        }
+        models.sort();
+        models.dedup();
+        if !models.is_empty() {
+            result.insert(provider.clone(), models);
+        }
+    }
+    result
+}
+
+fn canonical_provider_models(root: &Path) -> Result<Map<String, Vec<String>>, Value> {
+    for path in provider_registry_candidates(root) {
+        if !path.is_file() {
+            continue;
+        }
+        let value = read_json(&path).map_err(|_| {
+            error(
+                "worker_provider_registry_invalid",
+                "worker_provider_registry_invalid",
+            )
+        })?;
+        let models = provider_models_from_registry(&value);
+        if models.is_empty() {
+            return Err(error(
+                "worker_provider_registry_invalid",
+                "worker_provider_registry_invalid",
+            ));
+        }
+        return Ok(models);
+    }
+    Err(error(
+        "worker_provider_registry_unavailable",
+        "worker_provider_registry_unavailable",
+    ))
+}
+
 fn cognition_defaults_update(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     let provider = required_string(args, "provider", "worker_cognition_provider_required")?;
     let cognition = required_string(args, "cognition", "worker_cognition_required")?;
@@ -732,6 +800,19 @@ fn cognition_defaults_update(args: &Map<String, Value>, root: &Path) -> Result<V
     let effort = required_string(args, "reasoning_effort", "worker_reasoning_effort_required")?;
     let path = defaults_path(root);
     let mut record = read_json(&path).unwrap_or_else(|_| json!({"schema":"narada.worker.cognition_defaults.v1","version":0,"provider_cognition_defaults":{},"effective_cognition_defaults":empty_defaults()}));
+    let provider_models = canonical_provider_models(root)?;
+    let allowed_models = provider_models.get(provider).ok_or_else(|| {
+        error(
+            "worker_cognition_provider_not_allowed",
+            "worker_cognition_provider_not_allowed",
+        )
+    })?;
+    if !allowed_models.iter().any(|candidate| candidate == model) {
+        return Err(error(
+            "worker_cognition_model_not_allowed",
+            "worker_cognition_model_not_allowed",
+        ));
+    }
     record["version"] = json!(record.get("version").and_then(Value::as_u64).unwrap_or(0) + 1);
     record["updated_at"] = json!(now());
     record["updated_by"] = args.get("actor").cloned().unwrap_or(Value::Null);
@@ -868,9 +949,9 @@ fn validate_native_provider_binding(binding: Option<&Value>) -> Result<(), Value
         .get("provider")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let expected_credential = match provider {
-        "deepseek-api" => "DEEPSEEK_API_KEY",
-        "openrouter-api" => "OPENROUTER_API_KEY",
+    let expected_secret_ref = match provider {
+        "deepseek-api" => "narada/provider/deepseek-api/api-key",
+        "openrouter-api" => "narada/provider/openrouter-api/api-key",
         _ => {
             return Err(error(
                 "worker_native_provider_binding_invalid",
@@ -889,7 +970,7 @@ fn validate_native_provider_binding(binding: Option<&Value>) -> Result<(), Value
     };
     if binding.get("schema").and_then(Value::as_str) != Some("narada.native.provider_binding.v1")
         || binding.get("protocol").and_then(Value::as_str) != Some("openai/chat-completions/1")
-        || binding.get("credential_env").and_then(Value::as_str) != Some(expected_credential)
+        || binding.get("credential_secret_ref").and_then(Value::as_str) != Some(expected_secret_ref)
         || !endpoint_ok
         || binding
             .get("model")
@@ -1703,6 +1784,15 @@ mod tests {
     }
 
     #[test]
+    fn policy_declares_secret_store_reference_projection() {
+        let value = policy(Path::new("."), &[PathBuf::from(".")]);
+        assert_eq!(value["secret_projection"], "secret_store_reference_only");
+        assert!(guidance(&Map::new())["boundaries"][1]
+            .as_str()
+            .is_some_and(|text| text.contains("SecretStore-referenced")));
+    }
+
+    #[test]
     fn config_resolve_reports_site_cognition_mapping_without_launching() {
         let root =
             std::env::temp_dir().join(format!("narada-worker-config-{}", uuid::Uuid::new_v4()));
@@ -1880,6 +1970,29 @@ mod tests {
         });
         let refusal = admitted_plan_binding(&admission).expect_err("binding must be required");
         assert_eq!(refusal["code"], "worker_native_provider_binding_missing");
+
+        let mut valid = admission.clone();
+        valid["provider_binding"] = json!({
+            "schema":"narada.native.provider_binding.v1",
+            "provider":"deepseek-api",
+            "protocol":"openai/chat-completions/1",
+            "endpoint":"https://api.deepseek.com/v1/chat/completions",
+            "model":"deepseek-v4-flash",
+            "credential_secret_ref":"narada/provider/deepseek-api/api-key"
+        });
+        assert!(admitted_plan_binding(&valid).is_ok());
+
+        let mut env_binding = valid;
+        env_binding["provider_binding"] = json!({
+            "schema":"narada.native.provider_binding.v1",
+            "provider":"deepseek-api",
+            "protocol":"openai/chat-completions/1",
+            "endpoint":"https://api.deepseek.com/v1/chat/completions",
+            "model":"deepseek-v4-flash",
+            "credential_env":"DEEPSEEK_API_KEY"
+        });
+        let refusal = admitted_plan_binding(&env_binding).expect_err("env binding must refuse");
+        assert_eq!(refusal["code"], "worker_native_provider_binding_invalid");
     }
 
     #[test]
@@ -1977,12 +2090,51 @@ mod tests {
     fn native_worker_updates_cognition_defaults_atomically() {
         let root =
             std::env::temp_dir().join(format!("narada-worker-defaults-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join(".narada")).expect("site root");
+        fs::write(
+            root.join(".narada/provider-registry.json"),
+            serde_json::to_vec(&json!({
+                "schema":"narada.carrier.provider_registry.v1",
+                "providers":{"fixture":{"available_models":["fixture-model"]}}
+            }))
+            .expect("registry"),
+        )
+        .expect("registry write");
         let updated = cognition_defaults_update(json!({"provider":"fixture","cognition":"high","model":"fixture-model","reasoning_effort":"max","actor":"test"}).as_object().unwrap(), &root).expect("update");
         assert_eq!(updated["status"], "updated");
         assert_eq!(
             cognition_defaults(&root)["defaults"]["high"]["model"],
             "fixture-model"
         );
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn native_worker_rejects_provider_and_model_outside_registry() {
+        let root =
+            std::env::temp_dir().join(format!("narada-worker-defaults-reject-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join(".narada")).expect("site root");
+        fs::write(
+            root.join(".narada/provider-registry.json"),
+            br#"{"schema":"narada.carrier.provider_registry.v1","providers":{"fixture":{"available_models":["fixture-model"]}}}"#,
+        )
+        .expect("registry write");
+        let unknown_provider = cognition_defaults_update(
+            json!({"provider":"unknown","cognition":"low","model":"fixture-model","reasoning_effort":"low"})
+                .as_object()
+                .unwrap(),
+            &root,
+        )
+        .expect_err("unknown provider must be refused");
+        assert_eq!(unknown_provider["code"], "worker_cognition_provider_not_allowed");
+        let unknown_model = cognition_defaults_update(
+            json!({"provider":"fixture","cognition":"low","model":"unknown-model","reasoning_effort":"low"})
+                .as_object()
+                .unwrap(),
+            &root,
+        )
+        .expect_err("unknown model must be refused");
+        assert_eq!(unknown_model["code"], "worker_cognition_model_not_allowed");
         fs::remove_dir_all(root).expect("cleanup");
     }
 
