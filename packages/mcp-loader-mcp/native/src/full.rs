@@ -2382,7 +2382,10 @@ fn ms_to_iso(milliseconds: u128) -> String {
 fn runtime_freshness(state: &LoaderState) -> Value {
     let mut reload_action = supervisor_restart_action();
     reload_action["guidance"] = json!("Restart the mcp-loader process through its carrier or runtime supervisor to load rebuilt loader code. mcp_loader_surface_restart replaces only an attached child and does not reload the mcp-loader process.");
-    let loader_source = join_path(&state.workspace_root, "packages/mcp-loader-mcp/src/main.ts");
+    let loader_source = join_path(
+        &state.workspace_root,
+        "packages/mcp-loader-mcp/native/src/main.rs",
+    );
 
     let runtime_entrypoint = env::current_exe()
         .ok()
@@ -2395,90 +2398,30 @@ fn runtime_freshness(state: &LoaderState) -> Value {
             runtime_entrypoint.clone(),
         ),
         (
-            "loader_guidance",
+            "loader_runtime_impl",
             join_path(
                 &state.workspace_root,
-                "packages/mcp-loader-mcp/src/guidance.ts",
+                "packages/mcp-loader-mcp/native/src/full.rs",
             ),
-            join_path(
-                &state.workspace_root,
-                "packages/mcp-loader-mcp/dist/src/guidance.js",
-            ),
-        ),
-        (
-            "loader_runtime_lifecycle",
-            join_path(
-                &state.workspace_root,
-                "packages/mcp-loader-mcp/src/runtime-lifecycle.ts",
-            ),
-            join_path(
-                &state.workspace_root,
-                "packages/mcp-loader-mcp/dist/src/runtime-lifecycle.js",
-            ),
-        ),
-        (
-            "loader_tool_timeout",
-            join_path(
-                &state.workspace_root,
-                "packages/mcp-loader-mcp/src/tool-timeout.ts",
-            ),
-            join_path(
-                &state.workspace_root,
-                "packages/mcp-loader-mcp/dist/src/tool-timeout.js",
-            ),
-        ),
-        (
-            "mcp_transport",
-            join_path(
-                &state.workspace_root,
-                "packages/shared/mcp-transport/src/mcp-payload-file.ts",
-            ),
-            join_path(
-                &state.workspace_root,
-                "packages/shared/mcp-transport/dist/src/mcp-payload-file.js",
-            ),
+            runtime_entrypoint.clone(),
         ),
     ];
     let config_files = vec![
         (
-            "workspace_package",
-            join_path(&state.workspace_root, "package.json"),
+            "workspace_cargo_lockfile",
+            join_path(&state.workspace_root, "Cargo.lock"),
         ),
         (
-            "workspace_lockfile",
-            join_path(&state.workspace_root, "pnpm-lock.yaml"),
-        ),
-        (
-            "workspace_typescript_config",
-            join_path(&state.workspace_root, "tsconfig.base.json"),
-        ),
-        (
-            "loader_package",
+            "loader_cargo_manifest",
             join_path(
                 &state.workspace_root,
-                "packages/mcp-loader-mcp/package.json",
-            ),
-        ),
-        (
-            "loader_typescript_config",
-            join_path(
-                &state.workspace_root,
-                "packages/mcp-loader-mcp/tsconfig.json",
-            ),
-        ),
-        (
-            "mcp_transport_package",
-            join_path(
-                &state.workspace_root,
-                "packages/shared/mcp-transport/package.json",
+                "packages/mcp-loader-mcp/native/Cargo.toml",
             ),
         ),
     ];
-    // The Rust loader is the authority.  The source/dist TypeScript files and
-    // workspace package metadata remain in the response as diagnostics for
-    // older tooling, but they are not runtime dependencies of this binary.
-    // Treating their mtimes as loader freshness signals caused a supervisor to
-    // restart a healthy native loader after an unrelated package touch.
+    // The native Rust sources and Cargo manifests are the loader authority.
+    // The TypeScript implementation is retained only as a non-authoritative
+    // compatibility artifact and is deliberately absent from freshness data.
     let mut reasons = Vec::new();
     let mut file_pairs = Vec::new();
     for (name, source, runtime) in &pairs {
@@ -2545,6 +2488,8 @@ fn runtime_freshness(state: &LoaderState) -> Value {
         "dependency_files":dependencies,
         "config_files":config_observations,
         "tracked_file_count":file_pairs.len()*2+config_files.len(),
+        "authority":"native_rust",
+        "runtime_artifact_sharing":"loader_entrypoint and loader_runtime_impl are compiled into the same native executable",
         "reasons":reasons,
         "reload_action":reload_action
     })
@@ -5108,7 +5053,7 @@ mod tests {
             },
             surface_root: String::new(),
             workspace_root: env!("CARGO_MANIFEST_DIR").to_string(),
-            // An old process start must not make package/TS mtimes stale.
+            // Freshness is anchored to the native Rust artifact graph, not legacy TS metadata.
             started_ms: 0,
             run_id: "test-loader".to_string(),
             owner_pid: 0,
@@ -5123,6 +5068,18 @@ mod tests {
         assert_eq!(freshness["reload_required"], false);
         assert_eq!(freshness["freshness_scope"], "native_loader_artifact");
         assert_eq!(freshness["reasons"], json!([]));
+        assert_eq!(freshness["authority"], "native_rust");
+        for file in freshness["source_files"].as_array().expect("source files") {
+            let path = file["observation"]["path"].as_str().expect("source path");
+            assert!(path.contains("native/src/"));
+            assert!(!path.ends_with(".ts"));
+            assert!(!path.ends_with(".js"));
+        }
+        for file in freshness["config_files"].as_array().expect("config files") {
+            let path = file["observation"]["path"].as_str().expect("config path");
+            assert!(!path.ends_with("pnpm-lock.yaml"));
+            assert!(!path.ends_with(".ts"));
+        }
     }
 
     #[test]

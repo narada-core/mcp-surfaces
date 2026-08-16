@@ -13,6 +13,7 @@ const SERVER_NAME: &str = "worker-delegation-mcp";
 const DEFAULT_COGNITION: &str = "low";
 const MAX_RUNS: usize = 200;
 const MAX_FILE_BYTES: usize = 256_000;
+const READ_ONLY_COMMAND_CONTRACT: &str = "READ-ONLY COMMAND CONTRACT (apply before acting): use one executable with literal argv per probe; use supplied native preflight evidence for path existence/readability instead of probing again; never combine probes with &&, ;, pipes, redirection, $(), backticks, or generated scripts. If a probe is refused, stop that probe and report the refusal; do not retry by bundling commands or changing shells.";
 const READ_TOOLS: &[(&str, &str)] = &[
     (
         "worker_output_show",
@@ -44,7 +45,7 @@ const READ_TOOLS: &[(&str, &str)] = &[
     ),
     (
         "worker_run_wait",
-        "Read one worker run's current state; native mode does not launch or poll a child.",
+        "Read one durable worker run with bounded state-file polling; native mode does not launch a child.",
     ),
     (
         "worker_run_wait_batch",
@@ -161,7 +162,7 @@ fn guidance_tool() -> Value {
     )
 }
 fn guidance(args: &Map<String, Value>) -> Value {
-    json!({"schema":"narada.worker.guidance.v1","status":"ok","server_name":SERVER_NAME,"requested":{"workflow":args.get("workflow").cloned().unwrap_or(Value::Null),"tool":args.get("tool").cloned().unwrap_or(Value::Null)},"cognition":{"default":"low","omitted_constraint_behavior":"constraints.cognition resolves to low","mapping_tool":"worker_cognition_defaults_inspect"},"first_use":["Inspect worker_policy_inspect.","Omitted constraints.cognition resolves to low; use worker_cognition_defaults_inspect for the current model and reasoning-effort mapping.","Resolve worker inputs without launching with worker_config_resolve.","Launch with worker_run or worker_edit. Set constraints.wait_for_completion=true with a bounded wait_timeout_ms when one-call completion is preferred; omitted or false returns the accepted running record immediately.","Read durable runs with worker_run_status or worker_run_wait.","Use worker_output_show for bounded artifact readback."],"windows_rust_toolchain":{"status":"caller_environment_required","remediation":"For MSVC Rust linking, launch the carrier from a Developer PowerShell or initialize VsDevCmd before starting the carrier so link.exe is inherited by workers.","probe":"worker_policy_inspect reports the inherited PATH boundary; workers do not perform open-ended Visual Studio discovery."},"boundaries":["The native Rust surface launches only the native Rust narada-agent-runtime-server.","Credentials remain SecretStore-referenced and are never returned.","Run records are bounded to the site worker-delegation root."]})
+    json!({"schema":"narada.worker.guidance.v1","status":"ok","server_name":SERVER_NAME,"requested":{"workflow":args.get("workflow").cloned().unwrap_or(Value::Null),"tool":args.get("tool").cloned().unwrap_or(Value::Null)},"cognition":{"default":"low","omitted_constraint_behavior":"constraints.cognition resolves to low","mapping_tool":"worker_cognition_defaults_inspect"},"first_use":["Inspect worker_policy_inspect.","Omitted constraints.cognition resolves to low; use worker_cognition_defaults_inspect for the current model and reasoning-effort mapping.","Resolve worker inputs without launching with worker_config_resolve.","Launch with worker_run or worker_edit. Set constraints.wait_for_completion=true with a bounded wait_timeout_ms when one-call completion is preferred; omitted or false returns the accepted running record immediately.","Read durable runs with worker_run_status or worker_run_wait; worker_run_wait is the canonical bounded state-file poll and does not launch a child.","Use worker_output_show for bounded artifact readback.",READ_ONLY_COMMAND_CONTRACT],"windows_rust_toolchain":{"status":"caller_environment_required","remediation":"For MSVC Rust linking, launch the carrier from a Developer PowerShell or initialize VsDevCmd before starting the carrier so link.exe is inherited by workers.","probe":"worker_policy_inspect reports the inherited PATH boundary; workers do not perform open-ended Visual Studio discovery."},"boundaries":["The native Rust surface launches only the native Rust narada-agent-runtime-server.","Credentials remain SecretStore-referenced and are never returned.","Run records are bounded to the site worker-delegation root."]})
 }
 
 fn run_root(root: &Path) -> PathBuf {
@@ -528,7 +529,7 @@ fn wait_for_run(root: &Path, id: &str, timeout_ms: u64) -> Result<(Value, Value)
     }
     let running = run.get("status").and_then(Value::as_str) == Some("running");
     let waited_ms = started.elapsed().as_millis() as u64;
-    let wait = json!({"status":if running{"timed_out"}else{"finished"},"waited":waited_ms>0,"waited_ms":waited_ms,"timeout_ms":timeout_ms,"native_execution":"bounded_poll"});
+    let wait = json!({"status":if running{"timed_out"}else{"finished"},"waited":waited_ms>0,"waited_ms":waited_ms,"timeout_ms":timeout_ms,"native_execution":"bounded_state_poll"});
     Ok((run, wait))
 }
 fn run_wait(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
@@ -1277,7 +1278,7 @@ fn worker_run(
     resume: Option<String>,
     tool_name: &str,
 ) -> Result<Value, Value> {
-    let prompt = instruction(args)?;
+    let prompt = format!("{READ_ONLY_COMMAND_CONTRACT}\n\n{}", instruction(args)?);
     let auth = authority(args)?.to_string();
     let constraints = args.get("constraints").and_then(Value::as_object);
     let max_run_ms = constraints
@@ -1878,7 +1879,7 @@ fn input_schema(name: &str) -> Value {
             json!({"type":"object","properties":{"run_id":run_id()},"required":["run_id"],"additionalProperties":false})
         }
         "worker_run_wait" => {
-            json!({"type":"object","properties":{"run_id":run_id(),"timeout_ms":{"type":"integer","minimum":0,"maximum":300000}},"required":["run_id"],"additionalProperties":false})
+            json!({"type":"object","properties":{"run_id":run_id(),"timeout_ms":{"type":"integer","minimum":0,"maximum":300000,"default":30000,"description":"Maximum bounded state-file polling interval."}},"required":["run_id"],"additionalProperties":false})
         }
         "worker_runs_list" => {
             json!({"type":"object","properties":{"limit":{"type":"integer","minimum":1,"maximum":200},"include_running":{"type":"boolean"},"include_completed":{"type":"boolean"}},"additionalProperties":false})
@@ -2114,6 +2115,13 @@ mod tests {
             guidance(&Map::new())["windows_rust_toolchain"]["status"],
             "caller_environment_required"
         );
+        assert!(guidance(&Map::new())["first_use"]
+            .as_array()
+            .expect("guidance steps")
+            .iter()
+            .any(|step| step
+                .as_str()
+                .is_some_and(|text| text.starts_with("READ-ONLY COMMAND CONTRACT"))));
         assert_eq!(
             policy(Path::new("."), &[])["windows_msvc_environment"]["inherited"],
             true
@@ -2141,6 +2149,7 @@ mod tests {
         assert_eq!(run["status"], "completed");
         assert_eq!(wait["status"], "finished");
         assert_eq!(wait["timeout_ms"], 30_000);
+        assert_eq!(wait["native_execution"], "bounded_state_poll");
         fs::remove_dir_all(root).expect("cleanup");
     }
 

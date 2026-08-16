@@ -88,6 +88,11 @@ The payload's declared creator and id namespace are lineage hints and accidental
 
 The Rust implementation is the sole admitted loader authority in every runtime profile. The loader does not guess, locate, or substitute Node/Bun runtimes and has no compiled-in TypeScript surface registry. It may still execute an external runtime when that exact command is part of the admitted Site-fabric declaration; that is child execution, not a loader implementation fallback.
 
+Native freshness is anchored to native/src/main.rs, native/src/full.rs, the native
+Cargo manifest, and the workspace Cargo lockfile. Legacy TypeScript/JavaScript
+sources are not loader dependencies and do not participate in native loader
+freshness.
+
 For a registrar-materialized native child, the Rust loader deliberately unwraps the native runtime-proxy record and launches `--child-command` directly. The carrier-level runtime proxy remains responsible for materialization preflight; mcp-loader is responsible for the attached child's policy, ownership, supervision, and lifecycle. In native modes, `--entrypoint` is retained as a validated identity field and must match `--child-command`; `--child-applet` is recorded explicitly for multicall children.
 
 Run the authoritative Rust suite with:

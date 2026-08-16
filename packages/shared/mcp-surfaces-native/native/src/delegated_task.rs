@@ -558,7 +558,7 @@ fn assessment_output_schema() -> Value {
 
 fn assessment_template() -> Value {
     let output_schema = assessment_output_schema();
-    json!({"template_id":"task_executability_assessment_v1","strategy":"task_executability_assessment_v1","title":"Bounded Shoshin task executability assessment","profile_version":"shoshin-task-executability-v1","purpose":"Assess one canonical task snapshot without changing it.","idempotency":{"schema":"narada.task.executability.idempotency.v1","inputs":["request_id","task_digest","environment_digest","profile_version"],"formula":"sha256(canonical_json({request_id, task_digest, environment_digest, profile_version}))"},"bounds":{"authority":"read","cognition":"low","runtime":"narada-agent-runtime-server","max_worker_runs":1,"max_run_ms":120000,"max_retries":0,"max_result_items":32,"max_events":32,"write_set":[]},"result_policy":{"expose_worker_refs":true,"compact_completed_worker_refs":true,"max_events":32,"max_worker_refs":1,"max_result_items":32},"output_schema":output_schema,"milestones":[{"id":"assessment","title":"Assess canonical task snapshot","step_ids":["assessment"]}],"steps":[{"id":"assessment","kind":"worker","profile":"shoshin-task-executability-v1","milestone_id":"assessment","write_set":[],"constraints":{"authority":"read","cognition":"low","runtime":"narada-agent-runtime-server","max_run_ms":120000,"max_retries":0,"max_concurrency":1,"wait_for_completion":false,"resumable":false,"required_mcp_tools":[],"preflight_paths":[],"overrides":{"skip_git_repo_check":true}},"output_schema":output_schema}],"worker_delegation_contract":{"surface_id":"worker-delegation","caller_sets_worker_constraints":true,"worker_run_is_child_execution":true,"required_worker_output_fields":["summary","structured_outputs","verification","target_state_changed"],"forbidden_authorities":["write","command"],"required_structured_output":"task_executability_assessment_v1"}})
+    json!({"template_id":"task_executability_assessment_v1","strategy":"task_executability_assessment_v1","title":"Bounded Shoshin task executability assessment","profile_version":"shoshin-task-executability-v1","purpose":"Assess one canonical task snapshot without changing it.","idempotency":{"schema":"narada.task.executability.idempotency.v1","inputs":["request_id","task_digest","environment_digest","profile_version"],"formula":"sha256(canonical_json({request_id, task_digest, environment_digest, profile_version}))"},"bounds":{"authority":"read","cognition":"low","runtime":"narada-agent-runtime-server","max_worker_runs":1,"max_run_ms":300000,"max_retries":0,"max_result_items":32,"max_events":32,"write_set":[]},"result_policy":{"expose_worker_refs":true,"compact_completed_worker_refs":true,"max_events":32,"max_worker_refs":1,"max_result_items":32},"output_schema":output_schema,"milestones":[{"id":"assessment","title":"Assess canonical task snapshot","step_ids":["assessment"]}],"steps":[{"id":"assessment","kind":"worker","profile":"shoshin-task-executability-v1","milestone_id":"assessment","write_set":[],"constraints":{"authority":"read","cognition":"low","runtime":"narada-agent-runtime-server","max_run_ms":300000,"max_retries":0,"max_concurrency":1,"wait_for_completion":false,"resumable":false,"required_mcp_tools":[],"preflight_paths":[],"overrides":{"skip_git_repo_check":true}},"output_schema":output_schema}],"worker_delegation_contract":{"surface_id":"worker-delegation","caller_sets_worker_constraints":true,"worker_run_is_child_execution":true,"required_worker_output_fields":["summary","structured_outputs","verification","target_state_changed"],"forbidden_authorities":["write","command"],"required_structured_output":"task_executability_assessment_v1"}})
 }
 
 fn worker_contract(step_kinds: &[&str]) -> Value {
@@ -1109,31 +1109,54 @@ fn parse_embedded_structured_output(text: &str) -> Option<Value> {
         })
 }
 
+fn required_field_names(value: Option<&Value>) -> Vec<String> {
+    let mut fields = Vec::new();
+    if let Some(items) = value.and_then(Value::as_array) {
+        for field in items.iter().filter_map(|item| {
+            item.as_str()
+                .or_else(|| item.get("name").and_then(Value::as_str))
+        }) {
+            if !fields.iter().any(|known| known == field) {
+                fields.push(field.to_string());
+            }
+        }
+    }
+    fields
+}
+
 fn acceptance_required_fields(task: &Value) -> Vec<String> {
-    task.pointer("/acceptance/required_fields")
-        .or_else(|| task.pointer("/acceptance/requested_fields"))
-        .or_else(|| task.pointer("/acceptance/required"))
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| {
-                    item.as_str()
-                        .or_else(|| item.get("name").and_then(Value::as_str))
-                        .map(str::to_string)
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default()
+    for path in [
+        "/acceptance/required_fields",
+        "/acceptance/requested_fields",
+        "/acceptance/required",
+    ] {
+        let fields = required_field_names(task.pointer(path));
+        if !fields.is_empty() {
+            return fields;
+        }
+    }
+    Vec::new()
 }
 
 fn structured_output_instruction(task: &Value) -> Option<String> {
-    let fields = acceptance_required_fields(task);
+    structured_output_instruction_for_step(task, None)
+}
+
+fn structured_output_instruction_for_step(
+    task: &Value,
+    step: Option<&Value>,
+) -> Option<String> {
+    let mut fields = acceptance_required_fields(task);
+    for field in required_field_names(step.and_then(|value| value.pointer("/output_schema/required"))) {
+        if !fields.iter().any(|known| known == &field) {
+            fields.push(field);
+        }
+    }
     if fields.is_empty() {
         return None;
     }
     Some(format!(
-        "\n\nMANDATORY STRUCTURED OUTPUT CONTRACT: return exactly one JSON object with these required top-level keys: {}. Do not provide the answer only as Markdown or prose. Put each value in the JSON object; a short explanation may follow only after the object.",
+        "\n\nMANDATORY STRUCTURED OUTPUT CONTRACT: return exactly one JSON object with these required top-level keys: {}. Do not provide the answer only as Markdown or prose. Put each value in the JSON object; a short explanation may follow only after the object.\nREAD-ONLY PROBE RULE: use supplied preflight evidence for path checks; if a probe is necessary, issue one executable with literal arguments and no shell operators, pipes, redirection, or generated scripts.",
         fields.join(", ")
     ))
 }
@@ -1402,8 +1425,16 @@ fn task_wait_with_roots(
             poll.min(timeout.saturating_sub(started.elapsed().as_millis() as u64)),
         ))
     };
+    let handoff = terminal_handoff(&task, root);
+    let task_identity = json!({
+        "task_id": task.get("task_id"),
+        "task_status": task.get("status"),
+        "details_ref": handoff.get("details_ref"),
+        "details_tool": handoff.get("details_tool"),
+        "role": "identity_only"
+    });
     Ok(
-        json!({"schema":"narada.delegated_task.wait.v1","status":if task_is_terminal(&task){"finished"}else{"timeout"},"elapsed_ms":started.elapsed().as_millis() as u64,"timeout_ms":timeout,"poll_ms":poll,"task_id":id,"task_status":task.get("status"),"refresh_performed":true,"worker_execution":"native_worker_authority","canonical_terminal_handoff":task_is_terminal(&task),"readback_tool":"delegated_task_wait","result_readback_redundant":task_is_terminal(&task),"terminal_handoff":terminal_handoff(&task, root),"task":terminal_handoff(&task, root)}),
+        json!({"schema":"narada.delegated_task.wait.v1","status":if task_is_terminal(&task){"finished"}else{"timeout"},"elapsed_ms":started.elapsed().as_millis() as u64,"timeout_ms":timeout,"poll_ms":poll,"task_id":id,"task_status":task.get("status"),"refresh_performed":true,"worker_execution":"native_worker_authority","canonical_terminal_handoff":task_is_terminal(&task),"readback_tool":"delegated_task_wait","result_readback_redundant":task_is_terminal(&task),"terminal_handoff":handoff,"task":task_identity}),
     )
 }
 fn task_events(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
@@ -2508,7 +2539,7 @@ fn advance_value_with_roots(
                 .and_then(Value::as_str)
                 .or_else(|| task.get("objective").and_then(Value::as_str))
                 .unwrap_or_default();
-            let instruction = structured_output_instruction(&task)
+            let instruction = structured_output_instruction_for_step(&task, Some(step))
                 .map(|contract| format!("{instruction}{contract}"))
                 .unwrap_or_else(|| instruction.to_string());
             let constraints = if step.get("constraints").is_some() {
@@ -2782,6 +2813,23 @@ mod tests {
     }
 
     #[test]
+    fn structured_output_instruction_uses_step_schema_and_probe_contract() {
+        let task = json!({"objective":"assess"});
+        let step = json!({"output_schema":{"required":["dimensions","findings"]}});
+        let instruction =
+            structured_output_instruction_for_step(&task, Some(&step)).expect("contract");
+        assert!(instruction.contains("dimensions, findings"));
+        assert!(instruction.contains("READ-ONLY PROBE RULE"));
+    }
+
+    #[test]
+    fn executability_template_has_bounded_five_minute_worker_deadline() {
+        let template = assessment_template();
+        assert_eq!(template["bounds"]["max_run_ms"], 300_000);
+        assert_eq!(template["steps"][0]["constraints"]["max_run_ms"], 300_000);
+    }
+
+    #[test]
     fn validation_reports_deferred_preflight_without_inspecting_filesystem() {
         let root = std::env::temp_dir().join(format!("narada-delegated-task-preflight-{}", uuid::Uuid::new_v4()));
         let response = validate(
@@ -2859,6 +2907,9 @@ mod tests {
         assert_eq!(response["terminal_handoff"]["task_status"], "completed");
         assert_eq!(response["terminal_handoff"]["final_structured_output"]["ok"], true);
         assert_eq!(response["terminal_handoff"]["details_tool"], "delegated_task_result");
+        assert_eq!(response["task"]["role"], "identity_only");
+        assert_eq!(response["task"]["details_ref"], response["terminal_handoff"]["details_ref"]);
+        assert!(response["task"].get("final_structured_output").is_none());
         fs::remove_dir_all(root).expect("cleanup");
     }
 
