@@ -553,7 +553,7 @@ fn policy_with_roots(root: &Path, allowed_roots: &[PathBuf]) -> Value {
 }
 
 fn assessment_output_schema() -> Value {
-    json!({"schema":"narada.delegated_task.output_schema.v1","name":"task_executability_assessment_v1","version":1,"required":["dimensions","first_actions","reference_resolutions","acceptance_mappings","required_decisions","findings","assessment_result","evaluator_provenance"],"fields":{"dimensions":"array<object>","first_actions":"array<object>","reference_resolutions":"array<object>","acceptance_mappings":"array<object>","required_decisions":"array<object>","findings":"array<object>","assessment_result":"string: passed|blocked|undetermined|inconclusive OR object {status: executable|passed|blocked|undetermined|inconclusive, implementation_ready: boolean, blockers: array<object>}","evaluator_provenance":"object"},"provenance_required":["runtime","provider","model","cognition","profile_version"],"rejection_rules":["missing_required_field","prose_only","invalid_schema","invalid_provenance"]})
+    json!({"schema":"narada.delegated_task.output_schema.v1","name":"task_executability_assessment_v1","version":1,"required":["dimensions","first_actions","reference_resolutions","acceptance_mappings","required_decisions","findings","assessment_result","evaluator_provenance"],"fields":{"dimensions":"array<object>","first_actions":"array<object>","reference_resolutions":"array<object>","acceptance_mappings":"array<object>","required_decisions":"array<object>","findings":"array<object>","assessment_result":"object {status: executable|blocked|not_executable, implementation_ready: boolean, blockers: array<object>, reason: string when not_executable}","evaluator_provenance":"object"},"conditional_rules":[{"when":"assessment_result.status=executable","requires":["assessment_result.implementation_ready=true","assessment_result.blockers=[]"]},{"when":"assessment_result.status=blocked","requires":["assessment_result.implementation_ready=false","assessment_result.blockers nonempty"]},{"when":"assessment_result.status=not_executable","requires":["assessment_result.implementation_ready=false","assessment_result.reason nonempty"]}],"provenance_required":["runtime","provider","model","cognition","profile_version"],"rejection_rules":["missing_required_field","prose_only","invalid_schema","invalid_provenance"]})
 }
 
 fn assessment_template() -> Value {
@@ -1238,13 +1238,20 @@ fn assessment_consistency_check(task: &Value) -> Option<Value> {
         assessment_status.as_deref(),
         Some("executable" | "passed" | "pass" | "ready" | "complete" | "completed" | "success")
     );
+    let strict_blocked_status =
+        matches!(assessment_status.as_deref(), Some("blocked" | "not_executable"));
+    let explicit_reason_present = assessment
+        .get("reason")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .is_some_and(|reason| !reason.is_empty());
     let mut reasons = Vec::new();
     if assessment_status.is_none() {
         reasons.push("assessment_status_missing".to_string());
     } else if !executable_status
         && !matches!(
             assessment_status.as_deref(),
-            Some("blocked" | "failed" | "failure" | "undetermined" | "inconclusive" | "unavailable")
+            Some("blocked" | "not_executable" | "failed" | "failure" | "undetermined" | "inconclusive" | "unavailable")
         )
     {
         reasons.push("assessment_status_unknown".to_string());
@@ -1257,6 +1264,15 @@ fn assessment_consistency_check(task: &Value) -> Option<Value> {
     }
     if executable_status && blocking_decision_count > 0 {
         reasons.push("executable_status_has_blocking_required_decisions".to_string());
+    }
+    if strict_blocked_status && implementation_ready != Some(false) {
+        reasons.push("blocked_status_requires_implementation_ready_false".to_string());
+    }
+    if assessment_status.as_deref() == Some("blocked") && blocker_count == 0 {
+        reasons.push("blocked_status_requires_blockers".to_string());
+    }
+    if assessment_status.as_deref() == Some("not_executable") && !explicit_reason_present {
+        reasons.push("not_executable_status_requires_reason".to_string());
     }
     Some(json!({
         "kind":"assessment_consistency",
@@ -1329,7 +1345,7 @@ fn objective_verdict(task: &Value) -> (&'static str, Option<String>) {
         Some("passed" | "pass" | "achieved" | "success" | "succeeded" | "completed" | "complete" | "coherent" | "executable" | "ready") => "passed",
         Some("pending" | "running") => "pending",
         Some("failed" | "failure") => "failed",
-        Some("blocked" | "undetermined" | "inconclusive" | "unavailable" | "not_found") => "blocked",
+        Some("blocked" | "not_executable" | "undetermined" | "inconclusive" | "unavailable" | "not_found") => "blocked",
         Some("inconsistent") => "blocked",
         Some(_) => "blocked",
         None if is_executability_assessment(task) && !task_is_terminal(task) => "pending",
@@ -1395,9 +1411,18 @@ fn structured_output_instruction_for_step(
     if fields.is_empty() {
         return None;
     }
+    let assessment_contract = step
+        .and_then(|value| value.pointer("/output_schema/name"))
+        .and_then(Value::as_str)
+        .filter(|name| *name == "task_executability_assessment_v1")
+        .map(|_| {
+            " EXECUTABILITY ASSESSMENT SUBSCHEMA: assessment_result MUST be an object, not a string, with status, implementation_ready, blockers, and (for not_executable) reason. Rules: executable => implementation_ready=true and blockers=[]; blocked => implementation_ready=false and blockers nonempty; not_executable => implementation_ready=false and reason nonempty.".to_string()
+        })
+        .unwrap_or_default();
     Some(format!(
-        "\n\nMANDATORY STRUCTURED OUTPUT CONTRACT: return exactly one JSON object with these required top-level keys: {}. Do not provide the answer only as Markdown or prose. Put each value in the JSON object; a short explanation may follow only after the object.\nREAD-ONLY PROBE RULE: use supplied preflight evidence for path checks; if a probe is necessary, issue one executable with literal arguments and no shell operators, pipes, redirection, or generated scripts.",
-        fields.join(", ")
+        "\n\nMANDATORY STRUCTURED OUTPUT CONTRACT: return exactly one JSON object with these required top-level keys: {}. Do not provide the answer only as Markdown or prose. Put each value in the JSON object; a short explanation may follow only after the object.{}\nREAD-ONLY PROBE RULE: use supplied preflight evidence for path checks; if a probe is necessary, issue one executable with literal arguments and no shell operators, pipes, redirection, or generated scripts.",
+        fields.join(", "),
+        assessment_contract
     ))
 }
 
@@ -3113,10 +3138,35 @@ mod tests {
     }
 
     #[test]
+    fn executability_instruction_requires_conditional_assessment_result() {
+        let task = json!({"objective":"assess"});
+        let step = json!({
+            "output_schema": {
+                "name": "task_executability_assessment_v1",
+                "required": ["assessment_result"]
+            }
+        });
+        let instruction =
+            structured_output_instruction_for_step(&task, Some(&step)).expect("contract");
+        assert!(instruction.contains("assessment_result MUST be an object"));
+        assert!(instruction.contains("executable => implementation_ready=true"));
+        assert!(instruction.contains("blocked => implementation_ready=false"));
+    }
+
+    #[test]
     fn executability_template_has_bounded_five_minute_worker_deadline() {
         let template = assessment_template();
         assert_eq!(template["bounds"]["max_run_ms"], 300_000);
         assert_eq!(template["steps"][0]["constraints"]["max_run_ms"], 300_000);
+        assert!(template["output_schema"]["fields"]["assessment_result"]
+            .as_str()
+            .is_some_and(|description| description.contains("implementation_ready")));
+        assert_eq!(
+            template["output_schema"]["conditional_rules"]
+                .as_array()
+                .map(Vec::len),
+            Some(3)
+        );
     }
 
     #[test]
