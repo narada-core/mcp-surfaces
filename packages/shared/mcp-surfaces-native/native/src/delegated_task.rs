@@ -79,7 +79,7 @@ pub fn list_tools() -> Vec<Value> {
     tools.push(tool(
         "delegated_task_wait",
         "Advance and wait for a delegated task to approach terminal status.",
-        json!({"type":"object","properties":{"task_id":{"type":"string"},"timeout_ms":{"type":"integer","minimum":0,"maximum":600000,"default":30000},"poll_ms":{"type":"integer","minimum":50,"maximum":30000,"default":500},"expected_owner_site_id":{"type":"string"},"allow_cross_site":{"type":"boolean","default":false}},"required":["task_id"],"additionalProperties":false}),
+        json!({"type":"object","properties":{"task_id":{"type":"string"},"timeout_ms":{"type":"integer","minimum":0,"maximum":600000,"default":30000},"poll_ms":{"type":"integer","minimum":50,"maximum":30000,"default":5000},"expected_owner_site_id":{"type":"string"},"allow_cross_site":{"type":"boolean","default":false}},"required":["task_id"],"additionalProperties":false}),
         false,
     ));
     tools
@@ -715,6 +715,36 @@ fn compact_task(task: &Value) -> Value {
     json!({"task_id":obj.get("task_id"),"task_status":obj.get("status"),"objective":obj.get("objective"),"owner_site_id":obj.get("owner_site_id"),"created_by_site_id":obj.get("created_by_site_id"),"visibility_scope":obj.get("visibility_scope"),"updated_at":obj.get("updated_at"),"summary":obj.get("summary"),"execution_binding":obj.get("execution_binding"),"worker_refs":result.and_then(|v|v.get("worker_refs")),"worker_outputs":result.and_then(|v|v.get("worker_outputs"))})
 }
 
+fn parse_embedded_structured_output(text: &str) -> Option<Value> {
+    if let Ok(value) = serde_json::from_str::<Value>(text) {
+        return Some(value);
+    }
+    for block in text.split("```").skip(1).step_by(2) {
+        let body = block.trim();
+        let body = body
+            .strip_prefix("json")
+            .or_else(|| body.strip_prefix("JSON"))
+            .unwrap_or(body)
+            .trim();
+        if let Ok(value) = serde_json::from_str::<Value>(body) {
+            return Some(value);
+        }
+    }
+    text.char_indices()
+        .filter(|(_, character)| matches!(character, '{' | '['))
+        .find_map(|(start, _)| {
+            let candidate = text[start..].trim();
+            let candidate = candidate
+                .strip_suffix("```")
+                .map(str::trim)
+                .unwrap_or(candidate);
+            serde_json::from_str::<Value>(candidate).ok().or_else(|| {
+                let mut stream = serde_json::Deserializer::from_str(candidate).into_iter::<Value>();
+                stream.next().and_then(Result::ok)
+            })
+        })
+}
+
 fn worker_output_from_run(run: &Value) -> Option<Value> {
     let summary = run
         .get("summary")
@@ -724,7 +754,7 @@ fn worker_output_from_run(run: &Value) -> Option<Value> {
         Value::String(text) => {
             let bounded = text.len() <= MAX_WORKER_OUTPUT_BYTES;
             if bounded {
-                if let Ok(structured) = serde_json::from_str::<Value>(text) {
+                if let Some(structured) = parse_embedded_structured_output(text) {
                     let encoded_len = serde_json::to_vec(&structured)
                         .map(|bytes| bytes.len())
                         .unwrap_or(MAX_WORKER_OUTPUT_BYTES + 1);
@@ -840,7 +870,7 @@ fn task_wait_with_roots(
     let poll = args
         .get("poll_ms")
         .and_then(Value::as_u64)
-        .unwrap_or(500)
+        .unwrap_or(5000)
         .clamp(50, 30000);
     let started = std::time::Instant::now();
     let task = loop {
@@ -1042,7 +1072,7 @@ fn normalized_execution(value: Option<&Value>) -> Value {
         .and_then(|v| v.get("wait_for_completion"))
         .and_then(Value::as_bool)
         == Some(true);
-    json!({"start":input.and_then(|v|v.get("start")).and_then(Value::as_bool)!=Some(false),"wait_for_completion":wait,"timeout_ms":input.and_then(|v|v.get("timeout_ms")).and_then(Value::as_u64).unwrap_or(if wait{30000}else{0}).min(600000),"poll_ms":input.and_then(|v|v.get("poll_ms")).and_then(Value::as_u64).unwrap_or(500).clamp(50,30000),"resumable":input.and_then(|v|v.get("resumable")).and_then(Value::as_bool)!=Some(false),"exit_interview":input.and_then(|v|v.get("exit_interview")).and_then(Value::as_bool)==Some(true),"max_concurrency":input.and_then(|v|v.get("max_concurrency")).and_then(Value::as_u64).unwrap_or(10).clamp(1,32),"max_retries":input.and_then(|v|v.get("max_retries")).and_then(Value::as_u64).unwrap_or(0).min(10)})
+    json!({"start":input.and_then(|v|v.get("start")).and_then(Value::as_bool)!=Some(false),"wait_for_completion":wait,"timeout_ms":input.and_then(|v|v.get("timeout_ms")).and_then(Value::as_u64).unwrap_or(if wait{30000}else{0}).min(600000),"poll_ms":input.and_then(|v|v.get("poll_ms")).and_then(Value::as_u64).unwrap_or(5000).clamp(50,30000),"resumable":input.and_then(|v|v.get("resumable")).and_then(Value::as_bool)!=Some(false),"exit_interview":input.and_then(|v|v.get("exit_interview")).and_then(Value::as_bool)==Some(true),"max_concurrency":input.and_then(|v|v.get("max_concurrency")).and_then(Value::as_u64).unwrap_or(10).clamp(1,32),"max_retries":input.and_then(|v|v.get("max_retries")).and_then(Value::as_u64).unwrap_or(0).min(10)})
 }
 fn normalized_constraints(value: Option<&Value>) -> Value {
     let mut constraints = value
@@ -2033,6 +2063,13 @@ mod tests {
                 .expect("validate tool")["inputSchema"]["properties"]["constraints"]["properties"]["cognition"]["default"],
             "low"
         );
+        assert_eq!(
+            list_tools()
+                .iter()
+                .find(|tool| tool["name"] == "delegated_task_wait")
+                .expect("wait tool")["inputSchema"]["properties"]["poll_ms"]["default"],
+            5000
+        );
         let root = std::env::temp_dir().join(format!(
             "narada-delegated-task-default-cognition-{}",
             uuid::Uuid::new_v4()
@@ -2056,6 +2093,32 @@ mod tests {
         assert_eq!(output["structured_output"]["repository"], "marici");
         assert_eq!(output["structured_output"]["branch"], "main");
         assert_eq!(output["truncated"], false);
+    }
+
+    #[test]
+    fn completed_worker_output_extracts_json_after_prose() {
+        let run = json!({"summary":"I checked the repository. {\"repository\":\"marici\",\"branch\":\"main\"}"});
+        let output = worker_output_from_run(&run).expect("worker output");
+        assert_eq!(output["structured_output"]["repository"], "marici");
+        assert_eq!(output["structured_output"]["branch"], "main");
+        assert_eq!(output["summary_text"].as_str().unwrap().starts_with("I checked"), true);
+    }
+
+    #[test]
+    fn completed_worker_output_extracts_fenced_json_after_prose() {
+        let run = json!({"summary":"The checks are complete.```json\n{\"repository\":\"marici\",\"branch\":\"main\"}\n```"});
+        let output = worker_output_from_run(&run).expect("worker output");
+        assert_eq!(output["structured_output"]["repository"], "marici");
+        assert_eq!(output["structured_output"]["branch"], "main");
+    }
+
+    #[test]
+    fn completed_worker_output_extracts_multiline_fenced_json_after_prose() {
+        let run = json!({"summary":"I’ll perform two read-only checks.```json\n{\n  \"directory_name\": \"marici\",\n  \"current_git_branch\": \"main\",\n  \"verification\": {\n    \"path\": \"C:\\\\Users\\\\andrey\\\\src\\\\marici\",\n    \"changes_made\": false\n  }\n}\n```"});
+        let output = worker_output_from_run(&run).expect("worker output");
+        assert_eq!(output["structured_output"]["directory_name"], "marici");
+        assert_eq!(output["structured_output"]["current_git_branch"], "main");
+        assert_eq!(output["structured_output"]["verification"]["changes_made"], false);
     }
 
     #[test]
