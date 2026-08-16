@@ -929,13 +929,33 @@ fn acceptance_checks_or_derive(
     root: &Path,
     result: Option<&Map<String, Value>>,
 ) -> Value {
+    let (_, derived_checks) = acceptance_verdict(task, root);
+    let derived_requested_fields = derived_checks
+        .iter()
+        .find(|check| check["kind"] == "requested_fields")
+        .filter(|check| {
+            check["requested"]
+                .as_array()
+                .is_some_and(|fields| !fields.is_empty())
+        });
     if let Some(checks) = result.and_then(|value| value.get("acceptance_checks")) {
         if checks.as_array().is_some_and(|items| !items.is_empty()) {
+            if let Some(derived_requested_fields) = derived_requested_fields {
+                let mut refreshed = checks.as_array().cloned().unwrap_or_default();
+                if let Some(existing) = refreshed
+                    .iter_mut()
+                    .find(|check| check["kind"] == "requested_fields")
+                {
+                    *existing = derived_requested_fields.clone();
+                } else {
+                    refreshed.push(derived_requested_fields.clone());
+                }
+                return json!(refreshed);
+            }
             return checks.clone();
         }
     }
-    let (_, checks) = acceptance_verdict(task, root);
-    json!(checks)
+    json!(derived_checks)
 }
 
 fn compact_task(task: &Value, root: &Path) -> Value {
@@ -2782,6 +2802,39 @@ mod tests {
         let fields = checks
             .iter()
             .find(|check| check["kind"] == "requested_fields")
+            .expect("requested fields check");
+        assert_eq!(
+            fields["requested"],
+            json!(["repository_name", "current_branch", "verification"])
+        );
+        assert_eq!(fields["status"], "passed");
+    }
+
+    #[test]
+    fn acceptance_readback_refreshes_stale_requested_fields_check() {
+        let root = std::env::temp_dir().join(format!(
+            "narada-delegated-task-stale-acceptance-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let task = json!({
+            "objective":"demo",
+            "owner_site_id":"site-test",
+            "owner_site_root":root.to_string_lossy(),
+            "constraints":{"authority":"read"},
+            "acceptance":{"required":["repository_name","current_branch","verification"]},
+            "result":{
+                "acceptance_checks":[
+                    {"kind":"objective_present","status":"passed"},
+                    {"kind":"requested_fields","requested":[],"returned":["repository_name","current_branch","verification"],"missing":[],"status":"not_applicable"}
+                ],
+                "worker_outputs":[{"output":{"structured_output":{"repository_name":"marici","current_branch":"main","verification":"confirmed"}}}]
+            }
+        });
+        let result = task["result"].as_object().expect("result object");
+        let checks = acceptance_checks_or_derive(&task, &root, Some(result));
+        let fields = checks
+            .as_array()
+            .and_then(|checks| checks.iter().find(|check| check["kind"] == "requested_fields"))
             .expect("requested fields check");
         assert_eq!(
             fields["requested"],
