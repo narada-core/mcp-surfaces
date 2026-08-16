@@ -13,6 +13,7 @@ const SERVER_NAME: &str = "delegated-task-mcp";
 const DEFAULT_COGNITION: &str = "low";
 const MAX_ITEMS: usize = 200;
 const MAX_FILE_BYTES: u64 = 256_000;
+const MAX_WORKER_OUTPUT_BYTES: usize = 32_000;
 const MUTATING: &[&str] = &[
     "delegated_task_run",
     "delegated_task_advance",
@@ -701,7 +702,74 @@ fn tasks_list(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
 }
 fn compact_task(task: &Value) -> Value {
     let obj = task.as_object().cloned().unwrap_or_default();
-    json!({"task_id":obj.get("task_id"),"task_status":obj.get("status"),"objective":obj.get("objective"),"owner_site_id":obj.get("owner_site_id"),"created_by_site_id":obj.get("created_by_site_id"),"visibility_scope":obj.get("visibility_scope"),"updated_at":obj.get("updated_at"),"summary":obj.get("summary"),"execution_binding":obj.get("execution_binding")})
+    let result = obj.get("result").and_then(Value::as_object);
+    json!({"task_id":obj.get("task_id"),"task_status":obj.get("status"),"objective":obj.get("objective"),"owner_site_id":obj.get("owner_site_id"),"created_by_site_id":obj.get("created_by_site_id"),"visibility_scope":obj.get("visibility_scope"),"updated_at":obj.get("updated_at"),"summary":obj.get("summary"),"execution_binding":obj.get("execution_binding"),"worker_refs":result.and_then(|v|v.get("worker_refs")),"worker_outputs":result.and_then(|v|v.get("worker_outputs"))})
+}
+
+fn worker_output_from_run(run: &Value) -> Option<Value> {
+    let summary = run
+        .get("summary")
+        .or_else(|| run.get("summary_preview"))
+        .filter(|value| !value.is_null())?;
+    match summary {
+        Value::String(text) => {
+            let bounded = text.len() <= MAX_WORKER_OUTPUT_BYTES;
+            if bounded {
+                if let Ok(structured) = serde_json::from_str::<Value>(text) {
+                    let encoded_len = serde_json::to_vec(&structured)
+                        .map(|bytes| bytes.len())
+                        .unwrap_or(MAX_WORKER_OUTPUT_BYTES + 1);
+                    if encoded_len <= MAX_WORKER_OUTPUT_BYTES {
+                        return Some(json!({"summary_text":text,"structured_output":structured,"truncated":false}));
+                    }
+                }
+            }
+            Some(json!({"summary_text":text.chars().take(MAX_WORKER_OUTPUT_BYTES).collect::<String>(),"truncated":!bounded || text.chars().count()>MAX_WORKER_OUTPUT_BYTES}))
+        }
+        value => {
+            let encoded_len = serde_json::to_vec(value)
+                .map(|bytes| bytes.len())
+                .unwrap_or(MAX_WORKER_OUTPUT_BYTES + 1);
+            (encoded_len <= MAX_WORKER_OUTPUT_BYTES)
+                .then(|| json!({"structured_output":value,"truncated":false}))
+        }
+    }
+}
+
+fn record_worker_terminal(
+    task: &mut Value,
+    step_id: &str,
+    run_id: &str,
+    status: &str,
+    run: &Value,
+) {
+    let output = worker_output_from_run(run);
+    if let Some(refs) = task["result"]["worker_refs"].as_array_mut() {
+        if let Some(reference) = refs.iter_mut().find(|reference| {
+            reference.get("run_id").and_then(Value::as_str) == Some(run_id)
+        }) {
+            reference["status"] = json!(status);
+            reference["finished_at"] = json!(now());
+            if let Some(value) = output.clone() {
+                reference["output"] = value;
+            }
+            if let Some(error) = run.get("error").filter(|value| !value.is_null()) {
+                reference["error"] = error.clone();
+            }
+        }
+    }
+    let step_state = &mut task["result"]["step_states"][step_id];
+    step_state["worker_status"] = json!(status);
+    if let Some(value) = output.clone() {
+        step_state["worker_output"] = value;
+    }
+    if !task["result"].get("worker_outputs").is_some_and(Value::is_array) {
+        task["result"]["worker_outputs"] = json!([]);
+    }
+    if let Some(outputs) = task["result"]["worker_outputs"].as_array_mut() {
+        outputs.retain(|value| value.get("run_id").and_then(Value::as_str) != Some(run_id));
+        outputs.push(json!({"step_id":step_id,"run_id":run_id,"status":status,"output":output,"error":run.get("error")}));
+    }
 }
 fn task_status(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     let id = task_id(args)?;
@@ -734,7 +802,7 @@ fn task_summary(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> 
         .cloned()
         .unwrap_or_default();
     Ok(
-        json!({"schema":"narada.delegated_task.summary.v1","status":"ok","task_id":id,"task_status":task.get("status"),"objective":task.get("objective"),"summary":task.get("summary"),"acceptance_verdict":result.get("acceptance_verdict").cloned().unwrap_or(Value::String("pending".into())),"residual_risks":result.get("residual_risks").cloned().unwrap_or_else(||json!([])),"progress":result.get("progress")}),
+        json!({"schema":"narada.delegated_task.summary.v1","status":"ok","task_id":id,"task_status":task.get("status"),"objective":task.get("objective"),"summary":task.get("summary"),"acceptance_verdict":result.get("acceptance_verdict").cloned().unwrap_or(Value::String("pending".into())),"residual_risks":result.get("residual_risks").cloned().unwrap_or_else(||json!([])),"progress":result.get("progress"),"worker_refs":result.get("worker_refs"),"worker_outputs":result.get("worker_outputs")}),
     )
 }
 fn task_wait(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
@@ -1154,7 +1222,7 @@ fn task_run(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     let step_states = initial_step_states(&workflow);
     let site = current_site_id(root);
     let fingerprint = request_fingerprint(args, root, &id);
-    let mut task = json!({"schema":"narada.delegated_task.task.v1","task_id":id,"owner_site_id":site,"owner_site_root":if site.is_some(){json!(root.to_string_lossy())}else{Value::Null},"created_by_site_id":site,"visibility_scope":if site.is_some(){"site"}else{"user_global"},"task_root_scope":"site_root","status":"accepted_for_execution","objective":objective,"request_fingerprint":fingerprint,"created_at":created,"updated_at":created,"cancelled_at":null,"idempotency_key":args.get("idempotency_key"),"constraints":normalized_constraints(args.get("constraints")),"workflow":workflow,"execution":normalized_execution(args.get("execution")),"acceptance":args.get("acceptance").cloned().unwrap_or_else(||json!({})),"result":{"schema":"narada.delegated_task.handoff.v1","acceptance_verdict":"pending","step_states":step_states,"worker_refs":[],"residual_risks":[],"observed_incoherencies":[],"verification":[],"changed_files":[]},"summary":null});
+    let mut task = json!({"schema":"narada.delegated_task.task.v1","task_id":id,"owner_site_id":site,"owner_site_root":if site.is_some(){json!(root.to_string_lossy())}else{Value::Null},"created_by_site_id":site,"visibility_scope":if site.is_some(){"site"}else{"user_global"},"task_root_scope":"site_root","status":"accepted_for_execution","objective":objective,"request_fingerprint":fingerprint,"created_at":created,"updated_at":created,"cancelled_at":null,"idempotency_key":args.get("idempotency_key"),"constraints":normalized_constraints(args.get("constraints")),"workflow":workflow,"execution":normalized_execution(args.get("execution")),"acceptance":args.get("acceptance").cloned().unwrap_or_else(||json!({})),"result":{"schema":"narada.delegated_task.handoff.v1","acceptance_verdict":"pending","step_states":step_states,"worker_refs":[],"worker_outputs":[],"residual_risks":[],"observed_incoherencies":[],"verification":[],"changed_files":[]},"summary":null});
     write_task(root, &task)?;
     append_event(root, &id, "task_created", json!({"objective":objective}))?;
     if task.pointer("/execution/start").and_then(Value::as_bool) != Some(false) {
@@ -1582,7 +1650,9 @@ fn advance_value(mut task: Value, root: &Path) -> Result<Value, Value> {
             .and_then(Value::as_str)
             .unwrap_or("running")
             .to_string();
+        let worker_run = status.get("run").cloned().unwrap_or(Value::Null);
         if worker == "completed" {
+            record_worker_terminal(&mut task, step_id, &run_id, "completed", &worker_run);
             task["result"]["step_states"][step_id]["status"] = json!("completed");
             task["result"]["step_states"][step_id]["finished_at"] = json!(now());
             append_event(
@@ -1595,6 +1665,7 @@ fn advance_value(mut task: Value, root: &Path) -> Result<Value, Value> {
             worker.as_str(),
             "failed" | "cancelled" | "completed_with_errors"
         ) {
+            record_worker_terminal(&mut task, step_id, &run_id, &worker, &worker_run);
             let attempts = task["result"]["step_states"][step_id]["attempts"]
                 .as_u64()
                 .unwrap_or(1);
@@ -1931,6 +2002,31 @@ mod tests {
         let task = read_task(&root, "task_default_cognition").expect("task");
         assert_eq!(task["constraints"]["cognition"], "low");
         fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn completed_worker_output_is_structured_and_bounded() {
+        let run = json!({"summary":"{\"repository\":\"marici\",\"branch\":\"main\"}"});
+        let output = worker_output_from_run(&run).expect("worker output");
+        assert_eq!(output["structured_output"]["repository"], "marici");
+        assert_eq!(output["structured_output"]["branch"], "main");
+        assert_eq!(output["truncated"], false);
+    }
+
+    #[test]
+    fn terminal_worker_projection_updates_reference_and_handoff() {
+        let mut task = json!({"result":{"step_states":{"inspect":{"status":"running"}},"worker_refs":[{"step_id":"inspect","run_id":"run-1","status":"running"}],"worker_outputs":[]}});
+        record_worker_terminal(
+            &mut task,
+            "inspect",
+            "run-1",
+            "completed",
+            &json!({"summary":"{\"repository\":\"marici\",\"branch\":\"main\"}"}),
+        );
+        assert_eq!(task["result"]["worker_refs"][0]["status"], "completed");
+        assert_eq!(task["result"]["worker_refs"][0]["output"]["structured_output"]["branch"], "main");
+        assert_eq!(task["result"]["step_states"]["inspect"]["worker_status"], "completed");
+        assert_eq!(task["result"]["worker_outputs"][0]["output"]["structured_output"]["repository"], "marici");
     }
 
     #[test]
