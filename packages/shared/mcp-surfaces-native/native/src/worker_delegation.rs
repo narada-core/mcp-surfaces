@@ -161,7 +161,7 @@ fn guidance_tool() -> Value {
     )
 }
 fn guidance(args: &Map<String, Value>) -> Value {
-    json!({"schema":"narada.worker.guidance.v1","status":"ok","server_name":SERVER_NAME,"requested":{"workflow":args.get("workflow").cloned().unwrap_or(Value::Null),"tool":args.get("tool").cloned().unwrap_or(Value::Null)},"cognition":{"default":"low","omitted_constraint_behavior":"constraints.cognition resolves to low","mapping_tool":"worker_cognition_defaults_inspect"},"first_use":["Inspect worker_policy_inspect.","Omitted constraints.cognition resolves to low; use worker_cognition_defaults_inspect for the current model and reasoning-effort mapping.","Resolve worker inputs without launching with worker_config_resolve.","Launch with worker_run or worker_edit.","Read durable runs with worker_run_status or worker_run_wait.","Use worker_output_show for bounded artifact readback."],"windows_rust_toolchain":{"status":"caller_environment_required","remediation":"For MSVC Rust linking, launch the carrier from a Developer PowerShell or initialize VsDevCmd before starting the carrier so link.exe is inherited by workers.","probe":"worker_policy_inspect reports the inherited PATH boundary; workers do not perform open-ended Visual Studio discovery."},"boundaries":["The native Rust surface launches only the native Rust narada-agent-runtime-server.","Credentials remain SecretStore-referenced and are never returned.","Run records are bounded to the site worker-delegation root."]})
+    json!({"schema":"narada.worker.guidance.v1","status":"ok","server_name":SERVER_NAME,"requested":{"workflow":args.get("workflow").cloned().unwrap_or(Value::Null),"tool":args.get("tool").cloned().unwrap_or(Value::Null)},"cognition":{"default":"low","omitted_constraint_behavior":"constraints.cognition resolves to low","mapping_tool":"worker_cognition_defaults_inspect"},"first_use":["Inspect worker_policy_inspect.","Omitted constraints.cognition resolves to low; use worker_cognition_defaults_inspect for the current model and reasoning-effort mapping.","Resolve worker inputs without launching with worker_config_resolve.","Launch with worker_run or worker_edit. Set constraints.wait_for_completion=true with a bounded wait_timeout_ms when one-call completion is preferred; omitted or false returns the accepted running record immediately.","Read durable runs with worker_run_status or worker_run_wait.","Use worker_output_show for bounded artifact readback."],"windows_rust_toolchain":{"status":"caller_environment_required","remediation":"For MSVC Rust linking, launch the carrier from a Developer PowerShell or initialize VsDevCmd before starting the carrier so link.exe is inherited by workers.","probe":"worker_policy_inspect reports the inherited PATH boundary; workers do not perform open-ended Visual Studio discovery."},"boundaries":["The native Rust surface launches only the native Rust narada-agent-runtime-server.","Credentials remain SecretStore-referenced and are never returned.","Run records are bounded to the site worker-delegation root."]})
 }
 
 fn run_root(root: &Path) -> PathBuf {
@@ -434,27 +434,32 @@ fn runs_list(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
         json!({"schema":"narada.worker.runs_list.v1","status":"ok","count":items.len(),"limit":limit,"scanned":items.len(),"scan_limit":MAX_RUNS,"scan_truncated":false,"include_running":include_running,"include_completed":include_completed,"runs":items,"native_read_only":true}),
     )
 }
-fn run_wait(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
-    let id = run_id(args)?;
-    let timeout_ms = args
-        .get("timeout_ms")
-        .and_then(Value::as_u64)
-        .unwrap_or(0)
-        .min(300_000);
+fn wait_for_run(root: &Path, id: &str, timeout_ms: u64) -> Result<(Value, Value), Value> {
     let started = Instant::now();
-    let mut run = read_run(root, &id)?;
+    let mut run = read_run(root, id)?;
     while run.get("status").and_then(Value::as_str) == Some("running")
         && started.elapsed() < Duration::from_millis(timeout_ms)
     {
         thread::sleep(Duration::from_millis(100).min(Duration::from_millis(
             timeout_ms.saturating_sub(started.elapsed().as_millis() as u64),
         )));
-        run = read_run(root, &id)?;
+        run = read_run(root, id)?;
     }
     let running = run.get("status").and_then(Value::as_str) == Some("running");
     let waited_ms = started.elapsed().as_millis() as u64;
+    let wait = json!({"status":if running{"timed_out"}else{"finished"},"waited":waited_ms>0,"waited_ms":waited_ms,"timeout_ms":timeout_ms,"native_execution":"bounded_poll"});
+    Ok((run, wait))
+}
+fn run_wait(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let id = run_id(args)?;
+    let timeout_ms = args
+        .get("timeout_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or(30_000)
+        .min(300_000);
+    let (run, wait) = wait_for_run(root, &id, timeout_ms)?;
     Ok(
-        json!({"schema":"narada.worker.run_wait.v1","status":"ok","wait":{"status":if running{"timed_out"}else{"finished"},"waited":waited_ms>0,"waited_ms":waited_ms,"timeout_ms":timeout_ms,"native_execution":"bounded_poll"},"run":compact_run(&run),"native_read_only":true}),
+        json!({"schema":"narada.worker.run_wait.v1","status":"ok","wait":wait,"run":compact_run(&run),"native_read_only":true}),
     )
 }
 fn run_wait_batch(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
@@ -1199,6 +1204,15 @@ fn worker_run(
         .and_then(Value::as_u64)
         .unwrap_or(300_000)
         .clamp(1, 1_800_000);
+    let wait_for_completion = constraints
+        .and_then(|value| value.get("wait_for_completion"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let wait_timeout_ms = constraints
+        .and_then(|value| value.get("wait_timeout_ms"))
+        .and_then(Value::as_u64)
+        .unwrap_or(30_000)
+        .min(300_000);
     for key in ["provider"] {
         if constraints.and_then(|value| value.get(key)).is_some() {
             return Err(error(
@@ -1330,6 +1344,13 @@ fn worker_run(
             )
         })
         .map_err(|_| error("worker_launch_failed", "worker_launch_failed"))?;
+    if wait_for_completion {
+        let (mut run, wait) = wait_for_run(root, &id, wait_timeout_ms)?;
+        if let Some(object) = run.as_object_mut() {
+            object.insert("wait".into(), wait);
+        }
+        return Ok(run);
+    }
     Ok(running)
 }
 fn worker_edit(
@@ -1702,7 +1723,9 @@ fn input_schema(name: &str) -> Value {
                 "cognition":{"type":"string","enum":["low","medium","high"],"default":"low"},
                 "cwd":{"type":"string","minLength":1,"maxLength":4096},
                 "invocation_plan_ref":{"type":"string","minLength":6,"maxLength":512,"pattern":"^plan:[A-Za-z0-9._:-]+$"},
-                "max_run_ms":{"type":"integer","minimum":1,"maximum":1800000,"default":300000,"description":"Hard worker runtime deadline enforced by the native authority."}
+                "max_run_ms":{"type":"integer","minimum":1,"maximum":1800000,"default":300000,"description":"Hard worker runtime deadline enforced by the native authority."},
+                "wait_for_completion":{"type":"boolean","default":false,"description":"Return after bounded child completion polling when true; false returns the accepted running record immediately."},
+                "wait_timeout_ms":{"type":"integer","minimum":0,"maximum":300000,"default":30000,"description":"Maximum inline completion wait when wait_for_completion is true."}
             },
             "additionalProperties":false
         })
@@ -1776,6 +1799,16 @@ mod tests {
             input_schema("worker_run")["properties"]["constraints"]["properties"]["cognition"]
                 ["default"],
             "low"
+        );
+        assert_eq!(
+            input_schema("worker_run")["properties"]["constraints"]["properties"]["wait_for_completion"]
+                ["default"],
+            false
+        );
+        assert_eq!(
+            input_schema("worker_run")["properties"]["constraints"]["properties"]["wait_timeout_ms"]
+                ["default"],
+            30_000
         );
         assert_eq!(
             cognition_defaults(Path::new("."))["default_cognition"],
@@ -1875,12 +1908,29 @@ mod tests {
             Path::new("C:/Users/Andrey/Narada-other"),
             Path::new("C:/Users/Andrey/Narada")
         ));
+        assert!(path_components_equal_or_child(
+            Path::new("C:/Users/Andrey/src/mcp-surfaces"),
+            Path::new("C:/Users/Andrey/src")
+        ));
+        assert!(path_components_equal_or_child(
+            Path::new("C:/Users/Andrey/wt/mcp-surfaces"),
+            Path::new("C:/Users/Andrey/wt")
+        ));
+        assert!(!path_components_equal_or_child(
+            Path::new("C:/Users/Andrey/src-other/mcp-surfaces"),
+            Path::new("C:/Users/Andrey/src")
+        ));
     }
 
     #[test]
     fn wait_and_windows_toolchain_contracts_are_explicit() {
         assert_eq!(
             input_schema("worker_run_wait")["properties"]["timeout_ms"]["maximum"],
+            300_000
+        );
+        assert_eq!(
+            input_schema("worker_run")["properties"]["constraints"]["properties"]["wait_timeout_ms"]
+                ["maximum"],
             300_000
         );
         assert_eq!(
@@ -1891,6 +1941,32 @@ mod tests {
             policy(Path::new("."), &[])["windows_msvc_environment"]["inherited"],
             true
         );
+    }
+
+    #[test]
+    fn bounded_wait_returns_terminal_run_without_polling_forever() {
+        let root = std::env::temp_dir().join(format!(
+            "narada-worker-wait-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let run_dir = run_root(&root).join("run-test");
+        fs::create_dir_all(&run_dir).expect("run directory");
+        fs::write(
+            run_dir.join("result.json"),
+            serde_json::to_vec(&json!({
+                "schema":"narada.worker.run.v1",
+                "run_id":"run-test",
+                "status":"completed",
+                "completion_state":"complete"
+            }))
+            .expect("run record"),
+        )
+        .expect("write run");
+        let (run, wait) = wait_for_run(&root, "run-test", 30_000).expect("bounded wait");
+        assert_eq!(run["status"], "completed");
+        assert_eq!(wait["status"], "finished");
+        assert_eq!(wait["timeout_ms"], 30_000);
+        fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[test]

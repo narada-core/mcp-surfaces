@@ -384,7 +384,7 @@ fn extend_epistemic_catalog(contract: &mut Value) {
 fn align_native_surface_descriptor_schemas(contract: &mut Value) {
     let Some(items) = contract.pointer_mut("/read_models/registrar_surface_list/items").and_then(Value::as_array_mut) else { return; };
     let intent = || json!({"type":"object","properties":{"instruction":{"type":"string","minLength":1,"maxLength":65536},"task":{"type":"string","minLength":1,"maxLength":65536},"goal":{"type":"string","minLength":1,"maxLength":65536},"summary":{"type":"string","minLength":1,"maxLength":65536},"mode":{"type":"string","maxLength":256}},"additionalProperties":false,"anyOf":[{"required":["instruction"]},{"required":["task"]},{"required":["goal"]},{"required":["summary"]}]});
-    let constraints = || json!({"type":"object","properties":{"authority":{"type":"string","enum":["read","write","command"]},"cognition":{"type":"string","enum":["low","medium","high"]},"cwd":{"type":"string","minLength":1,"maxLength":4096},"invocation_plan_ref":{"type":"string","minLength":6,"maxLength":512,"pattern":"^plan:[A-Za-z0-9._:-]+$"},"max_run_ms":{"type":"integer","minimum":1,"maximum":1800000,"default":300000,"description":"Hard worker runtime deadline enforced by the native authority."}},"additionalProperties":false});
+    let constraints = || json!({"type":"object","properties":{"authority":{"type":"string","enum":["read","write","command"]},"cognition":{"type":"string","enum":["low","medium","high"]},"cwd":{"type":"string","minLength":1,"maxLength":4096},"invocation_plan_ref":{"type":"string","minLength":6,"maxLength":512,"pattern":"^plan:[A-Za-z0-9._:-]+$"},"max_run_ms":{"type":"integer","minimum":1,"maximum":1800000,"default":300000,"description":"Hard worker runtime deadline enforced by the native authority."},"wait_for_completion":{"type":"boolean","default":false,"description":"Return after bounded child completion polling when true; false returns the accepted running record immediately."},"wait_timeout_ms":{"type":"integer","minimum":0,"maximum":300000,"default":30000,"description":"Maximum inline completion wait when wait_for_completion is true."}},"additionalProperties":false});
     for item in items {
         let id = item.get("id").and_then(Value::as_str).unwrap_or_default().to_owned();
         let Some(tools) = item.pointer_mut("/descriptor/tools").and_then(Value::as_array_mut) else { continue; };
@@ -5428,6 +5428,18 @@ mod tests {
                 .iter().find(|tool| tool["name"] == name).unwrap()["input_schema"].clone()
         };
         assert!(schema("worker-delegation", "worker_run").pointer("/properties/constraints/properties/site_root").is_none());
+        assert_eq!(
+            schema("worker-delegation", "worker_run")
+                .pointer("/properties/constraints/properties/wait_for_completion/default")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            schema("worker-delegation", "worker_run")
+                .pointer("/properties/constraints/properties/wait_timeout_ms/maximum")
+                .and_then(Value::as_u64),
+            Some(300_000)
+        );
         assert_eq!(schema("worker-delegation", "worker_config_resolve")["additionalProperties"], false);
         assert_eq!(schema("epistemic-graph", "epistemic_graph_guidance")["properties"]["workflow"]["type"], "string");
     }
