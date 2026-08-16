@@ -2834,7 +2834,7 @@ mod tests {
     #[test]
     fn live_catalog_has_precise_closed_schemas() {
         let tools = list_tools();
-        assert_eq!(tools.len(), 17);
+        assert_eq!(tools.len(), 24);
         for tool in &tools {
             assert_eq!(tool["inputSchema"]["type"], "object");
             assert_eq!(tool["inputSchema"]["additionalProperties"], false);

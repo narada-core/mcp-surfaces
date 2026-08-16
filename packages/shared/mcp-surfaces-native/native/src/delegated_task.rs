@@ -14,6 +14,7 @@ const DEFAULT_COGNITION: &str = "low";
 const MAX_ITEMS: usize = 200;
 const MAX_FILE_BYTES: u64 = 256_000;
 const MAX_WORKER_OUTPUT_BYTES: usize = 32_000;
+const MAX_VALIDATED_REQUEST_BYTES: usize = 64_000;
 const MUTATING: &[&str] = &[
     "delegated_task_run",
     "delegated_task_advance",
@@ -37,7 +38,7 @@ pub fn list_tools() -> Vec<Value> {
         ),
         (
             "delegated_task_validate",
-            "Validate delegated task input without creating or running a task.",
+            "Validate delegated task input and persist a reusable validated-request reference without running a task.",
             json!({"type":"object","properties":{"objective":{"type":"string"},"workflow":{"type":"object"},"constraints":constraints_schema(),"acceptance":{"type":"object"},"execution":{"type":"object"},"execution_binding":{"type":"object"}},"additionalProperties":false}),
         ),
         (
@@ -52,12 +53,12 @@ pub fn list_tools() -> Vec<Value> {
         ),
         (
             "delegated_task_result",
-            "Return a delegated task result handoff from durable state.",
+            "Return a secondary durable readback; delegated_task_wait is the canonical terminal handoff.",
             id_schema(true),
         ),
         (
             "delegated_task_summary",
-            "Return a compact human review summary from durable state.",
+            "Return a compact derived human review summary and acceptance evidence from durable state.",
             id_schema(true),
         ),
         (
@@ -67,6 +68,11 @@ pub fn list_tools() -> Vec<Value> {
         ),
     ] {
         tools.push(tool(name, desc, schema, true));
+    }
+    if let Some(validate_tool) = tools.iter_mut().find(|tool| tool["name"] == "delegated_task_validate") {
+        validate_tool["annotations"]["readOnlyHint"] = json!(false);
+        validate_tool["annotations"]["destructiveHint"] = json!(false);
+        validate_tool["annotations"]["stateChangingHint"] = json!(true);
     }
     for name in MUTATING {
         tools.push(tool(
@@ -78,7 +84,7 @@ pub fn list_tools() -> Vec<Value> {
     }
     tools.push(tool(
         "delegated_task_wait",
-        "Advance and wait for a delegated task to approach terminal status.",
+        "Advance and wait for a delegated task; on terminal status this is the canonical complete handoff.",
         json!({"type":"object","properties":{"task_id":{"type":"string"},"timeout_ms":{"type":"integer","minimum":0,"maximum":600000,"default":30000},"poll_ms":{"type":"integer","minimum":50,"maximum":30000,"default":5000},"expected_owner_site_id":{"type":"string"},"allow_cross_site":{"type":"boolean","default":false}},"required":["task_id"],"additionalProperties":false}),
         false,
     ));
@@ -92,9 +98,10 @@ fn mutation_schema(name: &str) -> Value {
         "delegated_task_run" => {
             for field in ["objective","idempotency_key","task_id"] { properties.insert(field.into(),json!({"type":"string"})); }
             for field in ["intent","workflow","acceptance","result_policy","execution","execution_binding","source_task_ref"] { properties.insert(field.into(),json!({"type":"object"})); }
+            properties.insert("validated_request_ref".into(),json!({"type":"string","minLength":6,"maxLength":256,"pattern":"^vr_[A-Za-z0-9-]+$"}));
             properties.insert("constraints".into(), constraints_schema());
             for field in ["depends_on_task_ids","import_task_outputs","import_worker_refs"] { properties.insert(field.into(),json!({"type":"array","items":{"type":"string"}})); }
-            json!({"type":"object","properties":properties,"anyOf":[{"required":["objective"]},{"required":["intent"]},{"required":["task_id"]}],"additionalProperties":false})
+            json!({"type":"object","properties":properties,"anyOf":[{"required":["objective"]},{"required":["intent"]},{"required":["task_id"]},{"required":["validated_request_ref"]}],"additionalProperties":false})
         }
         "delegated_task_advance" => { properties.insert("task_id".into(),json!({"type":"string"})); json!({"type":"object","properties":properties,"required":["task_id"],"additionalProperties":false}) }
         "delegated_task_cancel" => { properties.insert("task_id".into(),json!({"type":"string"})); properties.insert("reason".into(),json!({"type":"string"})); json!({"type":"object","properties":properties,"required":["task_id"],"additionalProperties":false}) }
@@ -178,7 +185,7 @@ fn guidance_tool() -> Value {
     )
 }
 fn guidance(args: &Map<String, Value>) -> Value {
-    json!({"schema":"narada.mcp_surface.guidance.v0","status":"ok","surface_id":"delegated-task","guidance_tool":"delegated_task_guidance","purpose":"Validate, execute, and inspect durable delegated task workflows through native authority.","requested":{"workflow":args.get("workflow").cloned().unwrap_or(Value::Null),"tool":args.get("tool").cloned().unwrap_or(Value::Null)},"cognition":{"default":"low","omitted_constraint_behavior":"constraints.cognition resolves to low","mapping_surface":"worker-delegation","mapping_tool":"worker_cognition_defaults_inspect"},"first_use":["Call delegated_task_policy_inspect first.","Omitted constraints.cognition resolves to low; inspect worker-delegation's worker_cognition_defaults_inspect for the current model and reasoning-effort mapping.","Validate an input before creating a task.","Use bounded list/status/result/events readback.","Use explicit cancellation and disposition tools for lifecycle mutations."],"boundaries":["Native authority owns task.json/events.jsonl under the bounded task root.","Worker launches cross the native worker-delegation authority boundary.","Cross-site ownership remains server-bound authority."]})
+    json!({"schema":"narada.mcp_surface.guidance.v0","status":"ok","surface_id":"delegated-task","guidance_tool":"delegated_task_guidance","purpose":"Validate, execute, and inspect durable delegated task workflows through native authority.","requested":{"workflow":args.get("workflow").cloned().unwrap_or(Value::Null),"tool":args.get("tool").cloned().unwrap_or(Value::Null)},"cognition":{"default":"low","omitted_constraint_behavior":"constraints.cognition resolves to low","mapping_surface":"worker-delegation","mapping_tool":"worker_cognition_defaults_inspect"},"first_use":["Call delegated_task_policy_inspect first.","Omitted constraints.cognition resolves to low; inspect worker-delegation's worker_cognition_defaults_inspect for the current model and reasoning-effort mapping.","Call delegated_task_validate once, then pass its durable validated_request_ref to delegated_task_run so objective, constraints, workflow, and binding fields are not duplicated.","Prefer the site-scoped mcp_loader_call_binding_tool(binding_id, site_root, surface_id, tool_name, arguments) path when reopening a surface after a loader restart.","delegated_task_wait is the canonical terminal handoff and includes the complete compact result; delegated_task_result is a secondary durable readback.","Use bounded list/status/result/events readback.","Use explicit cancellation and disposition tools for lifecycle mutations."],"binding_reopen":{"tool_name":"mcp_loader_call_binding_tool","arguments":{"site_root":"<site_root>","binding_id":"<binding_id>","surface_id":"delegated-task","tool_name":"<child_tool>","arguments":{}}},"boundaries":["Native authority owns task.json/events.jsonl and validated request records under the bounded task root.","Worker launches cross the native worker-delegation authority boundary.","Cross-site ownership remains server-bound authority."]})
 }
 
 fn task_root(root: &Path) -> PathBuf {
@@ -197,6 +204,101 @@ fn task_root(root: &Path) -> PathBuf {
 }
 fn tasks_dir(root: &Path) -> PathBuf {
     task_root(root).join("tasks")
+}
+fn validated_requests_dir(root: &Path) -> PathBuf {
+    task_root(root).join("validated-requests")
+}
+fn validated_request_path(root: &Path, reference: &str) -> Result<PathBuf, Value> {
+    let reference = reference.trim();
+    if !reference.starts_with("vr_") {
+        return Err(error(
+            "validated_request_ref_invalid",
+            "validated_request_ref_invalid",
+        ));
+    }
+    safe_id(reference)?;
+    Ok(validated_requests_dir(root).join(format!("{reference}.json")))
+}
+fn write_validated_request(root: &Path, record: &Value) -> Result<(), Value> {
+    let reference = record
+        .get("validated_request_ref")
+        .and_then(Value::as_str)
+        .ok_or_else(|| error("validated_request_ref_invalid", "validated_request_ref_invalid"))?;
+    let path = validated_request_path(root, reference)?;
+    let bytes = serde_json::to_vec_pretty(record)
+        .map_err(|_| error("validated_request_write_failed", "validated_request_write_failed"))?;
+    if bytes.len() > MAX_VALIDATED_REQUEST_BYTES {
+        return Err(error(
+            "validated_request_too_large",
+            "validated_request_too_large",
+        ));
+    }
+    fs::create_dir_all(path.parent().unwrap())
+        .map_err(|_| error("validated_request_write_failed", "validated_request_write_failed"))?;
+    fs::write(path, bytes)
+        .map_err(|_| error("validated_request_write_failed", "validated_request_write_failed"))
+}
+fn read_validated_request(root: &Path, reference: &str) -> Result<Value, Value> {
+    let path = validated_request_path(root, reference)?;
+    let size = fs::metadata(&path)
+        .map_err(|_| error("validated_request_not_found", "validated_request_not_found"))?
+        .len();
+    if size > MAX_VALIDATED_REQUEST_BYTES as u64 {
+        return Err(error(
+            "validated_request_too_large",
+            "validated_request_too_large",
+        ));
+    }
+    let text = fs::read_to_string(path)
+        .map_err(|_| error("validated_request_not_found", "validated_request_not_found"))?;
+    let record: Value = serde_json::from_str(&text)
+        .map_err(|_| error("validated_request_invalid_json", "validated_request_invalid_json"))?;
+    if record.get("schema").and_then(Value::as_str)
+        != Some("narada.delegated_task.validated_request.v1")
+        || record.get("validated_request_ref").and_then(Value::as_str) != Some(reference)
+    {
+        return Err(error(
+            "validated_request_invalid",
+            "validated_request_invalid",
+        ));
+    }
+    Ok(record)
+}
+fn materialize_validated_request(
+    args: &Map<String, Value>,
+    root: &Path,
+) -> Result<Map<String, Value>, Value> {
+    let Some(reference) = args
+        .get("validated_request_ref")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(args.clone());
+    };
+    let record = read_validated_request(root, reference)?;
+    let mut merged = record
+        .get("request")
+        .and_then(Value::as_object)
+        .cloned()
+        .ok_or_else(|| error("validated_request_invalid", "validated_request_invalid"))?;
+    for (key, value) in args {
+        if key == "validated_request_ref" {
+            continue;
+        }
+        if !matches!(key.as_str(), "task_id" | "idempotency_key" | "expected_owner_site_id" | "allow_cross_site") {
+            return Err(json!({"schema":"narada.delegated_task.error.v1","code":"validated_request_drift","message":"validated_request_drift","validated_request_ref":reference,"field":key,"remediation":"Pass only validated_request_ref and optional task identity/scope fields to delegated_task_run."}));
+        }
+        if let Some(existing) = merged.get(key) {
+            if existing != value {
+                return Err(json!({"schema":"narada.delegated_task.error.v1","code":"validated_request_drift","message":"validated_request_drift","validated_request_ref":reference,"field":key}));
+            }
+        } else {
+            merged.insert(key.clone(), value.clone());
+        }
+    }
+    merged.insert("validated_request_ref".into(), json!(reference));
+    Ok(merged)
 }
 fn current_site_id(root: &Path) -> Option<String> {
     for key in ["NARADA_SITE_ID", "SITE_ID", "NARADA_SITE"] {
@@ -570,6 +672,13 @@ fn workflow_diagnostics(workflow: &Value) -> Vec<Value> {
     diagnostics
 }
 fn validate(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    validate_with_options(args, root, true)
+}
+fn validate_with_options(
+    args: &Map<String, Value>,
+    root: &Path,
+    persist_reference: bool,
+) -> Result<Value, Value> {
     let objective = args
         .get("objective")
         .and_then(Value::as_str)
@@ -600,18 +709,39 @@ fn validate(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
         .iter()
         .filter_map(|item| item.get("code").and_then(Value::as_str))
         .collect::<Vec<_>>();
-    Ok(json!({
+    let valid = errors.is_empty();
+    let mut response = json!({
         "schema":"narada.delegated_task.validate.v1",
         "status":if diagnostics.is_empty(){"ok"}else{"rejected"},
         "dry_run":true,
+        "validation_persisted":false,
         "diagnostics":diagnostics,
-        "valid":errors.is_empty(),
+        "valid":valid,
         "task_root":task_root(root).to_string_lossy(),
         "errors":errors,
         "objective":objective,
         "resolved_constraints":normalized_constraints(args.get("constraints")),
         "worker_execution":"not_run"
-    }))
+    });
+    if valid && persist_reference {
+        let reference = format!("vr_{}", uuid::Uuid::new_v4().simple());
+        let request = Value::Object(args.clone());
+        let digest = sha256_json(&request);
+        let record = json!({
+            "schema":"narada.delegated_task.validated_request.v1",
+            "validated_request_ref":reference,
+            "created_at":now(),
+            "site_root":root.to_string_lossy(),
+            "owner_site_id":current_site_id(root),
+            "request":request,
+            "request_digest":digest
+        });
+        write_validated_request(root, &record)?;
+        response["validated_request_ref"] = json!(reference);
+        response["request_digest"] = json!(digest);
+        response["validation_persisted"] = json!(true);
+    }
+    Ok(response)
 }
 fn is_within(path: &Path, root: &Path) -> bool {
     let p = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
@@ -709,10 +839,92 @@ fn tasks_list(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
         json!({"schema":"narada.delegated_task.list.v1","status":"ok","view":view,"site_scope":site_scope,"current_site_id":current,"owner_site_id":owner_filter,"count":tasks.len(),"total_scoped_count":total,"limit":limit,"include_active":include_active,"include_terminal":include_terminal,"include_acknowledged":include_ack,"tasks":tasks}),
     )
 }
+fn concise_value(value: &Value) -> String {
+    let text = match value {
+        Value::String(value) => value.clone(),
+        Value::Null => "null".into(),
+        Value::Bool(value) => value.to_string(),
+        Value::Number(value) => value.to_string(),
+        Value::Array(values) => format!("[{} items]", values.len()),
+        Value::Object(values) => format!("{{{} fields}}", values.len()),
+    };
+    text.chars().take(160).collect()
+}
+fn structured_output_summary(value: &Value) -> String {
+    if let Some(summary) = value
+        .get("summary")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|summary| !summary.is_empty())
+    {
+        return summary.chars().take(512).collect();
+    }
+    match value {
+        Value::Object(fields) => {
+            let parts = fields
+                .iter()
+                .take(4)
+                .map(|(key, value)| format!("{key}={}", concise_value(value)))
+                .collect::<Vec<_>>();
+            if parts.is_empty() {
+                format!("{} fields", fields.len())
+            } else {
+                parts.join(", ")
+            }
+        }
+        Value::Array(values) => format!("{} items", values.len()),
+        _ => concise_value(value),
+    }
+}
+fn diagnostics_prefix(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    let boundary = trimmed
+        .find("```")
+        .or_else(|| trimmed.char_indices().find_map(|(index, character)| {
+            matches!(character, '{' | '[').then_some(index)
+        }))?;
+    if boundary == 0 {
+        return None;
+    }
+    let prefix = trimmed[..boundary].trim();
+    (!prefix.is_empty()).then(|| prefix.chars().take(2000).collect())
+}
+fn derived_task_summary(task: &Value) -> Option<Value> {
+    let summaries = task
+        .pointer("/result/worker_outputs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            item.pointer("/output/summary_text")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+        })
+        .collect::<Vec<_>>();
+    if summaries.is_empty() {
+        None
+    } else {
+        Some(json!(summaries.join(" | ").chars().take(512).collect::<String>()))
+    }
+}
+fn task_summary_value(task: &Value) -> Option<Value> {
+    task.get("summary")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|summary| !summary.is_empty())
+        .map(|summary| json!(summary))
+        .or_else(|| derived_task_summary(task))
+}
+fn refresh_task_summary(task: &mut Value) {
+    if let Some(summary) = derived_task_summary(task) {
+        task["summary"] = summary;
+    }
+}
 fn compact_task(task: &Value) -> Value {
     let obj = task.as_object().cloned().unwrap_or_default();
     let result = obj.get("result").and_then(Value::as_object);
-    json!({"task_id":obj.get("task_id"),"task_status":obj.get("status"),"objective":obj.get("objective"),"owner_site_id":obj.get("owner_site_id"),"created_by_site_id":obj.get("created_by_site_id"),"visibility_scope":obj.get("visibility_scope"),"updated_at":obj.get("updated_at"),"summary":obj.get("summary"),"execution_binding":obj.get("execution_binding"),"worker_refs":result.and_then(|v|v.get("worker_refs")),"worker_outputs":result.and_then(|v|v.get("worker_outputs"))})
+    json!({"task_id":obj.get("task_id"),"task_status":obj.get("status"),"objective":obj.get("objective"),"owner_site_id":obj.get("owner_site_id"),"created_by_site_id":obj.get("created_by_site_id"),"visibility_scope":obj.get("visibility_scope"),"updated_at":obj.get("updated_at"),"summary":task_summary_value(task),"execution_binding":obj.get("execution_binding"),"worker_refs":result.and_then(|v|v.get("worker_refs")),"worker_outputs":result.and_then(|v|v.get("worker_outputs"))})
 }
 
 fn parse_embedded_structured_output(text: &str) -> Option<Value> {
@@ -759,7 +971,7 @@ fn worker_output_from_run(run: &Value) -> Option<Value> {
                         .map(|bytes| bytes.len())
                         .unwrap_or(MAX_WORKER_OUTPUT_BYTES + 1);
                     if encoded_len <= MAX_WORKER_OUTPUT_BYTES {
-                        return Some(json!({"summary_text":text,"structured_output":structured,"truncated":false}));
+                        return Some(json!({"summary_text":structured_output_summary(&structured),"diagnostics_text":diagnostics_prefix(text),"structured_output":structured,"truncated":false}));
                     }
                 }
             }
@@ -770,7 +982,7 @@ fn worker_output_from_run(run: &Value) -> Option<Value> {
                 .map(|bytes| bytes.len())
                 .unwrap_or(MAX_WORKER_OUTPUT_BYTES + 1);
             (encoded_len <= MAX_WORKER_OUTPUT_BYTES)
-                .then(|| json!({"structured_output":value,"truncated":false}))
+                .then(|| json!({"summary_text":structured_output_summary(value),"structured_output":value,"truncated":false}))
         }
     }
 }
@@ -809,6 +1021,7 @@ fn record_worker_terminal(
         outputs.retain(|value| value.get("run_id").and_then(Value::as_str) != Some(run_id));
         outputs.push(json!({"step_id":step_id,"run_id":run_id,"status":status,"output":output,"error":run.get("error")}));
     }
+    refresh_task_summary(task);
 }
 #[cfg(test)]
 fn task_status(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
@@ -833,11 +1046,18 @@ fn task_status_with_roots(
         json!({"schema":"narada.delegated_task.status.v1","status":"ok","task_id":id,"task_status":obj.get("status"),"objective":obj.get("objective"),"ownership":ownership(&task),"execution_binding":obj.get("execution_binding"),"request_fingerprint":obj.get("request_fingerprint"),"created_at":obj.get("created_at"),"updated_at":obj.get("updated_at"),"result":obj.get("result")}),
     )
 }
+fn task_is_terminal(task: &Value) -> bool {
+    matches!(
+        task.get("status").and_then(Value::as_str),
+        Some("completed" | "failed" | "cancelled")
+    )
+}
 fn task_result(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     let id = task_id(args)?;
     let task = read_task(root, &id)?;
+    let terminal = task_is_terminal(&task);
     Ok(
-        json!({"schema":"narada.delegated_task.result.v1","status":"ok","task_id":id,"task_status":task.get("status"),"result":task.get("result"),"summary":task.get("summary")}),
+        json!({"schema":"narada.delegated_task.result.v1","status":"ok","task_id":id,"task_status":task.get("status"),"result":task.get("result"),"summary":task_summary_value(&task),"canonical_terminal_handoff":terminal,"canonical_readback_tool":"delegated_task_wait","readback_role":"secondary_durable_readback"}),
     )
 }
 fn task_summary(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
@@ -848,8 +1068,9 @@ fn task_summary(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> 
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
+    let terminal = task_is_terminal(&task);
     Ok(
-        json!({"schema":"narada.delegated_task.summary.v1","status":"ok","task_id":id,"task_status":task.get("status"),"objective":task.get("objective"),"summary":task.get("summary"),"acceptance_verdict":result.get("acceptance_verdict").cloned().unwrap_or(Value::String("pending".into())),"residual_risks":result.get("residual_risks").cloned().unwrap_or_else(||json!([])),"progress":result.get("progress"),"worker_refs":result.get("worker_refs"),"worker_outputs":result.get("worker_outputs")}),
+        json!({"schema":"narada.delegated_task.summary.v1","status":"ok","task_id":id,"task_status":task.get("status"),"objective":task.get("objective"),"summary":task_summary_value(&task),"acceptance_verdict":result.get("acceptance_verdict").cloned().unwrap_or(Value::String("pending".into())),"residual_risks":result.get("residual_risks").cloned().unwrap_or_else(||json!([])),"progress":result.get("progress"),"worker_refs":result.get("worker_refs"),"worker_outputs":result.get("worker_outputs"),"canonical_terminal_handoff":terminal,"canonical_readback_tool":"delegated_task_wait"}),
     )
 }
 #[cfg(test)]
@@ -892,7 +1113,7 @@ fn task_wait_with_roots(
         ))
     };
     Ok(
-        json!({"schema":"narada.delegated_task.wait.v1","status":if matches!(task.get("status").and_then(Value::as_str),Some("completed"|"failed"|"cancelled")){"finished"}else{"timeout"},"elapsed_ms":started.elapsed().as_millis() as u64,"timeout_ms":timeout,"poll_ms":poll,"task_id":id,"task_status":task.get("status"),"refresh_performed":true,"worker_execution":"native_worker_authority","task":compact_task(&task)}),
+        json!({"schema":"narada.delegated_task.wait.v1","status":if task_is_terminal(&task){"finished"}else{"timeout"},"elapsed_ms":started.elapsed().as_millis() as u64,"timeout_ms":timeout,"poll_ms":poll,"task_id":id,"task_status":task.get("status"),"refresh_performed":true,"worker_execution":"native_worker_authority","canonical_terminal_handoff":task_is_terminal(&task),"readback_tool":"delegated_task_wait","result_readback_redundant":task_is_terminal(&task),"task":compact_task(&task)}),
     )
 }
 fn task_events(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
@@ -1032,6 +1253,14 @@ fn initial_step_states(workflow: &Value) -> Value {
 fn stable_task_id(args: &Map<String, Value>) -> String {
     if let Some(id) = args.get("task_id").and_then(Value::as_str) {
         return id.to_string();
+    }
+    if let Some(reference) = args.get("validated_request_ref").and_then(Value::as_str) {
+        let digest = Sha256::digest(reference.as_bytes());
+        let prefix = digest[..8]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        return format!("task_{prefix}");
     }
     if let Some(key) = args.get("idempotency_key").and_then(Value::as_str) {
         let digest = Sha256::digest(key.as_bytes());
@@ -1252,6 +1481,9 @@ fn task_run_with_roots(
     root: &Path,
     allowed_roots: &[PathBuf],
 ) -> Result<Value, Value> {
+    let original_validation_ref = args.get("validated_request_ref").cloned();
+    let resolved_args = materialize_validated_request(args, root)?;
+    let args = &resolved_args;
     let id = stable_task_id(args);
     safe_id(&id)?;
     let _lock = lock_task(root, &id)?;
@@ -1270,11 +1502,11 @@ fn task_run_with_roots(
             }
         }
         return Ok(
-            json!({"schema":"narada.delegated_task.run.v1","status":"existing","request_status":"existing","execution_status":task["status"],"created":false,"task_id":id,"task_status":task["status"],"summary":task["summary"]}),
+            json!({"schema":"narada.delegated_task.run.v1","status":"existing","request_status":"existing","execution_status":task["status"],"created":false,"task_id":id,"task_status":task["status"],"validated_request_ref":task.get("validated_request_ref"),"summary":task_summary_value(&task)}),
         );
     }
     let objective = objective(args)?;
-    let admission = validate(args, root)?;
+    let admission = validate_with_options(args, root, false)?;
     if admission.get("status").and_then(Value::as_str) != Some("ok") {
         return Err(
             json!({"schema":"narada.delegated_task.error.v1","code":"delegated_task_validation_failed","message":"delegated_task_validation_failed","diagnostics":admission["diagnostics"]}),
@@ -1285,14 +1517,14 @@ fn task_run_with_roots(
     let step_states = initial_step_states(&workflow);
     let site = current_site_id(root);
     let fingerprint = request_fingerprint(args, root, &id);
-    let mut task = json!({"schema":"narada.delegated_task.task.v1","task_id":id,"owner_site_id":site,"owner_site_root":if site.is_some(){json!(root.to_string_lossy())}else{Value::Null},"created_by_site_id":site,"visibility_scope":if site.is_some(){"site"}else{"user_global"},"task_root_scope":"site_root","status":"accepted_for_execution","objective":objective,"request_fingerprint":fingerprint,"created_at":created,"updated_at":created,"cancelled_at":null,"idempotency_key":args.get("idempotency_key"),"constraints":normalized_constraints(args.get("constraints")),"workflow":workflow,"execution":normalized_execution(args.get("execution")),"acceptance":args.get("acceptance").cloned().unwrap_or_else(||json!({})),"result":{"schema":"narada.delegated_task.handoff.v1","acceptance_verdict":"pending","step_states":step_states,"worker_refs":[],"worker_outputs":[],"residual_risks":[],"observed_incoherencies":[],"verification":[],"changed_files":[]},"summary":null});
+    let mut task = json!({"schema":"narada.delegated_task.task.v1","task_id":id,"owner_site_id":site,"owner_site_root":if site.is_some(){json!(root.to_string_lossy())}else{Value::Null},"created_by_site_id":site,"visibility_scope":if site.is_some(){"site"}else{"user_global"},"task_root_scope":"site_root","status":"accepted_for_execution","objective":objective,"request_fingerprint":fingerprint,"validated_request_ref":original_validation_ref,"created_at":created,"updated_at":created,"cancelled_at":null,"idempotency_key":args.get("idempotency_key"),"constraints":normalized_constraints(args.get("constraints")),"workflow":workflow,"execution":normalized_execution(args.get("execution")),"acceptance":args.get("acceptance").cloned().unwrap_or_else(||json!({})),"result":{"schema":"narada.delegated_task.handoff.v1","acceptance_verdict":"pending","step_states":step_states,"worker_refs":[],"worker_outputs":[],"residual_risks":[],"observed_incoherencies":[],"verification":[],"changed_files":[]},"summary":null});
     write_task(root, &task)?;
     append_event(root, &id, "task_created", json!({"objective":objective}))?;
     if task.pointer("/execution/start").and_then(Value::as_bool) != Some(false) {
         task = advance_value_with_roots(task, root, allowed_roots)?;
     }
     Ok(
-        json!({"schema":"narada.delegated_task.run.v1","status":"accepted_for_execution","request_status":"accepted_for_execution","execution_status":task["status"],"created":true,"task_id":id,"task_status":task["status"],"summary":task["summary"]}),
+        json!({"schema":"narada.delegated_task.run.v1","status":"accepted_for_execution","request_status":"accepted_for_execution","execution_status":task["status"],"created":true,"task_id":id,"task_status":task["status"],"validated_request_ref":task.get("validated_request_ref"),"summary":task_summary_value(&task)}),
     )
 }
 #[cfg(test)]
@@ -1470,6 +1702,99 @@ fn acceptance_verdict(task: &Value, root: &Path) -> (&'static str, Vec<Value>) {
     let mut checks = Vec::new();
     let result = task.get("result").cloned().unwrap_or_else(|| json!({}));
     let result_text = result.to_string();
+    let objective_present = task
+        .get("objective")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    checks.push(json!({
+        "kind":"objective_present",
+        "status":if objective_present {"passed"} else {"failed"}
+    }));
+    let owner_site_id = task.get("owner_site_id").and_then(Value::as_str);
+    let owner_site_root = task.get("owner_site_root").and_then(Value::as_str);
+    let provenance_status = match (owner_site_id, owner_site_root) {
+        (Some(site), Some(site_root)) if !site.trim().is_empty() && !site_root.trim().is_empty() => {
+            if is_within(Path::new(site_root), root) { "passed" } else { "failed" }
+        }
+        _ => "not_applicable",
+    };
+    checks.push(json!({
+        "kind":"site_provenance",
+        "owner_site_id":owner_site_id,
+        "owner_site_root":owner_site_root,
+        "status":provenance_status
+    }));
+    let requested_fields = task
+        .pointer("/acceptance/required_fields")
+        .or_else(|| task.pointer("/acceptance/requested_fields"))
+        .and_then(Value::as_array)
+        .map(|items| {
+            items.iter().filter_map(|item| {
+                item.as_str()
+                    .or_else(|| item.get("name").and_then(Value::as_str))
+                    .map(str::to_string)
+            }).collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let mut returned_fields = Vec::new();
+    for list_name in ["worker_outputs", "worker_refs"] {
+        if let Some(items) = result.get(list_name).and_then(Value::as_array) {
+            for item in items {
+                if let Some(fields) = item
+                    .pointer("/output/structured_output")
+                    .or_else(|| item.pointer("/structured_output"))
+                    .and_then(Value::as_object)
+                {
+                    for field in fields.keys() {
+                        if !returned_fields.contains(field) {
+                            returned_fields.push(field.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if requested_fields.is_empty() {
+        checks.push(json!({"kind":"requested_fields","requested":[],"returned":returned_fields,"missing":[],"status":"not_applicable"}));
+    } else {
+        let missing = requested_fields
+            .iter()
+            .filter(|field| !returned_fields.contains(field))
+            .cloned()
+            .collect::<Vec<_>>();
+        checks.push(json!({"kind":"requested_fields","requested":requested_fields,"returned":returned_fields,"missing":missing,"status":if missing.is_empty(){"passed"}else{"failed"}}));
+    }
+    let changed_files = result
+        .get("changed_files")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    let mut changes_made = false;
+    for list_name in ["worker_outputs", "worker_refs"] {
+        if let Some(items) = result.get(list_name).and_then(Value::as_array) {
+            changes_made |= items.iter().any(|item| {
+                let output = item
+                    .pointer("/output/structured_output")
+                    .or_else(|| item.pointer("/structured_output"));
+                output.is_some_and(|value| {
+                    value.pointer("/verification/changes_made").and_then(Value::as_bool) == Some(true)
+                        || value.get("changes_made").and_then(Value::as_bool) == Some(true)
+                        || value.pointer("/verification/target_state_changed").and_then(Value::as_bool) == Some(true)
+                })
+            });
+        }
+    }
+    let authority = task
+        .pointer("/constraints/authority")
+        .and_then(Value::as_str)
+        .unwrap_or("read");
+    checks.push(json!({
+        "kind":"no_write",
+        "authority":authority,
+        "changed_files":changed_files,
+        "changes_made":changes_made,
+        "status":if authority == "read" {if changed_files == 0 && !changes_made {"passed"} else {"failed"}} else {"not_applicable"}
+    }));
     for item in task
         .pointer("/acceptance/required_files")
         .and_then(Value::as_array)
@@ -2045,7 +2370,8 @@ fn error(code: &str, message: &str) -> Value {
     json!({"schema":"narada.delegated_task.error.v1","code":code,"message":message})
 }
 fn tool(name: &str, description: &str, schema: Value, read_only: bool) -> Value {
-    json!({"name":name,"description":description,"annotations":{"title":name,"readOnlyHint":read_only,"destructiveHint":!read_only,"idempotentHint":read_only,"openWorldHint":false},"inputSchema":schema,"outputSchema":{"type":"object","additionalProperties":true}})
+    let destructive = matches!(name, "delegated_task_cancel" | "delegated_task_parent_takeover");
+    json!({"name":name,"description":description,"annotations":{"title":name,"readOnlyHint":read_only,"destructiveHint":destructive,"stateChangingHint":!read_only,"idempotentHint":read_only,"openWorldHint":false},"inputSchema":schema,"outputSchema":{"type":"object","additionalProperties":true}})
 }
 
 #[cfg(test)]
@@ -2101,7 +2427,8 @@ mod tests {
         let output = worker_output_from_run(&run).expect("worker output");
         assert_eq!(output["structured_output"]["repository"], "marici");
         assert_eq!(output["structured_output"]["branch"], "main");
-        assert_eq!(output["summary_text"].as_str().unwrap().starts_with("I checked"), true);
+        assert_eq!(output["summary_text"], "repository=marici, branch=main");
+        assert_eq!(output["diagnostics_text"], "I checked the repository.");
     }
 
     #[test]
@@ -2152,6 +2479,52 @@ mod tests {
         let defaulted = validate(&json!({"objective":"probe"}).as_object().unwrap(), &root).expect("default validation");
         assert_eq!(defaulted["valid"], true);
         assert_eq!(defaulted["resolved_constraints"]["cognition"], "low");
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn validated_request_reference_prevents_drift_and_reuses_request() {
+        let root = std::env::temp_dir().join(format!(
+            "narada-delegated-task-validated-request-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let validation = validate(
+            json!({
+                "objective":"inspect repository",
+                "constraints":{"authority":"read"},
+                "execution":{"start":false}
+            })
+            .as_object()
+            .unwrap(),
+            &root,
+        )
+        .expect("validation");
+        let reference = validation["validated_request_ref"]
+            .as_str()
+            .expect("validated request reference")
+            .to_string();
+        assert_eq!(validation["validation_persisted"], true);
+        assert!(root.join(format!("validated-requests/{reference}.json")).is_file());
+        let run = task_run(
+            json!({"validated_request_ref":reference})
+                .as_object()
+                .unwrap(),
+            &root,
+        )
+        .expect("run from validated request");
+        assert_eq!(run["created"], true);
+        let task = read_task(&root, run["task_id"].as_str().unwrap()).expect("task");
+        assert_eq!(task["objective"], "inspect repository");
+        assert_eq!(task["validated_request_ref"], reference);
+        let drift = task_run(
+            json!({"validated_request_ref":reference,"constraints":{"authority":"write"}})
+                .as_object()
+                .unwrap(),
+            &root,
+        )
+        .expect_err("drift must be refused");
+        assert_eq!(drift["code"], "validated_request_drift");
+        fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[test]
@@ -2171,6 +2544,32 @@ mod tests {
     #[test]
     fn mutating_tool_contracts_are_closed_named_and_callable() {
         let tools = list_tools();
+        let validate = tools
+            .iter()
+            .find(|tool| tool["name"] == "delegated_task_validate")
+            .expect("validate tool");
+        assert_eq!(validate["annotations"]["readOnlyHint"], false);
+        assert_eq!(validate["annotations"]["destructiveHint"], false);
+        assert_eq!(validate["annotations"]["stateChangingHint"], true);
+        let wait = tools
+            .iter()
+            .find(|tool| tool["name"] == "delegated_task_wait")
+            .expect("wait tool");
+        assert_eq!(wait["annotations"]["destructiveHint"], false);
+        assert_eq!(wait["annotations"]["stateChangingHint"], true);
+        let cancel = tools
+            .iter()
+            .find(|tool| tool["name"] == "delegated_task_cancel")
+            .expect("cancel tool");
+        assert_eq!(cancel["annotations"]["destructiveHint"], true);
+        assert_eq!(cancel["annotations"]["stateChangingHint"], true);
+        let run = tools
+            .iter()
+            .find(|tool| tool["name"] == "delegated_task_run")
+            .expect("run tool");
+        assert!(run["inputSchema"]["anyOf"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| item["required"] == json!(["validated_request_ref"]))));
         for name in MUTATING {
             let tool = tools.iter().find(|tool| tool["name"] == *name).expect("tool");
             assert_eq!(tool["inputSchema"]["additionalProperties"], false, "{name}");
@@ -2329,14 +2728,14 @@ mod tests {
         ));
         fs::create_dir_all(&root).expect("root");
         fs::write(root.join("proof.txt"), "accepted evidence").expect("proof");
-        let task = json!({"result":{"acceptance_verdict":"passed","residual_risks":[],"verification":[{"command":"cargo test","status":"passed"}],"tools":["filesystem_search"],"step_states":{"review":{"kind":"review","status":"completed"}}},"acceptance":{"required_files":[{"path":"proof.txt","contains":"evidence"}],"required_tests":["cargo test"],"focused_tests":[{"command":"cargo test","status":"passed"}],"required_tools":["filesystem_search"],"forbidden_patterns":["forbidden-secret"],"verification_budget":{"max_attempts":2,"max_commands":2},"review_quorum":{"min_passed":1,"max_failed":0},"residual_risk_policy":"none_allowed"}});
+        let task = json!({"objective":"demo","owner_site_id":"site-test","owner_site_root":root.to_string_lossy(),"result":{"acceptance_verdict":"passed","residual_risks":[],"verification":[{"command":"cargo test","status":"passed"}],"tools":["filesystem_search"],"step_states":{"review":{"kind":"review","status":"completed"}}},"acceptance":{"required_files":[{"path":"proof.txt","contains":"evidence"}],"required_tests":["cargo test"],"focused_tests":[{"command":"cargo test","status":"passed"}],"required_tools":["filesystem_search"],"forbidden_patterns":["forbidden-secret"],"verification_budget":{"max_attempts":2,"max_commands":2},"review_quorum":{"min_passed":1,"max_failed":0},"residual_risk_policy":"none_allowed"}});
         assert!(condition_passes(
             Some("all(step:review:completed,no_residual_risks)"),
             &task
         ));
         let (verdict, checks) = acceptance_verdict(&task, &root);
         assert_eq!(verdict, "passed");
-        assert_eq!(checks.len(), 8);
+        assert_eq!(checks.len(), 12);
         fs::remove_dir_all(root).expect("cleanup");
     }
 
@@ -2376,6 +2775,15 @@ mod tests {
         )
         .expect("wait");
         assert_eq!(waited["status"], "finished");
+        assert_eq!(waited["canonical_terminal_handoff"], true);
+        assert_eq!(waited["result_readback_redundant"], true);
+        let result = task_result(
+            json!({"task_id":"task_terminal"}).as_object().unwrap(),
+            &root,
+        )
+        .expect("result");
+        assert_eq!(result["canonical_terminal_handoff"], true);
+        assert_eq!(result["readback_role"], "secondary_durable_readback");
         fs::remove_dir_all(root).expect("cleanup");
     }
 
