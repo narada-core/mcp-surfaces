@@ -44,6 +44,15 @@ Progressive bindings reject `surfaces: "all"`, bulk carrier binding, and
 single-surface direct carrier binding for non-bootstrap surfaces. Attach those
 surfaces through `mcp_loader_open_surface` and inspect their schemas with
 `mcp_loader_list_tools` or `mcp_loader_tool_discovery_manifest`.
+
+`registrar_surface_usage` separates Site declarations from carrier projections.
+When `runtime_access.available` is true, `carrier_count: 0` is not a missing
+surface: it means the surface is available through the Site-scoped
+`mcp-loader` route and is not statically projected into this carrier. Use the
+Site root and the admitted loader binding for runtime access. Use
+`registrar_carrier_bind` only for a surface already declared in that carrier's
+Site binding; native carrier publication remains the materializer's
+all-carrier operation.
 ## Tools
 
 | Tool | Description |
@@ -54,7 +63,7 @@ surfaces through `mcp_loader_open_surface` and inspect their schemas with
 | `registrar_site_bind` | Write a surface config into a site's `.ai/mcp/` |
 | `registrar_site_unbind` | Remove a surface from a site |
 | `registrar_carrier_list` | List carriers |
-| `registrar_carrier_bind` | Add surface to a carrier (JSON for opencode/kimi, TOML for Codex) |
+| `registrar_carrier_bind` | Validate a static carrier projection request; native publication is performed by the all-carrier materializer |
 | `registrar_carrier_unbind` | Remove from carrier |
 | `registrar_sync` | Bind surfaces across configured sites and carriers |
 | `registrar_site_mcp_fabric_validate` | Validate a Site's materialized MCP fabric |
@@ -115,7 +124,13 @@ records the external source path and revision-evidence requirement.
 Use the registrar when you want to inject a standalone MCP surface into Codex, opencode, Kimi, or a Narada site without hand-editing carrier config.
 
 - `registrar_site_bind` writes a site-local `.ai/mcp/` binding.
-- `registrar_carrier_bind` writes carrier config in the carrier's own format.
+- `registrar_carrier_bind` validates a static carrier projection request. It does
+  not write a single carrier config in the native architecture; change the
+  owning native contract or Site registry and run `cargo native-materialize`.
+- For Site-scoped or progressive surfaces (for example `scheduler`), use
+  `mcp_loader_open_surface` with the Site root instead of creating a carrier
+  binding. A missing carrier binding is therefore an expected routing result,
+  not evidence that the Site surface is unreachable.
 - `registrar_sync` applies the same surface binding across the supported sites and carriers.
 
 For a concrete example, `@narada-core/local-filesystem-mcp` can run standalone, while this registrar handles how it gets exposed to a specific CLI or TUI. See `docs/mcp-wiring.md` for the emitted Codex, opencode, and Kimi shapes.

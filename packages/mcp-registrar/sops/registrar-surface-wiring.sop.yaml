@@ -61,12 +61,17 @@ steps:
       Narada launcher/session materialization. Do not create site-specific
       carrier profiles such as opencode-sonar.
 
-      For each target carrier, call registrar_carrier_bind with:
-      - carrier_id (e.g., opencode-andrey, kimi-andrey, codex-andrey)
-      - surface_id
-      - site_id for the User Site interpolation context unless the operator
-        has explicitly requested a compatibility sidecar
-      Report success/failure per carrier.
+      Only request a carrier projection when the surface is declared in that
+      carrier's Site binding and a static carrier launch is required. Call
+      registrar_carrier_bind with carrier_id, surface_id, and site_id for that
+      declared binding. The native registrar validates this request; the
+      all-carrier native materializer performs publication.
+
+      For progressive or Site-scoped surfaces (including scheduler), do not
+      create a carrier binding. Use mcp-loader with the admitted Site root and
+      binding instead. A registrar_carrier_site_binding_missing refusal is
+      expected for that route and must identify mcp-loader as next_route.
+      Report the selected route and its verification evidence.
 
   - id: sync_all
     executor: engine
@@ -135,7 +140,8 @@ acceptance_criteria:
   - Surface builds, typechecks, and tests pass
   - Native SurfaceDescriptorV2 is complete in the registrar catalog
   - Surface is bound to all target sites
-  - Surface is bound to all target carriers
+  - Static carrier projections are declared for all target carriers that need them
+  - Progressive or Site-scoped surfaces are reachable through their admitted mcp-loader bindings
   - No site-specific carrier profile is created for ordinary Site launches
   - Carrier config files contain correct entries
   - Carrier config files do not contain stale local entrypoints or obsolete tool metadata

@@ -548,12 +548,49 @@ fn carrier_bind(contract: &Value, args: &Value) -> Result<Value, MutationFailure
         .as_array()
         .cloned()
         .unwrap_or_default();
-    lookup_site_value(&sites,site_id).map_err(|message|mutation_failure("registrar_unknown_site",message,json!({"known":sites.iter().filter_map(|site|site["site_id"].as_str()).collect::<Vec<_>>() })))?;
+    let site = lookup_site_value(&sites,site_id).map_err(|message|mutation_failure("registrar_unknown_site",message,json!({"known":sites.iter().filter_map(|site|site["site_id"].as_str()).collect::<Vec<_>>() })))?;
+    let site_declares_surface = site["surfaces"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|value| value == &surface_id)
+        || site_fabric_surface_ids(contract, &site)
+            .iter()
+            .any(|value| value == &surface_id)
+        || site_local_surface_ids(contract, &site)
+            .iter()
+            .any(|value| value == &surface_id);
     let binding = carrier["site_bindings"]
         .as_array()
         .into_iter()
         .flatten()
         .find(|binding| binding["site_id"] == site_id);
+    if binding.is_none() {
+        let next_route = if site_declares_surface {
+            "mcp-loader"
+        } else {
+            "registrar_site_bind"
+        };
+        let remediation = if site_declares_surface {
+            "The surface is declared by the Site but this carrier has no Site binding for it. Use mcp-loader with the Site root for runtime attachment; do not add a carrier binding for a site-scoped surface."
+        } else {
+            "The requested Site does not declare this surface. Bind the surface to the Site first, then use mcp-loader for a site-scoped runtime attachment or add it to the native carrier contract for static materialization."
+        };
+        return Err(mutation_failure(
+            "registrar_carrier_site_binding_missing",
+            format!("registrar_carrier_site_binding_missing:{carrier_id}:{site_id}:{surface_id}"),
+            json!({
+                "carrier_id":carrier_id,
+                "site_id":site_id,
+                "surface_id":surface_id,
+                "carrier_site_binding":"absent",
+                "site_surface_declared":site_declares_surface,
+                "site_root":site["root"],
+                "next_route":next_route,
+                "remediation":remediation
+            }),
+        ));
+    }
     let keys = carrier_surface_keys(contract, &carrier_id, &surface_id);
     if binding.is_some_and(|value| value["loading_mode"] == "progressive") && keys.is_empty() {
         return Err(mutation_failure(
@@ -572,9 +609,15 @@ fn carrier_bind(contract: &Value, args: &Value) -> Result<Value, MutationFailure
         ));
     }
     Err(mutation_failure(
-        "registrar_native_carrier_bind_unreachable",
-        format!("registrar_native_carrier_bind_unreachable:{carrier_id}:{surface_id}"),
-        json!({}),
+        "registrar_carrier_bind_requires_native_materializer",
+        format!("registrar_carrier_bind_requires_native_materializer:{carrier_id}:{site_id}:{surface_id}"),
+        json!({
+            "carrier_id":carrier_id,
+            "site_id":site_id,
+            "surface_id":surface_id,
+            "route":"native-materializer",
+            "remediation":"Change the owning native carrier contract or Site registry, then run cargo native-materialize; this registrar does not emit single-carrier configuration."
+        }),
     ))
 }
 fn carrier_unbind(contract: &Value, args: &Value) -> Result<Value, MutationFailure> {
@@ -2770,8 +2813,14 @@ fn surface_usage(contract: &Value, args: &Value) -> Result<Value, String> {
             deduped.push(item);
         }
     }
+    let runtime_access = json!({
+        "available": !matching_sites.is_empty(),
+        "owner": "mcp-loader",
+        "mode": "site-scoped",
+        "carrier_binding_required": matching_sites.is_empty()
+    });
     Ok(
-        json!({"surface_id":surface_id,"is_local":is_local,"sites":matching_sites,"carriers":deduped,"site_count":matching_sites.len(),"carrier_count":deduped.len()}),
+        json!({"surface_id":surface_id,"is_local":is_local,"sites":matching_sites,"carriers":deduped,"site_count":matching_sites.len(),"carrier_count":deduped.len(),"runtime_access":runtime_access}),
     )
 }
 
@@ -5353,6 +5402,37 @@ mod tests {
                 ["include_registry"]["default"],
             false
         );
+    }
+
+    #[test]
+    fn site_scoped_surface_reports_loader_route_when_carrier_binding_is_absent() {
+        let contract = embedded_contract();
+        let failure = carrier_bind(
+            &contract,
+            &json!({
+                "carrier_id":"codex-andrey",
+                "site_id":"marici",
+                "surface_id":"scheduler"
+            }),
+        )
+        .expect_err("site-scoped scheduler must not be emitted as a carrier mutation");
+        assert_eq!(failure.code, "registrar_carrier_site_binding_missing");
+        assert_eq!(failure.details["site_surface_declared"], true);
+        assert_eq!(failure.details["next_route"], "mcp-loader");
+        assert!(failure.details["site_root"]
+            .as_str()
+            .unwrap_or_default()
+            .replace('\\', "/")
+            .ends_with("/marici"));
+    }
+
+    #[test]
+    fn surface_usage_exposes_site_runtime_access_without_carrier_projection() {
+        let contract = embedded_contract();
+        let usage = surface_usage(&contract, &json!({"surface_id":"scheduler"})).unwrap();
+        assert_eq!(usage["runtime_access"]["owner"], "mcp-loader");
+        assert_eq!(usage["runtime_access"]["mode"], "site-scoped");
+        assert_eq!(usage["runtime_access"]["available"], true);
     }
 
     #[test]
