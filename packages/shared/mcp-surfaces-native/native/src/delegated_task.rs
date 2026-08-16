@@ -553,7 +553,7 @@ fn policy_with_roots(root: &Path, allowed_roots: &[PathBuf]) -> Value {
 }
 
 fn assessment_output_schema() -> Value {
-    json!({"schema":"narada.delegated_task.output_schema.v1","name":"task_executability_assessment_v1","version":1,"required":["dimensions","first_actions","reference_resolutions","acceptance_mappings","required_decisions","findings","assessment_result","evaluator_provenance"],"fields":{"dimensions":"array<object>","first_actions":"array<object>","reference_resolutions":"array<object>","acceptance_mappings":"array<object>","required_decisions":"array<object>","findings":"array<object>","assessment_result":"string: passed|blocked|undetermined|inconclusive","evaluator_provenance":"object"},"provenance_required":["runtime","provider","model","cognition","profile_version"],"rejection_rules":["missing_required_field","prose_only","invalid_schema","invalid_provenance"]})
+    json!({"schema":"narada.delegated_task.output_schema.v1","name":"task_executability_assessment_v1","version":1,"required":["dimensions","first_actions","reference_resolutions","acceptance_mappings","required_decisions","findings","assessment_result","evaluator_provenance"],"fields":{"dimensions":"array<object>","first_actions":"array<object>","reference_resolutions":"array<object>","acceptance_mappings":"array<object>","required_decisions":"array<object>","findings":"array<object>","assessment_result":"string: passed|blocked|undetermined|inconclusive OR object {status: executable|passed|blocked|undetermined|inconclusive, implementation_ready: boolean, blockers: array<object>}","evaluator_provenance":"object"},"provenance_required":["runtime","provider","model","cognition","profile_version"],"rejection_rules":["missing_required_field","prose_only","invalid_schema","invalid_provenance"]})
 }
 
 fn assessment_template() -> Value {
@@ -1071,7 +1071,7 @@ fn acceptance_checks_or_derive(
         .filter(|check| {
             matches!(
                 check["kind"].as_str(),
-                Some("output_contract" | "objective_outcome")
+                Some("output_contract" | "objective_outcome" | "assessment_consistency")
             )
         })
         .cloned()
@@ -1205,6 +1205,76 @@ fn is_executability_assessment(task: &Value) -> bool {
         })
 }
 
+fn assessment_consistency_check(task: &Value) -> Option<Value> {
+    if !is_executability_assessment(task) {
+        return None;
+    }
+    let projection = final_step_projection(task);
+    let output = projection
+        .get("final_structured_output")
+        .and_then(Value::as_object)?;
+    let assessment = output.get("assessment_result").and_then(Value::as_object)?;
+    let assessment_status = assessment
+        .get("status")
+        .and_then(Value::as_str)
+        .map(|value| value.trim().to_ascii_lowercase());
+    let implementation_ready = assessment.get("implementation_ready").and_then(Value::as_bool);
+    let blocker_count = assessment
+        .get("blockers")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    let blocking_decision_count = output
+        .get("required_decisions")
+        .and_then(Value::as_array)
+        .map(|decisions| {
+            decisions
+                .iter()
+                .filter(|decision| decision.get("blocking").and_then(Value::as_bool) == Some(true))
+                .count()
+        })
+        .unwrap_or(0);
+    let executable_status = matches!(
+        assessment_status.as_deref(),
+        Some("executable" | "passed" | "pass" | "ready" | "complete" | "completed" | "success")
+    );
+    let mut reasons = Vec::new();
+    if assessment_status.is_none() {
+        reasons.push("assessment_status_missing".to_string());
+    } else if !executable_status
+        && !matches!(
+            assessment_status.as_deref(),
+            Some("blocked" | "failed" | "failure" | "undetermined" | "inconclusive" | "unavailable")
+        )
+    {
+        reasons.push("assessment_status_unknown".to_string());
+    }
+    if executable_status && implementation_ready != Some(true) {
+        reasons.push("executable_status_requires_implementation_ready_true".to_string());
+    }
+    if executable_status && blocker_count > 0 {
+        reasons.push("executable_status_has_blockers".to_string());
+    }
+    if executable_status && blocking_decision_count > 0 {
+        reasons.push("executable_status_has_blocking_required_decisions".to_string());
+    }
+    Some(json!({
+        "kind":"assessment_consistency",
+        "status":if reasons.is_empty(){"passed"}else{"failed"},
+        "verdict":if reasons.is_empty(){"consistent"}else{"inconsistent"},
+        "assessment_status":assessment_status,
+        "implementation_ready":implementation_ready,
+        "blocker_count":blocker_count,
+        "blocking_decision_count":blocking_decision_count,
+        "reasons":reasons
+    }))
+}
+
+fn assessment_consistency_failed(task: &Value) -> bool {
+    assessment_consistency_check(task)
+        .is_some_and(|check| check.get("status").and_then(Value::as_str) == Some("failed"))
+}
+
 fn objective_signal(task: &Value) -> Option<String> {
     let projection = final_step_projection(task);
     let output = projection.get("final_structured_output")?;
@@ -1217,6 +1287,27 @@ fn objective_signal(task: &Value) -> Option<String> {
             return Some(text.to_ascii_lowercase());
         }
         if let Some(nested) = value.as_object() {
+            if key == "assessment_result" {
+                if assessment_consistency_failed(task) {
+                    return Some("inconsistent".to_string());
+                }
+                if let Some(text) = nested
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                {
+                    return Some(text.to_ascii_lowercase());
+                }
+                if nested.get("implementation_ready").and_then(Value::as_bool) == Some(true)
+                    && nested
+                        .get("blockers")
+                        .and_then(Value::as_array)
+                        .is_some_and(Vec::is_empty)
+                {
+                    return Some("passed".to_string());
+                }
+            }
             for nested_key in ["verdict", "status", "result"] {
                 if let Some(text) = nested
                     .get(nested_key)
@@ -1235,11 +1326,13 @@ fn objective_signal(task: &Value) -> Option<String> {
 fn objective_verdict(task: &Value) -> (&'static str, Option<String>) {
     let signal = objective_signal(task);
     let verdict = match signal.as_deref() {
-        Some("passed" | "pass" | "achieved" | "success" | "succeeded" | "completed" | "complete" | "coherent") => "passed",
+        Some("passed" | "pass" | "achieved" | "success" | "succeeded" | "completed" | "complete" | "coherent" | "executable" | "ready") => "passed",
         Some("pending" | "running") => "pending",
         Some("failed" | "failure") => "failed",
         Some("blocked" | "undetermined" | "inconclusive" | "unavailable" | "not_found") => "blocked",
+        Some("inconsistent") => "blocked",
         Some(_) => "blocked",
+        None if is_executability_assessment(task) && !task_is_terminal(task) => "pending",
         None if is_executability_assessment(task) => "blocked",
         None => "not_applicable",
     };
@@ -1256,6 +1349,9 @@ fn output_contract_verdict(task: &Value) -> &'static str {
             })
         })
     {
+        return "failed";
+    }
+    if assessment_consistency_failed(task) {
         return "failed";
     }
     let final_step = final_step_projection(task);
@@ -2451,6 +2547,9 @@ fn acceptance_verdict(task: &Value, root: &Path) -> (&'static str, Vec<Value>) {
         "verdict":output_contract,
         "status":output_contract
     }));
+    if let Some(check) = assessment_consistency_check(task) {
+        checks.push(check);
+    }
     let (objective, signal) = objective_verdict(task);
     checks.push(json!({
         "kind":"objective_outcome",
@@ -3070,6 +3169,7 @@ mod tests {
     fn final_projection_uses_review_and_preserves_prior_output_reference() {
         let task = json!({
             "task_id":"task-review",
+            "status":"completed",
             "workflow":{"steps":[
                 {"id":"implement","kind":"worker"},
                 {"id":"review","kind":"review","depends_on":["implement"]}
@@ -3090,6 +3190,7 @@ mod tests {
     fn executability_blocked_separates_contract_and_objective_verdicts() {
         let task = json!({
             "task_id":"task-assessment",
+            "status":"completed",
             "objective":"read the target file",
             "workflow":{"steps":[{"id":"assessment","kind":"worker","profile":"shoshin-task-executability-v1","output_schema":{"name":"task_executability_assessment_v1","required":["findings"]}}]},
             "result":{"worker_outputs":[{"step_id":"assessment","status":"completed","output":{"summary_text":"The target could not be read.","structured_output":{"findings":[],"assessment_result":"undetermined"}}}],"step_states":{"assessment":{"kind":"worker","status":"completed","worker_output_contract":"passed"}}}
@@ -3100,6 +3201,62 @@ mod tests {
         assert_eq!(acceptance, "blocked");
         assert!(checks.iter().any(|check| check["kind"] == "objective_outcome" && check["verdict"] == "blocked"));
         assert_eq!(derived_task_summary(&task), Some(json!("assessment_result: blocked. The target could not be read.")));
+    }
+
+    #[test]
+    fn running_executability_assessment_reports_pending_not_blocked() {
+        let task = json!({
+            "task_id":"task-assessment-running",
+            "status":"accepted_for_execution",
+            "objective":"read the target file",
+            "workflow":{"steps":[{"id":"assessment","kind":"worker","profile":"shoshin-task-executability-v1","output_schema":{"name":"task_executability_assessment_v1","required":["findings"]}}]},
+            "result":{"worker_outputs":[],"step_states":{"assessment":{"kind":"worker","status":"running"}}}
+        });
+        assert_eq!(objective_verdict(&task).0, "pending");
+        assert_eq!(
+            derived_task_summary(&task),
+            Some(json!("assessment_result: pending. No substantive objective result was reported."))
+        );
+        let (acceptance, checks) = acceptance_verdict(&task, Path::new("."));
+        assert_eq!(acceptance, "pending");
+        assert!(checks.iter().any(|check| {
+            check["kind"] == "objective_outcome" && check["verdict"] == "pending"
+        }));
+    }
+
+    #[test]
+    fn assessment_result_object_is_canonical_and_rejects_contradictory_blocking_decisions() {
+        let workflow = json!({"steps":[{"id":"assessment","kind":"worker","profile":"shoshin-task-executability-v1","output_schema":{"name":"task_executability_assessment_v1","required":["assessment_result","required_decisions"]}}]});
+        let mut task = json!({
+            "task_id":"task-assessment-object",
+            "status":"completed",
+            "objective":"assess the task",
+            "workflow":workflow,
+            "result":{"worker_outputs":[{"step_id":"assessment","status":"completed","output":{"summary_text":"assessment complete","structured_output":{"assessment_result":{"status":"executable","implementation_ready":true,"blockers":[]},"required_decisions":[]}}}],"step_states":{"assessment":{"kind":"worker","status":"completed","worker_output_contract":"passed"}}}
+        });
+        let (acceptance, checks) = acceptance_verdict(&task, Path::new("."));
+        assert_eq!(output_contract_verdict(&task), "passed");
+        assert_eq!(objective_verdict(&task).0, "passed");
+        assert_eq!(acceptance, "passed");
+        assert!(checks.iter().any(|check| {
+            check["kind"] == "assessment_consistency" && check["status"] == "passed"
+        }));
+
+        task["result"]["worker_outputs"][0]["output"]["structured_output"]["required_decisions"] =
+            json!([{"decision":"resolve dirty edits","blocking":true}]);
+        let (acceptance, checks) = acceptance_verdict(&task, Path::new("."));
+        assert_eq!(output_contract_verdict(&task), "failed");
+        assert_eq!(objective_verdict(&task).0, "blocked");
+        assert_eq!(acceptance, "failed");
+        assert!(checks.iter().any(|check| {
+            check["kind"] == "assessment_consistency"
+                && check["status"] == "failed"
+                && check["reasons"]
+                    .as_array()
+                    .is_some_and(|reasons| reasons.iter().any(|reason| {
+                        reason == "executable_status_has_blocking_required_decisions"
+                    }))
+        }));
     }
 
     #[test]
