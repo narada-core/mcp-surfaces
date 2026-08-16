@@ -1751,6 +1751,7 @@ fn acceptance_verdict(task: &Value, root: &Path) -> (&'static str, Vec<Value>) {
     let requested_fields = task
         .pointer("/acceptance/required_fields")
         .or_else(|| task.pointer("/acceptance/requested_fields"))
+        .or_else(|| task.pointer("/acceptance/required"))
         .and_then(Value::as_array)
         .map(|items| {
             items.iter().filter_map(|item| {
@@ -2761,6 +2762,32 @@ mod tests {
         assert_eq!(verdict, "passed");
         assert_eq!(checks.len(), 12);
         fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn acceptance_required_alias_reports_returned_fields() {
+        let root = std::env::temp_dir().join(format!(
+            "narada-delegated-task-required-fields-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let task = json!({
+            "objective":"demo",
+            "owner_site_id":"site-test",
+            "owner_site_root":root.to_string_lossy(),
+            "constraints":{"authority":"read"},
+            "acceptance":{"required":["repository_name","current_branch","verification"]},
+            "result":{"changed_files":[],"worker_outputs":[{"output":{"structured_output":{"repository_name":"marici","current_branch":"main","verification":"confirmed"}}}]}
+        });
+        let (_, checks) = acceptance_verdict(&task, &root);
+        let fields = checks
+            .iter()
+            .find(|check| check["kind"] == "requested_fields")
+            .expect("requested fields check");
+        assert_eq!(
+            fields["requested"],
+            json!(["repository_name", "current_branch", "verification"])
+        );
+        assert_eq!(fields["status"], "passed");
     }
 
     #[test]
