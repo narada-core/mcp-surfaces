@@ -394,7 +394,7 @@ fn read_run(root: &Path, id: &str) -> Result<Value, Value> {
 }
 
 fn policy(root: &Path, allowed_roots: &[PathBuf]) -> Value {
-    json!({"schema":"narada.worker.policy.v1","status":"ok","server_name":SERVER_NAME,"run_root":run_root(root).to_string_lossy(),"site_root":root.to_string_lossy(),"allowed_roots":allowed_roots.iter().map(|allowed|allowed.to_string_lossy()).collect::<Vec<_>>(),"allowed_runtimes":["narada-agent-runtime-server"],"allowed_authorities":["read","write","command"],"default_cognition":DEFAULT_COGNITION,"native_execution":"rust_authority","secret_projection":"secret_store_reference_only","windows_msvc_environment":{"inherited":true,"automatic_discovery":false,"remediation":"Initialize VsDevCmd or use Developer PowerShell before launching the carrier."}})
+    json!({"schema":"narada.worker.policy.v1","status":"ok","server_name":SERVER_NAME,"run_root":run_root(root).to_string_lossy(),"site_root":root.to_string_lossy(),"allowed_roots":allowed_roots.iter().map(|allowed|allowed.to_string_lossy()).collect::<Vec<_>>(),"allowed_runtimes":["narada-agent-runtime-server"],"allowed_authorities":["read","write","command"],"default_cognition":DEFAULT_COGNITION,"native_execution":"rust_authority","secret_projection":"secret_store_reference_only","provider_transports":{"codex-subscription":{"transport":"codex_app_server_broker","host_lifecycle":"owned_by_surface_process","thread_policy":"fresh_ephemeral_per_turn","fallback":"none"},"deepseek-api":{"transport":"native_http"},"openrouter-api":{"transport":"native_http"}},"windows_msvc_environment":{"inherited":true,"automatic_discovery":false,"remediation":"Initialize VsDevCmd or use Developer PowerShell before launching the carrier."}})
 }
 fn capability_snapshot(
     authority: &str,
@@ -413,7 +413,7 @@ fn capability_snapshot(
         "authority":authority,
         "effective_mode":effective_mode,
         "validated_against_runtime":true,
-        "validation_basis":if runtime_probe.is_some(){"scoped_create_read_remove_probe_plus_codex_cli_contract"}else{"native_worker_maps_authority_to_codex_cli_and_approval_contract"},
+        "validation_basis":if runtime_probe.is_some(){"scoped_create_read_remove_probe_plus_provider_contract"}else{"native_worker_maps_authority_to_provider_and_approval_contract"},
         "reconciliation":{"authoritative_source":"native_worker_runtime","ambient_profile_is_advisory":true,"conflict_resolution":"effective_mode_and_runtime_probe_win"},
         "runtime_probe":runtime_probe.cloned().unwrap_or(Value::Null),
         "provider_boundary":{"permission_profile":effective_mode,"writable_roots_injected":writable,"source":"native_process_environment_and_codex_cli"},
@@ -1412,6 +1412,13 @@ fn worker_run(
         reasoning_effort,
         provider_binding,
     ) = invocation_plan_binding(root, requested_plan_ref.as_deref(), Some(&cognition))?;
+    let codex_broker = if provider_mode == "codex-subscription" {
+        Some(crate::codex_app_server_broker::binding().map_err(|reason| {
+            json!({"schema":"narada.worker.error.v1","code":"worker_codex_app_server_unavailable","message":"worker_codex_app_server_unavailable","reason":reason,"mutation_started":false})
+        })?)
+    } else {
+        None
+    };
     let cwd = constraints
         .and_then(|v| v.get("cwd"))
         .and_then(Value::as_str)
@@ -1435,6 +1442,15 @@ fn worker_run(
         native_read_evidence_prompt(&preflight)
     );
     let mut capabilities = capability_snapshot(&auth, &cwd, allowed_roots, runtime_probe.as_ref());
+    if let Some(broker) = codex_broker.as_ref() {
+        capabilities["provider_boundary"]["source"] = json!("native_codex_app_server_broker");
+        capabilities["provider_boundary"]["transport"] = json!("codex_app_server_broker");
+        capabilities["provider_boundary"]["broker_generation"] = json!(broker.broker_generation);
+        capabilities["provider_boundary"]["thread_policy"] = json!("fresh_ephemeral_per_turn");
+    } else {
+        capabilities["provider_boundary"]["transport"] = json!("native_http");
+        capabilities["tool_bridge"]["kind"] = json!("nars_native_mcp_gateway");
+    }
     capabilities["preflight"] = preflight;
     let id = format!("run-{}", uuid::Uuid::new_v4().simple());
     let session = resume.clone().unwrap_or_else(|| id.clone());
@@ -1448,7 +1464,7 @@ fn worker_run(
     {
         write_json_atomic(path, binding)?;
     }
-    let resolved_invocation = resolved_invocation(
+    let mut resolved_invocation = resolved_invocation(
         &cognition,
         &plan_ref,
         &provider_mode,
@@ -1458,6 +1474,13 @@ fn worker_run(
         provider_binding.as_ref(),
         provider_binding_path.as_deref(),
     );
+    if let Some(broker) = codex_broker.as_ref() {
+        resolved_invocation["provider_transport"] = json!("codex_app_server_broker");
+        resolved_invocation["provider_broker_generation"] = json!(broker.broker_generation);
+        resolved_invocation["provider_thread_policy"] = json!("fresh_ephemeral_per_turn");
+    } else {
+        resolved_invocation["provider_transport"] = json!("native_http");
+    }
     let started = now();
     let request = json!({"schema":"narada.worker.request.v1","run_id":id,"origin_tool":tool_name,"intent":args.get("intent"),"constraints":args.get("constraints"),"resume_worker_session_id":resume,"capability_snapshot":capabilities.clone(),"invocation_plan_ref":plan_ref,"preflight_evidence_ref":preflight_evidence_ref,"resolved_invocation":resolved_invocation.clone()});
     write_json_atomic(&dir.join("request.json"), &request)?;
@@ -1492,6 +1515,7 @@ fn worker_run(
                 provider_model,
                 reasoning_effort,
                 provider_binding_path,
+                codex_broker,
                 allowed_roots_owned,
                 max_run_ms,
                 format!("Effective mode: {}. This reconciled state is injected at the provider process boundary through the permission profile, CLI sandbox, and writable-root arguments; ambient labels are advisory. CWD: {}. Writable roots: {}. Scoped create/read/remove preflight: {}. Command write effects: {}. First-class exact-byte lifecycle: one bounded shell command with explicit encoding for create/read-verify/remove/confirm-absent. On Windows assign literal path/content variables, use IO.File WriteAllBytes/ReadAllBytes, compare hex, delete, and test existence; avoid interpolated command strings. Use apply_patch for ordinary edits. Read-only command policy: issue one executable with literal arguments per probe; do not combine probes with &&, ;, pipes, redirection, $(), backticks, or generated scripts. Use separate bounded commands and report each result. For non-ASCII text, set explicit UTF-8 output before reading. Carrier MCP projection: none. On refusal return narada.worker.refusal.v1 with tool, operation, cwd, target_path, declared_capability, actual_refusal. Ergonomics ratings use narada.worker.observed_ergonomics.v1: lower a score only for observed failure, retry, human intervention, or ambiguity that changed execution; automatic contained review requires no human interaction and is not ceremony; put hypothetical improvements in non_scoring_observations.\n\nTask:\n{prompt}", capabilities["effective_mode"].as_str().unwrap_or("unknown"), capabilities["cwd"].as_str().unwrap_or("unknown"), capabilities["allowed_roots"].as_array().map(|roots| roots.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")).unwrap_or_default(), capabilities["runtime_probe"]["status"].as_str().unwrap_or("not_required"), capabilities["commands"]["write_effects"].as_bool().unwrap_or(false)),
@@ -1675,12 +1699,13 @@ fn complete_native_run(
     resume_session: Option<String>,
     authority: String,
     cognition: String,
-    resolved_invocation: Value,
+    mut resolved_invocation: Value,
     plan_ref: String,
     provider_mode: String,
     provider_model: String,
     reasoning_effort: Option<String>,
     provider_binding_path: Option<PathBuf>,
+    codex_broker: Option<crate::codex_app_server_broker::BrokerBinding>,
     allowed_roots: Vec<PathBuf>,
     max_run_ms: u64,
     prompt: String,
@@ -1728,6 +1753,13 @@ fn complete_native_run(
     if let Some(binding_path) = provider_binding_path {
         command.env("NARADA_NATIVE_PROVIDER_BINDING_PATH", binding_path);
     }
+    if let Some(broker) = codex_broker {
+        command
+            .env("NARADA_NATIVE_CODEX_TRANSPORT", "codex-app-server")
+            .env("NARADA_NATIVE_CODEX_BROKER_ENDPOINT", broker.endpoint)
+            .env("NARADA_NATIVE_CODEX_BROKER_CAPABILITY", broker.capability)
+            .env("NARADA_NATIVE_CODEX_BROKER_GENERATION", broker.broker_generation);
+    }
     command.env("NARADA_NATIVE_CODEX_MODEL", provider_model);
     if let Some(reasoning_effort) = reasoning_effort {
         command.env("NARADA_NATIVE_CODEX_REASONING_EFFORT", reasoning_effort);
@@ -1766,6 +1798,7 @@ fn complete_native_run(
         let mut events = fs::File::create(&events_path).ok();
         let mut assistant = None;
         let mut provider_session = None;
+        let mut provider_host_generation = None;
         let mut runtime_error = None;
         let mut failure = Value::Null;
         let mut close_sent = false;
@@ -1831,6 +1864,13 @@ fn complete_native_run(
                 {
                     provider_session = Some(value.to_string());
                 }
+                if let Some(value) = event
+                    .get("provider_host_generation")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                {
+                    provider_host_generation = Some(value.to_string());
+                }
                 if matches!(
                     kind,
                     "error"
@@ -1877,6 +1917,9 @@ fn complete_native_run(
             .and_then(|request| request.get("capability_snapshot").cloned())
             .unwrap_or(Value::Null);
         let elapsed_ms = started.elapsed().as_millis() as u64;
+        if let Some(generation) = provider_host_generation {
+            resolved_invocation["provider_host_generation"] = json!(generation);
+        }
         let final_error = runtime_error.or_else(|| {
             if successful {
                 None
@@ -2018,6 +2061,9 @@ mod tests {
     fn policy_declares_secret_store_reference_projection() {
         let value = policy(Path::new("."), &[PathBuf::from(".")]);
         assert_eq!(value["secret_projection"], "secret_store_reference_only");
+        assert_eq!(value["provider_transports"]["codex-subscription"]["transport"], "codex_app_server_broker");
+        assert_eq!(value["provider_transports"]["codex-subscription"]["thread_policy"], "fresh_ephemeral_per_turn");
+        assert_eq!(value["provider_transports"]["codex-subscription"]["fallback"], "none");
         assert!(guidance(&Map::new())["boundaries"][1]
             .as_str()
             .is_some_and(|text| text.contains("SecretStore-referenced")));

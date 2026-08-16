@@ -23,6 +23,15 @@ and failure posture are documented in [docs/epistemic-graph.md](docs/epistemic-g
 
 The executable hosts only explicitly admitted Rust surface modules. It does not dynamically evaluate JavaScript or infer a surface implementation from a tool name.
 
+Worker delegation keeps a fresh Rust NARS process for each run. Codex
+subscription turns cross a capability-authenticated loopback broker owned by
+the worker/delegated-task surface process; that broker owns one hidden Codex
+app-server and creates a fresh ephemeral Codex thread for every provider turn.
+It never reuses the outer carrier session or silently falls back to
+`codex exec`. DeepSeek and OpenRouter bindings use NARS's native HTTP provider
+adapter instead. `worker_policy_inspect` and each run's
+`resolved_invocation` expose the selected transport and host generation.
+
 ## Verification
 
 ```powershell

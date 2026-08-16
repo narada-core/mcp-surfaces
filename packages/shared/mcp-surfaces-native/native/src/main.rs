@@ -16,6 +16,7 @@ mod authority;
 mod browser_control_authority;
 mod calendar;
 mod cloudflare_carrier_authority;
+mod codex_app_server_broker;
 mod delegated_task;
 mod epistemic_graph;
 mod graph_authority;
