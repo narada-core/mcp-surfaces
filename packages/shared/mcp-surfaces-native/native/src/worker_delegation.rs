@@ -15,7 +15,7 @@ const MAX_RUNS: usize = 200;
 const MAX_FILE_BYTES: usize = 256_000;
 const MAX_NATIVE_READ_BYTES: usize = 64 * 1024;
 const MAX_NATIVE_READ_FILES: usize = 8;
-const READ_ONLY_COMMAND_CONTRACT: &str = "READ-ONLY COMMAND CONTRACT (apply before acting): use one executable with literal argv per probe; use supplied native preflight evidence for path existence/readability instead of probing again; when constraints.preflight_paths contains access=read, the native authority injects bounded file evidence before launch; never combine probes with &&, ;, pipes, redirection, $(), backticks, or generated scripts. If a probe is refused, stop that probe and report the refusal; do not retry by bundling commands or changing shells. WINDOWS READ-ONLY PROBE: when a filesystem read probe is actually needed, use pwsh with literal argv [-NoProfile, -NonInteractive, -Command, Get-Content -LiteralPath <literal-path> -TotalCount 1]. Do not start with dotnet File.OpenRead, C# scripts, generated scripts, or alternate shells. Prefer supplied native preflight evidence and do not probe again when it is present.";
+const READ_ONLY_COMMAND_CONTRACT: &str = "READ-ONLY COMMAND CONTRACT (apply before acting): use one executable with literal argv per probe; use supplied native preflight evidence for path existence/readability instead of probing again; when constraints.preflight_paths contains access=read, the native authority injects bounded file evidence before launch; never combine probes with &&, ;, pipes, redirection, $(), backticks, or generated scripts. If a probe is refused, stop that probe and report the refusal; do not retry by bundling commands or changing shells. WINDOWS READ-ONLY PROBE: when a filesystem read probe is actually needed, use pwsh with literal argv [-NoProfile, -NonInteractive, -Command, Get-Content -LiteralPath <literal-path> -TotalCount 1]. Do not start with dotnet File.OpenRead, C# scripts, generated scripts, or alternate shells. If supplied native_read status is passed, command probes for that path are prohibited: do not call shell, structured-command, pwsh, dotnet, or any command tool; use the evidence above as authoritative and do not retry. Prefer supplied native preflight evidence and do not probe again when it is present.";
 const READ_TOOLS: &[(&str, &str)] = &[
     (
         "worker_output_show",
@@ -314,7 +314,7 @@ fn native_read_evidence_prompt(preflight: &Value) -> String {
         };
         match read.get("status").and_then(Value::as_str) {
             Some("passed") => sections.push(format!(
-                "PATH: {path}\nCONTENT (native, bounded; do not reread through a shell):\n{}",
+                "PATH: {path}\nCONTENT (native, bounded; authoritative; do not call shell or command tools for this path):\n{}",
                 read.get("content").and_then(Value::as_str).unwrap_or_default()
             )),
             Some(status) => sections.push(format!(
@@ -2111,7 +2111,7 @@ mod tests {
         assert_eq!(result["items"][0]["native_read"]["status"], "passed");
         assert_eq!(result["items"][0]["native_read"]["content"], "ok");
         let prompt = native_read_evidence_prompt(&result);
-        assert!(prompt.contains("CONTENT (native, bounded; do not reread through a shell)"));
+        assert!(prompt.contains("CONTENT (native, bounded; authoritative; do not call shell or command tools for this path)"));
         assert!(prompt.contains("ok"));
         fs::remove_dir_all(root).expect("cleanup");
     }
