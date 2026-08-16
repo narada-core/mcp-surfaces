@@ -939,7 +939,12 @@ fn call_tool(
         ("calendar", name) => calendar::call_tool(name, &args, &options.site_root),
         ("surface-feedback", name) => surface_feedback::call_tool(name, &args, &options.site_root),
         ("sop", name) => sop::call_tool(name, &args, &options.site_root),
-        ("delegated-task", name) => delegated_task::call_tool(name, &args, &options.site_root),
+        ("delegated-task", name) => delegated_task::call_tool(
+            name,
+            &args,
+            &options.site_root,
+            &options.allowed_roots,
+        ),
         ("worker-delegation", name) => {
             worker_delegation::call_tool(name, &args, &options.site_root, &options.allowed_roots)
         }

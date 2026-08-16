@@ -143,20 +143,25 @@ pub fn auxiliary(method: &str, params: &Map<String, Value>) -> Result<Value, Val
     }
 }
 
-pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+pub fn call_tool(
+    name: &str,
+    args: &Map<String, Value>,
+    root: &Path,
+    allowed_roots: &[PathBuf],
+) -> Result<Value, Value> {
     match name {
         "delegated_task_guidance" => Ok(guidance(args)),
-        "delegated_task_policy_inspect" => Ok(policy(root)),
+        "delegated_task_policy_inspect" => Ok(policy_with_roots(root, allowed_roots)),
         "delegated_task_template_catalog" => Ok(template_catalog(args)),
         "delegated_task_validate" => validate(args, root),
         "delegated_tasks_list" => tasks_list(args, root),
-        "delegated_task_status" => task_status(args, root),
+        "delegated_task_status" => task_status_with_roots(args, root, allowed_roots),
         "delegated_task_result" => task_result(args, root),
         "delegated_task_summary" => task_summary(args, root),
         "delegated_task_events" => task_events(args, root),
-        "delegated_task_wait" => task_wait(args, root),
-        "delegated_task_run" => task_run(args, root),
-        "delegated_task_advance" => task_advance(args, root),
+        "delegated_task_wait" => task_wait_with_roots(args, root, allowed_roots),
+        "delegated_task_run" => task_run_with_roots(args, root, allowed_roots),
+        "delegated_task_advance" => task_advance_with_roots(args, root, allowed_roots),
         "delegated_task_cancel" => task_cancel(args, root, false),
         "delegated_task_parent_takeover" => task_cancel(args, root, true),
         "delegated_task_acknowledge" => task_acknowledge(args, root),
@@ -437,8 +442,12 @@ fn task_id(args: &Map<String, Value>) -> Result<String, Value> {
         .ok_or_else(|| error("task_id_required", "task_id_required"))
 }
 
+#[cfg(test)]
 fn policy(root: &Path) -> Value {
-    json!({"schema":"narada.delegated_task.policy.v1","status":"ok","server_name":SERVER_NAME,"task_root":task_root(root).to_string_lossy(),"site_root":root.to_string_lossy(),"allowed_roots":[root.to_string_lossy()],"default_cognition":DEFAULT_COGNITION,"list_defaults":{"view":"active_queue","site_scope":"current_site"},"workflow_engine":"native_authority","worker_execution":"native_worker_authority","result_compaction":{"max_worker_refs":50,"max_list_items":200}})
+    policy_with_roots(root, &[root.to_path_buf()])
+}
+fn policy_with_roots(root: &Path, allowed_roots: &[PathBuf]) -> Value {
+    json!({"schema":"narada.delegated_task.policy.v1","status":"ok","server_name":SERVER_NAME,"task_root":task_root(root).to_string_lossy(),"site_root":root.to_string_lossy(),"allowed_roots":allowed_roots.iter().map(|path| path.to_string_lossy().to_string()).collect::<Vec<_>>(),"default_cognition":DEFAULT_COGNITION,"list_defaults":{"view":"active_queue","site_scope":"current_site"},"workflow_engine":"native_authority","worker_execution":"native_worker_authority","result_compaction":{"max_worker_refs":50,"max_list_items":200}})
 }
 
 fn assessment_output_schema() -> Value {
@@ -771,13 +780,21 @@ fn record_worker_terminal(
         outputs.push(json!({"step_id":step_id,"run_id":run_id,"status":status,"output":output,"error":run.get("error")}));
     }
 }
+#[cfg(test)]
 fn task_status(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    task_status_with_roots(args, root, &[root.to_path_buf()])
+}
+fn task_status_with_roots(
+    args: &Map<String, Value>,
+    root: &Path,
+    allowed_roots: &[PathBuf],
+) -> Result<Value, Value> {
     let id = task_id(args)?;
     let task = if args.get("refresh").and_then(Value::as_bool) == Some(true) {
         let _lock = lock_task(root, &id)?;
         let current = read_task(root, &id)?;
         assert_mutation_scope(&current, args, root)?;
-        advance_value(current, root)?
+        advance_value_with_roots(current, root, allowed_roots)?
     } else {
         read_task(root, &id)?
     };
@@ -805,7 +822,15 @@ fn task_summary(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> 
         json!({"schema":"narada.delegated_task.summary.v1","status":"ok","task_id":id,"task_status":task.get("status"),"objective":task.get("objective"),"summary":task.get("summary"),"acceptance_verdict":result.get("acceptance_verdict").cloned().unwrap_or(Value::String("pending".into())),"residual_risks":result.get("residual_risks").cloned().unwrap_or_else(||json!([])),"progress":result.get("progress"),"worker_refs":result.get("worker_refs"),"worker_outputs":result.get("worker_outputs")}),
     )
 }
+#[cfg(test)]
 fn task_wait(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    task_wait_with_roots(args, root, &[root.to_path_buf()])
+}
+fn task_wait_with_roots(
+    args: &Map<String, Value>,
+    root: &Path,
+    allowed_roots: &[PathBuf],
+) -> Result<Value, Value> {
     let id = task_id(args)?;
     let timeout = args
         .get("timeout_ms")
@@ -823,7 +848,7 @@ fn task_wait(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
             let _lock = lock_task(root, &id)?;
             let current = read_task(root, &id)?;
             assert_mutation_scope(&current, args, root)?;
-            advance_value(current, root)?
+            advance_value_with_roots(current, root, allowed_roots)?
         };
         if matches!(
             current.get("status").and_then(Value::as_str),
@@ -1188,7 +1213,15 @@ fn request_fingerprint(args: &Map<String, Value>, root: &Path, id: &str) -> Stri
     material.insert("external_dependencies".into(),json!({"depends_on_task_ids":args.get("depends_on_task_ids").cloned().unwrap_or_else(||json!([])),"import_task_outputs":args.get("import_task_outputs").cloned().unwrap_or_else(||json!([])),"import_worker_refs":args.get("import_worker_refs").cloned().unwrap_or_else(||json!([])),"source_task_ref":args.get("source_task_ref").cloned().unwrap_or_else(||json!({}))}));
     sha256_json(&Value::Object(material))
 }
+#[cfg(test)]
 fn task_run(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    task_run_with_roots(args, root, &[root.to_path_buf()])
+}
+fn task_run_with_roots(
+    args: &Map<String, Value>,
+    root: &Path,
+    allowed_roots: &[PathBuf],
+) -> Result<Value, Value> {
     let id = stable_task_id(args);
     safe_id(&id)?;
     let _lock = lock_task(root, &id)?;
@@ -1196,7 +1229,7 @@ fn task_run(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
         let mut task = read_task(root, &id)?;
         if args.get("objective").is_none() && args.get("intent").is_none() {
             assert_mutation_scope(&task, args, root)?;
-            task = advance_value(task, root)?;
+            task = advance_value_with_roots(task, root, allowed_roots)?;
         } else if args.get("idempotency_key").is_some() {
             let fingerprint = request_fingerprint(args, root, &id);
             if task.get("request_fingerprint").and_then(Value::as_str) != Some(fingerprint.as_str())
@@ -1226,18 +1259,26 @@ fn task_run(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     write_task(root, &task)?;
     append_event(root, &id, "task_created", json!({"objective":objective}))?;
     if task.pointer("/execution/start").and_then(Value::as_bool) != Some(false) {
-        task = advance_value(task, root)?;
+        task = advance_value_with_roots(task, root, allowed_roots)?;
     }
     Ok(
         json!({"schema":"narada.delegated_task.run.v1","status":"accepted_for_execution","request_status":"accepted_for_execution","execution_status":task["status"],"created":true,"task_id":id,"task_status":task["status"],"summary":task["summary"]}),
     )
 }
+#[cfg(test)]
 fn task_advance(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    task_advance_with_roots(args, root, &[root.to_path_buf()])
+}
+fn task_advance_with_roots(
+    args: &Map<String, Value>,
+    root: &Path,
+    allowed_roots: &[PathBuf],
+) -> Result<Value, Value> {
     let id = task_id(args)?;
     let _lock = lock_task(root, &id)?;
     let current = read_task(root, &id)?;
     assert_mutation_scope(&current, args, root)?;
-    let task = advance_value(current, root)?;
+    let task = advance_value_with_roots(current, root, allowed_roots)?;
     Ok(
         json!({"schema":"narada.delegated_task.advance.v1","status":"ok","task_id":id,"task_status":task["status"],"task":compact_task(&task)}),
     )
@@ -1610,7 +1651,11 @@ fn ready_step_ids(task: &Value) -> Vec<String> {
         })
         .collect()
 }
-fn advance_value(mut task: Value, root: &Path) -> Result<Value, Value> {
+fn advance_value_with_roots(
+    mut task: Value,
+    root: &Path,
+    allowed_roots: &[PathBuf],
+) -> Result<Value, Value> {
     let constraints_changed = normalize_persisted_constraints(&mut task);
     if matches!(
         task.get("status").and_then(Value::as_str),
@@ -1643,7 +1688,7 @@ fn advance_value(mut task: Value, root: &Path) -> Result<Value, Value> {
             "worker_run_status",
             json!({"run_id":run_id}).as_object().unwrap(),
             root,
-            &[root.to_path_buf()],
+            allowed_roots,
         )?;
         let worker = status
             .pointer("/run/status")
@@ -1823,7 +1868,7 @@ fn advance_value(mut task: Value, root: &Path) -> Result<Value, Value> {
                 "worker_run",
                 worker_args.as_object().unwrap(),
                 root,
-                &[root.to_path_buf()],
+                allowed_roots,
             )?;
             let run_id = run
                 .get("run_id")
