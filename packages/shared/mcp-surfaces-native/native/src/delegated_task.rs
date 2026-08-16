@@ -834,7 +834,10 @@ fn tasks_list(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     });
     let total = records.len();
     records.truncate(limit);
-    let tasks = records.iter().map(compact_task).collect::<Vec<_>>();
+    let tasks = records
+        .iter()
+        .map(|task| compact_task(task, root))
+        .collect::<Vec<_>>();
     Ok(
         json!({"schema":"narada.delegated_task.list.v1","status":"ok","view":view,"site_scope":site_scope,"current_site_id":current,"owner_site_id":owner_filter,"count":tasks.len(),"total_scoped_count":total,"limit":limit,"include_active":include_active,"include_terminal":include_terminal,"include_acknowledged":include_ack,"tasks":tasks}),
     )
@@ -921,10 +924,11 @@ fn refresh_task_summary(task: &mut Value) {
         task["summary"] = summary;
     }
 }
-fn compact_task(task: &Value) -> Value {
+fn compact_task(task: &Value, root: &Path) -> Value {
     let obj = task.as_object().cloned().unwrap_or_default();
     let result = obj.get("result").and_then(Value::as_object);
-    json!({"task_id":obj.get("task_id"),"task_status":obj.get("status"),"objective":obj.get("objective"),"owner_site_id":obj.get("owner_site_id"),"created_by_site_id":obj.get("created_by_site_id"),"visibility_scope":obj.get("visibility_scope"),"updated_at":obj.get("updated_at"),"summary":task_summary_value(task),"execution_binding":obj.get("execution_binding"),"worker_refs":result.and_then(|v|v.get("worker_refs")),"worker_outputs":result.and_then(|v|v.get("worker_outputs"))})
+    let (derived_verdict, derived_checks) = acceptance_verdict(task, root);
+    json!({"task_id":obj.get("task_id"),"task_status":obj.get("status"),"objective":obj.get("objective"),"owner_site_id":obj.get("owner_site_id"),"created_by_site_id":obj.get("created_by_site_id"),"visibility_scope":obj.get("visibility_scope"),"updated_at":obj.get("updated_at"),"summary":task_summary_value(task),"acceptance_verdict":result.and_then(|v|v.get("acceptance_verdict")).cloned().unwrap_or_else(||json!(derived_verdict)),"acceptance_checks":result.and_then(|v|v.get("acceptance_checks")).cloned().unwrap_or_else(||json!(derived_checks)),"execution_binding":obj.get("execution_binding"),"worker_refs":result.and_then(|v|v.get("worker_refs")),"worker_outputs":result.and_then(|v|v.get("worker_outputs"))})
 }
 
 fn parse_embedded_structured_output(text: &str) -> Option<Value> {
@@ -1056,8 +1060,10 @@ fn task_result(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     let id = task_id(args)?;
     let task = read_task(root, &id)?;
     let terminal = task_is_terminal(&task);
+    let result = task.get("result").cloned().unwrap_or_else(|| json!({}));
+    let (derived_verdict, derived_checks) = acceptance_verdict(&task, root);
     Ok(
-        json!({"schema":"narada.delegated_task.result.v1","status":"ok","task_id":id,"task_status":task.get("status"),"result":task.get("result"),"summary":task_summary_value(&task),"canonical_terminal_handoff":terminal,"canonical_readback_tool":"delegated_task_wait","readback_role":"secondary_durable_readback"}),
+        json!({"schema":"narada.delegated_task.result.v1","status":"ok","task_id":id,"task_status":task.get("status"),"result":result,"summary":task_summary_value(&task),"acceptance_verdict":task.pointer("/result/acceptance_verdict").cloned().unwrap_or_else(||json!(derived_verdict)),"acceptance_checks":task.pointer("/result/acceptance_checks").cloned().unwrap_or_else(||json!(derived_checks)),"canonical_terminal_handoff":terminal,"canonical_readback_tool":"delegated_task_wait","readback_role":"secondary_durable_readback"}),
     )
 }
 fn task_summary(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
@@ -1069,8 +1075,9 @@ fn task_summary(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> 
         .cloned()
         .unwrap_or_default();
     let terminal = task_is_terminal(&task);
+    let (derived_verdict, derived_checks) = acceptance_verdict(&task, root);
     Ok(
-        json!({"schema":"narada.delegated_task.summary.v1","status":"ok","task_id":id,"task_status":task.get("status"),"objective":task.get("objective"),"summary":task_summary_value(&task),"acceptance_verdict":result.get("acceptance_verdict").cloned().unwrap_or(Value::String("pending".into())),"residual_risks":result.get("residual_risks").cloned().unwrap_or_else(||json!([])),"progress":result.get("progress"),"worker_refs":result.get("worker_refs"),"worker_outputs":result.get("worker_outputs"),"canonical_terminal_handoff":terminal,"canonical_readback_tool":"delegated_task_wait"}),
+        json!({"schema":"narada.delegated_task.summary.v1","status":"ok","task_id":id,"task_status":task.get("status"),"objective":task.get("objective"),"summary":task_summary_value(&task),"acceptance_verdict":result.get("acceptance_verdict").cloned().unwrap_or_else(||json!(derived_verdict)),"acceptance_checks":result.get("acceptance_checks").cloned().unwrap_or_else(||json!(derived_checks)),"residual_risks":result.get("residual_risks").cloned().unwrap_or_else(||json!([])),"progress":result.get("progress"),"worker_refs":result.get("worker_refs"),"worker_outputs":result.get("worker_outputs"),"canonical_terminal_handoff":terminal,"canonical_readback_tool":"delegated_task_wait"}),
     )
 }
 #[cfg(test)]
@@ -1113,7 +1120,7 @@ fn task_wait_with_roots(
         ))
     };
     Ok(
-        json!({"schema":"narada.delegated_task.wait.v1","status":if task_is_terminal(&task){"finished"}else{"timeout"},"elapsed_ms":started.elapsed().as_millis() as u64,"timeout_ms":timeout,"poll_ms":poll,"task_id":id,"task_status":task.get("status"),"refresh_performed":true,"worker_execution":"native_worker_authority","canonical_terminal_handoff":task_is_terminal(&task),"readback_tool":"delegated_task_wait","result_readback_redundant":task_is_terminal(&task),"task":compact_task(&task)}),
+        json!({"schema":"narada.delegated_task.wait.v1","status":if task_is_terminal(&task){"finished"}else{"timeout"},"elapsed_ms":started.elapsed().as_millis() as u64,"timeout_ms":timeout,"poll_ms":poll,"task_id":id,"task_status":task.get("status"),"refresh_performed":true,"worker_execution":"native_worker_authority","canonical_terminal_handoff":task_is_terminal(&task),"readback_tool":"delegated_task_wait","result_readback_redundant":task_is_terminal(&task),"task":compact_task(&task, root)}),
     )
 }
 fn task_events(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
@@ -1542,7 +1549,7 @@ fn task_advance_with_roots(
     assert_mutation_scope(&current, args, root)?;
     let task = advance_value_with_roots(current, root, allowed_roots)?;
     Ok(
-        json!({"schema":"narada.delegated_task.advance.v1","status":"ok","task_id":id,"task_status":task["status"],"task":compact_task(&task)}),
+        json!({"schema":"narada.delegated_task.advance.v1","status":"ok","task_id":id,"task_status":task["status"],"task":compact_task(&task, root)}),
     )
 }
 fn step_status<'a>(task: &'a Value, id: &str) -> Option<&'a str> {
