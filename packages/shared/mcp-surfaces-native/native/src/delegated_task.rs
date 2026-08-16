@@ -185,7 +185,7 @@ fn guidance_tool() -> Value {
     )
 }
 fn guidance(args: &Map<String, Value>) -> Value {
-    json!({"schema":"narada.mcp_surface.guidance.v0","status":"ok","surface_id":"delegated-task","guidance_tool":"delegated_task_guidance","purpose":"Validate, execute, and inspect durable delegated task workflows through native authority.","requested":{"workflow":args.get("workflow").cloned().unwrap_or(Value::Null),"tool":args.get("tool").cloned().unwrap_or(Value::Null)},"cognition":{"default":"low","omitted_constraint_behavior":"constraints.cognition resolves to low","mapping_surface":"worker-delegation","mapping_tool":"worker_cognition_defaults_inspect"},"first_use":["Call delegated_task_policy_inspect first.","Omitted constraints.cognition resolves to low; inspect worker-delegation's worker_cognition_defaults_inspect for the current model and reasoning-effort mapping.","Call delegated_task_validate once, then pass its durable validated_request_ref to delegated_task_run so objective, constraints, workflow, and binding fields are not duplicated. Validation is structural only: when constraints.preflight_paths is present, validate reports preflight_status=deferred and worker-delegation.worker_run performs the authoritative existence and scope check immediately before launch.","Prefer the site-scoped mcp_loader_call_binding_tool(binding_id, site_root, surface_id, tool_name, arguments) path when reopening a surface after a loader restart.","delegated_task_wait is the canonical terminal handoff and includes the complete compact result; delegated_task_result is a secondary durable readback.","Use bounded list/status/result/events readback.","Use explicit cancellation and disposition tools for lifecycle mutations."],"binding_reopen":{"tool_name":"mcp_loader_call_binding_tool","arguments":{"site_root":"<site_root>","binding_id":"<binding_id>","surface_id":"delegated-task","tool_name":"<child_tool>","arguments":{}}},"boundaries":["Native authority owns task.json/events.jsonl and validated request records under the bounded task root.","Worker launches cross the native worker-delegation authority boundary.","Cross-site ownership remains server-bound authority."]})
+    json!({"schema":"narada.mcp_surface.guidance.v0","status":"ok","surface_id":"delegated-task","guidance_tool":"delegated_task_guidance","purpose":"Validate, execute, and inspect durable delegated task workflows through native authority.","requested":{"workflow":args.get("workflow").cloned().unwrap_or(Value::Null),"tool":args.get("tool").cloned().unwrap_or(Value::Null)},"cognition":{"default":"low","omitted_constraint_behavior":"constraints.cognition resolves to low","mapping_surface":"worker-delegation","mapping_tool":"worker_cognition_defaults_inspect"},"first_use":["Call delegated_task_policy_inspect first.","Omitted constraints.cognition resolves to low; inspect worker-delegation's worker_cognition_defaults_inspect for the current model and reasoning-effort mapping.","Call delegated_task_validate once, then pass its durable validated_request_ref to delegated_task_run so objective, constraints, workflow, and binding fields are not duplicated. Validation is structural only: when constraints.preflight_paths is present, validate reports preflight_status=deferred and worker-delegation.worker_run performs the authoritative existence, scope, and bounded native read check immediately before launch. For read-only file evidence, include each target path with access=read; the native authority injects its bounded content and the worker must not fall back to a shell read.","Prefer the site-scoped mcp_loader_call_binding_tool(binding_id, site_root, surface_id, tool_name, arguments) path when reopening a surface after a loader restart.","delegated_task_wait is the canonical terminal handoff and includes the complete compact result; delegated_task_result is a secondary durable readback.","Use bounded list/status/result/events readback.","Use explicit cancellation and disposition tools for lifecycle mutations."],"binding_reopen":{"tool_name":"mcp_loader_call_binding_tool","arguments":{"site_root":"<site_root>","binding_id":"<binding_id>","surface_id":"delegated-task","tool_name":"<child_tool>","arguments":{}}},"boundaries":["Native authority owns task.json/events.jsonl and validated request records under the bounded task root.","Worker launches cross the native worker-delegation authority boundary.","Cross-site ownership remains server-bound authority."]})
 }
 
 fn task_root(root: &Path) -> PathBuf {
@@ -553,7 +553,7 @@ fn policy_with_roots(root: &Path, allowed_roots: &[PathBuf]) -> Value {
 }
 
 fn assessment_output_schema() -> Value {
-    json!({"schema":"narada.delegated_task.output_schema.v1","name":"task_executability_assessment_v1","version":1,"required":["dimensions","first_actions","reference_resolutions","acceptance_mappings","required_decisions","findings","evaluator_provenance"],"fields":{"dimensions":"array<object>","first_actions":"array<object>","reference_resolutions":"array<object>","acceptance_mappings":"array<object>","required_decisions":"array<object>","findings":"array<object>","evaluator_provenance":"object"},"provenance_required":["runtime","provider","model","cognition","profile_version"],"rejection_rules":["missing_required_field","prose_only","invalid_schema","invalid_provenance"]})
+    json!({"schema":"narada.delegated_task.output_schema.v1","name":"task_executability_assessment_v1","version":1,"required":["dimensions","first_actions","reference_resolutions","acceptance_mappings","required_decisions","findings","assessment_result","evaluator_provenance"],"fields":{"dimensions":"array<object>","first_actions":"array<object>","reference_resolutions":"array<object>","acceptance_mappings":"array<object>","required_decisions":"array<object>","findings":"array<object>","assessment_result":"string: passed|blocked|undetermined|inconclusive","evaluator_provenance":"object"},"provenance_required":["runtime","provider","model","cognition","profile_version"],"rejection_rules":["missing_required_field","prose_only","invalid_schema","invalid_provenance"]})
 }
 
 fn assessment_template() -> Value {
@@ -1016,12 +1016,28 @@ fn final_step_projection(task: &Value) -> Value {
 }
 
 fn derived_task_summary(task: &Value) -> Option<Value> {
-    final_step_projection(task)
+    let base = final_step_projection(task)
         .get("final_summary")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|text| !text.is_empty())
-        .map(|text| json!(text.chars().take(512).collect::<String>()))
+        .map(str::to_string);
+    let (objective, _) = objective_verdict(task);
+    if objective == "not_applicable" {
+        return base.map(|text| json!(text.chars().take(512).collect::<String>()));
+    }
+    let label = if is_executability_assessment(task) {
+        "assessment_result"
+    } else {
+        "objective_result"
+    };
+    let body = base.unwrap_or_else(|| "No substantive objective result was reported.".to_string());
+    Some(json!(
+        format!("{label}: {objective}. {body}")
+            .chars()
+            .take(512)
+            .collect::<String>()
+    ))
 }
 fn task_summary_value(task: &Value) -> Option<Value> {
     task.get("summary")
@@ -1050,10 +1066,20 @@ fn acceptance_checks_or_derive(
                 .as_array()
                 .is_some_and(|fields| !fields.is_empty())
         });
+    let derived_outcome_checks = derived_checks
+        .iter()
+        .filter(|check| {
+            matches!(
+                check["kind"].as_str(),
+                Some("output_contract" | "objective_outcome")
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
     if let Some(checks) = result.and_then(|value| value.get("acceptance_checks")) {
         if checks.as_array().is_some_and(|items| !items.is_empty()) {
+            let mut refreshed = checks.as_array().cloned().unwrap_or_default();
             if let Some(derived_requested_fields) = derived_requested_fields {
-                let mut refreshed = checks.as_array().cloned().unwrap_or_default();
                 if let Some(existing) = refreshed
                     .iter_mut()
                     .find(|check| check["kind"] == "requested_fields")
@@ -1062,9 +1088,18 @@ fn acceptance_checks_or_derive(
                 } else {
                     refreshed.push(derived_requested_fields.clone());
                 }
-                return json!(refreshed);
             }
-            return checks.clone();
+            for derived in derived_outcome_checks {
+                if let Some(existing) = refreshed
+                    .iter_mut()
+                    .find(|check| check["kind"] == derived["kind"])
+                {
+                    *existing = derived;
+                } else {
+                    refreshed.push(derived);
+                }
+            }
+            return json!(refreshed);
         }
     }
     json!(derived_checks)
@@ -1075,8 +1110,10 @@ fn compact_task(task: &Value, root: &Path) -> Value {
     let result = obj.get("result").and_then(Value::as_object);
     let (derived_verdict, _) = acceptance_verdict(task, root);
     let acceptance_checks = acceptance_checks_or_derive(task, root, result);
+    let output_contract = output_contract_verdict(task);
+    let objective_verdict_value = objective_verdict(task).0;
     let final_projection = final_step_projection(task);
-    json!({"task_id":obj.get("task_id"),"task_status":obj.get("status"),"objective":obj.get("objective"),"owner_site_id":obj.get("owner_site_id"),"created_by_site_id":obj.get("created_by_site_id"),"visibility_scope":obj.get("visibility_scope"),"updated_at":obj.get("updated_at"),"summary":task_summary_value(task),"acceptance_verdict":result.and_then(|v|v.get("acceptance_verdict")).cloned().unwrap_or_else(||json!(derived_verdict)),"acceptance_checks":acceptance_checks,"final_step":final_projection.get("final_step"),"final_structured_output":final_projection.get("final_structured_output"),"prior_step_outputs_ref":final_projection.get("prior_step_outputs_ref"),"execution_binding":obj.get("execution_binding"),"worker_refs":result.and_then(|v|v.get("worker_refs")),"worker_outputs":result.and_then(|v|v.get("worker_outputs"))})
+    json!({"task_id":obj.get("task_id"),"task_status":obj.get("status"),"objective":obj.get("objective"),"owner_site_id":obj.get("owner_site_id"),"created_by_site_id":obj.get("created_by_site_id"),"visibility_scope":obj.get("visibility_scope"),"updated_at":obj.get("updated_at"),"summary":task_summary_value(task),"output_contract_verdict":output_contract,"objective_verdict":objective_verdict_value,"acceptance_verdict":result.and_then(|v|v.get("acceptance_verdict")).cloned().unwrap_or_else(||json!(derived_verdict)),"acceptance_checks":acceptance_checks,"final_step":final_projection.get("final_step"),"final_structured_output":final_projection.get("final_structured_output"),"prior_step_outputs_ref":final_projection.get("prior_step_outputs_ref"),"execution_binding":obj.get("execution_binding"),"worker_refs":result.and_then(|v|v.get("worker_refs")),"worker_outputs":result.and_then(|v|v.get("worker_outputs"))})
 }
 
 fn parse_embedded_structured_output(text: &str) -> Option<Value> {
@@ -1136,6 +1173,113 @@ fn acceptance_required_fields(task: &Value) -> Vec<String> {
         }
     }
     Vec::new()
+}
+
+fn required_contract_fields(task: &Value, step_id: Option<&str>) -> Vec<String> {
+    let mut fields = acceptance_required_fields(task);
+    if let Some(steps) = task.pointer("/workflow/steps").and_then(Value::as_array) {
+        for step in steps {
+            if step_id.is_some_and(|wanted| step.get("id").and_then(Value::as_str) != Some(wanted)) {
+                continue;
+            }
+            for field in required_field_names(step.pointer("/output_schema/required")) {
+                if !fields.iter().any(|known| known == &field) {
+                    fields.push(field);
+                }
+            }
+        }
+    }
+    fields
+}
+
+fn is_executability_assessment(task: &Value) -> bool {
+    task.pointer("/workflow/steps")
+        .and_then(Value::as_array)
+        .is_some_and(|steps| {
+            steps.iter().any(|step| {
+                step.pointer("/output_schema/name").and_then(Value::as_str)
+                    == Some("task_executability_assessment_v1")
+                    || step.get("profile").and_then(Value::as_str)
+                        == Some("shoshin-task-executability-v1")
+            })
+        })
+}
+
+fn objective_signal(task: &Value) -> Option<String> {
+    let projection = final_step_projection(task);
+    let output = projection.get("final_structured_output")?;
+    let object = output.as_object()?;
+    for key in ["objective_verdict", "assessment_result", "objective_status"] {
+        let Some(value) = object.get(key) else {
+            continue;
+        };
+        if let Some(text) = value.as_str().map(str::trim).filter(|text| !text.is_empty()) {
+            return Some(text.to_ascii_lowercase());
+        }
+        if let Some(nested) = value.as_object() {
+            for nested_key in ["verdict", "status", "result"] {
+                if let Some(text) = nested
+                    .get(nested_key)
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                {
+                    return Some(text.to_ascii_lowercase());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn objective_verdict(task: &Value) -> (&'static str, Option<String>) {
+    let signal = objective_signal(task);
+    let verdict = match signal.as_deref() {
+        Some("passed" | "pass" | "achieved" | "success" | "succeeded" | "completed" | "complete" | "coherent") => "passed",
+        Some("pending" | "running") => "pending",
+        Some("failed" | "failure") => "failed",
+        Some("blocked" | "undetermined" | "inconclusive" | "unavailable" | "not_found") => "blocked",
+        Some(_) => "blocked",
+        None if is_executability_assessment(task) => "blocked",
+        None => "not_applicable",
+    };
+    (verdict, signal)
+}
+
+fn output_contract_verdict(task: &Value) -> &'static str {
+    if task
+        .pointer("/result/step_states")
+        .and_then(Value::as_object)
+        .is_some_and(|states| {
+            states.values().any(|state| {
+                state.get("worker_output_contract").and_then(Value::as_str) == Some("failed")
+            })
+        })
+    {
+        return "failed";
+    }
+    let final_step = final_step_projection(task);
+    let step_id = final_step.get("final_step").and_then(Value::as_str);
+    let fields = required_contract_fields(task, step_id);
+    if fields.is_empty() {
+        return "not_applicable";
+    }
+    let Some(output) = final_step.get("final_structured_output").filter(|value| !value.is_null()) else {
+        return "pending";
+    };
+    if fields.iter().all(|field| output.get(field).is_some()) {
+        "passed"
+    } else {
+        "failed"
+    }
+}
+
+fn set_outcome_verdicts(task: &mut Value, acceptance: &str) {
+    let output_contract = output_contract_verdict(task);
+    let objective = objective_verdict(task).0;
+    task["result"]["output_contract_verdict"] = json!(output_contract);
+    task["result"]["objective_verdict"] = json!(objective);
+    task["result"]["acceptance_verdict"] = json!(acceptance);
 }
 
 fn structured_output_instruction(task: &Value) -> Option<String> {
@@ -1269,7 +1413,7 @@ fn record_worker_terminal(
     status: &str,
     run: &Value,
 ) {
-    let required_fields = acceptance_required_fields(task);
+    let required_fields = required_contract_fields(task, Some(step_id));
     let output = worker_output_from_run_with_required_fields(run, &required_fields).or_else(|| {
         (!required_fields.is_empty()).then(|| {
             json!({
@@ -1347,9 +1491,11 @@ fn task_result(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     let result = task.get("result").cloned().unwrap_or_else(|| json!({}));
     let (derived_verdict, _) = acceptance_verdict(&task, root);
     let acceptance_checks = acceptance_checks_or_derive(&task, root, task.get("result").and_then(Value::as_object));
+    let output_contract = output_contract_verdict(&task);
+    let objective_verdict_value = objective_verdict(&task).0;
     let final_projection = final_step_projection(&task);
     Ok(
-        json!({"schema":"narada.delegated_task.result.v1","status":"ok","task_id":id,"task_status":task.get("status"),"result":result,"summary":task_summary_value(&task),"acceptance_verdict":task.pointer("/result/acceptance_verdict").cloned().unwrap_or_else(||json!(derived_verdict)),"acceptance_checks":acceptance_checks,"final_step":final_projection.get("final_step"),"final_structured_output":final_projection.get("final_structured_output"),"prior_step_outputs_ref":final_projection.get("prior_step_outputs_ref"),"canonical_terminal_handoff":terminal,"canonical_readback_tool":"delegated_task_wait","readback_role":"secondary_durable_readback"}),
+        json!({"schema":"narada.delegated_task.result.v1","status":"ok","task_id":id,"task_status":task.get("status"),"result":result,"summary":task_summary_value(&task),"output_contract_verdict":output_contract,"objective_verdict":objective_verdict_value,"acceptance_verdict":task.pointer("/result/acceptance_verdict").cloned().unwrap_or_else(||json!(derived_verdict)),"acceptance_checks":acceptance_checks,"final_step":final_projection.get("final_step"),"final_structured_output":final_projection.get("final_structured_output"),"prior_step_outputs_ref":final_projection.get("prior_step_outputs_ref"),"canonical_terminal_handoff":terminal,"canonical_readback_tool":"delegated_task_wait","readback_role":"secondary_durable_readback"}),
     )
 }
 fn task_summary(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
@@ -1363,20 +1509,26 @@ fn task_summary(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> 
     let terminal = task_is_terminal(&task);
     let (derived_verdict, _) = acceptance_verdict(&task, root);
     let acceptance_checks = acceptance_checks_or_derive(&task, root, Some(&result));
+    let output_contract = output_contract_verdict(&task);
+    let objective_verdict_value = objective_verdict(&task).0;
     let final_projection = final_step_projection(&task);
     Ok(
-        json!({"schema":"narada.delegated_task.summary.v1","status":"ok","task_id":id,"task_status":task.get("status"),"objective":task.get("objective"),"summary":task_summary_value(&task),"acceptance_verdict":result.get("acceptance_verdict").cloned().unwrap_or_else(||json!(derived_verdict)),"acceptance_checks":acceptance_checks,"final_step":final_projection.get("final_step"),"final_structured_output":final_projection.get("final_structured_output"),"prior_step_outputs_ref":final_projection.get("prior_step_outputs_ref"),"residual_risks":result.get("residual_risks").cloned().unwrap_or_else(||json!([])),"progress":result.get("progress"),"worker_refs":result.get("worker_refs"),"worker_outputs":result.get("worker_outputs"),"canonical_terminal_handoff":terminal,"canonical_readback_tool":"delegated_task_wait"}),
+        json!({"schema":"narada.delegated_task.summary.v1","status":"ok","task_id":id,"task_status":task.get("status"),"objective":task.get("objective"),"summary":task_summary_value(&task),"output_contract_verdict":output_contract,"objective_verdict":objective_verdict_value,"acceptance_verdict":result.get("acceptance_verdict").cloned().unwrap_or_else(||json!(derived_verdict)),"acceptance_checks":acceptance_checks,"final_step":final_projection.get("final_step"),"final_structured_output":final_projection.get("final_structured_output"),"prior_step_outputs_ref":final_projection.get("prior_step_outputs_ref"),"residual_risks":result.get("residual_risks").cloned().unwrap_or_else(||json!([])),"progress":result.get("progress"),"worker_refs":result.get("worker_refs"),"worker_outputs":result.get("worker_outputs"),"canonical_terminal_handoff":terminal,"canonical_readback_tool":"delegated_task_wait"}),
     )
 }
 fn terminal_handoff(task: &Value, root: &Path) -> Value {
     let result = task.get("result").and_then(Value::as_object);
     let (derived_verdict, _) = acceptance_verdict(task, root);
+    let output_contract = output_contract_verdict(task);
+    let objective_verdict_value = objective_verdict(task).0;
     let final_projection = final_step_projection(task);
     let task_id = task.get("task_id").and_then(Value::as_str).unwrap_or("unknown");
     json!({
         "task_id":task.get("task_id"),
         "task_status":task.get("status"),
         "summary":task_summary_value(task),
+        "output_contract_verdict":output_contract,
+        "objective_verdict":objective_verdict_value,
         "acceptance_verdict":result.and_then(|value| value.get("acceptance_verdict")).cloned().unwrap_or_else(||json!(derived_verdict)),
         "acceptance_checks":acceptance_checks_or_derive(task, root, result),
         "final_step":final_projection.get("final_step"),
@@ -1639,6 +1791,28 @@ fn normalized_constraints(value: Option<&Value>) -> Value {
     }
     Value::Object(constraints)
 }
+
+fn merged_step_constraints(task: &Value, step: &Value) -> Value {
+    let mut merged = normalized_constraints(task.get("constraints"));
+    let Some(step_constraints) = step.get("constraints").and_then(Value::as_object) else {
+        return merged;
+    };
+    let Some(target) = merged.as_object_mut() else {
+        return merged;
+    };
+    for (key, value) in step_constraints {
+        let preserve_task_preflight = key == "preflight_paths"
+            && value.as_array().is_some_and(Vec::is_empty)
+            && target
+                .get(key)
+                .and_then(Value::as_array)
+                .is_some_and(|paths| !paths.is_empty());
+        if !preserve_task_preflight {
+            target.insert(key.clone(), value.clone());
+        }
+    }
+    normalized_constraints(Some(&merged))
+}
 const CONSTRAINT_FIELDS: &[&str] = &[
     "authority",
     "cwd",
@@ -1838,7 +2012,7 @@ fn task_run_with_roots(
     let step_states = initial_step_states(&workflow);
     let site = current_site_id(root);
     let fingerprint = request_fingerprint(args, root, &id);
-    let mut task = json!({"schema":"narada.delegated_task.task.v1","task_id":id,"owner_site_id":site,"owner_site_root":if site.is_some(){json!(root.to_string_lossy())}else{Value::Null},"created_by_site_id":site,"visibility_scope":if site.is_some(){"site"}else{"user_global"},"task_root_scope":"site_root","status":"accepted_for_execution","objective":objective,"request_fingerprint":fingerprint,"validated_request_ref":original_validation_ref,"created_at":created,"updated_at":created,"cancelled_at":null,"idempotency_key":args.get("idempotency_key"),"constraints":normalized_constraints(args.get("constraints")),"workflow":workflow,"execution":normalized_execution(args.get("execution")),"acceptance":args.get("acceptance").cloned().unwrap_or_else(||json!({})),"result":{"schema":"narada.delegated_task.handoff.v1","acceptance_verdict":"pending","step_states":step_states,"worker_refs":[],"worker_outputs":[],"residual_risks":[],"observed_incoherencies":[],"verification":[],"changed_files":[]},"summary":null});
+    let mut task = json!({"schema":"narada.delegated_task.task.v1","task_id":id,"owner_site_id":site,"owner_site_root":if site.is_some(){json!(root.to_string_lossy())}else{Value::Null},"created_by_site_id":site,"visibility_scope":if site.is_some(){"site"}else{"user_global"},"task_root_scope":"site_root","status":"accepted_for_execution","objective":objective,"request_fingerprint":fingerprint,"validated_request_ref":original_validation_ref,"created_at":created,"updated_at":created,"cancelled_at":null,"idempotency_key":args.get("idempotency_key"),"constraints":normalized_constraints(args.get("constraints")),"workflow":workflow,"execution":normalized_execution(args.get("execution")),"acceptance":args.get("acceptance").cloned().unwrap_or_else(||json!({})),"result":{"schema":"narada.delegated_task.handoff.v1","output_contract_verdict":"pending","objective_verdict":"pending","acceptance_verdict":"pending","step_states":step_states,"worker_refs":[],"worker_outputs":[],"residual_risks":[],"observed_incoherencies":[],"verification":[],"changed_files":[]},"summary":null});
     write_task(root, &task)?;
     append_event(root, &id, "task_created", json!({"objective":objective}))?;
     if task.pointer("/execution/start").and_then(Value::as_bool) != Some(false) {
@@ -2271,14 +2445,29 @@ fn acceptance_verdict(task: &Value, root: &Path) -> (&'static str, Vec<Value>) {
             .unwrap_or(0);
         checks.push(json!({"kind":"residual_risk_policy","status":if count==0{"passed"}else{"failed"},"risk_count":count}));
     }
-    let verdict = if checks
-        .iter()
-        .any(|check| check.get("status").and_then(Value::as_str) == Some("failed"))
+    let output_contract = output_contract_verdict(task);
+    checks.push(json!({
+        "kind":"output_contract",
+        "verdict":output_contract,
+        "status":output_contract
+    }));
+    let (objective, signal) = objective_verdict(task);
+    checks.push(json!({
+        "kind":"objective_outcome",
+        "verdict":objective,
+        "signal":signal,
+        "status":objective
+    }));
+    let verdict = if output_contract == "failed"
+        || checks.iter().any(|check| check.get("status").and_then(Value::as_str) == Some("failed"))
     {
         "failed"
-    } else if checks
-        .iter()
-        .any(|check| check.get("status").and_then(Value::as_str) == Some("pending"))
+    } else if objective == "failed" {
+        "failed"
+    } else if objective == "blocked" {
+        "blocked"
+    } else if output_contract == "pending"
+        || checks.iter().any(|check| check.get("status").and_then(Value::as_str) == Some("pending"))
     {
         "pending"
     } else {
@@ -2371,7 +2560,7 @@ fn advance_value_with_roots(
                 task["status"] = json!("failed");
                 task["result"]["step_states"][step_id]["status"] = json!("failed");
                 task["result"]["step_states"][step_id]["finished_at"] = json!(now());
-                task["result"]["acceptance_verdict"] = json!("failed");
+                set_outcome_verdicts(&mut task, "failed");
                 append_event(
                     root,
                     &id,
@@ -2408,7 +2597,7 @@ fn advance_value_with_roots(
             } else {
                 task["status"] = json!("failed");
                 task["result"]["step_states"][step_id]["status"] = json!("failed");
-                task["result"]["acceptance_verdict"] = json!("failed");
+                set_outcome_verdicts(&mut task, "failed");
                 append_event(
                     root,
                     &id,
@@ -2419,7 +2608,7 @@ fn advance_value_with_roots(
         }
     }
     let (current_acceptance, current_checks) = acceptance_verdict(&task, root);
-    task["result"]["acceptance_verdict"] = json!(current_acceptance);
+    set_outcome_verdicts(&mut task, current_acceptance);
     task["result"]["acceptance_checks"] = json!(current_checks);
     if task.get("status").and_then(Value::as_str) != Some("failed") {
         let steps = task
@@ -2542,11 +2731,7 @@ fn advance_value_with_roots(
             let instruction = structured_output_instruction_for_step(&task, Some(step))
                 .map(|contract| format!("{instruction}{contract}"))
                 .unwrap_or_else(|| instruction.to_string());
-            let constraints = if step.get("constraints").is_some() {
-                normalized_constraints(step.get("constraints"))
-            } else {
-                normalized_constraints(task.get("constraints"))
-            };
+            let constraints = merged_step_constraints(&task, step);
             let worker_args =
                 json!({"intent":{"instruction":instruction},"constraints":constraints});
             let run = crate::worker_delegation::call_tool(
@@ -2594,22 +2779,28 @@ fn advance_value_with_roots(
             })
         {
             let (verdict, checks) = acceptance_verdict(&task, root);
-            task["result"]["acceptance_verdict"] = json!(verdict);
+            set_outcome_verdicts(&mut task, verdict);
             task["result"]["acceptance_checks"] = json!(checks);
-            task["status"] = json!(if verdict == "passed" {
-                "completed"
-            } else {
+            let terminal_failed = verdict == "failed"
+                || output_contract_verdict(&task) == "failed";
+            task["status"] = json!(if terminal_failed {
                 "failed"
+            } else {
+                "completed"
             });
             append_event(
                 root,
                 &id,
-                if verdict == "passed" {
-                    "task_completed"
-                } else {
+                if terminal_failed {
                     "task_failed"
+                } else {
+                    "task_completed"
                 },
-                json!({"acceptance_verdict":verdict}),
+                json!({
+                    "output_contract_verdict":task["result"]["output_contract_verdict"],
+                    "objective_verdict":task["result"]["objective_verdict"],
+                    "acceptance_verdict":verdict
+                }),
             )?;
         } else if step_ids
             .iter()
@@ -2619,7 +2810,7 @@ fn advance_value_with_roots(
                 .any(|step_id| matches!(step_status(&task, step_id), Some("pending" | "running")))
         {
             task["status"] = json!("failed");
-            task["result"]["acceptance_verdict"] = json!("failed");
+            set_outcome_verdicts(&mut task, "failed");
             append_event(
                 root,
                 &id,
@@ -2830,6 +3021,21 @@ mod tests {
     }
 
     #[test]
+    fn merged_step_constraints_preserves_caller_read_preflight() {
+        let task = json!({
+            "constraints":{"preflight_paths":[{"path":"README.md","access":"read"}],"cwd":"C:/site"}
+        });
+        let step = json!({
+            "constraints":{"authority":"read","preflight_paths":[],"max_run_ms":300_000}
+        });
+        let merged = merged_step_constraints(&task, &step);
+        assert_eq!(merged["authority"], "read");
+        assert_eq!(merged["max_run_ms"], 300_000);
+        assert_eq!(merged["cwd"], "C:/site");
+        assert_eq!(merged["preflight_paths"][0]["path"], "README.md");
+    }
+
+    #[test]
     fn validation_reports_deferred_preflight_without_inspecting_filesystem() {
         let root = std::env::temp_dir().join(format!("narada-delegated-task-preflight-{}", uuid::Uuid::new_v4()));
         let response = validate(
@@ -2878,6 +3084,22 @@ mod tests {
         assert_eq!(projection["final_structured_output"]["verdict"], "passed");
         assert_eq!(derived_task_summary(&task), Some(json!("review")));
         assert!(projection["prior_step_outputs_ref"].as_str().is_some());
+    }
+
+    #[test]
+    fn executability_blocked_separates_contract_and_objective_verdicts() {
+        let task = json!({
+            "task_id":"task-assessment",
+            "objective":"read the target file",
+            "workflow":{"steps":[{"id":"assessment","kind":"worker","profile":"shoshin-task-executability-v1","output_schema":{"name":"task_executability_assessment_v1","required":["findings"]}}]},
+            "result":{"worker_outputs":[{"step_id":"assessment","status":"completed","output":{"summary_text":"The target could not be read.","structured_output":{"findings":[],"assessment_result":"undetermined"}}}],"step_states":{"assessment":{"kind":"worker","status":"completed","worker_output_contract":"passed"}}}
+        });
+        let (acceptance, checks) = acceptance_verdict(&task, Path::new("."));
+        assert_eq!(output_contract_verdict(&task), "passed");
+        assert_eq!(objective_verdict(&task).0, "blocked");
+        assert_eq!(acceptance, "blocked");
+        assert!(checks.iter().any(|check| check["kind"] == "objective_outcome" && check["verdict"] == "blocked"));
+        assert_eq!(derived_task_summary(&task), Some(json!("assessment_result: blocked. The target could not be read.")));
     }
 
     #[test]
@@ -3218,7 +3440,9 @@ mod tests {
         ));
         let (verdict, checks) = acceptance_verdict(&task, &root);
         assert_eq!(verdict, "passed");
-        assert_eq!(checks.len(), 12);
+        assert!(checks.len() >= 14);
+        assert!(checks.iter().any(|check| check["kind"] == "output_contract"));
+        assert!(checks.iter().any(|check| check["kind"] == "objective_outcome"));
         fs::remove_dir_all(root).expect("cleanup");
     }
 

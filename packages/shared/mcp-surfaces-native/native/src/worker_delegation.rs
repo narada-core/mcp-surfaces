@@ -13,7 +13,9 @@ const SERVER_NAME: &str = "worker-delegation-mcp";
 const DEFAULT_COGNITION: &str = "low";
 const MAX_RUNS: usize = 200;
 const MAX_FILE_BYTES: usize = 256_000;
-const READ_ONLY_COMMAND_CONTRACT: &str = "READ-ONLY COMMAND CONTRACT (apply before acting): use one executable with literal argv per probe; use supplied native preflight evidence for path existence/readability instead of probing again; never combine probes with &&, ;, pipes, redirection, $(), backticks, or generated scripts. If a probe is refused, stop that probe and report the refusal; do not retry by bundling commands or changing shells. WINDOWS READ-ONLY PROBE: when a filesystem read probe is actually needed, use pwsh with literal argv [-NoProfile, -NonInteractive, -Command, Get-Content -LiteralPath <literal-path> -TotalCount 1]. Do not start with dotnet File.OpenRead, C# scripts, generated scripts, or alternate shells. Prefer supplied native preflight evidence and do not probe again when it is present.";
+const MAX_NATIVE_READ_BYTES: usize = 64 * 1024;
+const MAX_NATIVE_READ_FILES: usize = 8;
+const READ_ONLY_COMMAND_CONTRACT: &str = "READ-ONLY COMMAND CONTRACT (apply before acting): use one executable with literal argv per probe; use supplied native preflight evidence for path existence/readability instead of probing again; when constraints.preflight_paths contains access=read, the native authority injects bounded file evidence before launch; never combine probes with &&, ;, pipes, redirection, $(), backticks, or generated scripts. If a probe is refused, stop that probe and report the refusal; do not retry by bundling commands or changing shells. WINDOWS READ-ONLY PROBE: when a filesystem read probe is actually needed, use pwsh with literal argv [-NoProfile, -NonInteractive, -Command, Get-Content -LiteralPath <literal-path> -TotalCount 1]. Do not start with dotnet File.OpenRead, C# scripts, generated scripts, or alternate shells. Prefer supplied native preflight evidence and do not probe again when it is present.";
 const READ_TOOLS: &[(&str, &str)] = &[
     (
         "worker_output_show",
@@ -162,7 +164,7 @@ fn guidance_tool() -> Value {
     )
 }
 fn guidance(args: &Map<String, Value>) -> Value {
-    json!({"schema":"narada.worker.guidance.v1","status":"ok","server_name":SERVER_NAME,"requested":{"workflow":args.get("workflow").cloned().unwrap_or(Value::Null),"tool":args.get("tool").cloned().unwrap_or(Value::Null)},"cognition":{"default":"low","omitted_constraint_behavior":"constraints.cognition resolves to low","mapping_tool":"worker_cognition_defaults_inspect"},"first_use":["Inspect worker_policy_inspect.","Omitted constraints.cognition resolves to low; use worker_cognition_defaults_inspect for the current model and reasoning-effort mapping.","Resolve worker inputs without launching with worker_config_resolve.","Launch with worker_run or worker_edit. Set constraints.wait_for_completion=true with a bounded wait_timeout_ms when one-call completion is preferred; omitted or false returns the accepted running record immediately.","Read durable runs with worker_run_status or worker_run_wait; worker_run_wait is the canonical bounded state-file poll and does not launch a child.","Use worker_output_show for bounded artifact readback.",READ_ONLY_COMMAND_CONTRACT],"windows_rust_toolchain":{"status":"caller_environment_required","remediation":"For MSVC Rust linking, launch the carrier from a Developer PowerShell or initialize VsDevCmd before starting the carrier so link.exe is inherited by workers.","probe":"worker_policy_inspect reports the inherited PATH boundary; workers do not perform open-ended Visual Studio discovery."},"boundaries":["The native Rust surface launches only the native Rust narada-agent-runtime-server.","Credentials remain SecretStore-referenced and are never returned.","Run records are bounded to the site worker-delegation root."]})
+    json!({"schema":"narada.worker.guidance.v1","status":"ok","server_name":SERVER_NAME,"requested":{"workflow":args.get("workflow").cloned().unwrap_or(Value::Null),"tool":args.get("tool").cloned().unwrap_or(Value::Null)},"cognition":{"default":"low","omitted_constraint_behavior":"constraints.cognition resolves to low","mapping_tool":"worker_cognition_defaults_inspect"},"first_use":["Inspect worker_policy_inspect.","Omitted constraints.cognition resolves to low; use worker_cognition_defaults_inspect for the current model and reasoning-effort mapping.","Resolve worker inputs without launching with worker_config_resolve.","Launch with worker_run or worker_edit. Set constraints.wait_for_completion=true with a bounded wait_timeout_ms when one-call completion is preferred; omitted or false returns the accepted running record immediately.","Read durable runs with worker_run_status or worker_run_wait; worker_run_wait is the canonical bounded state-file poll and does not launch a child.","Use worker_output_show for bounded artifact readback.","For read-only file evidence, supply constraints.preflight_paths entries with access=read; native authority injects bounded content before launch.",READ_ONLY_COMMAND_CONTRACT],"windows_rust_toolchain":{"status":"caller_environment_required","remediation":"For MSVC Rust linking, launch the carrier from a Developer PowerShell or initialize VsDevCmd before starting the carrier so link.exe is inherited by workers.","probe":"worker_policy_inspect reports the inherited PATH boundary; workers do not perform open-ended Visual Studio discovery."},"boundaries":["The native Rust surface launches only the native Rust narada-agent-runtime-server.","Credentials remain SecretStore-referenced and are never returned.","Run records are bounded to the site worker-delegation root."]})
 }
 
 fn run_root(root: &Path) -> PathBuf {
@@ -197,6 +199,7 @@ fn preflight_paths(
         return Ok(json!({"status":"not_requested","items":[]}));
     };
     let mut checked = Vec::with_capacity(items.len());
+    let mut native_read_files = 0usize;
     for item in items {
         let Some(object) = item.as_object() else {
             return Err(error("worker_preflight_path_invalid", "worker_preflight_path_invalid"));
@@ -257,14 +260,77 @@ fn preflight_paths(
                 "remediation":"Create or select an existing parent directory before retrying."
             }));
         }
+        let native_read = if access == "read" && exists {
+            if native_read_files >= MAX_NATIVE_READ_FILES {
+                json!({"status":"not_read","reason":"native_read_budget_exhausted","max_files":MAX_NATIVE_READ_FILES})
+            } else {
+                native_read_files += 1;
+                match fs::read(&path) {
+                    Ok(bytes) => {
+                        let total_bytes = bytes.len();
+                        let returned_bytes = total_bytes.min(MAX_NATIVE_READ_BYTES);
+                        let content = String::from_utf8_lossy(&bytes[..returned_bytes]).to_string();
+                        json!({
+                            "status":"passed",
+                            "encoding":"utf8_lossy",
+                            "content":content,
+                            "bytes":total_bytes,
+                            "returned_bytes":returned_bytes,
+                            "truncated":total_bytes > returned_bytes
+                        })
+                    }
+                    Err(error) => json!({
+                        "status":"failed",
+                        "error_kind":format!("{:?}", error.kind()),
+                        "message":"native file read failed"
+                    }),
+                }
+            }
+        } else {
+            Value::Null
+        };
         checked.push(json!({
             "path":path.to_string_lossy(),
             "access":access,
             "exists":exists,
-            "status":"passed"
+            "status":"passed",
+            "native_read":native_read
         }));
     }
     Ok(json!({"status":"passed","items":checked}))
+}
+
+fn native_read_evidence_prompt(preflight: &Value) -> String {
+    let items = preflight
+        .get("items")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut sections = Vec::new();
+    for item in items {
+        let path = item.get("path").and_then(Value::as_str).unwrap_or("unknown");
+        let Some(read) = item.get("native_read").and_then(Value::as_object) else {
+            continue;
+        };
+        match read.get("status").and_then(Value::as_str) {
+            Some("passed") => sections.push(format!(
+                "PATH: {path}\nCONTENT (native, bounded; do not reread through a shell):\n{}",
+                read.get("content").and_then(Value::as_str).unwrap_or_default()
+            )),
+            Some(status) => sections.push(format!(
+                "PATH: {path}\nNATIVE READ STATUS: {status}. Do not retry this read through a shell."
+            )),
+            _ => {}
+        }
+    }
+    if sections.is_empty() {
+        "NATIVE FILE READ EVIDENCE: none supplied. Only issue a bounded shell read when no native evidence was requested.".to_string()
+    } else {
+        format!(
+            "NATIVE FILE READ EVIDENCE (authoritative worker-boundary evidence):\n{}",
+            sections.join("\n\n")
+        )
+    }
 }
 #[cfg(windows)]
 fn path_components_equal_or_child(path: &Path, root: &Path) -> bool {
@@ -1278,7 +1344,7 @@ fn worker_run(
     resume: Option<String>,
     tool_name: &str,
 ) -> Result<Value, Value> {
-    let prompt = format!("{READ_ONLY_COMMAND_CONTRACT}\n\n{}", instruction(args)?);
+    let instruction_text = instruction(args)?;
     let auth = authority(args)?.to_string();
     let constraints = args.get("constraints").and_then(Value::as_object);
     let max_run_ms = constraints
@@ -1364,6 +1430,10 @@ fn worker_run(
         Some(scoped_write_probe(&cwd)?)
     };
     let preflight = preflight_paths(constraints, &cwd, allowed_roots)?;
+    let prompt = format!(
+        "{READ_ONLY_COMMAND_CONTRACT}\n\n{instruction_text}\n\n{}",
+        native_read_evidence_prompt(&preflight)
+    );
     let mut capabilities = capability_snapshot(&auth, &cwd, allowed_roots, runtime_probe.as_ref());
     capabilities["preflight"] = preflight;
     let id = format!("run-{}", uuid::Uuid::new_v4().simple());
@@ -2038,6 +2108,11 @@ mod tests {
             .expect("existing path");
         assert_eq!(result["status"], "passed");
         assert_eq!(result["items"][0]["status"], "passed");
+        assert_eq!(result["items"][0]["native_read"]["status"], "passed");
+        assert_eq!(result["items"][0]["native_read"]["content"], "ok");
+        let prompt = native_read_evidence_prompt(&result);
+        assert!(prompt.contains("CONTENT (native, bounded; do not reread through a shell)"));
+        assert!(prompt.contains("ok"));
         fs::remove_dir_all(root).expect("cleanup");
     }
 
