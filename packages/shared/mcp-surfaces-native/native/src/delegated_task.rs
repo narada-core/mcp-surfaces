@@ -924,11 +924,26 @@ fn refresh_task_summary(task: &mut Value) {
         task["summary"] = summary;
     }
 }
+fn acceptance_checks_or_derive(
+    task: &Value,
+    root: &Path,
+    result: Option<&Map<String, Value>>,
+) -> Value {
+    if let Some(checks) = result.and_then(|value| value.get("acceptance_checks")) {
+        if checks.as_array().is_some_and(|items| !items.is_empty()) {
+            return checks.clone();
+        }
+    }
+    let (_, checks) = acceptance_verdict(task, root);
+    json!(checks)
+}
+
 fn compact_task(task: &Value, root: &Path) -> Value {
     let obj = task.as_object().cloned().unwrap_or_default();
     let result = obj.get("result").and_then(Value::as_object);
-    let (derived_verdict, derived_checks) = acceptance_verdict(task, root);
-    json!({"task_id":obj.get("task_id"),"task_status":obj.get("status"),"objective":obj.get("objective"),"owner_site_id":obj.get("owner_site_id"),"created_by_site_id":obj.get("created_by_site_id"),"visibility_scope":obj.get("visibility_scope"),"updated_at":obj.get("updated_at"),"summary":task_summary_value(task),"acceptance_verdict":result.and_then(|v|v.get("acceptance_verdict")).cloned().unwrap_or_else(||json!(derived_verdict)),"acceptance_checks":result.and_then(|v|v.get("acceptance_checks")).cloned().unwrap_or_else(||json!(derived_checks)),"execution_binding":obj.get("execution_binding"),"worker_refs":result.and_then(|v|v.get("worker_refs")),"worker_outputs":result.and_then(|v|v.get("worker_outputs"))})
+    let (derived_verdict, _) = acceptance_verdict(task, root);
+    let acceptance_checks = acceptance_checks_or_derive(task, root, result);
+    json!({"task_id":obj.get("task_id"),"task_status":obj.get("status"),"objective":obj.get("objective"),"owner_site_id":obj.get("owner_site_id"),"created_by_site_id":obj.get("created_by_site_id"),"visibility_scope":obj.get("visibility_scope"),"updated_at":obj.get("updated_at"),"summary":task_summary_value(task),"acceptance_verdict":result.and_then(|v|v.get("acceptance_verdict")).cloned().unwrap_or_else(||json!(derived_verdict)),"acceptance_checks":acceptance_checks,"execution_binding":obj.get("execution_binding"),"worker_refs":result.and_then(|v|v.get("worker_refs")),"worker_outputs":result.and_then(|v|v.get("worker_outputs"))})
 }
 
 fn parse_embedded_structured_output(text: &str) -> Option<Value> {
@@ -1061,9 +1076,10 @@ fn task_result(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     let task = read_task(root, &id)?;
     let terminal = task_is_terminal(&task);
     let result = task.get("result").cloned().unwrap_or_else(|| json!({}));
-    let (derived_verdict, derived_checks) = acceptance_verdict(&task, root);
+    let (derived_verdict, _) = acceptance_verdict(&task, root);
+    let acceptance_checks = acceptance_checks_or_derive(&task, root, task.get("result").and_then(Value::as_object));
     Ok(
-        json!({"schema":"narada.delegated_task.result.v1","status":"ok","task_id":id,"task_status":task.get("status"),"result":result,"summary":task_summary_value(&task),"acceptance_verdict":task.pointer("/result/acceptance_verdict").cloned().unwrap_or_else(||json!(derived_verdict)),"acceptance_checks":task.pointer("/result/acceptance_checks").cloned().unwrap_or_else(||json!(derived_checks)),"canonical_terminal_handoff":terminal,"canonical_readback_tool":"delegated_task_wait","readback_role":"secondary_durable_readback"}),
+        json!({"schema":"narada.delegated_task.result.v1","status":"ok","task_id":id,"task_status":task.get("status"),"result":result,"summary":task_summary_value(&task),"acceptance_verdict":task.pointer("/result/acceptance_verdict").cloned().unwrap_or_else(||json!(derived_verdict)),"acceptance_checks":acceptance_checks,"canonical_terminal_handoff":terminal,"canonical_readback_tool":"delegated_task_wait","readback_role":"secondary_durable_readback"}),
     )
 }
 fn task_summary(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
@@ -1075,9 +1091,10 @@ fn task_summary(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> 
         .cloned()
         .unwrap_or_default();
     let terminal = task_is_terminal(&task);
-    let (derived_verdict, derived_checks) = acceptance_verdict(&task, root);
+    let (derived_verdict, _) = acceptance_verdict(&task, root);
+    let acceptance_checks = acceptance_checks_or_derive(&task, root, Some(&result));
     Ok(
-        json!({"schema":"narada.delegated_task.summary.v1","status":"ok","task_id":id,"task_status":task.get("status"),"objective":task.get("objective"),"summary":task_summary_value(&task),"acceptance_verdict":result.get("acceptance_verdict").cloned().unwrap_or_else(||json!(derived_verdict)),"acceptance_checks":result.get("acceptance_checks").cloned().unwrap_or_else(||json!(derived_checks)),"residual_risks":result.get("residual_risks").cloned().unwrap_or_else(||json!([])),"progress":result.get("progress"),"worker_refs":result.get("worker_refs"),"worker_outputs":result.get("worker_outputs"),"canonical_terminal_handoff":terminal,"canonical_readback_tool":"delegated_task_wait"}),
+        json!({"schema":"narada.delegated_task.summary.v1","status":"ok","task_id":id,"task_status":task.get("status"),"objective":task.get("objective"),"summary":task_summary_value(&task),"acceptance_verdict":result.get("acceptance_verdict").cloned().unwrap_or_else(||json!(derived_verdict)),"acceptance_checks":acceptance_checks,"residual_risks":result.get("residual_risks").cloned().unwrap_or_else(||json!([])),"progress":result.get("progress"),"worker_refs":result.get("worker_refs"),"worker_outputs":result.get("worker_outputs"),"canonical_terminal_handoff":terminal,"canonical_readback_tool":"delegated_task_wait"}),
     )
 }
 #[cfg(test)]
