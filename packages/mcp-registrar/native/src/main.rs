@@ -3894,7 +3894,7 @@ fn build_bind_config(
         .filter_map(Value::as_str)
         .map(|value| interpolate(value, site_id, &root, &workspace))
         .collect::<Vec<_>>();
-    append_durable_worker_allowed_roots(surface_id, &root, &mut child_args)?;
+    append_durable_delegation_allowed_roots(surface_id, &root, &mut child_args)?;
     if projection["id"] == "user-site-operator" {
         child_args.extend(
             [
@@ -3968,12 +3968,12 @@ fn site_workspace_root(site: &Value) -> PathBuf {
     ))
 }
 
-fn append_durable_worker_allowed_roots(
+fn append_durable_delegation_allowed_roots(
     surface_id: &str,
     site_root: &Path,
     child_args: &mut Vec<String>,
 ) -> Result<(), String> {
-    if surface_id != "worker-delegation" {
+    if !matches!(surface_id, "worker-delegation" | "delegated-task") {
         return Ok(());
     }
     let extras = durable_extra_allowed_roots(site_root)?;
@@ -5609,7 +5609,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_binding_consumes_durable_extra_allowed_roots() {
+    fn delegation_bindings_consume_durable_extra_allowed_roots() {
         let suffix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -5635,21 +5635,20 @@ mod tests {
         )
         .unwrap();
 
-        let mut args = vec![
-            "--allowed-root".to_string(),
-            path_text(&root),
-        ];
-        append_durable_worker_allowed_roots("worker-delegation", &root, &mut args).unwrap();
-        let roots = args
-            .windows(2)
-            .filter(|pair| pair[0] == "--allowed-root")
-            .map(|pair| comparable_root(Path::new(&pair[1])))
-            .collect::<BTreeSet<_>>();
-        assert!(!roots.contains(&comparable_root(&root)));
-        assert!(roots.contains(&comparable_root(&src)));
-        assert!(roots.contains(&comparable_root(&wt)));
-        assert_eq!(roots.len(), 2);
-        assert!(!roots.contains(&comparable_root(Path::new("C:/Users/andrey/tmp"))));
+        for surface_id in ["worker-delegation", "delegated-task"] {
+            let mut args = vec!["--allowed-root".to_string(), path_text(&root)];
+            append_durable_delegation_allowed_roots(surface_id, &root, &mut args).unwrap();
+            let roots = args
+                .windows(2)
+                .filter(|pair| pair[0] == "--allowed-root")
+                .map(|pair| comparable_root(Path::new(&pair[1])))
+                .collect::<BTreeSet<_>>();
+            assert!(!roots.contains(&comparable_root(&root)));
+            assert!(roots.contains(&comparable_root(&src)));
+            assert!(roots.contains(&comparable_root(&wt)));
+            assert_eq!(roots.len(), 2);
+            assert!(!roots.contains(&comparable_root(Path::new("C:/Users/andrey/tmp"))));
+        }
 
         fs::remove_dir_all(root).unwrap();
     }
