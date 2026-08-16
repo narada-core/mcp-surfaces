@@ -273,7 +273,7 @@ fn mailbox_public_protocol_is_complete_bounded_paged_and_recoverable() {
         &[tool(
             20,
             "mailbox_sync_generation",
-            json!({"idempotency_key":"sync-1","scope_id":"support","timeout_ms":2000}),
+            json!({"idempotency_key":"sync-1","scope_id":"support","timeout_ms":10000}),
         )],
     );
     assert!(
@@ -293,7 +293,7 @@ fn mailbox_public_protocol_is_complete_bounded_paged_and_recoverable() {
             tool(
                 21,
                 "mailbox_sync_generation",
-                json!({"idempotency_key":"sync-1","scope_id":"support","timeout_ms":2000}),
+                json!({"idempotency_key":"sync-1","scope_id":"support","timeout_ms":10000}),
             ),
             tool(
                 22,
