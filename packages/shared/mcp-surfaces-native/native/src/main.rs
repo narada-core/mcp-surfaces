@@ -284,7 +284,9 @@ fn parse_options(args: Vec<String>) -> Result<Options, String> {
     let surface_id = surface_id.ok_or("native_surface_missing_surface_id")?;
     let site_root =
         site_root.unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    if !allowed_roots.iter().any(|root| root == &site_root) {
+    if surface_id != "worker-delegation"
+        && !allowed_roots.iter().any(|root| root == &site_root)
+    {
         allowed_roots.push(site_root.clone());
     }
     Ok(Options {
@@ -1555,6 +1557,19 @@ mod tests {
         assert_eq!(
             worker.allowed_roots,
             vec![PathBuf::from("site"), PathBuf::from("src")]
+        );
+
+        let worker_without_explicit_site = parsed_options(&[
+            "--surface-id",
+            "worker-delegation",
+            "--site-root",
+            "site",
+            "--allowed-root",
+            "src",
+        ]);
+        assert_eq!(
+            worker_without_explicit_site.allowed_roots,
+            vec![PathBuf::from("src")]
         );
 
         let coherence = parsed_options(&["--surface-id", "site-coherence", "--repo-root", "repo"]);

@@ -3894,6 +3894,7 @@ fn build_bind_config(
         .filter_map(Value::as_str)
         .map(|value| interpolate(value, site_id, &root, &workspace))
         .collect::<Vec<_>>();
+    append_durable_worker_allowed_roots(surface_id, &root, &mut child_args)?;
     if projection["id"] == "user-site-operator" {
         child_args.extend(
             [
@@ -3966,6 +3967,103 @@ fn site_workspace_root(site: &Value) -> PathBuf {
         configured.unwrap_or_else(|| site["root"].as_str().unwrap_or("")),
     ))
 }
+
+fn append_durable_worker_allowed_roots(
+    surface_id: &str,
+    site_root: &Path,
+    child_args: &mut Vec<String>,
+) -> Result<(), String> {
+    if surface_id != "worker-delegation" {
+        return Ok(());
+    }
+    let extras = durable_extra_allowed_roots(site_root)?;
+    if extras.is_empty() {
+        return Ok(());
+    }
+    let site_root_key = comparable_root(site_root);
+    let mut filtered = Vec::with_capacity(child_args.len());
+    let mut index = 0;
+    while index < child_args.len() {
+        if index + 1 < child_args.len()
+            && child_args[index] == "--allowed-root"
+            && comparable_root(Path::new(&child_args[index + 1])) == site_root_key
+        {
+            index += 2;
+            continue;
+        }
+        filtered.push(child_args[index].clone());
+        index += 1;
+    }
+    *child_args = filtered;
+    let existing = child_args
+        .windows(2)
+        .filter(|pair| pair[0] == "--allowed-root")
+        .map(|pair| comparable_root(Path::new(&pair[1])))
+        .collect::<std::collections::BTreeSet<_>>();
+    for extra in extras {
+        if existing.contains(&comparable_root(&extra)) {
+            continue;
+        }
+        child_args.push("--allowed-root".to_string());
+        child_args.push(path_text(&extra));
+    }
+    Ok(())
+}
+
+fn durable_extra_allowed_roots(site_root: &Path) -> Result<Vec<PathBuf>, String> {
+    let path = site_root.join(".narada").join("allowed-roots.json");
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let bytes = fs::read(&path).map_err(|error| {
+        format!(
+            "registrar_allowed_roots_read_failed:{}:{error}",
+            path_text(&path)
+        )
+    })?;
+    let document: Value = serde_json::from_slice(&bytes).map_err(|error| {
+        format!(
+            "registrar_allowed_roots_invalid_json:{}:{error}",
+            path_text(&path)
+        )
+    })?;
+    let Some(entries) = document.get("extra_allowed_roots") else {
+        return Ok(Vec::new());
+    };
+    let entries = entries.as_array().ok_or_else(|| {
+        format!(
+            "registrar_allowed_roots_invalid_extra_allowed_roots:{}",
+            path_text(&path)
+        )
+    })?;
+    let mut roots = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for (index, entry) in entries.iter().enumerate() {
+        let value = entry
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                format!(
+                    "registrar_allowed_roots_invalid_entry:{}:{index}",
+                    path_text(&path)
+                )
+            })?;
+        let root = PathBuf::from(value);
+        if !root.is_absolute() {
+            return Err(format!(
+                "registrar_allowed_roots_entry_not_absolute:{}:{index}",
+                path_text(&path)
+            ));
+        }
+        let root = canonical_root(root);
+        if seen.insert(comparable_root(&root)) {
+            roots.push(root);
+        }
+    }
+    Ok(roots)
+}
+
 fn interpolate(value: &str, site_id: &str, root: &Path, workspace: &Path) -> String {
     let control = if root
         .file_name()
@@ -5433,6 +5531,52 @@ mod tests {
         assert_eq!(usage["runtime_access"]["owner"], "mcp-loader");
         assert_eq!(usage["runtime_access"]["mode"], "site-scoped");
         assert_eq!(usage["runtime_access"]["available"], true);
+    }
+
+    #[test]
+    fn worker_binding_consumes_durable_extra_allowed_roots() {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = env::temp_dir().join(format!(
+            "narada-registrar-extra-roots-{}-{suffix}",
+            std::process::id()
+        ));
+        fs::create_dir_all(root.join(".narada")).unwrap();
+        let src = PathBuf::from("C:/Users/andrey/src");
+        let wt = PathBuf::from("C:/Users/andrey/wt");
+        fs::write(
+            root.join(".narada/allowed-roots.json"),
+            serde_json::to_vec(&json!({
+                "extra_allowed_roots": [
+                    src.to_string_lossy(),
+                    wt.to_string_lossy(),
+                    src.to_string_lossy()
+                ],
+                "temp_allowed_roots": ["C:/Users/andrey/tmp"]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut args = vec![
+            "--allowed-root".to_string(),
+            path_text(&root),
+        ];
+        append_durable_worker_allowed_roots("worker-delegation", &root, &mut args).unwrap();
+        let roots = args
+            .windows(2)
+            .filter(|pair| pair[0] == "--allowed-root")
+            .map(|pair| comparable_root(Path::new(&pair[1])))
+            .collect::<BTreeSet<_>>();
+        assert!(!roots.contains(&comparable_root(&root)));
+        assert!(roots.contains(&comparable_root(&src)));
+        assert!(roots.contains(&comparable_root(&wt)));
+        assert_eq!(roots.len(), 2);
+        assert!(!roots.contains(&comparable_root(Path::new("C:/Users/andrey/tmp"))));
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
