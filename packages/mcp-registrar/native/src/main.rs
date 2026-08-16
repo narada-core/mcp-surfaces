@@ -384,7 +384,7 @@ fn extend_epistemic_catalog(contract: &mut Value) {
 fn align_native_surface_descriptor_schemas(contract: &mut Value) {
     let Some(items) = contract.pointer_mut("/read_models/registrar_surface_list/items").and_then(Value::as_array_mut) else { return; };
     let intent = || json!({"type":"object","properties":{"instruction":{"type":"string","minLength":1,"maxLength":65536},"task":{"type":"string","minLength":1,"maxLength":65536},"goal":{"type":"string","minLength":1,"maxLength":65536},"summary":{"type":"string","minLength":1,"maxLength":65536},"mode":{"type":"string","maxLength":256}},"additionalProperties":false,"anyOf":[{"required":["instruction"]},{"required":["task"]},{"required":["goal"]},{"required":["summary"]}]});
-    let constraints = || json!({"type":"object","properties":{"authority":{"type":"string","enum":["read","write","command"]},"cognition":{"type":"string","enum":["low","medium","high"]},"cwd":{"type":"string","minLength":1,"maxLength":4096},"invocation_plan_ref":{"type":"string","minLength":6,"maxLength":512,"pattern":"^plan:[A-Za-z0-9._:-]+$"},"max_run_ms":{"type":"integer","minimum":1,"maximum":1800000,"default":300000,"description":"Hard worker runtime deadline enforced by the native authority."}},"additionalProperties":false});
+    let constraints = || json!({"type":"object","properties":{"authority":{"type":"string","enum":["read","write","command"]},"cognition":{"type":"string","enum":["low","medium","high"]},"cwd":{"type":"string","minLength":1,"maxLength":4096},"invocation_plan_ref":{"type":"string","minLength":6,"maxLength":512,"pattern":"^plan:[A-Za-z0-9._:-]+$"},"max_run_ms":{"type":"integer","minimum":1,"maximum":1800000,"default":300000,"description":"Hard worker runtime deadline enforced by the native authority."},"wait_for_completion":{"type":"boolean","default":false,"description":"Return after bounded child completion polling when true; false returns the accepted running record immediately."},"wait_timeout_ms":{"type":"integer","minimum":0,"maximum":300000,"default":30000,"description":"Maximum inline completion wait when wait_for_completion is true."}},"additionalProperties":false});
     for item in items {
         let id = item.get("id").and_then(Value::as_str).unwrap_or_default().to_owned();
         let Some(tools) = item.pointer_mut("/descriptor/tools").and_then(Value::as_array_mut) else { continue; };
@@ -4102,6 +4102,21 @@ fn workspace_repo_root() -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
+fn runtime_implementation_matrix_path(workspace: &Path) -> Result<PathBuf, String> {
+    const MATRIX_RELATIVE_PATH: &str =
+        "narada/packages/operator-surface-runtime-contract/contracts/runtime-implementation-matrix.json";
+    workspace
+        .ancestors()
+        .find(|candidate| candidate.join(MATRIX_RELATIVE_PATH).is_file())
+        .map(|candidate| candidate.join(MATRIX_RELATIVE_PATH))
+        .ok_or_else(|| {
+            format!(
+                "registrar_runtime_matrix_unavailable:{}",
+                path_text(workspace)
+            )
+        })
+}
+
 fn scope_metadata(projection: &Value, root: &Path) -> Value {
     let injection = projection["injection_scope"]
         .as_str()
@@ -4353,10 +4368,12 @@ fn runtime_engine(component: &str, implementation: Option<&str>) -> Result<Strin
         return Err("registrar_legacy_javascript_runtime_retired".into());
     }
     let workspace = workspace_repo_root().ok_or("registrar_workspace_root_unavailable")?;
-    let path=workspace.parent().unwrap_or(&workspace).join("narada/packages/operator-surface-runtime-contract/contracts/runtime-implementation-matrix.json");
-    let matrix: Value =
-        serde_json::from_str(&fs::read_to_string(path).map_err(|error| error.to_string())?)
-            .map_err(|error| error.to_string())?;
+    let path = runtime_implementation_matrix_path(&workspace)?;
+    let matrix: Value = serde_json::from_str(
+        &fs::read_to_string(&path)
+            .map_err(|error| format!("registrar_runtime_matrix_read_failed:{}:{error}", path_text(&path)))?,
+    )
+    .map_err(|error| format!("registrar_runtime_matrix_invalid:{}:{error}", path_text(&path)))?;
     let row = matrix["rows"]
         .as_array()
         .into_iter()
@@ -4468,7 +4485,12 @@ fn refresh_site_sidecar_bindings(contract: &Value, site: &Value) -> Result<Value
                     "projection_id":projection_id,
                     "allow_sidecar":true
                 }),
-            )?;
+            )
+            .map_err(|error| {
+                format!(
+                    "registrar_site_binding_refresh_surface_failed:{site_id}:{surface_id}:{projection_id}:{error}"
+                )
+            })?;
             if result["status"] != "bound" {
                 return Err(format!(
                     "registrar_site_binding_refresh_refused:{site_id}:{surface_id}:{}",
@@ -4517,20 +4539,38 @@ fn site_surface_registry_sync(contract: &Value, args: &Value) -> Result<Value, S
         }
         return Ok(result);
     }
-    let binding_refresh = refresh_site_sidecar_bindings(contract, &site)?;
-    let registry = build_site_surface_registry(contract, &site)?;
-    fs::create_dir_all(
-        path.parent()
-            .ok_or("registrar_site_registry_path_invalid")?,
-    )
-    .map_err(|error| error.to_string())?;
+    let binding_refresh = refresh_site_sidecar_bindings(contract, &site).map_err(|error| {
+        format!("registrar_site_binding_refresh_failed:{requested}:{error}")
+    })?;
+    let registry = build_site_surface_registry(contract, &site)
+        .map_err(|error| format!("registrar_site_registry_build_failed:{requested}:{error}"))?;
+    let parent = path
+        .parent()
+        .ok_or("registrar_site_registry_path_invalid")?;
+    fs::create_dir_all(parent).map_err(|error| {
+        format!(
+            "registrar_site_registry_parent_create_failed:{}:{error}",
+            path_text(parent)
+        )
+    })?;
     let temporary = path.with_extension(format!("json.tmp-{}", std::process::id()));
     fs::write(
         &temporary,
         serde_json::to_string_pretty(&registry).map_err(|error| error.to_string())? + "\n",
     )
-    .map_err(|error| error.to_string())?;
-    fs::rename(&temporary, &path).map_err(|error| error.to_string())?;
+    .map_err(|error| {
+        format!(
+            "registrar_site_registry_write_failed:{}:{error}",
+            path_text(&temporary)
+        )
+    })?;
+    fs::rename(&temporary, &path).map_err(|error| {
+        format!(
+            "registrar_site_registry_rename_failed:{}:{}:{error}",
+            path_text(&temporary),
+            path_text(&path)
+        )
+    })?;
     let surfaces = registry["surfaces"].as_array().cloned().unwrap_or_default();
     let tool_count = surfaces
         .iter()
@@ -5199,6 +5239,29 @@ mod tests {
     }
 
     #[test]
+    fn runtime_matrix_path_resolves_from_nested_worktree() {
+        let root = env::temp_dir().join(format!(
+            "narada-registrar-runtime-matrix-{}",
+            std::process::id()
+        ));
+        let source_root = root.join("src");
+        let worktree_root = source_root.join("mcp-surfaces/.worktrees/worker");
+        let matrix = source_root.join(
+            "narada/packages/operator-surface-runtime-contract/contracts/runtime-implementation-matrix.json",
+        );
+        fs::create_dir_all(&worktree_root).expect("worktree");
+        fs::create_dir_all(matrix.parent().expect("matrix parent")).expect("narada source");
+        fs::write(&matrix, b"{}").expect("matrix file");
+
+        assert_eq!(
+            runtime_implementation_matrix_path(&worktree_root).expect("matrix path"),
+            matrix
+        );
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
     fn embedded_site_local_descriptor_normalizes_into_catalog_shape() {
         let server = json!({
             "surface_projection": {
@@ -5428,6 +5491,18 @@ mod tests {
                 .iter().find(|tool| tool["name"] == name).unwrap()["input_schema"].clone()
         };
         assert!(schema("worker-delegation", "worker_run").pointer("/properties/constraints/properties/site_root").is_none());
+        assert_eq!(
+            schema("worker-delegation", "worker_run")
+                .pointer("/properties/constraints/properties/wait_for_completion/default")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            schema("worker-delegation", "worker_run")
+                .pointer("/properties/constraints/properties/wait_timeout_ms/maximum")
+                .and_then(Value::as_u64),
+            Some(300_000)
+        );
         assert_eq!(schema("worker-delegation", "worker_config_resolve")["additionalProperties"], false);
         assert_eq!(schema("epistemic-graph", "epistemic_graph_guidance")["properties"]["workflow"]["type"], "string");
     }
