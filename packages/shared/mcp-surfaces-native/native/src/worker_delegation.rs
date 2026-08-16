@@ -184,6 +184,87 @@ fn is_within(path: &Path, root: &Path) -> bool {
     let r = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     path_components_equal_or_child(&p, &r)
 }
+fn preflight_paths(
+    constraints: Option<&Map<String, Value>>,
+    cwd: &Path,
+    allowed_roots: &[PathBuf],
+) -> Result<Value, Value> {
+    let Some(items) = constraints
+        .and_then(|value| value.get("preflight_paths"))
+        .and_then(Value::as_array)
+    else {
+        return Ok(json!({"status":"not_requested","items":[]}));
+    };
+    let mut checked = Vec::with_capacity(items.len());
+    for item in items {
+        let Some(object) = item.as_object() else {
+            return Err(error("worker_preflight_path_invalid", "worker_preflight_path_invalid"));
+        };
+        let raw_path = object
+            .get("path")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| error("worker_preflight_path_required", "worker_preflight_path_required"))?;
+        let access = object
+            .get("access")
+            .and_then(Value::as_str)
+            .unwrap_or("read");
+        if !matches!(access, "read" | "write" | "create") {
+            return Err(error("worker_preflight_access_invalid", "worker_preflight_access_invalid"));
+        }
+        let path = {
+            let candidate = PathBuf::from(raw_path);
+            if candidate.is_absolute() { candidate } else { cwd.join(candidate) }
+        };
+        let scope_path = if path.exists() {
+            path.as_path()
+        } else {
+            path.parent().unwrap_or(path.as_path())
+        };
+        if !allowed_roots.iter().any(|allowed| is_within(scope_path, allowed)) {
+            return Err(json!({
+                "schema":"narada.worker.error.v1",
+                "code":"worker_preflight_path_outside_allowed_roots",
+                "message":"worker_preflight_path_outside_allowed_roots",
+                "path":path.to_string_lossy(),
+                "access":access,
+                "preflight_status":"failed",
+                "remediation":"Use a path under the admitted worker root."
+            }));
+        }
+        let exists = path.exists();
+        if matches!(access, "read" | "write") && !exists {
+            return Err(json!({
+                "schema":"narada.worker.error.v1",
+                "code":"worker_preflight_path_missing",
+                "message":"worker_preflight_path_missing",
+                "path":path.to_string_lossy(),
+                "access":access,
+                "preflight_status":"failed",
+                "remediation":"Correct constraints.preflight_paths or remove the stale path before retrying."
+            }));
+        }
+        if access == "create" && !exists && path.parent().is_some_and(|parent| !parent.exists()) {
+            return Err(json!({
+                "schema":"narada.worker.error.v1",
+                "code":"worker_preflight_parent_missing",
+                "message":"worker_preflight_parent_missing",
+                "path":path.to_string_lossy(),
+                "access":access,
+                "preflight_status":"failed",
+                "remediation":"Create or select an existing parent directory before retrying."
+            }));
+        }
+        checked.push(json!({
+            "path":path.to_string_lossy(),
+            "access":access,
+            "exists":exists,
+            "status":"passed"
+        }));
+    }
+    Ok(json!({"status":"passed","items":checked}))
+}
 #[cfg(windows)]
 fn path_components_equal_or_child(path: &Path, root: &Path) -> bool {
     let path = path
@@ -669,7 +750,7 @@ fn affordances() -> Value {
 }
 fn compact_run(run: &Value) -> Value {
     let o = run.as_object().cloned().unwrap_or_default();
-    json!({"run_id":o.get("run_id"),"status":o.get("status"),"completion_state":o.get("completion_state"),"authority":o.get("authority"),"resolved_invocation":o.get("resolved_invocation"),"capability_snapshot":o.get("capability_snapshot"),"worker_session_id":o.get("worker_session_id"),"started_at":o.get("timing").and_then(|v|v.get("started_at")),"finished_at":o.get("timing").and_then(|v|v.get("finished_at")),"summary":o.get("summary").or_else(||o.get("last_message")),"summary_preview":o.get("summary").or_else(||o.get("last_message")),"error_preview":o.get("error"),"updated_at":o.get("updated_at").or_else(||o.get("timing").and_then(|v|v.get("finished_at")))})
+    json!({"run_id":o.get("run_id"),"status":o.get("status"),"completion_state":o.get("completion_state"),"authority":o.get("authority"),"resolved_invocation":o.get("resolved_invocation"),"capability_snapshot":o.get("capability_snapshot"),"worker_session_id":o.get("worker_session_id"),"started_at":o.get("timing").and_then(|v|v.get("started_at")),"finished_at":o.get("timing").and_then(|v|v.get("finished_at")),"duration_ms":o.get("timing").and_then(|v|v.get("duration_ms")),"summary":o.get("summary").or_else(||o.get("last_message")),"summary_preview":o.get("summary").or_else(||o.get("last_message")),"error":o.get("error"),"error_preview":o.get("error"),"failure":o.get("failure"),"updated_at":o.get("updated_at").or_else(||o.get("timing").and_then(|v|v.get("finished_at")))})
 }
 
 fn resolved_invocation(
@@ -1281,7 +1362,9 @@ fn worker_run(
     } else {
         Some(scoped_write_probe(&cwd)?)
     };
-    let capabilities = capability_snapshot(&auth, &cwd, allowed_roots, runtime_probe.as_ref());
+    let preflight = preflight_paths(constraints, &cwd, allowed_roots)?;
+    let mut capabilities = capability_snapshot(&auth, &cwd, allowed_roots, runtime_probe.as_ref());
+    capabilities["preflight"] = preflight;
     let id = format!("run-{}", uuid::Uuid::new_v4().simple());
     let session = resume.clone().unwrap_or_else(|| id.clone());
     let dir = run_root(root).join(&id);
@@ -1340,7 +1423,7 @@ fn worker_run(
                 provider_binding_path,
                 allowed_roots_owned,
                 max_run_ms,
-                format!("Effective mode: {}. This reconciled state is injected at the provider process boundary through the permission profile, CLI sandbox, and writable-root arguments; ambient labels are advisory. CWD: {}. Writable roots: {}. Scoped create/read/remove preflight: {}. Command write effects: {}. First-class exact-byte lifecycle: one bounded shell command with explicit encoding for create/read-verify/remove/confirm-absent. On Windows assign literal path/content variables, use IO.File WriteAllBytes/ReadAllBytes, compare hex, delete, and test existence; avoid interpolated command strings. Use apply_patch for ordinary edits. Carrier MCP projection: none. On refusal return narada.worker.refusal.v1 with tool, operation, cwd, target_path, declared_capability, actual_refusal. Ergonomics ratings use narada.worker.observed_ergonomics.v1: lower a score only for observed failure, retry, human intervention, or ambiguity that changed execution; automatic contained review requires no human interaction and is not ceremony; put hypothetical improvements in non_scoring_observations.\n\nTask:\n{prompt}", capabilities["effective_mode"].as_str().unwrap_or("unknown"), capabilities["cwd"].as_str().unwrap_or("unknown"), capabilities["allowed_roots"].as_array().map(|roots| roots.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")).unwrap_or_default(), capabilities["runtime_probe"]["status"].as_str().unwrap_or("not_required"), capabilities["commands"]["write_effects"].as_bool().unwrap_or(false)),
+                format!("Effective mode: {}. This reconciled state is injected at the provider process boundary through the permission profile, CLI sandbox, and writable-root arguments; ambient labels are advisory. CWD: {}. Writable roots: {}. Scoped create/read/remove preflight: {}. Command write effects: {}. First-class exact-byte lifecycle: one bounded shell command with explicit encoding for create/read-verify/remove/confirm-absent. On Windows assign literal path/content variables, use IO.File WriteAllBytes/ReadAllBytes, compare hex, delete, and test existence; avoid interpolated command strings. Use apply_patch for ordinary edits. Read-only command policy: issue one executable with literal arguments per probe; do not combine probes with &&, ;, pipes, redirection, $(), backticks, or generated scripts. Use separate bounded commands and report each result. For non-ASCII text, set explicit UTF-8 output before reading. Carrier MCP projection: none. On refusal return narada.worker.refusal.v1 with tool, operation, cwd, target_path, declared_capability, actual_refusal. Ergonomics ratings use narada.worker.observed_ergonomics.v1: lower a score only for observed failure, retry, human intervention, or ambiguity that changed execution; automatic contained review requires no human interaction and is not ceremony; put hypothetical improvements in non_scoring_observations.\n\nTask:\n{prompt}", capabilities["effective_mode"].as_str().unwrap_or("unknown"), capabilities["cwd"].as_str().unwrap_or("unknown"), capabilities["allowed_roots"].as_array().map(|roots| roots.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")).unwrap_or_default(), capabilities["runtime_probe"]["status"].as_str().unwrap_or("not_required"), capabilities["commands"]["write_effects"].as_bool().unwrap_or(false)),
             )
         })
         .map_err(|_| error("worker_launch_failed", "worker_launch_failed"))?;
@@ -1462,6 +1545,29 @@ fn worker_run_reap(args: &Map<String, Value>, root: &Path) -> Result<Value, Valu
         json!({"schema":"narada.worker.run_reap.v1","status":"reaped","run_id":id,"reaped":true,"run":run}),
     )
 }
+fn repair_mojibake(text: &str) -> String {
+    text.replace("Â·", "·")
+        .replace("â€“", "–")
+        .replace("â€”", "—")
+        .replace("â€œ", "“")
+        .replace("â€\u{009d}", "”")
+        .replace("â€˜", "‘")
+        .replace("â€™", "’")
+        .replace("â€¦", "…")
+        .replace("Â ", " ")
+}
+
+fn timeout_failure(run_id: &str, max_run_ms: u64, elapsed_ms: u64) -> Value {
+    json!({
+        "schema":"narada.worker.failure.v1",
+        "code":"worker_runtime_timed_out",
+        "run_id":run_id,
+        "max_run_ms":max_run_ms,
+        "elapsed_ms":elapsed_ms,
+        "remediation":"Increase constraints.max_run_ms or inspect the worker runtime before retrying."
+    })
+}
+
 fn event_text(event: &Value) -> Option<String> {
     for key in ["content", "message", "text", "summary"] {
         if let Some(value) = event
@@ -1470,7 +1576,7 @@ fn event_text(event: &Value) -> Option<String> {
             .map(str::trim)
             .filter(|v| !v.is_empty())
         {
-            return Some(value.to_string());
+            return Some(repair_mojibake(value));
         }
     }
     event
@@ -1483,7 +1589,7 @@ fn event_text(event: &Value) -> Option<String> {
                     .and_then(Value::as_str)
                     .map(str::trim)
                     .filter(|v| !v.is_empty())
-                    .map(str::to_string)
+                    .map(repair_mojibake)
             })
         })
 }
@@ -1590,6 +1696,7 @@ fn complete_native_run(
         let mut assistant = None;
         let mut provider_session = None;
         let mut runtime_error = None;
+        let mut failure = Value::Null;
         let mut close_sent = false;
         if let Some(stdout) = child.stdout.take() {
             let (line_tx, line_rx) = mpsc::channel();
@@ -1602,8 +1709,18 @@ fn complete_native_run(
             });
             loop {
                 if started.elapsed() >= Duration::from_millis(max_run_ms) {
-                    runtime_error =
-                        Some(format!("worker_runtime_timed_out:max_run_ms={max_run_ms}"));
+                    let elapsed_ms = started.elapsed().as_millis() as u64;
+                    failure = timeout_failure(&id, max_run_ms, elapsed_ms);
+                    runtime_error = Some(format!(
+                        "worker_runtime_timed_out:max_run_ms={max_run_ms}:elapsed_ms={elapsed_ms}"
+                    ));
+                    if let Some(file) = events.as_mut() {
+                        let _ = writeln!(
+                            file,
+                            "{}",
+                            json!({"schema":"narada.worker.event.v1","event":"worker_runtime_timed_out","run_id":id,"elapsed_ms":elapsed_ms,"max_run_ms":max_run_ms,"failure":failure,"remediation":"Increase constraints.max_run_ms or inspect the worker runtime before retrying."})
+                        );
+                    }
                     let _ = child.kill();
                     break;
                 }
@@ -1688,7 +1805,15 @@ fn complete_native_run(
             .ok()
             .and_then(|request| request.get("capability_snapshot").cloned())
             .unwrap_or(Value::Null);
-        let payload = json!({"schema":"narada.worker.run.v1","run_id":id,"status":if successful{"completed"}else{"failed"},"completion_state":if assistant.is_some(){"complete"}else{"absent"},"runtime":"narada-agent-runtime-server","authority":authority,"cognition":cognition,"resolved_invocation":resolved_invocation,"capability_snapshot":snapshot,"worker_session_id":provider_session.unwrap_or(session),"pid":child.id(),"summary":assistant,"error":runtime_error.or_else(||if successful{None}else{Some(format!("worker_runtime_exit:{:?}",status.and_then(|v|v.code())))}),"timing":{"started_at":Value::Null,"finished_at":finished,"duration_ms":started.elapsed().as_millis() as u64},"artifacts":{"request":dir.join("request.json").to_string_lossy(),"events":events_path.to_string_lossy(),"diagnostic":diagnostic_path.to_string_lossy(),"last_message":dir.join("last_message.json").to_string_lossy()}});
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        let final_error = runtime_error.or_else(|| {
+            if successful {
+                None
+            } else {
+                Some(format!("worker_runtime_exit:{:?}", status.and_then(|v| v.code())))
+            }
+        });
+        let payload = json!({"schema":"narada.worker.run.v1","run_id":id,"status":if successful{"completed"}else{"failed"},"completion_state":if assistant.is_some(){"complete"}else{"absent"},"runtime":"narada-agent-runtime-server","authority":authority,"cognition":cognition,"resolved_invocation":resolved_invocation,"capability_snapshot":snapshot,"worker_session_id":provider_session.unwrap_or(session),"pid":child.id(),"summary":assistant,"error":final_error,"failure":failure,"timing":{"started_at":Value::Null,"finished_at":finished,"duration_ms":elapsed_ms},"artifacts":{"request":dir.join("request.json").to_string_lossy(),"events":events_path.to_string_lossy(),"diagnostic":diagnostic_path.to_string_lossy(),"last_message":dir.join("last_message.json").to_string_lossy()}});
         let _ = write_json_atomic(&result_path, &payload);
     }
 }
@@ -1722,6 +1847,7 @@ fn input_schema(name: &str) -> Value {
                 "authority":{"type":"string","enum":["read","write","command"]},
                 "cognition":{"type":"string","enum":["low","medium","high"],"default":"low"},
                 "cwd":{"type":"string","minLength":1,"maxLength":4096},
+                "preflight_paths":{"type":"array","maxItems":64,"items":{"type":"object","properties":{"path":{"type":"string","minLength":1,"maxLength":4096},"access":{"type":"string","enum":["read","write","create"],"default":"read"}},"required":["path"],"additionalProperties":false}},
                 "invocation_plan_ref":{"type":"string","minLength":6,"maxLength":512,"pattern":"^plan:[A-Za-z0-9._:-]+$"},
                 "max_run_ms":{"type":"integer","minimum":1,"maximum":1800000,"default":300000,"description":"Hard worker runtime deadline enforced by the native authority."},
                 "wait_for_completion":{"type":"boolean","default":false,"description":"Return after bounded child completion polling when true; false returns the accepted running record immediately."},
@@ -1861,6 +1987,57 @@ mod tests {
             compact["resolved_invocation"]["provider_model"],
             "gpt-5.6-luna"
         );
+    }
+
+    #[test]
+    fn compact_run_surfaces_failure_and_elapsed_time() {
+        let compact = compact_run(&json!({
+            "run_id":"run-timeout",
+            "status":"failed",
+            "error":"worker_runtime_timed_out:max_run_ms=120000:elapsed_ms=120004",
+            "failure":{"code":"worker_runtime_timed_out","elapsed_ms":120004},
+            "timing":{"duration_ms":120004}
+        }));
+        assert_eq!(compact["error"], "worker_runtime_timed_out:max_run_ms=120000:elapsed_ms=120004");
+        assert_eq!(compact["duration_ms"], 120004);
+        assert_eq!(compact["failure"]["code"], "worker_runtime_timed_out");
+    }
+
+    #[test]
+    fn timeout_failure_contains_remediation_and_elapsed_time() {
+        let failure = timeout_failure("run-timeout", 120_000, 120_004);
+        assert_eq!(failure["code"], "worker_runtime_timed_out");
+        assert_eq!(failure["elapsed_ms"], 120_004);
+        assert!(failure["remediation"].as_str().is_some_and(|text| !text.is_empty()));
+    }
+
+    #[test]
+    fn worker_output_repairs_common_utf8_display_corruption() {
+        assert_eq!(repair_mojibake("x Â· y â€“ z"), "x · y – z");
+    }
+
+    #[test]
+    fn worker_preflight_rejects_missing_read_path() {
+        let root = std::env::temp_dir().join(format!("narada-worker-preflight-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("root");
+        let constraints = json!({"preflight_paths":[{"path":"missing.txt","access":"read"}]});
+        let error = preflight_paths(constraints.as_object(), &root, std::slice::from_ref(&root))
+            .expect_err("missing path must fail");
+        assert_eq!(error["code"], "worker_preflight_path_missing");
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn worker_preflight_accepts_existing_read_path() {
+        let root = std::env::temp_dir().join(format!("narada-worker-preflight-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("root");
+        fs::write(root.join("present.txt"), "ok").expect("file");
+        let constraints = json!({"preflight_paths":[{"path":"present.txt","access":"read"}]});
+        let result = preflight_paths(constraints.as_object(), &root, std::slice::from_ref(&root))
+            .expect("existing path");
+        assert_eq!(result["status"], "passed");
+        assert_eq!(result["items"][0]["status"], "passed");
+        fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[test]
