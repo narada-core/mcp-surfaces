@@ -1412,7 +1412,16 @@ fn worker_run(
         reasoning_effort,
         provider_binding,
     ) = invocation_plan_binding(root, requested_plan_ref.as_deref(), Some(&cognition))?;
-    let codex_broker = if provider_mode == "codex-subscription" {
+    let codex_transport = if provider_mode == "codex-subscription" {
+        std::env::var("NARADA_WORKER_CODEX_TRANSPORT")
+            .unwrap_or_else(|_| "codex-app-server".to_string())
+    } else {
+        "native-http".to_string()
+    };
+    if !matches!(codex_transport.as_str(), "codex-app-server" | "codex-exec" | "native-http") {
+        return Err(error("worker_codex_transport_invalid", "worker_codex_transport_invalid"));
+    }
+    let codex_broker = if provider_mode == "codex-subscription" && codex_transport == "codex-app-server" {
         Some(crate::codex_app_server_broker::binding().map_err(|reason| {
             json!({"schema":"narada.worker.error.v1","code":"worker_codex_app_server_unavailable","message":"worker_codex_app_server_unavailable","reason":reason,"mutation_started":false})
         })?)
@@ -1431,11 +1440,7 @@ fn worker_run(
         ));
     }
     let runtime = runtime_command(root)?;
-    let runtime_probe = if auth == "read" {
-        None
-    } else {
-        Some(scoped_write_probe(&cwd)?)
-    };
+    let runtime_probe = if auth == "read" { None } else { Some(scoped_write_probe(&cwd)?) };
     let preflight = preflight_paths(constraints, &cwd, allowed_roots)?;
     let prompt = format!(
         "{READ_ONLY_COMMAND_CONTRACT}\n\n{instruction_text}\n\n{}",
@@ -1447,6 +1452,9 @@ fn worker_run(
         capabilities["provider_boundary"]["transport"] = json!("codex_app_server_broker");
         capabilities["provider_boundary"]["broker_generation"] = json!(broker.broker_generation);
         capabilities["provider_boundary"]["thread_policy"] = json!("fresh_ephemeral_per_turn");
+    } else if provider_mode == "codex-subscription" {
+        capabilities["provider_boundary"]["source"] = json!("native_codex_exec");
+        capabilities["provider_boundary"]["transport"] = json!("codex_exec");
     } else {
         capabilities["provider_boundary"]["transport"] = json!("native_http");
         capabilities["tool_bridge"]["kind"] = json!("nars_native_mcp_gateway");
@@ -1478,6 +1486,8 @@ fn worker_run(
         resolved_invocation["provider_transport"] = json!("codex_app_server_broker");
         resolved_invocation["provider_broker_generation"] = json!(broker.broker_generation);
         resolved_invocation["provider_thread_policy"] = json!("fresh_ephemeral_per_turn");
+    } else if provider_mode == "codex-subscription" {
+        resolved_invocation["provider_transport"] = json!("codex_exec");
     } else {
         resolved_invocation["provider_transport"] = json!("native_http");
     }
@@ -1516,6 +1526,7 @@ fn worker_run(
                 reasoning_effort,
                 provider_binding_path,
                 codex_broker,
+                codex_transport,
                 allowed_roots_owned,
                 max_run_ms,
                 format!("Effective mode: {}. This reconciled state is injected at the provider process boundary through the permission profile, CLI sandbox, and writable-root arguments; ambient labels are advisory. CWD: {}. Writable roots: {}. Scoped create/read/remove preflight: {}. Command write effects: {}. First-class exact-byte lifecycle: one bounded shell command with explicit encoding for create/read-verify/remove/confirm-absent. On Windows assign literal path/content variables, use IO.File WriteAllBytes/ReadAllBytes, compare hex, delete, and test existence; avoid interpolated command strings. Use apply_patch for ordinary edits. Read-only command policy: issue one executable with literal arguments per probe; do not combine probes with &&, ;, pipes, redirection, $(), backticks, or generated scripts. Use separate bounded commands and report each result. For non-ASCII text, set explicit UTF-8 output before reading. Carrier MCP projection: none. On refusal return narada.worker.refusal.v1 with tool, operation, cwd, target_path, declared_capability, actual_refusal. Ergonomics ratings use narada.worker.observed_ergonomics.v1: lower a score only for observed failure, retry, human intervention, or ambiguity that changed execution; automatic contained review requires no human interaction and is not ceremony; put hypothetical improvements in non_scoring_observations.\n\nTask:\n{prompt}", capabilities["effective_mode"].as_str().unwrap_or("unknown"), capabilities["cwd"].as_str().unwrap_or("unknown"), capabilities["allowed_roots"].as_array().map(|roots| roots.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")).unwrap_or_default(), capabilities["runtime_probe"]["status"].as_str().unwrap_or("not_required"), capabilities["commands"]["write_effects"].as_bool().unwrap_or(false)),
@@ -1706,6 +1717,7 @@ fn complete_native_run(
     reasoning_effort: Option<String>,
     provider_binding_path: Option<PathBuf>,
     codex_broker: Option<crate::codex_app_server_broker::BrokerBinding>,
+    codex_transport: String,
     allowed_roots: Vec<PathBuf>,
     max_run_ms: u64,
     prompt: String,
@@ -1728,7 +1740,7 @@ fn complete_native_run(
         .env("NARADA_WORKSPACE_ROOT", &cwd)
         .env("NARADA_CARRIER_SESSION_ID", &runtime_session)
         .env("NARADA_INTELLIGENCE_PLAN_REF", &plan_ref)
-        .env("NARADA_NATIVE_PROVIDER_MODE", provider_mode)
+        .env("NARADA_NATIVE_PROVIDER_MODE", &provider_mode)
         .env(
             "NARADA_NATIVE_CODEX_SANDBOX",
             if authority == "read" {
@@ -1759,6 +1771,9 @@ fn complete_native_run(
             .env("NARADA_NATIVE_CODEX_BROKER_ENDPOINT", broker.endpoint)
             .env("NARADA_NATIVE_CODEX_BROKER_CAPABILITY", broker.capability)
             .env("NARADA_NATIVE_CODEX_BROKER_GENERATION", broker.broker_generation);
+    }
+    if provider_mode == "codex-subscription" {
+        command.env("NARADA_NATIVE_CODEX_TRANSPORT", codex_transport);
     }
     command.env("NARADA_NATIVE_CODEX_MODEL", provider_model);
     if let Some(reasoning_effort) = reasoning_effort {

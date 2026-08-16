@@ -31,6 +31,9 @@ It never reuses the outer carrier session or silently falls back to
 `codex exec`. DeepSeek and OpenRouter bindings use NARS's native HTTP provider
 adapter instead. `worker_policy_inspect` and each run's
 `resolved_invocation` expose the selected transport and host generation.
+For controlled parity diagnosis, the carrier process may set
+`NARADA_WORKER_CODEX_TRANSPORT=codex-exec`; callers cannot override transport
+through worker tool arguments.
 
 ## Verification
 
