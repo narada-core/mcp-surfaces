@@ -146,6 +146,20 @@ fn workspace_root() -> Result<PathBuf, String> {
         .ok_or_else(|| "native_distribution_workspace_unresolved".into())
 }
 
+fn narada_source_root(root: &Path) -> Result<PathBuf, String> {
+    const MATRIX_RELATIVE_PATH: &str =
+        "narada/packages/operator-surface-runtime-contract/contracts/runtime-implementation-matrix.json";
+    root.ancestors()
+        .find(|candidate| candidate.join(MATRIX_RELATIVE_PATH).is_file())
+        .map(Path::to_path_buf)
+        .ok_or_else(|| {
+            format!(
+                "native_distribution_narada_source_root_unresolved:{}",
+                path_text(root)
+            )
+        })
+}
+
 fn cargo(root: &Path, arguments: &[&str], phase: &str) -> Result<(), String> {
     let status = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
         .args(arguments)
@@ -361,14 +375,16 @@ fn materialize(root: &Path, options: &MaterializeOptions) -> Result<Value, Strin
         .clone()
         .or_else(|| env::var_os("USERPROFILE").map(PathBuf::from))
         .ok_or("native_distribution_home_required")?;
-    let source_root = root
-        .parent()
-        .ok_or("native_distribution_source_root_unresolved")?;
     let contract = options
         .contract
         .clone()
         .unwrap_or_else(|| home.join("Narada/.narada/capabilities/carrier-materialization.json"));
-    let matrix = options.matrix.clone().unwrap_or_else(|| source_root.join("narada/packages/operator-surface-runtime-contract/contracts/runtime-implementation-matrix.json"));
+    let matrix = match options.matrix.clone() {
+        Some(matrix) => matrix,
+        None => narada_source_root(root)?.join(
+            "narada/packages/operator-surface-runtime-contract/contracts/runtime-implementation-matrix.json",
+        ),
+    };
     let installed = options
         .installed_index
         .clone()
@@ -617,10 +633,33 @@ fn now() -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn native_distribution_has_no_javascript_subprocess() {
         verify_native_distribution_source(include_str!("main.rs")).unwrap();
     }
+
+    #[test]
+    fn narada_source_root_resolves_from_nested_worktree() {
+        let root = std::env::temp_dir().join(format!(
+            "narada-native-source-root-{}",
+            std::process::id()
+        ));
+        let source_root = root.join("src");
+        let worktree_root = source_root.join("mcp-surfaces/.worktrees/worker");
+        let matrix = source_root.join(
+            "narada/packages/operator-surface-runtime-contract/contracts/runtime-implementation-matrix.json",
+        );
+        std::fs::create_dir_all(&worktree_root).expect("worktree");
+        std::fs::create_dir_all(matrix.parent().expect("matrix parent")).expect("narada source");
+        std::fs::write(&matrix, b"{}").expect("matrix file");
+
+        assert_eq!(narada_source_root(&worktree_root).expect("source root"), source_root);
+
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
     fn verify_native_distribution_source(source: &str) -> Result<(), String> {
         for command in ["node", "bun", "pnpm", "tsx", "powershell", "pwsh"] {
             if source.contains(&format!("Command::new(\"{command}\"")) {
