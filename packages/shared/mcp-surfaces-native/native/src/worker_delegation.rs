@@ -13,7 +13,7 @@ const SERVER_NAME: &str = "worker-delegation-mcp";
 const DEFAULT_COGNITION: &str = "low";
 const MAX_RUNS: usize = 200;
 const MAX_FILE_BYTES: usize = 256_000;
-const READ_ONLY_COMMAND_CONTRACT: &str = "READ-ONLY COMMAND CONTRACT (apply before acting): use one executable with literal argv per probe; use supplied native preflight evidence for path existence/readability instead of probing again; never combine probes with &&, ;, pipes, redirection, $(), backticks, or generated scripts. If a probe is refused, stop that probe and report the refusal; do not retry by bundling commands or changing shells.";
+const READ_ONLY_COMMAND_CONTRACT: &str = "READ-ONLY COMMAND CONTRACT (apply before acting): use one executable with literal argv per probe; use supplied native preflight evidence for path existence/readability instead of probing again; never combine probes with &&, ;, pipes, redirection, $(), backticks, or generated scripts. If a probe is refused, stop that probe and report the refusal; do not retry by bundling commands or changing shells. WINDOWS READ-ONLY PROBE: when a filesystem read probe is actually needed, use pwsh with literal argv [-NoProfile, -NonInteractive, -Command, Get-Content -LiteralPath <literal-path> -TotalCount 1]. Do not start with dotnet File.OpenRead, C# scripts, generated scripts, or alternate shells. Prefer supplied native preflight evidence and do not probe again when it is present.";
 const READ_TOOLS: &[(&str, &str)] = &[
     (
         "worker_output_show",
