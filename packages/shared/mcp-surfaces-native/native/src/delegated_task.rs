@@ -996,7 +996,95 @@ fn parse_embedded_structured_output(text: &str) -> Option<Value> {
         })
 }
 
-fn worker_output_from_run(run: &Value) -> Option<Value> {
+fn acceptance_required_fields(task: &Value) -> Vec<String> {
+    task.pointer("/acceptance/required_fields")
+        .or_else(|| task.pointer("/acceptance/requested_fields"))
+        .or_else(|| task.pointer("/acceptance/required"))
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    item.as_str()
+                        .or_else(|| item.get("name").and_then(Value::as_str))
+                        .map(str::to_string)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn structured_output_instruction(task: &Value) -> Option<String> {
+    let fields = acceptance_required_fields(task);
+    if fields.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "\n\nMANDATORY STRUCTURED OUTPUT CONTRACT: return exactly one JSON object with these required top-level keys: {}. Do not provide the answer only as Markdown or prose. Put each value in the JSON object; a short explanation may follow only after the object.",
+        fields.join(", ")
+    ))
+}
+
+fn markdown_field_value(line: &str, field: &str) -> Option<Value> {
+    let mut candidate = line.trim();
+    for prefix in ["- ", "* ", "+ ", "• "] {
+        if let Some(rest) = candidate.strip_prefix(prefix) {
+            candidate = rest.trim_start();
+            break;
+        }
+    }
+    if let Some(rest) = candidate.strip_prefix("**") {
+        let end = rest.find("**")?;
+        if rest[..end].trim() != field {
+            return None;
+        }
+        candidate = &rest[end + 2..];
+    } else if let Some(rest) = candidate.strip_prefix('`') {
+        let end = rest.find('`')?;
+        if rest[..end].trim() != field {
+            return None;
+        }
+        candidate = &rest[end + 1..];
+    } else {
+        candidate = candidate.strip_prefix(field)?;
+    }
+    let separator = candidate.chars().next()?;
+    if !matches!(separator, ':' | '=') {
+        return None;
+    }
+    let value = candidate[separator.len_utf8()..]
+        .trim()
+        .trim_matches('`')
+        .trim_matches('*')
+        .trim();
+    if value.is_empty() {
+        return None;
+    }
+    serde_json::from_str(value)
+        .ok()
+        .filter(|parsed: &Value| !parsed.is_object() && !parsed.is_array())
+        .or_else(|| Some(Value::String(value.to_string())))
+}
+
+fn parse_markdown_structured_output(text: &str, required_fields: &[String]) -> Option<Value> {
+    if required_fields.is_empty() {
+        return None;
+    }
+    let mut fields = Map::new();
+    for field in required_fields {
+        let value = text
+            .lines()
+            .flat_map(|line| std::iter::once(line).chain(line.split(", ")))
+            .find_map(|line| markdown_field_value(line, field))?;
+        fields.insert(field.clone(), value);
+    }
+    Some(Value::Object(fields))
+}
+
+fn worker_output_from_run_with_required_fields(
+    run: &Value,
+    required_fields: &[String],
+) -> Option<Value> {
     let summary = run
         .get("summary")
         .or_else(|| run.get("summary_preview"))
@@ -1013,8 +1101,15 @@ fn worker_output_from_run(run: &Value) -> Option<Value> {
                         return Some(json!({"summary_text":structured_output_summary(&structured),"diagnostics_text":diagnostics_prefix(text),"structured_output":structured,"truncated":false}));
                     }
                 }
+                if let Some(structured) = parse_markdown_structured_output(text, required_fields) {
+                    return Some(json!({"summary_text":structured_output_summary(&structured),"diagnostics_text":diagnostics_prefix(text),"raw_summary_text":text.chars().take(MAX_WORKER_OUTPUT_BYTES).collect::<String>(),"structured_output":structured,"structured_output_normalization":"markdown_summary","truncated":false}));
+                }
             }
-            Some(json!({"summary_text":text.chars().take(MAX_WORKER_OUTPUT_BYTES).collect::<String>(),"truncated":!bounded || text.chars().count()>MAX_WORKER_OUTPUT_BYTES}))
+            Some(if required_fields.is_empty() {
+                json!({"summary_text":text.chars().take(MAX_WORKER_OUTPUT_BYTES).collect::<String>(),"truncated":!bounded || text.chars().count()>MAX_WORKER_OUTPUT_BYTES})
+            } else {
+                json!({"summary_text":text.chars().take(MAX_WORKER_OUTPUT_BYTES).collect::<String>(),"structured_output_required":true,"structured_output_error":{"code":"worker_structured_output_required","required_fields":required_fields},"truncated":!bounded || text.chars().count()>MAX_WORKER_OUTPUT_BYTES})
+            })
         }
         value => {
             let encoded_len = serde_json::to_vec(value)
@@ -1033,7 +1128,8 @@ fn record_worker_terminal(
     status: &str,
     run: &Value,
 ) {
-    let output = worker_output_from_run(run);
+    let required_fields = acceptance_required_fields(task);
+    let output = worker_output_from_run_with_required_fields(run, &required_fields);
     if let Some(refs) = task["result"]["worker_refs"].as_array_mut() {
         if let Some(reference) = refs.iter_mut().find(|reference| {
             reference.get("run_id").and_then(Value::as_str) == Some(run_id)
@@ -1768,19 +1864,7 @@ fn acceptance_verdict(task: &Value, root: &Path) -> (&'static str, Vec<Value>) {
         "owner_site_root":owner_site_root,
         "status":provenance_status
     }));
-    let requested_fields = task
-        .pointer("/acceptance/required_fields")
-        .or_else(|| task.pointer("/acceptance/requested_fields"))
-        .or_else(|| task.pointer("/acceptance/required"))
-        .and_then(Value::as_array)
-        .map(|items| {
-            items.iter().filter_map(|item| {
-                item.as_str()
-                    .or_else(|| item.get("name").and_then(Value::as_str))
-                    .map(str::to_string)
-            }).collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let requested_fields = acceptance_required_fields(task);
     let mut returned_fields = Vec::new();
     for list_name in ["worker_outputs", "worker_refs"] {
         if let Some(items) = result.get(list_name).and_then(Value::as_array) {
@@ -2257,6 +2341,9 @@ fn advance_value_with_roots(
                 .and_then(Value::as_str)
                 .or_else(|| task.get("objective").and_then(Value::as_str))
                 .unwrap_or_default();
+            let instruction = structured_output_instruction(&task)
+                .map(|contract| format!("{instruction}{contract}"))
+                .unwrap_or_else(|| instruction.to_string());
             let constraints = if step.get("constraints").is_some() {
                 normalized_constraints(step.get("constraints"))
             } else {
@@ -2460,7 +2547,7 @@ mod tests {
     #[test]
     fn completed_worker_output_is_structured_and_bounded() {
         let run = json!({"summary":"{\"repository\":\"marici\",\"branch\":\"main\"}"});
-        let output = worker_output_from_run(&run).expect("worker output");
+        let output = worker_output_from_run_with_required_fields(&run, &[]).expect("worker output");
         assert_eq!(output["structured_output"]["repository"], "marici");
         assert_eq!(output["structured_output"]["branch"], "main");
         assert_eq!(output["truncated"], false);
@@ -2469,7 +2556,7 @@ mod tests {
     #[test]
     fn completed_worker_output_extracts_json_after_prose() {
         let run = json!({"summary":"I checked the repository. {\"repository\":\"marici\",\"branch\":\"main\"}"});
-        let output = worker_output_from_run(&run).expect("worker output");
+        let output = worker_output_from_run_with_required_fields(&run, &[]).expect("worker output");
         assert_eq!(output["structured_output"]["repository"], "marici");
         assert_eq!(output["structured_output"]["branch"], "main");
         assert_eq!(output["summary_text"], "repository=marici, branch=main");
@@ -2479,7 +2566,7 @@ mod tests {
     #[test]
     fn completed_worker_output_extracts_fenced_json_after_prose() {
         let run = json!({"summary":"The checks are complete.```json\n{\"repository\":\"marici\",\"branch\":\"main\"}\n```"});
-        let output = worker_output_from_run(&run).expect("worker output");
+        let output = worker_output_from_run_with_required_fields(&run, &[]).expect("worker output");
         assert_eq!(output["structured_output"]["repository"], "marici");
         assert_eq!(output["structured_output"]["branch"], "main");
     }
@@ -2487,10 +2574,44 @@ mod tests {
     #[test]
     fn completed_worker_output_extracts_multiline_fenced_json_after_prose() {
         let run = json!({"summary":"I’ll perform two read-only checks.```json\n{\n  \"directory_name\": \"marici\",\n  \"current_git_branch\": \"main\",\n  \"verification\": {\n    \"path\": \"C:\\\\Users\\\\andrey\\\\src\\\\marici\",\n    \"changes_made\": false\n  }\n}\n```"});
-        let output = worker_output_from_run(&run).expect("worker output");
+        let output = worker_output_from_run_with_required_fields(&run, &[]).expect("worker output");
         assert_eq!(output["structured_output"]["directory_name"], "marici");
         assert_eq!(output["structured_output"]["current_git_branch"], "main");
         assert_eq!(output["structured_output"]["verification"]["changes_made"], false);
+    }
+
+    #[test]
+    fn completed_worker_output_normalizes_required_markdown_fields() {
+        let run = json!({"summary":"- **repository_name**: marici\n- current_branch: main\n- verification: read-only check confirmed the branch."});
+        let required = vec![
+            "repository_name".to_string(),
+            "current_branch".to_string(),
+            "verification".to_string(),
+        ];
+        let output = worker_output_from_run_with_required_fields(&run, &required)
+            .expect("worker output");
+        assert_eq!(output["structured_output"]["repository_name"], "marici");
+        assert_eq!(output["structured_output"]["current_branch"], "main");
+        assert_eq!(output["structured_output"]["verification"], "read-only check confirmed the branch.");
+        assert_eq!(output["structured_output_normalization"], "markdown_summary");
+    }
+
+    #[test]
+    fn completed_worker_output_marks_missing_structured_output_explicitly() {
+        let run = json!({"summary":"The repository is marici and the branch is main."});
+        let required = vec!["repository_name".to_string(), "current_branch".to_string()];
+        let output = worker_output_from_run_with_required_fields(&run, &required)
+            .expect("worker output");
+        assert_eq!(output["structured_output_required"], true);
+        assert_eq!(output["structured_output_error"]["code"], "worker_structured_output_required");
+    }
+
+    #[test]
+    fn structured_output_instruction_names_acceptance_fields() {
+        let task = json!({"acceptance":{"required":["repository_name","current_branch"]}});
+        let instruction = structured_output_instruction(&task).expect("contract");
+        assert!(instruction.contains("repository_name, current_branch"));
+        assert!(instruction.contains("exactly one JSON object"));
     }
 
     #[test]
