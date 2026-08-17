@@ -841,6 +841,24 @@ fn require_current_site_scope(args: &Map<String, Value>) -> Result<(), Value> {
         )),
     }
 }
+fn compact_text(value: Option<&Value>) -> Value {
+    let Some(value) = value else { return Value::Null; };
+    let text = value
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| serde_json::to_string(value).unwrap_or_default());
+    if text.chars().count() <= 320 {
+        return json!(text);
+    }
+    let prefix = text.chars().take(320).collect::<String>();
+    let boundary = prefix
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| ch.is_whitespace())
+        .map(|(index, _)| index)
+        .unwrap_or(prefix.len());
+    json!(format!("{}…", prefix[..boundary].trim_end()))
+}
 fn minimal_run(run: &Value) -> Value {
     let o = run.as_object().cloned().unwrap_or_default();
     json!({
@@ -852,8 +870,8 @@ fn minimal_run(run: &Value) -> Value {
         "finished_at":o.get("timing").and_then(|v|v.get("finished_at")),
         "duration_ms":o.get("timing").and_then(|v|v.get("duration_ms")),
         "updated_at":o.get("updated_at").or_else(||o.get("timing").and_then(|v|v.get("finished_at"))),
-        "summary":o.get("summary").or_else(||o.get("last_message")),
-        "error":o.get("error")
+        "summary":compact_text(o.get("summary").or_else(||o.get("last_message"))),
+        "error":compact_text(o.get("error"))
     })
 }
 fn compact_run(run: &Value) -> Value {
@@ -1538,7 +1556,7 @@ fn worker_run(
     write_json_atomic(&dir.join("request.json"), &request)?;
     fs::write(dir.join("worker_prompt.txt"), &prompt)
         .map_err(|_| error("worker_write_failed", "worker_write_failed"))?;
-    let running = json!({"schema":"narada.worker.run.v1","run_id":id,"task_label":task_label.clone(),"status":"running","completion_state":"pending","runtime":"narada-agent-runtime-server","authority":auth,"resolved_invocation":resolved_invocation.clone(),"capability_snapshot":capabilities.clone(),"worker_session_id":session,"origin_tool":tool_name,"pid":null,"summary":null,"error":null,"timing":{"started_at":started,"finished_at":null,"duration_ms":null},"artifacts":{"request":dir.join("request.json").to_string_lossy(),"events":dir.join("events.jsonl").to_string_lossy(),"diagnostic":dir.join("diagnostic.log").to_string_lossy(),"last_message":dir.join("last_message.json").to_string_lossy()}});
+    let running = json!({"schema":"narada.worker.run.v1","run_id":id,"task_label":task_label.clone(),"status":"running","completion_state":"pending","runtime":"narada-agent-runtime-server","authority":auth,"resolved_invocation":resolved_invocation.clone(),"capability_snapshot":capabilities.clone(),"worker_session_id":session,"origin_tool":tool_name,"pid":null,"summary":null,"error":null,"timing":{"started_at":started.clone(),"finished_at":null,"duration_ms":null},"artifacts":{"request":dir.join("request.json").to_string_lossy(),"events":dir.join("events.jsonl").to_string_lossy(),"diagnostic":dir.join("diagnostic.log").to_string_lossy(),"last_message":dir.join("last_message.json").to_string_lossy()}});
     write_json_atomic(&dir.join("result.json"), &running)?;
     let root_owned = root.to_path_buf();
     let dir_owned = dir.clone();
@@ -1572,6 +1590,7 @@ fn worker_run(
                 allowed_roots_owned,
                 max_run_ms,
                 task_label,
+                started,
                 format!("Effective mode: {}. This reconciled state is injected at the provider process boundary through the permission profile, CLI sandbox, and writable-root arguments; ambient labels are advisory. CWD: {}. Writable roots: {}. Scoped create/read/remove preflight: {}. Command write effects: {}. First-class exact-byte lifecycle: one bounded shell command with explicit encoding for create/read-verify/remove/confirm-absent. On Windows assign literal path/content variables, use IO.File WriteAllBytes/ReadAllBytes, compare hex, delete, and test existence; avoid interpolated command strings. Use apply_patch for ordinary edits. Read-only command policy: issue one executable with literal arguments per probe; do not combine probes with &&, ;, pipes, redirection, $(), backticks, or generated scripts. Use separate bounded commands and report each result. For non-ASCII text, set explicit UTF-8 output before reading. Carrier MCP projection: none. On refusal return narada.worker.refusal.v1 with tool, operation, cwd, target_path, declared_capability, actual_refusal. Ergonomics ratings use narada.worker.observed_ergonomics.v1: lower a score only for observed failure, retry, human intervention, or ambiguity that changed execution; automatic contained review requires no human interaction and is not ceremony; put hypothetical improvements in non_scoring_observations.\n\nTask:\n{prompt}", capabilities["effective_mode"].as_str().unwrap_or("unknown"), capabilities["cwd"].as_str().unwrap_or("unknown"), capabilities["allowed_roots"].as_array().map(|roots| roots.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")).unwrap_or_default(), capabilities["runtime_probe"]["status"].as_str().unwrap_or("not_required"), capabilities["commands"]["write_effects"].as_bool().unwrap_or(false)),
             )
         })
@@ -1764,6 +1783,7 @@ fn complete_native_run(
     allowed_roots: Vec<PathBuf>,
     max_run_ms: u64,
     task_label: String,
+    started_at: String,
     prompt: String,
 ) {
     let result_path = dir.join("result.json");
@@ -1832,7 +1852,7 @@ fn complete_native_run(
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(err) => {
-            let failed = json!({"schema":"narada.worker.run.v1","run_id":id,"task_label":task_label,"status":"failed","completion_state":"absent","runtime":"narada-agent-runtime-server","authority":authority,"cognition":cognition,"resolved_invocation":resolved_invocation,"worker_session_id":session,"summary":null,"error":format!("worker_launch_failed:{err}"),"timing":{"started_at":now(),"finished_at":now(),"duration_ms":0}});
+            let failed = json!({"schema":"narada.worker.run.v1","run_id":id,"task_label":task_label,"status":"failed","completion_state":"absent","runtime":"narada-agent-runtime-server","authority":authority,"cognition":cognition,"resolved_invocation":resolved_invocation,"worker_session_id":session,"summary":null,"error":format!("worker_launch_failed:{err}"),"timing":{"started_at":started_at,"finished_at":now(),"duration_ms":0}});
             let _ = write_json_atomic(&result_path, &failed);
             return;
         }
@@ -1986,7 +2006,7 @@ fn complete_native_run(
                 Some(format!("worker_runtime_exit:{:?}", status.and_then(|v| v.code())))
             }
         });
-        let payload = json!({"schema":"narada.worker.run.v1","run_id":id,"task_label":task_label,"status":if successful{"completed"}else{"failed"},"completion_state":if assistant.is_some(){"complete"}else{"absent"},"runtime":"narada-agent-runtime-server","authority":authority,"cognition":cognition,"resolved_invocation":resolved_invocation,"capability_snapshot":snapshot,"worker_session_id":provider_session.unwrap_or(session),"pid":child.id(),"summary":assistant,"error":final_error,"failure":failure,"timing":{"started_at":Value::Null,"finished_at":finished,"duration_ms":elapsed_ms},"artifacts":{"request":dir.join("request.json").to_string_lossy(),"events":events_path.to_string_lossy(),"diagnostic":diagnostic_path.to_string_lossy(),"last_message":dir.join("last_message.json").to_string_lossy()}});
+        let payload = json!({"schema":"narada.worker.run.v1","run_id":id,"task_label":task_label,"status":if successful{"completed"}else{"failed"},"completion_state":if assistant.is_some(){"complete"}else{"absent"},"runtime":"narada-agent-runtime-server","authority":authority,"cognition":cognition,"resolved_invocation":resolved_invocation,"capability_snapshot":snapshot,"worker_session_id":provider_session.unwrap_or(session),"pid":child.id(),"summary":assistant,"error":final_error,"failure":failure,"timing":{"started_at":started_at,"finished_at":finished,"duration_ms":elapsed_ms},"artifacts":{"request":dir.join("request.json").to_string_lossy(),"events":events_path.to_string_lossy(),"diagnostic":diagnostic_path.to_string_lossy(),"last_message":dir.join("last_message.json").to_string_lossy()}});
         let _ = write_json_atomic(&result_path, &payload);
     }
 }

@@ -24,10 +24,10 @@ const MUTATING: &[&str] = &[
     "delegated_task_acknowledge",
     "delegated_task_parent_takeover",
 ];
-// Loader-mediated MCP calls have a 240s hard transport lifetime. Keep every
+// Loader-mediated child calls may have a 181s transport lifetime. Keep every
 // synchronous lifecycle wait comfortably below it; workers may continue under
 // their independent max_run_ms and are recovered by durable task_id.
-const MAX_TRANSPORT_SAFE_WAIT_MS: u64 = 180_000;
+const MAX_TRANSPORT_SAFE_WAIT_MS: u64 = 120_000;
 
 pub fn list_tools() -> Vec<Value> {
     let mut tools = vec![guidance_tool()];
@@ -2163,6 +2163,14 @@ fn merged_step_constraints(task: &Value, step: &Value) -> Value {
     }
     normalized_constraints(Some(&merged))
 }
+fn asynchronous_worker_constraints(task: &Value, step: &Value) -> Value {
+    let mut constraints = merged_step_constraints(task, step);
+    if let Some(constraints) = constraints.as_object_mut() {
+        constraints.insert("wait_for_completion".into(), json!(false));
+        constraints.remove("wait_timeout_ms");
+    }
+    constraints
+}
 const CONSTRAINT_FIELDS: &[&str] = &[
     "authority",
     "cwd",
@@ -3099,7 +3107,9 @@ fn advance_value_with_roots(
             let instruction = structured_output_instruction_for_step(&task, Some(step))
                 .map(|contract| format!("{instruction}{contract}"))
                 .unwrap_or_else(|| instruction.to_string());
-            let constraints = merged_step_constraints(&task, step);
+            // The lifecycle authority owns polling and durable recovery. Never
+            // let a worker child synchronously occupy this MCP request.
+            let constraints = asynchronous_worker_constraints(&task, step);
             let worker_args =
                 json!({"intent":{"instruction":instruction},"constraints":constraints});
             let run = crate::worker_delegation::call_tool(
@@ -3447,6 +3457,16 @@ mod tests {
         assert_eq!(merged["max_run_ms"], 300_000);
         assert_eq!(merged["cwd"], "C:/site");
         assert_eq!(merged["preflight_paths"][0]["path"], "README.md");
+    }
+
+    #[test]
+    fn lifecycle_worker_launch_is_always_asynchronous() {
+        let task = json!({"constraints":{"authority":"read","wait_for_completion":true,"wait_timeout_ms":180000}});
+        let step = json!({"constraints":{"max_run_ms":600000}});
+        let constraints = asynchronous_worker_constraints(&task, &step);
+        assert_eq!(constraints["wait_for_completion"], false);
+        assert!(constraints.get("wait_timeout_ms").is_none());
+        assert_eq!(constraints["max_run_ms"], 600000);
     }
 
     #[test]
