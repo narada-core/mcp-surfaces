@@ -46,7 +46,7 @@ Every list, queue, show, and stats call must provide `scope` explicitly:
 
 Scope names remain in `tools/list` for protocol stability, but availability is runtime state. Call `surface_feedback_guidance` or `surface_feedback_doctor` and inspect `capabilities.read_scopes[scope].available` before selecting a scope. Inspect `capabilities.mutations.task_handoff.available` before conversion.
 
-The canonical User Site projection should pass `--feedback-root`, `--site-id`, and repeated `--owned-surface-id` arguments explicitly, and must configure the canonical store with `--canonical-feedback-root` or `NARADA_SURFACE_FEEDBACK_ROOT`. There is no machine-specific default canonical root. Do not rely on the current directory or an ambient caller-supplied site filter. A scoped show of an entry outside the scope returns `feedback_not_found` so existence is not disclosed.
+The canonical User Site projection should pass `--feedback-root`, `--site-id`, and `--owned-surface-id '*'` explicitly, and must configure the canonical store with `--canonical-feedback-root` or `NARADA_SURFACE_FEEDBACK_ROOT`. The wildcard is reserved for the canonical User Site maintainer projection; ordinary Site projections should name only surfaces they maintain. There is no machine-specific default canonical root. Do not rely on the current directory or an ambient caller-supplied site filter. A scoped show of an entry outside the scope returns `feedback_not_found` so existence is not disclosed.
 
 ## Explicit store import
 

@@ -22,6 +22,7 @@ export function surfaceDefinition(): DefinedSurface {
           '--canonical-feedback-root', '{site_control_root}/feedback',
           '--task-lifecycle-root', '{site_root}',
           '--site-id', '{site_id}',
+          '--owned-surface-id', '*',
         ],
         env: ['NARADA_SURFACE_FEEDBACK_ROOT'],
       },

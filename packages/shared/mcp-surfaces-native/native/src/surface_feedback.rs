@@ -65,7 +65,7 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<V
 }
 
 fn guidance_tool() -> Value { tool("surface_feedback_guidance", "Show model-facing operating guidance for surface feedback workflows.", json!({"type":"object","properties":{"workflow":{"type":"string"},"tool":{"type":"string"}},"additionalProperties":false}), true) }
-fn submit_schema() -> Value { json!({"type":"object","properties":{"surface_id":{"type":"string","minLength":1},"submitter_site_id":{"type":"string","minLength":1,"description":"Defaults to server-bound NARADA_SITE_ID."},"submitter_principal":{"type":"string","minLength":1,"description":"Defaults to server-bound NARADA_AGENT_ID."},"kind":{"type":"string","enum":FEEDBACK_KINDS},"summary":{"type":"string","minLength":1},"details":{"type":"string"},"idempotency_key":{"type":"string","minLength":1,"description":"Stable retry key; reuse with different content is refused."}},"required":["surface_id","kind","summary"],"additionalProperties":false}) }
+fn submit_schema() -> Value { json!({"type":"object","properties":{"surface_id":{"type":"string","minLength":1},"submitter_site_id":{"type":"string","minLength":1,"description":"Optional assertion that must equal server-bound NARADA_SITE_ID."},"submitter_principal":{"type":"string","minLength":1,"description":"Optional assertion that must equal server-bound NARADA_AGENT_ID."},"kind":{"type":"string","enum":FEEDBACK_KINDS},"summary":{"type":"string","minLength":1},"details":{"type":"string"},"idempotency_key":{"type":"string","minLength":1,"description":"Stable retry key; reuse with different content is refused."}},"required":["surface_id","kind","summary"],"additionalProperties":false}) }
 fn update_status_schema() -> Value { json!({"type":"object","properties":{"feedback_id":{"type":"string","minLength":1},"status":{"type":"string","enum":FEEDBACK_STATUSES},"resolution_note":{"type":"string","minLength":1},"task_ref":{"type":"string"},"task_status":{"type":"string"}},"required":["feedback_id","status","resolution_note"],"additionalProperties":false}) }
 fn update_status_batch_schema() -> Value { json!({"type":"object","properties":{"updates":{"type":"array","minItems":1,"maxItems":MAX_IMPORT_IDS,"items":update_status_schema()}},"required":["updates"],"additionalProperties":false}) }
 fn convert_to_task_schema() -> Value { json!({"type":"object","properties":{"feedback_id":{"type":"string","minLength":1},"task_title":{"type":"string","minLength":1},"resolution_note":{"type":"string","minLength":1}},"required":["feedback_id"],"additionalProperties":false}) }
@@ -103,8 +103,13 @@ fn authority() -> Result<(String, String, Vec<String>), Value> {
 
 fn feedback_submit(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     let surface_id = required_arg(args, "surface_id", "feedback_requires_surface_id")?;
-    let submitter_site_id = args.get("submitter_site_id").and_then(Value::as_str).map(str::trim).filter(|v|!v.is_empty()).map(ToOwned::to_owned).or_else(||std::env::var("NARADA_SITE_ID").ok().filter(|v|!v.trim().is_empty())).ok_or_else(||error("feedback_requires_submitter_site_id","feedback_requires_submitter_site_id"))?;
-    let submitter_principal = args.get("submitter_principal").and_then(Value::as_str).map(str::trim).filter(|v|!v.is_empty()).map(ToOwned::to_owned).or_else(||std::env::var("NARADA_AGENT_ID").ok().filter(|v|!v.trim().is_empty())).unwrap_or_else(||format!("surface-feedback@{submitter_site_id}"));
+    let (submitter_site_id, submitter_principal, _) = authority()?;
+    if let Some(asserted) = args.get("submitter_site_id").and_then(Value::as_str).map(str::trim).filter(|v| !v.is_empty()) {
+        if asserted != submitter_site_id { return Err(error("feedback_submitter_site_authority_mismatch", "feedback_submitter_site_authority_mismatch")); }
+    }
+    if let Some(asserted) = args.get("submitter_principal").and_then(Value::as_str).map(str::trim).filter(|v| !v.is_empty()) {
+        if asserted != submitter_principal { return Err(error("feedback_submitter_principal_authority_mismatch", "feedback_submitter_principal_authority_mismatch")); }
+    }
     let kind = required_arg(args, "kind", "feedback_requires_kind")?;
     if !FEEDBACK_KINDS.contains(&kind.as_str()) { return Err(error("feedback_invalid_kind", "feedback_invalid_kind")); }
     let summary = required_arg(args, "summary", "feedback_requires_summary")?;
@@ -131,7 +136,8 @@ fn feedback_update_status(args: &Map<String, Value>, root: &Path) -> Result<Valu
     let db = open_db_rw(root)?;
     let row: Option<(String, String, String)> = db.query_row("SELECT submitter_site_id,surface_id,status FROM feedback_entries WHERE feedback_id=?1", params![id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional().map_err(|e| error("feedback_query_failed", &e.to_string()))?;
     let Some((submitter_site, surface_id, previous_status)) = row else { return Err(error("feedback_not_found", "feedback_not_found")); };
-    if submitter_site != authority_site && !owned_surfaces.iter().any(|value| value == &surface_id) { return Err(error("feedback_not_visible", "feedback_not_visible")); }
+    let owns_surface = owned_surfaces.iter().any(|value| value == "*" || value == &surface_id);
+    if submitter_site != authority_site && !owns_surface { return Err(error("feedback_not_visible", "feedback_not_visible")); }
     let now = now_iso();
     let task_ref = args.get("task_ref").and_then(Value::as_str);
     let task_status = args.get("task_status").and_then(Value::as_str);
@@ -492,8 +498,12 @@ mod tests {
         assert_eq!(doctor["read_only_native"], false);
         assert_eq!(doctor["capabilities"]["read_scopes"]["all_authorized"]["available"], true);
         assert_eq!(doctor["capabilities"]["read_scopes"]["authority_visible"]["available"], false);
+        std::env::set_var("NARADA_SITE_ID", "site-a");
+        std::env::set_var("NARADA_AGENT_ID", "agent-a");
         let submitted = call_tool("surface_feedback_submit", &json!({"surface_id":"calendar","submitter_site_id":"site-a","submitter_principal":"agent-a","kind":"observation","summary":"native write"}).as_object().unwrap(), &root).expect("submit");
         assert_eq!(submitted["status"], "submitted");
+        let mismatch = call_tool("surface_feedback_submit", &json!({"surface_id":"calendar","submitter_site_id":"site-b","kind":"bug","summary":"spoofed"}).as_object().unwrap(), &root).expect_err("authority mismatch");
+        assert_eq!(mismatch["code"], "feedback_submitter_site_authority_mismatch");
         let retry_args=json!({"surface_id":"calendar","submitter_site_id":"site-a","submitter_principal":"agent-a","kind":"observation","summary":"retry safe","idempotency_key":"retry-1"});
         let first=call_tool("surface_feedback_submit",retry_args.as_object().unwrap(),&root).expect("first");
         let replay=call_tool("surface_feedback_submit",retry_args.as_object().unwrap(),&root).expect("replay");
