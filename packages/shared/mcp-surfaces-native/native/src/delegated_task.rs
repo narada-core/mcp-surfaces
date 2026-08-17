@@ -1653,7 +1653,7 @@ fn record_worker_terminal(
     run: &Value,
 ) {
     let required_fields = required_contract_fields(task, Some(step_id));
-    let runtime_terminal_missing = run.get("runtime").is_some()
+    let runtime_terminal_missing = run.get("phase").is_some()
         && run.get("terminal_event").and_then(Value::as_bool) != Some(true);
     let output = if runtime_terminal_missing {
         Some(json!({
@@ -3902,7 +3902,7 @@ mod tests {
             "implement",
             "run-1",
             "completed",
-            &json!({"runtime":"narada-agent-runtime-server","status":"completed","summary":"I am starting the computation now"}),
+            &json!({"runtime":"narada-agent-runtime-server","phase":"formatting_output","status":"completed","summary":"I am starting the computation now"}),
         );
         assert_eq!(task["result"]["worker_outputs"][0]["status"], "failed");
         assert_eq!(task["result"]["worker_outputs"][0]["output"]["worker_runtime_incomplete"], true);
