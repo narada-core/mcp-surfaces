@@ -24,6 +24,10 @@ const MUTATING: &[&str] = &[
     "delegated_task_acknowledge",
     "delegated_task_parent_takeover",
 ];
+// Loader-mediated MCP calls have a 240s hard transport lifetime. Keep every
+// synchronous lifecycle wait comfortably below it; workers may continue under
+// their independent max_run_ms and are recovered by durable task_id.
+const MAX_TRANSPORT_SAFE_WAIT_MS: u64 = 180_000;
 
 pub fn list_tools() -> Vec<Value> {
     let mut tools = vec![guidance_tool()];
@@ -104,7 +108,7 @@ pub fn list_tools() -> Vec<Value> {
     tools.push(tool(
         "delegated_task_wait",
         "Advance and wait for a delegated task; on terminal status this is the canonical complete handoff.",
-        json!({"type":"object","properties":{"task_id":{"type":"string"},"timeout_ms":{"type":"integer","minimum":0,"maximum":600000,"default":30000},"poll_ms":{"type":"integer","minimum":50,"maximum":30000,"default":5000},"expected_owner_site_id":{"type":"string"},"allow_cross_site":{"type":"boolean","default":false}},"required":["task_id"],"additionalProperties":false}),
+        json!({"type":"object","properties":{"task_id":{"type":"string"},"timeout_ms":{"type":"integer","minimum":0,"maximum":MAX_TRANSPORT_SAFE_WAIT_MS,"default":30000,"description":"Bounded synchronous wait below the loader transport lifetime. A timeout returns durable task_id for repeated wait/status recovery; worker max_run_ms is independent."},"poll_ms":{"type":"integer","minimum":50,"maximum":30000,"default":5000},"expected_owner_site_id":{"type":"string"},"allow_cross_site":{"type":"boolean","default":false}},"required":["task_id"],"additionalProperties":false}),
         false,
     ));
     tools
@@ -136,7 +140,7 @@ fn mutation_schema(name: &str) -> Value {
             for field in ["objective","idempotency_key"] { properties.insert(field.into(),json!({"type":"string"})); }
             for field in ["workflow","acceptance","execution","execution_binding"] { properties.insert(field.into(),json!({"type":"object"})); }
             properties.insert("constraints".into(), constraints_schema());
-            properties.insert("timeout_ms".into(),json!({"type":"integer","minimum":0,"maximum":600000,"default":30000}));
+            properties.insert("timeout_ms".into(),json!({"type":"integer","minimum":0,"maximum":MAX_TRANSPORT_SAFE_WAIT_MS,"default":30000,"description":"Transport-safe synchronous wait. Longer worker executions continue durably and return task_id for recovery."}));
             properties.insert("poll_ms".into(),json!({"type":"integer","minimum":50,"maximum":30000,"default":5000}));
             json!({"type":"object","properties":properties,"required":["objective","idempotency_key"],"additionalProperties":false})
         }
@@ -1879,11 +1883,11 @@ fn task_wait_with_roots(
     allowed_roots: &[PathBuf],
 ) -> Result<Value, Value> {
     let id = task_id(args)?;
-    let timeout = args
+    let requested_timeout = args
         .get("timeout_ms")
         .and_then(Value::as_u64)
-        .unwrap_or(30000)
-        .min(600000);
+        .unwrap_or(30000);
+    let timeout = requested_timeout.min(MAX_TRANSPORT_SAFE_WAIT_MS);
     let poll = args
         .get("poll_ms")
         .and_then(Value::as_u64)
@@ -1917,7 +1921,7 @@ fn task_wait_with_roots(
         "role": "identity_only"
     });
     Ok(
-        json!({"schema":"narada.delegated_task.wait.v1","status":if task_is_terminal(&task){"finished"}else{"timeout"},"elapsed_ms":started.elapsed().as_millis() as u64,"timeout_ms":timeout,"poll_ms":poll,"task_id":id,"task_status":task.get("status"),"refresh_performed":true,"worker_execution":"native_worker_authority","canonical_terminal_handoff":task_is_terminal(&task),"readback_tool":"delegated_task_wait","result_readback_redundant":task_is_terminal(&task),"terminal_handoff":handoff,"task":task_identity}),
+        json!({"schema":"narada.delegated_task.wait.v1","status":if task_is_terminal(&task){"finished"}else{"timeout"},"elapsed_ms":started.elapsed().as_millis() as u64,"requested_timeout_ms":requested_timeout,"timeout_ms":timeout,"timeout_clamped_for_transport":requested_timeout > timeout,"poll_ms":poll,"task_id":id,"task_status":task.get("status"),"refresh_performed":true,"worker_execution":"native_worker_authority","canonical_terminal_handoff":task_is_terminal(&task),"readback_tool":"delegated_task_wait","recovery":{"durable":true,"task_id":id,"status_tool":"delegated_task_status","wait_tool":"delegated_task_wait","events_tool":"delegated_task_events"},"result_readback_redundant":task_is_terminal(&task),"terminal_handoff":handoff,"task":task_identity}),
     )
 }
 fn task_events(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
@@ -4024,6 +4028,14 @@ mod tests {
         let wait = tools.iter().find(|tool| tool["name"] == "delegated_task_wait").unwrap();
         assert_eq!(wait["annotations"]["readOnlyHint"], false);
         assert!(wait["inputSchema"]["properties"].get("timeout_ms").is_some());
+        assert_eq!(
+            wait["inputSchema"]["properties"]["timeout_ms"]["maximum"],
+            MAX_TRANSPORT_SAFE_WAIT_MS
+        );
+        assert_eq!(
+            execute["inputSchema"]["properties"]["timeout_ms"]["maximum"],
+            MAX_TRANSPORT_SAFE_WAIT_MS
+        );
         assert!(wait["inputSchema"]["properties"].get("allow_cross_site").is_some());
     }
 
