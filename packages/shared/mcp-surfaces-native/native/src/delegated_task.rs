@@ -120,7 +120,8 @@ fn batch_execute_schema() -> Value {
                 "maxItems":16,
                 "items":mutation_schema("delegated_task_execute")
             },
-            "max_concurrency":{"type":"integer","minimum":1,"maximum":8,"default":2}
+            "max_concurrency":{"type":"integer","minimum":1,"maximum":8,"default":2},
+            "compact":{"type":"boolean","default":false,"description":"Return one lean terminal projection per task; use details_ref for complete readback."}
         },
         "required":["items"],
         "additionalProperties":false
@@ -1818,6 +1819,7 @@ fn task_execute_batch(
         .and_then(Value::as_u64)
         .unwrap_or(2)
         .clamp(1, 8) as usize;
+    let compact = args.get("compact").and_then(Value::as_bool).unwrap_or(false);
     let worker_count = max_concurrency.min(items.len());
     let next = AtomicUsize::new(0);
     let results = Mutex::new(vec![Value::Null; items.len()]);
@@ -1828,7 +1830,10 @@ fn task_execute_batch(
                 let index = next.fetch_add(1, Ordering::Relaxed);
                 let Some(item) = items.get(index) else { break };
                 let value = match task_execute(item, root, allowed_roots) {
-                    Ok(result) => json!({"index":index,"status":"ok","result":result}),
+                    Ok(result) => {
+                        let result = if compact { compact_batch_result(&result) } else { result };
+                        json!({"index":index,"status":"ok","result":result})
+                    },
                     Err(failure) => json!({"index":index,"status":"failed","error":failure}),
                 };
                 results.lock().expect("batch result lock")[index] = value;
@@ -1844,9 +1849,25 @@ fn task_execute_batch(
         "completed_count":results.len() - failed_count,
         "failed_count":failed_count,
         "max_concurrency":max_concurrency,
+        "compact":compact,
         "elapsed_ms":started.elapsed().as_millis() as u64,
         "results":results
     }))
+}
+
+fn compact_batch_result(result: &Value) -> Value {
+    let handoff = result.pointer("/terminal/terminal_handoff").unwrap_or(&Value::Null);
+    json!({
+        "task_id":handoff.get("task_id").or_else(|| result.pointer("/run/task_id")),
+        "task_status":handoff.get("task_status"),
+        "summary":handoff.get("summary"),
+        "output_contract_verdict":handoff.get("output_contract_verdict"),
+        "objective_verdict":handoff.get("objective_verdict"),
+        "acceptance_verdict":handoff.get("acceptance_verdict"),
+        "timing":handoff.get("timing"),
+        "details_ref":handoff.get("details_ref"),
+        "idempotency_replay":result.get("idempotency_replay")
+    })
 }
 #[cfg(test)]
 fn task_wait(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
@@ -3478,7 +3499,10 @@ mod tests {
         let projection = final_step_projection(&task);
         assert_eq!(projection["final_step"], "review");
         assert_eq!(projection["final_structured_output"]["verdict"], "passed");
-        assert_eq!(derived_task_summary(&task), Some(json!("objective_result: passed. review")));
+        assert_eq!(
+            derived_task_summary(&task),
+            Some(json!("objective_result: passed. verdict=passed"))
+        );
         assert!(projection["prior_step_outputs_ref"].as_str().is_some());
     }
 
@@ -3496,7 +3520,12 @@ mod tests {
         assert_eq!(objective_verdict(&task).0, "blocked");
         assert_eq!(acceptance, "blocked");
         assert!(checks.iter().any(|check| check["kind"] == "objective_outcome" && check["verdict"] == "blocked"));
-        assert_eq!(derived_task_summary(&task), Some(json!("assessment_result: blocked. The target could not be read.")));
+        assert_eq!(
+            derived_task_summary(&task),
+            Some(json!(
+                "assessment_result: blocked. findings=[0 items], assessment_result=undetermined"
+            ))
+        );
     }
 
     #[test]
@@ -3675,6 +3704,26 @@ mod tests {
         assert_eq!(batch["results"][0]["error"]["code"], "delegated_task_validation_failed");
         assert_eq!(batch["results"][0]["error"]["validation"]["request_valid"], false);
         fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn compact_batch_result_keeps_terminal_verdicts_and_durable_readback() {
+        let compact = compact_batch_result(&json!({
+            "idempotency_replay":false,
+            "run":{"task_id":"task-compact"},
+            "terminal":{"terminal_handoff":{
+                "task_id":"task-compact","task_status":"completed","summary":"objective_result: passed. ok",
+                "output_contract_verdict":"passed","objective_verdict":"passed","acceptance_verdict":"passed",
+                "timing":{"total_ms":42},"details_ref":"delegated-task://task-compact/result",
+                "final_structured_output":{"large":"omitted"},"acceptance_checks":[{"large":"omitted"}]
+            }}
+        }));
+        assert_eq!(compact["task_id"], "task-compact");
+        assert_eq!(compact["objective_verdict"], "passed");
+        assert_eq!(compact["timing"]["total_ms"], 42);
+        assert_eq!(compact["details_ref"], "delegated-task://task-compact/result");
+        assert!(compact.get("final_structured_output").is_none());
+        assert!(compact.get("acceptance_checks").is_none());
     }
 
     #[test]

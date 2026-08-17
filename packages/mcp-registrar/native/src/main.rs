@@ -387,6 +387,7 @@ fn align_native_surface_descriptor_schemas(contract: &mut Value) {
     let constraints = || json!({"type":"object","properties":{"authority":{"type":"string","enum":["read","write","command"]},"cognition":{"type":"string","enum":["low","medium","high"]},"cwd":{"type":"string","minLength":1,"maxLength":4096},"invocation_plan_ref":{"type":"string","minLength":6,"maxLength":512,"pattern":"^plan:[A-Za-z0-9._:-]+$"},"max_run_ms":{"type":"integer","minimum":1,"maximum":1800000,"default":300000,"description":"Hard worker runtime deadline enforced by the native authority."},"wait_for_completion":{"type":"boolean","default":false,"description":"Return after bounded child completion polling when true; false returns the accepted running record immediately."},"wait_timeout_ms":{"type":"integer","minimum":0,"maximum":300000,"default":30000,"description":"Maximum inline completion wait when wait_for_completion is true."}},"additionalProperties":false});
     for item in items {
         let id = item.get("id").and_then(Value::as_str).unwrap_or_default().to_owned();
+        if id == "surface-feedback" { ensure_feedback_site_reporter_projection(item); }
         let Some(tools) = item.pointer_mut("/descriptor/tools").and_then(Value::as_array_mut) else { continue; };
         for tool in tools {
             let name = tool.get("name").and_then(Value::as_str).unwrap_or_default();
@@ -394,10 +395,46 @@ fn align_native_surface_descriptor_schemas(contract: &mut Value) {
                 ("epistemic-graph", "epistemic_graph_guidance") => Some(json!({"type":"object","properties":{"workflow":{"type":"string","maxLength":256},"tool":{"type":"string","maxLength":256}},"additionalProperties":false})),
                 ("worker-delegation", "worker_run") => Some(json!({"type":"object","properties":{"intent":intent(),"constraints":constraints()},"required":["intent"],"additionalProperties":false})),
                 ("worker-delegation", "worker_config_resolve") => Some(json!({"type":"object","properties":{"cwd":{"type":"string","minLength":1,"maxLength":4096},"constraints":constraints()},"additionalProperties":false})),
+                ("surface-feedback", "surface_feedback_submit") => Some(json!({
+                    "type":"object","properties":{
+                        "surface_id":{"type":"string","minLength":1},
+                        "submitter_site_id":{"type":"string","minLength":1,"description":"Optional assertion that must equal the server-bound Site identity. Omit for ordinary submission."},
+                        "submitter_principal":{"type":"string","minLength":1,"description":"Optional assertion that must equal the server-bound principal. Omit for ordinary submission."},
+                        "kind":{"type":"string","enum":["bug","improvement","gap","observation"]},
+                        "summary":{"type":"string","minLength":1},"details":{"type":"string"},
+                        "idempotency_key":{"type":"string","minLength":1,"description":"Stable retry key; reuse with different content is refused."}
+                    },"required":["surface_id","kind","summary"],"additionalProperties":false
+                })),
                 _ => None,
             };
             if let Some(schema) = schema { tool["input_schema"] = schema; }
         }
+    }
+}
+
+fn ensure_feedback_site_reporter_projection(item: &mut Value) {
+    let args = json!(["--feedback-root","{user_site_control_root}/feedback","--canonical-feedback-root","{user_site_control_root}/feedback","--task-lifecycle-root","{site_root}","--site-id","{site_id}"]);
+    let descriptor_projection = json!({
+        "id":"site-reporter","transport":{"kind":"stdio","command":"narada-mcp-surfaces","args":args,"env":["NARADA_SURFACE_FEEDBACK_ROOT"]},
+        "injection_scope":"local_site","default_injection":"disabled","runtime_requirements":[],"authority_requirements":["scope.local_site"],
+        "lifecycle":{"mode":"replayable","reason":"Site-bound reporters write to the canonical User Site feedback store while retaining mechanically bound Site identity."}
+    });
+    if let Some(projections) = item.pointer_mut("/descriptor/projections").and_then(Value::as_array_mut) {
+        if !projections.iter().any(|projection| projection["id"] == "site-reporter") { projections.push(descriptor_projection); }
+    }
+    let entrypoint = item.get("entrypoint").cloned().unwrap_or(Value::Null);
+    if let Some(projections) = item.get_mut("projections").and_then(Value::as_array_mut) {
+        if !projections.iter().any(|projection| projection["id"] == "site-reporter") {
+            projections.push(json!({
+                "id":"site-reporter","injection_scope":"local_site","execution":{"adapter":"stdio","tenancy":"session_isolated","replacement":"manual"},
+                "restart_owner":"local_site","runtime_requirements":[],"env_vars":["NARADA_SURFACE_FEEDBACK_ROOT"],"command":"narada-mcp-surfaces",
+                "entrypoint":entrypoint,"args":args
+            }));
+        }
+    }
+    if let Some(descriptor) = item.get("descriptor").cloned() {
+        item["descriptor_digest"] = json!(sha256_text(&canonical_json(&descriptor)));
+        item["tool_contract_digest"] = json!(sha256_text(&canonical_json(&descriptor["tools"])));
     }
 }
 
@@ -4073,6 +4110,8 @@ fn interpolate(value: &str, site_id: &str, root: &Path, workspace: &Path) -> Str
     } else {
         root.join(".narada")
     };
+    let user_root = user_site_root();
+    let user_control = user_root.join(".narada");
     value
         .replace(
             "{mcp_surfaces_root}",
@@ -4082,6 +4121,8 @@ fn interpolate(value: &str, site_id: &str, root: &Path, workspace: &Path) -> Str
         )
         .replace("{site_root}", &path_text(root))
         .replace("{site_control_root}", &path_text(&control))
+        .replace("{user_site_root}", &path_text(&user_root))
+        .replace("{user_site_control_root}", &path_text(&user_control))
         .replace("{site_runtime_root}", &path_text(&control.join("runtime")))
         .replace("{workspace_root}", &path_text(workspace))
         .replace("{site_id}", site_id)
@@ -5505,6 +5546,13 @@ mod tests {
         );
         assert_eq!(schema("worker-delegation", "worker_config_resolve")["additionalProperties"], false);
         assert_eq!(schema("epistemic-graph", "epistemic_graph_guidance")["properties"]["workflow"]["type"], "string");
+        let feedback = items.iter().find(|item| item["id"] == "surface-feedback").unwrap();
+        let site_reporter = feedback["projections"].as_array().unwrap().iter().find(|projection| projection["id"] == "site-reporter").unwrap();
+        assert_eq!(site_reporter["injection_scope"], "local_site");
+        assert!(site_reporter["args"].as_array().unwrap().iter().any(|argument| argument == "{user_site_control_root}/feedback"));
+        assert!(feedback["descriptor"]["projections"].as_array().unwrap().iter().any(|projection| projection["id"] == "site-reporter"));
+        assert_eq!(schema("surface-feedback", "surface_feedback_submit")["required"], json!(["surface_id","kind","summary"]));
+        assert!(schema("surface-feedback", "surface_feedback_submit")["properties"]["idempotency_key"].is_object());
     }
 
     #[test]
