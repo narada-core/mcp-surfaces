@@ -429,7 +429,7 @@ fn read_reconciled_run(root: &Path, id: &str) -> Result<Value, Value> {
             .pointer("/resolved_invocation/provider_broker_generation")
             .and_then(Value::as_str);
         let expected_owned = expected.map(str::to_string);
-        let current = crate::codex_app_server_broker::binding().ok().map(|binding| binding.broker_generation);
+        let current = crate::codex_app_server_broker::current_generation();
         if let (Some(expected), Some(current)) = (expected_owned.as_deref(), current.as_deref()) {
             if expected != current {
                 let at = now();
@@ -1651,7 +1651,7 @@ fn worker_run(
         return Err(error("worker_codex_transport_invalid", "worker_codex_transport_invalid"));
     }
     let codex_broker = if provider_mode == "codex-subscription" && codex_transport == "codex-app-server" {
-        Some(crate::codex_app_server_broker::binding().map_err(|reason| {
+        Some(crate::codex_app_server_broker::binding(root).map_err(|reason| {
             json!({"schema":"narada.worker.error.v1","code":"worker_codex_app_server_unavailable","message":"worker_codex_app_server_unavailable","reason":reason,"mutation_started":false})
         })?)
     } else {

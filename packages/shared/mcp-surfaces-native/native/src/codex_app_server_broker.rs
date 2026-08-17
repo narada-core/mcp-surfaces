@@ -1,6 +1,7 @@
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
@@ -23,7 +24,7 @@ struct BrokerState {
 
 static BROKER: OnceLock<Mutex<Option<BrokerState>>> = OnceLock::new();
 
-pub fn binding() -> Result<BrokerBinding, String> {
+pub fn binding(site_root: &Path) -> Result<BrokerBinding, String> {
     let broker = BROKER.get_or_init(|| Mutex::new(None));
     let mut state = broker
         .lock()
@@ -31,13 +32,20 @@ pub fn binding() -> Result<BrokerBinding, String> {
     if let Some(state) = state.as_ref() {
         return Ok(state.binding.clone());
     }
-    let started = start_broker()?;
+    let started = start_broker(site_root)?;
     let binding = started.binding.clone();
     *state = Some(started);
     Ok(binding)
 }
 
-fn start_broker() -> Result<BrokerState, String> {
+pub fn current_generation() -> Option<String> {
+    BROKER
+        .get()
+        .and_then(|broker| broker.lock().ok())
+        .and_then(|state| state.as_ref().map(|state| state.binding.broker_generation.clone()))
+}
+
+fn start_broker(site_root: &Path) -> Result<BrokerState, String> {
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .map_err(|error| format!("codex_app_server_broker_bind_failed:{error}"))?;
     let endpoint = listener
@@ -46,7 +54,7 @@ fn start_broker() -> Result<BrokerState, String> {
         .to_string();
     let capability = uuid::Uuid::new_v4().to_string();
     let broker_generation = uuid::Uuid::new_v4().to_string();
-    let app_server = Arc::new(Mutex::new(AppServer::start()?));
+    let app_server = Arc::new(Mutex::new(AppServer::start(site_root)?));
     let server = Arc::clone(&app_server);
     let expected_capability = capability.clone();
     thread::Builder::new()
@@ -132,6 +140,7 @@ fn read_frame(stream: &mut TcpStream) -> Result<Value, String> {
 }
 
 struct AppServer {
+    site_root: PathBuf,
     child: Child,
     input: ChildStdin,
     output: mpsc::Receiver<String>,
@@ -140,11 +149,18 @@ struct AppServer {
 }
 
 impl AppServer {
-    fn start() -> Result<Self, String> {
+    fn start(site_root: &Path) -> Result<Self, String> {
+        let site_root = site_root
+            .canonicalize()
+            .map_err(|error| format!("codex_app_server_site_root_invalid:{error}"))?;
+        if !site_root.is_dir() {
+            return Err("codex_app_server_site_root_not_directory".to_string());
+        }
         let command =
             std::env::var_os("NARADA_NATIVE_CODEX_COMMAND").unwrap_or_else(|| "codex".into());
         let mut child = Command::new(command)
             .args(app_server_args())
+            .current_dir(&site_root)
             .env_remove("CODEX_PERMISSION_PROFILE")
             .env_remove("CODEX_THREAD_ID")
             .stdin(Stdio::piped())
@@ -172,6 +188,7 @@ impl AppServer {
             })
             .map_err(|error| format!("codex_app_server_output_thread_failed:{error}"))?;
         let mut server = Self {
+            site_root,
             child,
             input,
             output: output_rx,
@@ -193,7 +210,7 @@ impl AppServer {
             .map_err(|error| error.to_string())?
             .is_some()
         {
-            *self = Self::start()?;
+            *self = Self::start(&self.site_root)?;
         }
         let prompt = required_string(request, "prompt")?;
         let cwd = required_string(request, "cwd")?;
