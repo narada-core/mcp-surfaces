@@ -361,6 +361,15 @@ fn native_read_evidence_prompt(preflight: &Value) -> String {
         )
     }
 }
+fn worker_prompt(instruction_text: &str, preflight: &Value) -> String {
+    // Evidence is context, not the terminal instruction. Keep the caller-owned
+    // output contract last so it remains the worker's final obligation after
+    // what may be a comparatively large native evidence packet.
+    format!(
+        "{READ_ONLY_COMMAND_CONTRACT}\n\n{}\n\nWORKER INTENT AND TERMINAL OUTPUT CONTRACT:\n{instruction_text}",
+        native_read_evidence_prompt(preflight)
+    )
+}
 #[cfg(windows)]
 fn path_components_equal_or_child(path: &Path, root: &Path) -> bool {
     let path = path
@@ -1671,10 +1680,7 @@ fn worker_run(
     let runtime = runtime_command(root)?;
     let runtime_probe = if auth == "write" { Some(scoped_write_probe(&cwd)?) } else { None };
     let preflight = preflight_paths(constraints, &cwd, allowed_roots)?;
-    let prompt = format!(
-        "{READ_ONLY_COMMAND_CONTRACT}\n\n{instruction_text}\n\n{}",
-        native_read_evidence_prompt(&preflight)
-    );
+    let prompt = worker_prompt(&instruction_text, &preflight);
     let task_label = instruction_text.chars().take(160).collect::<String>();
     let mut capabilities = capability_snapshot(&auth, &cwd, allowed_roots, runtime_probe.as_ref());
     if let Some(broker) = codex_broker.as_ref() {
@@ -2503,6 +2509,17 @@ mod tests {
         assert!(prompt.contains("CONTENT (native, bounded; authoritative; do not call shell or command tools for this path)"));
         assert!(prompt.contains("ok"));
         fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn worker_prompt_places_terminal_contract_after_native_evidence() {
+        let preflight = json!({"items":[{"path":"fixture.txt","native_read":{"status":"passed","content":"fixture evidence"}}]});
+        let contract = "MANDATORY TERMINAL OUTPUT CONTRACT: return exactly one JSON object";
+        let prompt = worker_prompt(contract, &preflight);
+        let evidence_offset = prompt.find("fixture evidence").expect("evidence");
+        let contract_offset = prompt.find(contract).expect("contract");
+        assert!(contract_offset > evidence_offset);
+        assert!(prompt.ends_with(contract));
     }
 
     #[test]

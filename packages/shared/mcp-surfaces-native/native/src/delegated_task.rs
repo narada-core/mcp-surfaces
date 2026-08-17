@@ -1546,7 +1546,7 @@ fn structured_output_instruction_for_step(
         })
         .unwrap_or_default();
     Some(format!(
-        "\n\nMANDATORY STRUCTURED OUTPUT CONTRACT: return exactly one JSON object with these required top-level keys: {}. Do not provide the answer only as Markdown or prose. Put each value in the JSON object; a short explanation may follow only after the object.{}\nREAD-ONLY PROBE RULE: use supplied preflight evidence for path checks; if a probe is necessary, issue one executable with literal arguments and no shell operators, pipes, redirection, or generated scripts.",
+        "\n\nMANDATORY TERMINAL OUTPUT CONTRACT: return exactly one JSON object with these required top-level keys: {}. The JSON object must be the entire final answer: no Markdown fence, preamble, narration, or trailing explanation. Complete every required field before returning.{}\nREAD-ONLY PROBE RULE: use supplied preflight evidence for path checks; if a probe is necessary, issue one executable with literal arguments and no shell operators, pipes, redirection, or generated scripts.",
         fields.join(", "),
         assessment_contract
     ))
@@ -1728,12 +1728,22 @@ fn task_status_with_roots(
     allowed_roots: &[PathBuf],
 ) -> Result<Value, Value> {
     let id = task_id(args)?;
+    let current = read_task(root, &id)?;
+    let has_unresolved_dependencies = !task_is_terminal(&current)
+        && current
+            .get("depends_on_task_ids")
+            .and_then(Value::as_array)
+            .is_some_and(|dependencies| !dependencies.is_empty());
     let task = if args.get("refresh").and_then(Value::as_bool) == Some(true) {
-        let current = read_task(root, &id)?;
         assert_mutation_scope(&current, args, root)?;
         advance_task_closure(root, &id, allowed_roots, &mut std::collections::BTreeSet::new())?
+    } else if has_unresolved_dependencies {
+        // Dependency transitions are lifecycle-owned projections. Reading a
+        // dependent task must not preserve stale waiting state after a
+        // predecessor has reached a terminal outcome.
+        advance_task_closure(root, &id, allowed_roots, &mut std::collections::BTreeSet::new())?
     } else {
-        read_task(root, &id)?
+        current
     };
     let obj = task.as_object().cloned().unwrap_or_default();
     Ok(
@@ -3633,6 +3643,8 @@ mod tests {
         let instruction = structured_output_instruction(&task).expect("contract");
         assert!(instruction.contains("repository_name, current_branch"));
         assert!(instruction.contains("exactly one JSON object"));
+        assert!(instruction.contains("entire final answer"));
+        assert!(!instruction.contains("explanation may follow"));
     }
 
     #[test]
@@ -4749,6 +4761,22 @@ mod tests {
         assert_eq!(blocked["status"], "failed");
         assert_eq!(blocked["external_dependencies"]["reason"], "predecessor_structured_output_missing");
         assert!(blocked["result"]["worker_refs"].as_array().is_some_and(Vec::is_empty));
+        let events = task_events(json!({"task_id":"task_b","limit":20}).as_object().unwrap(), &root).expect("events");
+        assert!(events["events"].as_array().is_some_and(|items| items.iter().any(|event| event["event_kind"] == "task_dependency_blocked")));
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn ordinary_status_reconciles_terminal_predecessor_failure() {
+        let root = std::env::temp_dir().join(format!("narada-delegated-task-status-reconcile-{}", uuid::Uuid::new_v4()));
+        task_run(json!({"task_id":"task_a","objective":"extract","constraints":{"authority":"read"},"execution":{"start":false}}).as_object().unwrap(), &root).expect("A");
+        task_run(json!({"task_id":"task_b","objective":"consume","constraints":{"authority":"read"},"depends_on_task_ids":["task_a"],"execution":{"start":false}}).as_object().unwrap(), &root).expect("B");
+        let mut predecessor = read_task(&root, "task_a").expect("predecessor");
+        predecessor["status"] = json!("failed");
+        write_task(&root, &predecessor).expect("fail predecessor");
+        let status = task_status(json!({"task_id":"task_b"}).as_object().unwrap(), &root).expect("status reconciliation");
+        assert_eq!(status["task_status"], "failed");
+        assert_eq!(read_task(&root, "task_b").expect("persisted descendant")["external_dependencies"]["status"], "blocked");
         let events = task_events(json!({"task_id":"task_b","limit":20}).as_object().unwrap(), &root).expect("events");
         assert!(events["events"].as_array().is_some_and(|items| items.iter().any(|event| event["event_kind"] == "task_dependency_blocked")));
         fs::remove_dir_all(root).expect("cleanup");
