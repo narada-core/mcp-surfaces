@@ -395,6 +395,10 @@ fn align_native_surface_descriptor_schemas(contract: &mut Value) {
                 ("epistemic-graph", "epistemic_graph_guidance") => Some(json!({"type":"object","properties":{"workflow":{"type":"string","maxLength":256},"tool":{"type":"string","maxLength":256}},"additionalProperties":false})),
                 ("worker-delegation", "worker_run") => Some(json!({"type":"object","properties":{"intent":intent(),"constraints":constraints()},"required":["intent"],"additionalProperties":false})),
                 ("worker-delegation", "worker_run_batch") => Some(json!({"type":"object","properties":{"requests":{"type":"array","minItems":1,"maxItems":50,"items":{"type":"object","properties":{"intent":intent(),"constraints":constraints()},"required":["intent"],"additionalProperties":false,"maxProperties":256}}},"required":["requests"],"additionalProperties":false,"maxProperties":256})),
+                ("worker-delegation", "worker_run_status") => Some(json!({"type":"object","properties":{"run_id":{"type":"string","minLength":1,"maxLength":256},"compact":{"type":"boolean","default":true}},"required":["run_id"],"additionalProperties":false})),
+                ("worker-delegation", "worker_runs_list") => Some(json!({"type":"object","properties":{"limit":{"type":"integer","minimum":1,"maximum":200},"compact":{"type":"boolean","default":true},"site_scope":{"type":"string","enum":["current_site"],"default":"current_site","description":"Runs are filtered by the server-bound Site root; caller-supplied cross-site identity is not accepted."},"include_running":{"type":"boolean"},"include_completed":{"type":"boolean"}},"additionalProperties":false})),
+                ("worker-delegation", "worker_run_wait") => Some(json!({"type":"object","properties":{"run_id":{"type":"string","minLength":1,"maxLength":256},"compact":{"type":"boolean","default":true},"timeout_ms":{"type":"integer","minimum":0,"maximum":300000,"default":30000,"description":"Maximum bounded state-file polling interval."}},"required":["run_id"],"additionalProperties":false})),
+                ("worker-delegation", "worker_run_wait_batch") => Some(json!({"type":"object","properties":{"run_ids":{"type":"array","minItems":1,"maxItems":50,"items":{"type":"string","minLength":1,"maxLength":256}},"compact":{"type":"boolean","default":true},"timeout_ms":{"type":"integer","minimum":0,"maximum":180000,"default":30000},"poll_ms":{"type":"integer","minimum":100,"maximum":30000,"default":5000}},"required":["run_ids"],"additionalProperties":false})),
                 ("worker-delegation", "worker_config_resolve") => Some(json!({"type":"object","properties":{"cwd":{"type":"string","minLength":1,"maxLength":4096},"constraints":constraints()},"additionalProperties":false})),
                 ("surface-feedback", "surface_feedback_submit") => Some(json!({
                     "type":"object","properties":{
@@ -5564,6 +5568,10 @@ mod tests {
                 "legacy catalog-only field remained advertised: {legacy_field}"
             );
         }
+        assert_eq!(schema("worker-delegation", "worker_runs_list")["properties"]["compact"]["default"], true);
+        assert_eq!(schema("worker-delegation", "worker_runs_list")["properties"]["site_scope"]["default"], "current_site");
+        assert_eq!(schema("worker-delegation", "worker_run_wait_batch")["properties"]["timeout_ms"]["maximum"], 180_000);
+        assert_eq!(schema("worker-delegation", "worker_run_wait_batch")["properties"]["poll_ms"]["default"], 5_000);
         assert_eq!(schema("worker-delegation", "worker_config_resolve")["additionalProperties"], false);
         assert_eq!(schema("epistemic-graph", "epistemic_graph_guidance")["properties"]["workflow"]["type"], "string");
         let feedback = items.iter().find(|item| item["id"] == "surface-feedback").unwrap();

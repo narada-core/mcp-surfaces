@@ -533,11 +533,14 @@ fn config_resolve(
 fn run_status(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     let id = run_id(args)?;
     let run = read_run(root, &id)?;
+    let compact = args.get("compact").and_then(Value::as_bool).unwrap_or(true);
     Ok(
-        json!({"schema":"narada.worker.run_status.v1","status":"ok","run_id":id,"run":compact_run(&run),"native_read_only":true}),
+        json!({"schema":"narada.worker.run_status.v1","status":"ok","run_id":id,"compact":compact,"site_scope":"current_site","run":if compact{minimal_run(&run)}else{compact_run(&run)},"native_read_only":true}),
     )
 }
 fn runs_list(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    require_current_site_scope(args)?;
+    let compact = args.get("compact").and_then(Value::as_bool).unwrap_or(true);
     let limit = args
         .get("limit")
         .and_then(Value::as_u64)
@@ -567,7 +570,7 @@ fn runs_list(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
                 let terminal =
                     !matches!(run.get("status").and_then(Value::as_str), Some("running"));
                 if (terminal && include_completed) || (!terminal && include_running) {
-                    items.push(compact_run(&run));
+                    items.push(if compact { minimal_run(&run) } else { compact_run(&run) });
                 }
             }
         }
@@ -579,7 +582,7 @@ fn runs_list(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     });
     items.truncate(limit);
     Ok(
-        json!({"schema":"narada.worker.runs_list.v1","status":"ok","count":items.len(),"limit":limit,"scanned":items.len(),"scan_limit":MAX_RUNS,"scan_truncated":false,"include_running":include_running,"include_completed":include_completed,"runs":items,"native_read_only":true}),
+        json!({"schema":"narada.worker.runs_list.v1","status":"ok","count":items.len(),"limit":limit,"scanned":items.len(),"scan_limit":MAX_RUNS,"scan_truncated":false,"site_scope":"current_site","site_root":root.to_string_lossy(),"compact":compact,"include_running":include_running,"include_completed":include_completed,"runs":items,"native_read_only":true}),
     )
 }
 fn wait_for_run(root: &Path, id: &str, timeout_ms: u64) -> Result<(Value, Value), Value> {
@@ -600,6 +603,7 @@ fn wait_for_run(root: &Path, id: &str, timeout_ms: u64) -> Result<(Value, Value)
 }
 fn run_wait(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     let id = run_id(args)?;
+    let compact = args.get("compact").and_then(Value::as_bool).unwrap_or(true);
     let timeout_ms = args
         .get("timeout_ms")
         .and_then(Value::as_u64)
@@ -607,7 +611,7 @@ fn run_wait(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
         .min(300_000);
     let (run, wait) = wait_for_run(root, &id, timeout_ms)?;
     Ok(
-        json!({"schema":"narada.worker.run_wait.v1","status":"ok","wait":wait,"run":compact_run(&run),"native_read_only":true}),
+        json!({"schema":"narada.worker.run_wait.v1","status":"ok","wait":wait,"compact":compact,"site_scope":"current_site","run":if compact{minimal_run(&run)}else{compact_run(&run)},"native_read_only":true}),
     )
 }
 fn run_wait_batch(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
@@ -615,16 +619,29 @@ fn run_wait_batch(args: &Map<String, Value>, root: &Path) -> Result<Value, Value
         .get("run_ids")
         .and_then(Value::as_array)
         .ok_or_else(|| error("worker_run_ids_required", "worker_run_ids_required"))?;
-    let mut runs = Vec::new();
-    for id in ids.iter().take(50).filter_map(Value::as_str) {
-        let mut item = json!({"run_id":id,"status":"error"});
-        if let Ok(run) = read_run(root, id) {
-            item = json!({"run_id":id,"status":"ok","run":compact_run(&run)});
+    let timeout_ms = args.get("timeout_ms").and_then(Value::as_u64).unwrap_or(30_000).min(180_000);
+    let poll_ms = args.get("poll_ms").and_then(Value::as_u64).unwrap_or(5_000).clamp(100, 30_000);
+    let compact = args.get("compact").and_then(Value::as_bool).unwrap_or(true);
+    let started = Instant::now();
+    let runs = loop {
+        let mut runs = Vec::new();
+        let mut all_terminal = true;
+        for id in ids.iter().take(50).filter_map(Value::as_str) {
+            let mut item = json!({"run_id":id,"status":"error","error":"worker_run_not_found"});
+            if let Ok(run) = read_run(root, id) {
+                all_terminal &= run.get("status").and_then(Value::as_str) != Some("running");
+                item = json!({"run_id":id,"status":"ok","run":if compact{minimal_run(&run)}else{compact_run(&run)}});
+            }
+            runs.push(item);
         }
-        runs.push(item);
-    }
+        if all_terminal || started.elapsed() >= Duration::from_millis(timeout_ms) {
+            break runs;
+        }
+        thread::sleep(Duration::from_millis(poll_ms.min(timeout_ms.saturating_sub(started.elapsed().as_millis() as u64))));
+    };
+    let timed_out = runs.iter().any(|item| item.pointer("/run/status").and_then(Value::as_str) == Some("running"));
     Ok(
-        json!({"schema":"narada.worker.run_wait_batch.v1","status":"ok","requested_count":ids.len().min(50),"runs":runs,"native_read_only":true}),
+        json!({"schema":"narada.worker.run_wait_batch.v1","status":"ok","requested_count":ids.len().min(50),"site_scope":"current_site","compact":compact,"wait":{"status":if timed_out{"timed_out"}else{"finished"},"timeout_ms":timeout_ms,"poll_ms":poll_ms,"waited_ms":started.elapsed().as_millis() as u64},"runs":runs,"native_read_only":true}),
     )
 }
 fn runs_synthesize(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
@@ -814,6 +831,30 @@ fn output_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
 }
 fn affordances() -> Value {
     json!({"schema":"narada.worker.operator_affordances.v1","status":"ok","read_tools":READ_TOOLS.iter().map(|(n,_)|*n).collect::<Vec<_>>(),"mutation_tools":MUTATING_TOOLS,"native_read_only":true,"execution_authority":"rust"})
+}
+fn require_current_site_scope(args: &Map<String, Value>) -> Result<(), Value> {
+    match args.get("site_scope").and_then(Value::as_str) {
+        None | Some("current_site") => Ok(()),
+        Some(_) => Err(error(
+            "worker_site_scope_invalid",
+            "worker_site_scope_invalid: only server-bound current_site is available",
+        )),
+    }
+}
+fn minimal_run(run: &Value) -> Value {
+    let o = run.as_object().cloned().unwrap_or_default();
+    json!({
+        "run_id":o.get("run_id"),
+        "task_label":o.get("task_label"),
+        "status":o.get("status"),
+        "completion_state":o.get("completion_state"),
+        "started_at":o.get("timing").and_then(|v|v.get("started_at")),
+        "finished_at":o.get("timing").and_then(|v|v.get("finished_at")),
+        "duration_ms":o.get("timing").and_then(|v|v.get("duration_ms")),
+        "updated_at":o.get("updated_at").or_else(||o.get("timing").and_then(|v|v.get("finished_at"))),
+        "summary":o.get("summary").or_else(||o.get("last_message")),
+        "error":o.get("error")
+    })
 }
 fn compact_run(run: &Value) -> Value {
     let o = run.as_object().cloned().unwrap_or_default();
@@ -1446,6 +1487,7 @@ fn worker_run(
         "{READ_ONLY_COMMAND_CONTRACT}\n\n{instruction_text}\n\n{}",
         native_read_evidence_prompt(&preflight)
     );
+    let task_label = instruction_text.chars().take(160).collect::<String>();
     let mut capabilities = capability_snapshot(&auth, &cwd, allowed_roots, runtime_probe.as_ref());
     if let Some(broker) = codex_broker.as_ref() {
         capabilities["provider_boundary"]["source"] = json!("native_codex_app_server_broker");
@@ -1496,7 +1538,7 @@ fn worker_run(
     write_json_atomic(&dir.join("request.json"), &request)?;
     fs::write(dir.join("worker_prompt.txt"), &prompt)
         .map_err(|_| error("worker_write_failed", "worker_write_failed"))?;
-    let running = json!({"schema":"narada.worker.run.v1","run_id":id,"status":"running","completion_state":"pending","runtime":"narada-agent-runtime-server","authority":auth,"resolved_invocation":resolved_invocation.clone(),"capability_snapshot":capabilities.clone(),"worker_session_id":session,"origin_tool":tool_name,"pid":null,"summary":null,"error":null,"timing":{"started_at":started,"finished_at":null,"duration_ms":null},"artifacts":{"request":dir.join("request.json").to_string_lossy(),"events":dir.join("events.jsonl").to_string_lossy(),"diagnostic":dir.join("diagnostic.log").to_string_lossy(),"last_message":dir.join("last_message.json").to_string_lossy()}});
+    let running = json!({"schema":"narada.worker.run.v1","run_id":id,"task_label":task_label.clone(),"status":"running","completion_state":"pending","runtime":"narada-agent-runtime-server","authority":auth,"resolved_invocation":resolved_invocation.clone(),"capability_snapshot":capabilities.clone(),"worker_session_id":session,"origin_tool":tool_name,"pid":null,"summary":null,"error":null,"timing":{"started_at":started,"finished_at":null,"duration_ms":null},"artifacts":{"request":dir.join("request.json").to_string_lossy(),"events":dir.join("events.jsonl").to_string_lossy(),"diagnostic":dir.join("diagnostic.log").to_string_lossy(),"last_message":dir.join("last_message.json").to_string_lossy()}});
     write_json_atomic(&dir.join("result.json"), &running)?;
     let root_owned = root.to_path_buf();
     let dir_owned = dir.clone();
@@ -1529,6 +1571,7 @@ fn worker_run(
                 codex_transport,
                 allowed_roots_owned,
                 max_run_ms,
+                task_label,
                 format!("Effective mode: {}. This reconciled state is injected at the provider process boundary through the permission profile, CLI sandbox, and writable-root arguments; ambient labels are advisory. CWD: {}. Writable roots: {}. Scoped create/read/remove preflight: {}. Command write effects: {}. First-class exact-byte lifecycle: one bounded shell command with explicit encoding for create/read-verify/remove/confirm-absent. On Windows assign literal path/content variables, use IO.File WriteAllBytes/ReadAllBytes, compare hex, delete, and test existence; avoid interpolated command strings. Use apply_patch for ordinary edits. Read-only command policy: issue one executable with literal arguments per probe; do not combine probes with &&, ;, pipes, redirection, $(), backticks, or generated scripts. Use separate bounded commands and report each result. For non-ASCII text, set explicit UTF-8 output before reading. Carrier MCP projection: none. On refusal return narada.worker.refusal.v1 with tool, operation, cwd, target_path, declared_capability, actual_refusal. Ergonomics ratings use narada.worker.observed_ergonomics.v1: lower a score only for observed failure, retry, human intervention, or ambiguity that changed execution; automatic contained review requires no human interaction and is not ceremony; put hypothetical improvements in non_scoring_observations.\n\nTask:\n{prompt}", capabilities["effective_mode"].as_str().unwrap_or("unknown"), capabilities["cwd"].as_str().unwrap_or("unknown"), capabilities["allowed_roots"].as_array().map(|roots| roots.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")).unwrap_or_default(), capabilities["runtime_probe"]["status"].as_str().unwrap_or("not_required"), capabilities["commands"]["write_effects"].as_bool().unwrap_or(false)),
             )
         })
@@ -1720,6 +1763,7 @@ fn complete_native_run(
     codex_transport: String,
     allowed_roots: Vec<PathBuf>,
     max_run_ms: u64,
+    task_label: String,
     prompt: String,
 ) {
     let result_path = dir.join("result.json");
@@ -1788,7 +1832,7 @@ fn complete_native_run(
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(err) => {
-            let failed = json!({"schema":"narada.worker.run.v1","run_id":id,"status":"failed","completion_state":"absent","runtime":"narada-agent-runtime-server","authority":authority,"cognition":cognition,"resolved_invocation":resolved_invocation,"worker_session_id":session,"summary":null,"error":format!("worker_launch_failed:{err}"),"timing":{"started_at":now(),"finished_at":now(),"duration_ms":0}});
+            let failed = json!({"schema":"narada.worker.run.v1","run_id":id,"task_label":task_label,"status":"failed","completion_state":"absent","runtime":"narada-agent-runtime-server","authority":authority,"cognition":cognition,"resolved_invocation":resolved_invocation,"worker_session_id":session,"summary":null,"error":format!("worker_launch_failed:{err}"),"timing":{"started_at":now(),"finished_at":now(),"duration_ms":0}});
             let _ = write_json_atomic(&result_path, &failed);
             return;
         }
@@ -1942,7 +1986,7 @@ fn complete_native_run(
                 Some(format!("worker_runtime_exit:{:?}", status.and_then(|v| v.code())))
             }
         });
-        let payload = json!({"schema":"narada.worker.run.v1","run_id":id,"status":if successful{"completed"}else{"failed"},"completion_state":if assistant.is_some(){"complete"}else{"absent"},"runtime":"narada-agent-runtime-server","authority":authority,"cognition":cognition,"resolved_invocation":resolved_invocation,"capability_snapshot":snapshot,"worker_session_id":provider_session.unwrap_or(session),"pid":child.id(),"summary":assistant,"error":final_error,"failure":failure,"timing":{"started_at":Value::Null,"finished_at":finished,"duration_ms":elapsed_ms},"artifacts":{"request":dir.join("request.json").to_string_lossy(),"events":events_path.to_string_lossy(),"diagnostic":diagnostic_path.to_string_lossy(),"last_message":dir.join("last_message.json").to_string_lossy()}});
+        let payload = json!({"schema":"narada.worker.run.v1","run_id":id,"task_label":task_label,"status":if successful{"completed"}else{"failed"},"completion_state":if assistant.is_some(){"complete"}else{"absent"},"runtime":"narada-agent-runtime-server","authority":authority,"cognition":cognition,"resolved_invocation":resolved_invocation,"capability_snapshot":snapshot,"worker_session_id":provider_session.unwrap_or(session),"pid":child.id(),"summary":assistant,"error":final_error,"failure":failure,"timing":{"started_at":Value::Null,"finished_at":finished,"duration_ms":elapsed_ms},"artifacts":{"request":dir.join("request.json").to_string_lossy(),"events":events_path.to_string_lossy(),"diagnostic":diagnostic_path.to_string_lossy(),"last_message":dir.join("last_message.json").to_string_lossy()}});
         let _ = write_json_atomic(&result_path, &payload);
     }
 }
@@ -2004,15 +2048,18 @@ fn input_schema(name: &str) -> Value {
             json!({"type":"object","properties":{"cwd":{"type":"string","minLength":1,"maxLength":4096},"constraints":constraints()},"additionalProperties":false})
         }
         "worker_run_status" => {
-            json!({"type":"object","properties":{"run_id":run_id()},"required":["run_id"],"additionalProperties":false})
+            json!({"type":"object","properties":{"run_id":run_id(),"compact":{"type":"boolean","default":true}},"required":["run_id"],"additionalProperties":false})
         }
         "worker_run_wait" => {
-            json!({"type":"object","properties":{"run_id":run_id(),"timeout_ms":{"type":"integer","minimum":0,"maximum":300000,"default":30000,"description":"Maximum bounded state-file polling interval."}},"required":["run_id"],"additionalProperties":false})
+            json!({"type":"object","properties":{"run_id":run_id(),"compact":{"type":"boolean","default":true},"timeout_ms":{"type":"integer","minimum":0,"maximum":300000,"default":30000,"description":"Maximum bounded state-file polling interval."}},"required":["run_id"],"additionalProperties":false})
         }
         "worker_runs_list" => {
-            json!({"type":"object","properties":{"limit":{"type":"integer","minimum":1,"maximum":200},"include_running":{"type":"boolean"},"include_completed":{"type":"boolean"}},"additionalProperties":false})
+            json!({"type":"object","properties":{"limit":{"type":"integer","minimum":1,"maximum":200},"compact":{"type":"boolean","default":true},"site_scope":{"type":"string","enum":["current_site"],"default":"current_site","description":"Runs are filtered by the server-bound Site root; caller-supplied cross-site identity is not accepted."},"include_running":{"type":"boolean"},"include_completed":{"type":"boolean"}},"additionalProperties":false})
         }
-        "worker_run_wait_batch" | "worker_runs_synthesize" => {
+        "worker_run_wait_batch" => {
+            json!({"type":"object","properties":{"run_ids":run_ids(),"compact":{"type":"boolean","default":true},"timeout_ms":{"type":"integer","minimum":0,"maximum":180000,"default":30000},"poll_ms":{"type":"integer","minimum":100,"maximum":30000,"default":5000}},"required":["run_ids"],"additionalProperties":false})
+        }
+        "worker_runs_synthesize" => {
             json!({"type":"object","properties":{"run_ids":run_ids()},"required":["run_ids"],"additionalProperties":false})
         }
         "worker_dashboard_describe" => {
@@ -2119,6 +2166,30 @@ mod tests {
             compact["resolved_invocation"]["provider_model"],
             "gpt-5.6-luna"
         );
+    }
+
+    #[test]
+    fn minimal_readback_omits_capability_and_exposes_batch_wait_controls() {
+        let minimal = minimal_run(&json!({
+            "run_id":"run-test",
+            "task_label":"inspect ledger",
+            "status":"completed",
+            "completion_state":"complete",
+            "capability_snapshot":{"large":true},
+            "resolved_invocation":{"provider_model":"model"},
+            "timing":{"started_at":"start","finished_at":"finish","duration_ms":12},
+            "summary":"done",
+            "error":null
+        }));
+        assert_eq!(minimal["task_label"], "inspect ledger");
+        assert!(minimal.get("capability_snapshot").is_none());
+        assert!(minimal.get("resolved_invocation").is_none());
+        let batch = input_schema("worker_run_wait_batch");
+        assert_eq!(batch["properties"]["compact"]["default"], true);
+        assert_eq!(batch["properties"]["timeout_ms"]["maximum"], 180_000);
+        assert_eq!(batch["properties"]["poll_ms"]["default"], 5_000);
+        let list = input_schema("worker_runs_list");
+        assert_eq!(list["properties"]["site_scope"]["default"], "current_site");
     }
 
     #[test]

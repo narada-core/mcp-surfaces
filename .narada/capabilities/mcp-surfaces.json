@@ -3,7 +3,7 @@
   "artifact_role": "site_capability_surface_registry_not_mcp_client_config",
   "site_id": "mcp-surfaces",
   "generated_by": "mcp-registrar",
-  "generated_at": "2026-08-17T15:38:09.2924507Z",
+  "generated_at": "2026-08-17T15:46:30.519017Z",
   "generation_policy": {
     "source": ".ai/mcp + registrar surface catalog",
     "mode": "enabled_surface_tool_authority",
@@ -5223,11 +5223,13 @@
                 "type": "object",
                 "properties": {
                   "run_id": {
-                    "type": "string"
-                  },
-                  "site_root": {
                     "type": "string",
-                    "description": "Optional authorized Narada Site root whose worker run store should be inspected."
+                    "minLength": 1,
+                    "maxLength": 256
+                  },
+                  "compact": {
+                    "type": "boolean",
+                    "default": true
                   }
                 },
                 "required": [
@@ -5830,26 +5832,25 @@
                     "minimum": 1,
                     "maximum": 200
                   },
+                  "compact": {
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "site_scope": {
+                    "type": "string",
+                    "enum": [
+                      "current_site"
+                    ],
+                    "default": "current_site",
+                    "description": "Runs are filtered by the server-bound Site root; caller-supplied cross-site identity is not accepted."
+                  },
                   "include_running": {
                     "type": "boolean"
                   },
                   "include_completed": {
                     "type": "boolean"
-                  },
-                  "include_summary": {
-                    "type": "boolean",
-                    "description": "Include full summaries in each compact list item."
-                  },
-                  "verbose": {
-                    "type": "boolean",
-                    "description": "Include full run path, timing object, session id, and full error fields."
-                  },
-                  "site_root": {
-                    "type": "string",
-                    "description": "Optional authorized Narada Site root whose worker run store should be listed."
                   }
                 },
-                "required": [],
                 "additionalProperties": false
               },
               "output_schema": {
@@ -6087,29 +6088,20 @@
                 "type": "object",
                 "properties": {
                   "run_id": {
-                    "type": "string"
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
+                  },
+                  "compact": {
+                    "type": "boolean",
+                    "default": true
                   },
                   "timeout_ms": {
                     "type": "integer",
                     "minimum": 0,
-                    "maximum": 300000
-                  },
-                  "poll_ms": {
-                    "type": "integer",
-                    "minimum": 25,
-                    "maximum": 10000
-                  },
-                  "summary_only": {
-                    "type": "boolean",
-                    "description": "Return only run id, status, summary, and error preview."
-                  },
-                  "verbose": {
-                    "type": "boolean",
-                    "description": "Include the full worker run payload as full_run."
-                  },
-                  "site_root": {
-                    "type": "string",
-                    "description": "Optional authorized Narada Site root whose worker run store should be read."
+                    "maximum": 300000,
+                    "default": 30000,
+                    "description": "Maximum bounded state-file polling interval."
                   }
                 },
                 "required": [
@@ -6420,25 +6412,28 @@
                   "run_ids": {
                     "type": "array",
                     "minItems": 1,
+                    "maxItems": 50,
                     "items": {
-                      "type": "string"
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 256
                     }
+                  },
+                  "compact": {
+                    "type": "boolean",
+                    "default": true
                   },
                   "timeout_ms": {
                     "type": "integer",
                     "minimum": 0,
-                    "maximum": 300000
+                    "maximum": 180000,
+                    "default": 30000
                   },
                   "poll_ms": {
                     "type": "integer",
-                    "minimum": 25,
-                    "maximum": 10000
-                  },
-                  "summary_only": {
-                    "type": "boolean"
-                  },
-                  "verbose": {
-                    "type": "boolean"
+                    "minimum": 100,
+                    "maximum": 30000,
+                    "default": 5000
                   }
                 },
                 "required": [
@@ -6833,7 +6828,7 @@
       "runtime_binding": {
         "runtime_kind": "rust-stdio",
         "proxy_implementation": "native",
-        "entrypoint": "C:/Users/andrey/src/mcp-surfaces/packages/shared/mcp-surfaces-native/dist/native/versions/b90f928bca5e1026c71979eea8d686d608c547a438f8475a7c4710cd03ccbc86/narada-mcp-surfaces.exe",
+        "entrypoint": "C:/Users/andrey/src/mcp-surfaces/packages/shared/mcp-surfaces-native/dist/native/versions/419a740e38aafeafee778e43ca533f1da09608c514ca0a2574466a2b748fbf6a/narada-mcp-surfaces.exe",
         "owner_site_id": "mcp-surfaces",
         "transport": {
           "type": "stdio",
@@ -6843,13 +6838,13 @@
             "--surface-id",
             "worker-delegation",
             "--child-command",
-            "C:/Users/andrey/src/mcp-surfaces/packages/shared/mcp-surfaces-native/dist/native/versions/b90f928bca5e1026c71979eea8d686d608c547a438f8475a7c4710cd03ccbc86/narada-mcp-surfaces.exe",
+            "C:/Users/andrey/src/mcp-surfaces/packages/shared/mcp-surfaces-native/dist/native/versions/419a740e38aafeafee778e43ca533f1da09608c514ca0a2574466a2b748fbf6a/narada-mcp-surfaces.exe",
             "--artifact-manifest",
             "C:/Users/andrey/src/mcp-surfaces/.ai/runtime/workspace-artifact-manifest.json",
             "--runtime-contract-version",
             "8",
             "--entrypoint",
-            "C:/Users/andrey/src/mcp-surfaces/packages/shared/mcp-surfaces-native/dist/native/versions/b90f928bca5e1026c71979eea8d686d608c547a438f8475a7c4710cd03ccbc86/narada-mcp-surfaces.exe",
+            "C:/Users/andrey/src/mcp-surfaces/packages/shared/mcp-surfaces-native/dist/native/versions/419a740e38aafeafee778e43ca533f1da09608c514ca0a2574466a2b748fbf6a/narada-mcp-surfaces.exe",
             "--child-invocation-kind",
             "native_entrypoint",
             "--",
