@@ -975,7 +975,7 @@ fn concise_value(value: &Value) -> String {
         Value::Array(values) => format!("[{} items]", values.len()),
         Value::Object(values) => format!("{{{} fields}}", values.len()),
     };
-    text.chars().take(160).collect()
+    truncate_summary(&text, 160)
 }
 fn structured_output_summary(value: &Value) -> String {
     if let Some(summary) = value
@@ -984,7 +984,7 @@ fn structured_output_summary(value: &Value) -> String {
         .map(str::trim)
         .filter(|summary| !summary.is_empty())
     {
-        return summary.chars().take(512).collect();
+        return truncate_summary(summary, 512);
     }
     match value {
         Value::Object(fields) => {
@@ -1083,12 +1083,17 @@ fn final_step_projection(task: &Value) -> Value {
 }
 
 fn derived_task_summary(task: &Value) -> Option<Value> {
-    let base = final_step_projection(task)
+    let projection = final_step_projection(task);
+    let base = projection
+        .get("final_structured_output")
+        .filter(|value| !value.is_null())
+        .map(structured_output_summary)
+        .or_else(|| projection
         .get("final_summary")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|text| !text.is_empty())
-        .map(str::to_string);
+        .map(str::to_string));
     let (objective, _) = objective_verdict(task);
     if objective == "not_applicable" {
         return base.map(|text| json!(truncate_summary(&text, 512)));
@@ -1134,12 +1139,13 @@ fn timing_projection(task: &Value) -> Value {
     json!({"queue_ms":queue_ms,"worker_ms":worker_ms,"orchestration_ms":orchestration_ms,"total_ms":total_ms})
 }
 fn task_summary_value(task: &Value) -> Option<Value> {
-    task.get("summary")
+    derived_task_summary(task).or_else(|| {
+        task.get("summary")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|summary| !summary.is_empty())
         .map(|summary| json!(summary))
-        .or_else(|| derived_task_summary(task))
+    })
 }
 fn refresh_task_summary(task: &mut Value) {
     if let Some(summary) = derived_task_summary(task) {
@@ -3609,8 +3615,42 @@ mod tests {
     }
 
     #[test]
+    fn terminal_summary_replaces_persisted_pending_projection() {
+        let task = json!({
+            "task_id":"generic",
+            "status":"completed",
+            "summary":"objective_result: pending. waiting",
+            "result":{"worker_outputs":[{"step_id":"implement","status":"completed","output":{"summary_text":"done"}}]}
+        });
+        assert_eq!(task_summary_value(&task), Some(json!("objective_result: passed. done")));
+    }
+
+    #[test]
+    fn terminal_summary_prefers_complete_structured_output_over_clipped_worker_summary() {
+        let task = json!({
+            "task_id":"generic",
+            "status":"completed",
+            "result":{"worker_outputs":[{"step_id":"implement","status":"completed","output":{
+                "summary_text":"topic=cross-sector falsifi",
+                "structured_output":{"topic":"cross-sector falsification"}
+            }}]}
+        });
+        assert_eq!(
+            task_summary_value(&task),
+            Some(json!("objective_result: passed. topic=cross-sector falsification"))
+        );
+    }
+
+    #[test]
     fn summary_truncation_preserves_word_boundaries() {
         assert_eq!(truncate_summary("alpha beta gamma", 11), "alpha beta…");
+        let long_summary = format!("{} falsifiability", "word ".repeat(102));
+        let summary = structured_output_summary(&json!({"summary":long_summary}));
+        assert!(summary.ends_with('…'));
+        assert!(!summary.ends_with("falsifi…"));
+        let concise = concise_value(&json!(format!("{}falsification", "word ".repeat(32))));
+        assert!(concise.ends_with('…'));
+        assert!(!concise.ends_with("falsifi…"));
     }
 
     #[test]
