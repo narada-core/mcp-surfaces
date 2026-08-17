@@ -152,7 +152,11 @@ impl AppServer {
                 "mcp_servers={}",
                 "-c",
                 "features.apps=false",
+                "-c",
+                "windows.sandbox=\"unelevated\"",
             ])
+            .env_remove("CODEX_PERMISSION_PROFILE")
+            .env_remove("CODEX_THREAD_ID")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
