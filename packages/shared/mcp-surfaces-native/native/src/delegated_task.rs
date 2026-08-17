@@ -3005,6 +3005,10 @@ fn advance_value_with_roots(
                 )
             })
         {
+            // Acceptance checks such as strict_clean_run are terminal-state
+            // predicates. Mark the candidate outcome terminal before deriving
+            // them, then downgrade to failed if a check or output contract fails.
+            task["status"] = json!("completed");
             let (verdict, checks) = acceptance_verdict(&task, root);
             set_outcome_verdicts(&mut task, verdict);
             task["result"]["acceptance_checks"] = json!(checks);
@@ -3399,6 +3403,49 @@ mod tests {
         let (passed, terminal_checks) = acceptance_verdict(&task, Path::new("."));
         assert_eq!(passed, "passed");
         assert!(terminal_checks.iter().any(|check| check["kind"] == "strict_clean_run" && check["status"] == "passed"));
+    }
+
+    #[test]
+    fn task_advance_recomputes_terminal_acceptance_after_marking_terminal() {
+        let root = std::env::temp_dir().join(format!(
+            "narada-delegated-task-terminal-verdict-{}",
+            uuid::Uuid::new_v4()
+        ));
+        task_run(
+            json!({
+                "task_id":"task_terminal_verdict",
+                "objective":"return status ok",
+                "execution":{"start":false},
+                "constraints":{"authority":"read"},
+                "acceptance":{"strict_clean_run":true},
+                "workflow":{"steps":[{"id":"implement","kind":"worker"}]}
+            })
+            .as_object()
+            .unwrap(),
+            &root,
+        )
+        .expect("create");
+        let mut task = read_task(&root, "task_terminal_verdict").expect("task");
+        task["result"]["step_states"]["implement"]["status"] = json!("completed");
+        task["result"]["step_states"]["implement"]["attempts"] = json!(1);
+        task["result"]["step_states"]["implement"]["error"] = Value::Null;
+        write_task(&root, &task).expect("persist worker result");
+        let terminal = task_advance(
+            json!({"task_id":"task_terminal_verdict"})
+                .as_object()
+                .unwrap(),
+            &root,
+        )
+        .expect("advance");
+        assert_eq!(terminal["status"], "ok");
+        assert_eq!(terminal["task_status"], "completed");
+        assert_eq!(terminal["task"]["acceptance_verdict"], "passed");
+        assert!(terminal["task"]["acceptance_checks"]
+            .as_array()
+            .is_some_and(|checks| checks.iter().any(|check| {
+                check["kind"] == "strict_clean_run" && check["status"] == "passed"
+            })));
+        fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[test]
