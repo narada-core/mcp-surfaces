@@ -1401,6 +1401,14 @@ fn assessment_consistency_failed(task: &Value) -> bool {
 
 fn objective_signal(task: &Value) -> Option<String> {
     let projection = final_step_projection(task);
+    if projection.get("final_step").and_then(Value::as_str).is_some()
+        && projection.get("final_structured_output").is_none_or(Value::is_null)
+        && projection.get("final_summary").is_none_or(|value| {
+            value.is_null() || value.as_str().is_none_or(|text| text.trim().is_empty())
+        })
+    {
+        return Some("missing_terminal_result".to_string());
+    }
     let output = projection.get("final_structured_output")?;
     let object = output.as_object()?;
     for key in ["objective_verdict", "assessment_result", "objective_status"] {
@@ -1452,7 +1460,7 @@ fn objective_verdict(task: &Value) -> (&'static str, Option<String>) {
     let verdict = match signal.as_deref() {
         Some("passed" | "pass" | "achieved" | "success" | "succeeded" | "completed" | "complete" | "coherent" | "executable" | "ready") => "passed",
         Some("pending" | "running") => "pending",
-        Some("failed" | "failure") => "failed",
+        Some("failed" | "failure" | "missing_terminal_result") => "failed",
         Some("blocked" | "not_executable" | "undetermined" | "inconclusive" | "unavailable" | "not_found") => "blocked",
         Some("inconsistent") => "blocked",
         Some(_) => "blocked",
@@ -3665,6 +3673,26 @@ mod tests {
         assert_eq!(compact["final_structured_output"]["answer"], "ok");
         assert!(compact["worker_refs"].is_null());
         assert!(compact["worker_outputs"].is_null());
+    }
+
+    #[test]
+    fn terminal_worker_without_substantive_result_cannot_pass() {
+        let task = json!({
+            "task_id":"progress-only",
+            "status":"completed",
+            "objective":"compute the two invariants",
+            "result":{
+                "worker_outputs":[{"step_id":"implement","status":"completed","output":{"summary_text":null}}],
+                "step_states":{"implement":{"kind":"worker","status":"completed"}}
+            }
+        });
+        assert_eq!(objective_verdict(&task).0, "failed");
+        let (_, checks) = acceptance_verdict(&task, Path::new("."));
+        assert!(checks.iter().any(|check| {
+            check["kind"] == "objective_outcome"
+                && check["signal"] == "missing_terminal_result"
+                && check["status"] == "failed"
+        }));
     }
 
     #[test]
