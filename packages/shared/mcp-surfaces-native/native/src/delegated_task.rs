@@ -1768,6 +1768,11 @@ fn terminal_handoff(task: &Value, root: &Path) -> Value {
 }
 fn task_execute(args: &Map<String, Value>, root: &Path, allowed_roots: &[PathBuf]) -> Result<Value, Value> {
     let validation = validate(args, root)?;
+    if validation.get("request_valid").and_then(Value::as_bool) != Some(true) {
+        let mut failure = error("delegated_task_validation_failed", "delegated_task_validation_failed");
+        failure["validation"] = validation;
+        return Err(failure);
+    }
     let validated_request_ref = validation.get("validated_request_ref").cloned()
         .ok_or_else(|| error("validated_request_ref_missing", "validated_request_ref_missing"))?;
     let mut run_args = Map::new();
@@ -3627,6 +3632,8 @@ mod tests {
         assert_eq!(batch["failed_count"], 2);
         assert_eq!(batch["results"][0]["index"], 0);
         assert_eq!(batch["results"][1]["index"], 1);
+        assert_eq!(batch["results"][0]["error"]["code"], "delegated_task_validation_failed");
+        assert_eq!(batch["results"][0]["error"]["validation"]["request_valid"], false);
         fs::remove_dir_all(root).ok();
     }
 
