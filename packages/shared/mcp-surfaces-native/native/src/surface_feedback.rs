@@ -74,6 +74,10 @@ fn guidance(args: &Map<String, Value>) -> Value { json!({"schema":"narada.mcp_su
 
 fn feedback_path(root: &Path) -> std::path::PathBuf { root.join(".feedback/surface-feedback.db") }
 
+fn is_canonical_store(root: &Path) -> bool {
+    std::env::var("NARADA_SURFACE_FEEDBACK_ROOT").ok().map(PathBuf::from).is_some_and(|canonical| canonical == root)
+}
+
 fn open_db(root: &Path) -> Result<Connection, Value> {
     let path = feedback_path(root);
     if !path.exists() { return Err(error("feedback_store_missing", "feedback_store_missing")); }
@@ -136,8 +140,8 @@ fn feedback_update_status(args: &Map<String, Value>, root: &Path) -> Result<Valu
     let db = open_db_rw(root)?;
     let row: Option<(String, String, String)> = db.query_row("SELECT submitter_site_id,surface_id,status FROM feedback_entries WHERE feedback_id=?1", params![id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional().map_err(|e| error("feedback_query_failed", &e.to_string()))?;
     let Some((submitter_site, surface_id, previous_status)) = row else { return Err(error("feedback_not_found", "feedback_not_found")); };
-    let owns_surface = owned_surfaces.iter().any(|value| value == "*" || value == &surface_id);
-    if submitter_site != authority_site && !owns_surface { return Err(error("feedback_not_visible", "feedback_not_visible")); }
+    let owns_surface = owned_surfaces.iter().any(|value| value == &surface_id);
+    if submitter_site != authority_site && !owns_surface && !is_canonical_store(root) { return Err(error("feedback_not_visible", "feedback_not_visible")); }
     let now = now_iso();
     let task_ref = args.get("task_ref").and_then(Value::as_str);
     let task_status = args.get("task_status").and_then(Value::as_str);
@@ -510,6 +514,11 @@ mod tests {
         assert_eq!(first["feedback_id"],replay["feedback_id"]); assert_eq!(replay["idempotency_replay"],true);
         let conflict=call_tool("surface_feedback_submit",&json!({"surface_id":"calendar","submitter_site_id":"site-a","submitter_principal":"agent-a","kind":"bug","summary":"different","idempotency_key":"retry-1"}).as_object().unwrap(),&root).expect_err("conflict");
         assert_eq!(conflict["code"],"feedback_idempotency_conflict");
+        std::env::set_var("NARADA_SITE_ID", "canonical-maintainer");
+        std::env::set_var("NARADA_AGENT_ID", "canonical-maintainer-agent");
+        std::env::set_var("NARADA_SURFACE_FEEDBACK_ROOT", &root);
+        let maintained = feedback_update_status(&json!({"feedback_id":"f1","status":"closed","resolution_note":"canonical repair"}).as_object().unwrap(), &root).expect("canonical maintainer");
+        assert_eq!(maintained["new_status"], "closed");
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 
