@@ -1,15 +1,18 @@
 use serde_json::{json, Value};
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(1_800);
+const QUEUE_HEARTBEAT: Duration = Duration::from_secs(5);
+const MAX_QUEUED_JOBS: usize = 64;
 
 #[derive(Clone, Debug)]
 pub struct BrokerBinding {
@@ -42,7 +45,11 @@ pub fn current_generation() -> Option<String> {
     BROKER
         .get()
         .and_then(|broker| broker.lock().ok())
-        .and_then(|state| state.as_ref().map(|state| state.binding.broker_generation.clone()))
+        .and_then(|state| {
+            state
+                .as_ref()
+                .map(|state| state.binding.broker_generation.clone())
+        })
 }
 
 fn start_broker(site_root: &Path) -> Result<BrokerState, String> {
@@ -54,19 +61,20 @@ fn start_broker(site_root: &Path) -> Result<BrokerState, String> {
         .to_string();
     let capability = uuid::Uuid::new_v4().to_string();
     let broker_generation = uuid::Uuid::new_v4().to_string();
-    let app_server = Arc::new(Mutex::new(AppServer::start(site_root)?));
-    let server = Arc::clone(&app_server);
+    let scheduler = Arc::new(BrokerScheduler::new(AppServer::start(site_root)?));
+    BrokerScheduler::start(Arc::clone(&scheduler))?;
+    let server = Arc::clone(&scheduler);
     let expected_capability = capability.clone();
     thread::Builder::new()
         .name("codex-app-server-broker".to_string())
         .spawn(move || {
             for connection in listener.incoming() {
                 let Ok(stream) = connection else { continue };
-                let app_server = Arc::clone(&server);
+                let scheduler = Arc::clone(&server);
                 let capability = expected_capability.clone();
                 let _ = thread::Builder::new()
                     .name("codex-app-server-request".to_string())
-                    .spawn(move || handle_connection(stream, &capability, app_server));
+                    .spawn(move || handle_connection(stream, &capability, scheduler));
             }
         })
         .map_err(|error| format!("codex_app_server_broker_thread_failed:{error}"))?;
@@ -79,23 +87,138 @@ fn start_broker(site_root: &Path) -> Result<BrokerState, String> {
     })
 }
 
+struct BrokerJob {
+    id: String,
+    request: Value,
+    cancelled: Arc<AtomicBool>,
+    events: mpsc::Sender<Value>,
+}
+
+struct BrokerQueue {
+    jobs: VecDeque<BrokerJob>,
+}
+
+struct BrokerScheduler {
+    queue: Mutex<BrokerQueue>,
+    wake: Condvar,
+    app_server: Mutex<Option<AppServer>>,
+}
+
+impl BrokerScheduler {
+    fn new(app_server: AppServer) -> Self {
+        Self {
+            queue: Mutex::new(BrokerQueue {
+                jobs: VecDeque::new(),
+            }),
+            wake: Condvar::new(),
+            app_server: Mutex::new(Some(app_server)),
+        }
+    }
+
+    fn start(scheduler: Arc<Self>) -> Result<(), String> {
+        thread::Builder::new()
+            .name("codex-app-server-lane-1".to_string())
+            .spawn(move || scheduler.run())
+            .map(|_| ())
+            .map_err(|error| format!("codex_app_server_scheduler_thread_failed:{error}"))
+    }
+
+    fn enqueue(&self, job: BrokerJob) -> Result<usize, String> {
+        let mut queue = self
+            .queue
+            .lock()
+            .map_err(|_| "codex_app_server_queue_poisoned".to_string())?;
+        if queue.jobs.len() >= MAX_QUEUED_JOBS {
+            return Err("codex_app_server_provider_queue_full".to_string());
+        }
+        queue.jobs.push_back(job);
+        let position = queue.jobs.len();
+        self.wake.notify_one();
+        Ok(position)
+    }
+
+    fn position(&self, id: &str) -> Option<usize> {
+        self.queue
+            .lock()
+            .ok()?
+            .jobs
+            .iter()
+            .position(|job| job.id == id)
+            .map(|index| index + 1)
+    }
+
+    fn run(&self) {
+        loop {
+            let job = {
+                let mut queue = match self.queue.lock() {
+                    Ok(queue) => queue,
+                    Err(_) => return,
+                };
+                while queue.jobs.is_empty() {
+                    queue = match self.wake.wait(queue) {
+                        Ok(queue) => queue,
+                        Err(_) => return,
+                    };
+                }
+                queue.jobs.pop_front().expect("non-empty broker queue")
+            };
+            if job.cancelled.load(Ordering::Acquire) {
+                let _ = job.events.send(broker_event(
+                    &job.id,
+                    "cancelled",
+                    json!({"error":"codex_app_server_queued_job_cancelled"}),
+                ));
+                continue;
+            }
+            let admitted_at = Instant::now();
+            let _ = job.events.send(broker_event(
+                &job.id,
+                "admitted",
+                json!({"capacity":{"lanes":1,"queue_limit":MAX_QUEUED_JOBS,"scheduling":"fifo"}}),
+            ));
+            let response = self
+                .app_server
+                .lock()
+                .map_err(|_| "codex_app_server_state_poisoned".to_string())
+                .and_then(|mut slot| {
+                    slot.as_mut()
+                        .ok_or_else(|| "codex_app_server_state_missing".to_string())?
+                        .perform_turn(&job.request, &job.cancelled)
+                })
+                .unwrap_or_else(|error| {
+                    let state = if error == "codex_app_server_turn_interrupted" {
+                        "cancelled"
+                    } else {
+                        "failed"
+                    };
+                    broker_event(
+                        &job.id,
+                        state,
+                        json!({"error":error,"execution_ms":admitted_at.elapsed().as_millis()}),
+                    )
+                });
+            let _ = job.events.send(response);
+        }
+    }
+}
+
 fn handle_connection(
     mut stream: TcpStream,
     expected_capability: &str,
-    app_server: Arc<Mutex<AppServer>>,
+    scheduler: Arc<BrokerScheduler>,
 ) {
     let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
     let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
-    let response = read_frame(&mut stream)
-        .and_then(|request| {
+    let result = read_frame(&mut stream).and_then(|request| {
             if request.get("schema").and_then(Value::as_str)
-                != Some("narada.codex_app_server.broker_request.v1")
+                != Some("narada.codex_app_server.broker_request.v2")
             {
                 return Err("codex_app_server_broker_schema_invalid".to_string());
             }
             if request.get("capability").and_then(Value::as_str) != Some(expected_capability) {
                 return Err("codex_app_server_broker_capability_refused".to_string());
             }
+            let request_id = required_string(&request, "request_id")?.to_string();
             let cancelled = Arc::new(AtomicBool::new(false));
             let cancellation = Arc::clone(&cancelled);
             let mut disconnect = stream
@@ -109,21 +232,70 @@ fn handle_connection(
                         cancellation.store(true, Ordering::Release);
                     }
                 });
-            let mut server = app_server
-                .lock()
-                .map_err(|_| "codex_app_server_broker_lock_poisoned".to_string())?;
-            server.perform_turn(&request, &cancelled)
-        })
-        .unwrap_or_else(|error| {
-            json!({
-                "schema":"narada.codex_app_server.broker_response.v1",
-                "status":"failed",
-                "error":error,
-            })
+            let (events, responses) = mpsc::channel();
+            let position = scheduler.enqueue(BrokerJob {
+                id: request_id.clone(),
+                request,
+                cancelled: Arc::clone(&cancelled),
+                events,
+            })?;
+            write_frame(&mut stream, &broker_event(
+                &request_id,
+                "queued",
+                json!({"queue_position":position,"capacity":{"lanes":1,"queue_limit":MAX_QUEUED_JOBS,"scheduling":"fifo"}}),
+            ))?;
+            let mut admitted = false;
+            loop {
+                match responses.recv_timeout(QUEUE_HEARTBEAT) {
+                    Ok(event) => {
+                        let state = event.get("state").and_then(Value::as_str).unwrap_or("failed");
+                        admitted |= state == "admitted";
+                        write_frame(&mut stream, &event)?;
+                        if matches!(state, "completed" | "failed" | "cancelled") {
+                            return Ok(());
+                        }
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) if !admitted => {
+                        write_frame(&mut stream, &broker_event(
+                            &request_id,
+                            "heartbeat",
+                            json!({"queue_position":scheduler.position(&request_id)}),
+                        ))?;
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        return Err("codex_app_server_scheduler_disconnected".to_string());
+                    }
+                }
+            }
         });
-    let _ = serde_json::to_writer(&mut stream, &response);
-    let _ = stream.write_all(b"\n");
-    let _ = stream.flush();
+    if let Err(error) = result {
+        let response = broker_event("unknown", "failed", json!({"error":error}));
+        let _ = write_frame(&mut stream, &response);
+    }
+}
+
+fn broker_event(request_id: &str, state: &str, extra: Value) -> Value {
+    let mut event = json!({
+        "schema":"narada.codex_app_server.broker_event.v2",
+        "request_id":request_id,
+        "state":state,
+    });
+    if let (Some(target), Some(values)) = (event.as_object_mut(), extra.as_object()) {
+        for (key, value) in values {
+            target.insert(key.clone(), value.clone());
+        }
+    }
+    event
+}
+
+fn write_frame(stream: &mut TcpStream, value: &Value) -> Result<(), String> {
+    serde_json::to_writer(&mut *stream, value)
+        .map_err(|error| format!("codex_app_server_broker_response_encode_failed:{error}"))?;
+    stream
+        .write_all(b"\n")
+        .and_then(|()| stream.flush())
+        .map_err(|error| format!("codex_app_server_broker_response_write_failed:{error}"))
 }
 
 fn read_frame(stream: &mut TcpStream) -> Result<Value, String> {
@@ -299,14 +471,16 @@ impl AppServer {
                 break;
             }
         }
-        Ok(json!({
-            "schema":"narada.codex_app_server.broker_response.v1",
-            "status":"completed",
-            "content":content.ok_or_else(|| "codex_app_server_content_missing".to_string())?,
-            "thread_id":thread_id,
-            "turn_id":turn_id,
-            "host_generation":self.generation,
-        }))
+        Ok(broker_event(
+            required_string(request, "request_id")?,
+            "completed",
+            json!({
+                "content":content.ok_or_else(|| "codex_app_server_content_missing".to_string())?,
+                "thread_id":thread_id,
+                "turn_id":turn_id,
+                "host_generation":self.generation,
+            }),
+        ))
     }
 
     fn request(&mut self, method: &str, params: Value) -> Result<u64, String> {
@@ -408,5 +582,14 @@ mod tests {
             args.contains(&"windows.sandbox=\"unelevated\""),
             "the broker must avoid the elevated setup payload transport limit"
         );
+    }
+
+    #[test]
+    fn broker_events_use_only_the_admission_aware_v2_contract() {
+        let event = broker_event("request-1", "queued", json!({"queue_position":2}));
+        assert_eq!(event["schema"], "narada.codex_app_server.broker_event.v2");
+        assert_eq!(event["state"], "queued");
+        assert_eq!(event["queue_position"], 2);
+        assert_eq!(MAX_QUEUED_JOBS, 64);
     }
 }

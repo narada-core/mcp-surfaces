@@ -457,7 +457,7 @@ fn read_reconciled_run(root: &Path, id: &str) -> Result<Value, Value> {
 }
 
 fn policy(root: &Path, allowed_roots: &[PathBuf]) -> Value {
-    json!({"schema":"narada.worker.policy.v1","status":"ok","server_name":SERVER_NAME,"run_root":run_root(root).to_string_lossy(),"site_root":root.to_string_lossy(),"allowed_roots":allowed_roots.iter().map(|allowed|allowed.to_string_lossy()).collect::<Vec<_>>(),"allowed_runtimes":["narada-agent-runtime-server"],"allowed_authorities":["read","write","command"],"default_cognition":DEFAULT_COGNITION,"native_execution":"rust_authority","secret_projection":"secret_store_reference_only","provider_transports":{"codex-subscription":{"transport":"codex_app_server_broker","host_lifecycle":"owned_by_surface_process","thread_policy":"fresh_ephemeral_per_turn","fallback":"none"},"deepseek-api":{"transport":"native_http"},"openrouter-api":{"transport":"native_http"}},"windows_msvc_environment":{"inherited":true,"automatic_discovery":false,"remediation":"Initialize VsDevCmd or use Developer PowerShell before launching the carrier."}})
+    json!({"schema":"narada.worker.policy.v1","status":"ok","server_name":SERVER_NAME,"run_root":run_root(root).to_string_lossy(),"site_root":root.to_string_lossy(),"allowed_roots":allowed_roots.iter().map(|allowed|allowed.to_string_lossy()).collect::<Vec<_>>(),"allowed_runtimes":["narada-agent-runtime-server"],"allowed_authorities":["read","write","command"],"default_cognition":DEFAULT_COGNITION,"native_execution":"rust_authority","secret_projection":"secret_store_reference_only","provider_transports":{"codex-subscription":{"transport":"codex_app_server_broker","host_lifecycle":"owned_by_surface_process","thread_policy":"fresh_ephemeral_per_turn","fallback":"none","capacity":{"lanes":1,"queue_limit":64,"scheduling":"fifo"},"timing":{"queue_timeout_field":"constraints.queue_timeout_ms","execution_timeout_field":"constraints.max_run_ms","execution_clock_starts":"provider_admitted"}},"deepseek-api":{"transport":"native_http"},"openrouter-api":{"transport":"native_http"}},"windows_msvc_environment":{"inherited":true,"automatic_discovery":false,"remediation":"Initialize VsDevCmd or use Developer PowerShell before launching the carrier."}})
 }
 fn capability_snapshot(
     authority: &str,
@@ -1590,6 +1590,11 @@ fn worker_run(
         .and_then(Value::as_u64)
         .unwrap_or(300_000)
         .clamp(1, 1_800_000);
+    let queue_timeout_ms = constraints
+        .and_then(|value| value.get("queue_timeout_ms"))
+        .and_then(Value::as_u64)
+        .unwrap_or(300_000)
+        .clamp(1, 1_800_000);
     let wait_for_completion = constraints
         .and_then(|value| value.get("wait_for_completion"))
         .and_then(Value::as_bool)
@@ -1732,7 +1737,7 @@ fn worker_run(
     write_json_atomic(&dir.join("request.json"), &request)?;
     fs::write(dir.join("worker_prompt.txt"), &prompt)
         .map_err(|_| error("worker_write_failed", "worker_write_failed"))?;
-    let running = json!({"schema":"narada.worker.run.v1","run_id":id,"task_label":task_label.clone(),"status":"running","completion_state":"pending","phase":"starting","heartbeat_at":started.clone(),"runtime":"narada-agent-runtime-server","authority":auth,"resolved_invocation":resolved_invocation.clone(),"capability_snapshot":capabilities.clone(),"worker_session_id":session,"origin_tool":tool_name,"pid":null,"summary":null,"result":null,"error":null,"refusals":[],"timing":{"started_at":started.clone(),"finished_at":null,"duration_ms":null},"artifacts":{"request":dir.join("request.json").to_string_lossy(),"events":dir.join("events.jsonl").to_string_lossy(),"diagnostic":dir.join("diagnostic.log").to_string_lossy(),"last_message":dir.join("last_message.json").to_string_lossy()}});
+    let running = json!({"schema":"narada.worker.run.v1","run_id":id,"task_label":task_label.clone(),"status":"running","completion_state":"pending","phase":"starting","heartbeat_at":started.clone(),"runtime":"narada-agent-runtime-server","authority":auth,"resolved_invocation":resolved_invocation.clone(),"capability_snapshot":capabilities.clone(),"worker_session_id":session,"origin_tool":tool_name,"pid":null,"summary":null,"result":null,"error":null,"refusals":[],"timing":{"started_at":started.clone(),"admitted_at":null,"finished_at":null,"queue_ms":null,"execution_ms":null,"duration_ms":null},"artifacts":{"request":dir.join("request.json").to_string_lossy(),"events":dir.join("events.jsonl").to_string_lossy(),"diagnostic":dir.join("diagnostic.log").to_string_lossy(),"last_message":dir.join("last_message.json").to_string_lossy()}});
     write_json_atomic(&dir.join("result.json"), &running)?;
     let root_owned = root.to_path_buf();
     let dir_owned = dir.clone();
@@ -1765,6 +1770,7 @@ fn worker_run(
                 codex_transport,
                 allowed_roots_owned,
                 max_run_ms,
+                queue_timeout_ms,
                 task_label,
                 started,
                 format!("Effective mode: {}. This reconciled state is injected at the provider process boundary through the permission profile, CLI sandbox, and writable-root arguments; ambient labels are advisory. CWD: {}. Writable roots: {}. Scoped create/read/remove preflight: {}. Command write effects: {}. Windows text-file lifecycle: use one literal-path PowerShell cmdlet invocation per operation: Set-Content -Encoding utf8, Get-Content -Encoding utf8, Remove-Item, then Test-Path; do not use utf8NoBOM or .NET methods under ConstrainedLanguage. Delegated apply_patch is unavailable under this restricted-token carrier. Read-only command policy: issue one executable with literal arguments per probe; do not combine probes with &&, ;, pipes, redirection, $(), backticks, or generated scripts. Use separate bounded commands and report each result. For non-ASCII text, set explicit UTF-8 output before reading. Carrier MCP projection: none. On refusal return narada.worker.refusal.v1 with tool, operation, cwd, target_path, declared_capability, actual_refusal. Ergonomics ratings use narada.worker.observed_ergonomics.v1: lower a score only for observed failure, retry, human intervention, or ambiguity that changed execution; automatic contained review requires no human interaction and is not ceremony; put hypothetical improvements in non_scoring_observations.\n\nTask:\n{prompt}", capabilities["effective_mode"].as_str().unwrap_or("unknown"), capabilities["cwd"].as_str().unwrap_or("unknown"), capabilities["allowed_roots"].as_array().map(|roots| roots.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")).unwrap_or_default(), capabilities["runtime_probe"]["status"].as_str().unwrap_or("not_required"), capabilities["commands"]["write_effects"].as_bool().unwrap_or(false)),
@@ -1911,6 +1917,9 @@ fn timeout_failure(run_id: &str, max_run_ms: u64, elapsed_ms: u64) -> Value {
         "remediation":"Increase constraints.max_run_ms or inspect the worker runtime before retrying."
     })
 }
+fn queue_timeout_failure(run_id: &str, queue_timeout_ms: u64, elapsed_ms: u64) -> Value {
+    json!({"schema":"narada.worker.failure.v1","code":"provider_queue_timed_out","run_id":run_id,"queue_timeout_ms":queue_timeout_ms,"elapsed_ms":elapsed_ms,"remediation":"Retry after provider capacity is available or increase constraints.queue_timeout_ms."})
+}
 
 fn event_text(event: &Value) -> Option<String> {
     for key in ["content", "message", "text", "summary"] {
@@ -1959,6 +1968,19 @@ fn update_run_progress(path: &Path, phase: &str, broker_generation: Option<&str>
         }
     }
 }
+fn update_provider_admission_progress(path: &Path, event: &Value, admitted_at: Option<&str>) {
+    if let Ok(mut run) = read_json(path) {
+        if run.get("status").and_then(Value::as_str) != Some("running") { return; }
+        if let Some(position) = event.get("queue_position") { run["provider_queue"]["position"] = position.clone(); }
+        if let Some(capacity) = event.get("capacity") { run["provider_queue"]["capacity"] = capacity.clone(); }
+        if let Some(admitted_at) = admitted_at {
+            run["timing"]["admitted_at"] = json!(admitted_at);
+            run["provider_queue"]["position"] = Value::Null;
+        }
+        run["heartbeat_at"] = json!(now());
+        let _ = write_json_atomic(path, &run);
+    }
+}
 fn refusal_records(path: &Path) -> Value {
     let Ok(file) = fs::File::open(path) else { return json!([]); };
     let mut records = Vec::new();
@@ -2001,6 +2023,7 @@ fn complete_native_run(
     codex_transport: String,
     allowed_roots: Vec<PathBuf>,
     max_run_ms: u64,
+    queue_timeout_ms: u64,
     task_label: String,
     started_at: String,
     prompt: String,
@@ -2025,6 +2048,7 @@ fn complete_native_run(
         .env("NARADA_INTELLIGENCE_PLAN_REF", &plan_ref)
         .env("NARADA_NATIVE_PROVIDER_MODE", &provider_mode)
         .env("NARADA_NATIVE_PROVIDER_TIMEOUT_MS", max_run_ms.to_string())
+        .env("NARADA_NATIVE_PROVIDER_QUEUE_TIMEOUT_MS", queue_timeout_ms.to_string())
         .env(
             "NARADA_WORKER_CAPABILITY_JSON",
             serde_json::to_string(&capability_snapshot(
@@ -2103,6 +2127,8 @@ fn complete_native_run(
         let mut failure = Value::Null;
         let mut turn_completed = false;
         let mut close_sent = false;
+        let mut admitted_at: Option<std::time::Instant> = None;
+        let mut admitted_at_text: Option<String> = None;
         if let Some(stdout) = child.stdout.take() {
             let (line_tx, line_rx) = mpsc::channel();
             thread::spawn(move || {
@@ -2113,17 +2139,23 @@ fn complete_native_run(
                 }
             });
             loop {
-                if started.elapsed() >= Duration::from_millis(max_run_ms) {
-                    let elapsed_ms = started.elapsed().as_millis() as u64;
-                    failure = timeout_failure(&id, max_run_ms, elapsed_ms);
-                    runtime_error = Some(format!(
-                        "worker_runtime_timed_out:max_run_ms={max_run_ms}:elapsed_ms={elapsed_ms}"
-                    ));
+                let execution_timed_out = admitted_at.as_ref().is_some_and(|admitted| admitted.elapsed() >= Duration::from_millis(max_run_ms));
+                let queue_timed_out = admitted_at.is_none() && started.elapsed() >= Duration::from_millis(queue_timeout_ms);
+                if execution_timed_out || queue_timed_out {
+                    let elapsed_ms = admitted_at.as_ref().map(|admitted| admitted.elapsed().as_millis() as u64).unwrap_or_else(|| started.elapsed().as_millis() as u64);
+                    let (event_name, error_text) = if queue_timed_out {
+                        failure = queue_timeout_failure(&id, queue_timeout_ms, elapsed_ms);
+                        ("provider_queue_timed_out", format!("provider_queue_timed_out:queue_timeout_ms={queue_timeout_ms}:elapsed_ms={elapsed_ms}"))
+                    } else {
+                        failure = timeout_failure(&id, max_run_ms, elapsed_ms);
+                        ("worker_runtime_timed_out", format!("worker_runtime_timed_out:max_run_ms={max_run_ms}:elapsed_ms={elapsed_ms}"))
+                    };
+                    runtime_error = Some(error_text);
                     if let Some(file) = events.as_mut() {
                         let _ = writeln!(
                             file,
                             "{}",
-                            json!({"schema":"narada.worker.event.v1","event":"worker_runtime_timed_out","run_id":id,"elapsed_ms":elapsed_ms,"max_run_ms":max_run_ms,"failure":failure,"remediation":"Increase constraints.max_run_ms or inspect the worker runtime before retrying."})
+                            json!({"schema":"narada.worker.event.v1","event":event_name,"run_id":id,"elapsed_ms":elapsed_ms,"max_run_ms":max_run_ms,"queue_timeout_ms":queue_timeout_ms,"failure":failure})
                         );
                     }
                     let _ = child.kill();
@@ -2156,7 +2188,19 @@ fn complete_native_run(
                     .or_else(|| event.get("type"))
                     .and_then(Value::as_str)
                     .unwrap_or("");
-                update_run_progress(&result_path, phase_for_event(kind), provider_host_generation.as_deref());
+                let provider_state = event.get("next_state").or_else(|| event.get("invocation_state")).and_then(Value::as_str);
+                let phase = match provider_state {
+                    Some("queued_for_provider") => "queued_for_provider",
+                    Some("admitted") => {
+                        if admitted_at.is_none() { admitted_at = Some(std::time::Instant::now()); admitted_at_text = Some(now()); }
+                        "provider_executing"
+                    }
+                    _ => phase_for_event(kind),
+                };
+                update_run_progress(&result_path, phase, provider_host_generation.as_deref());
+                if kind == "provider_invocation_state_transition" {
+                    update_provider_admission_progress(&result_path, &event, admitted_at_text.as_deref());
+                }
                 if kind == "assistant_message" {
                     assistant = event_text(&event);
                 }
@@ -2222,6 +2266,8 @@ fn complete_native_run(
             .and_then(|request| request.get("capability_snapshot").cloned())
             .unwrap_or(Value::Null);
         let elapsed_ms = started.elapsed().as_millis() as u64;
+        let queue_ms = admitted_at.as_ref().map(|admitted| elapsed_ms.saturating_sub(admitted.elapsed().as_millis() as u64)).unwrap_or(elapsed_ms);
+        let execution_ms = admitted_at.as_ref().map(|admitted| admitted.elapsed().as_millis() as u64);
         if let Some(generation) = provider_host_generation {
             resolved_invocation["provider_host_generation"] = json!(generation);
         }
@@ -2239,7 +2285,7 @@ fn complete_native_run(
             &json!({"result":assistant.clone(),"summary":assistant.clone(),"error":final_error.clone(),"failure":failure.clone(),"deliverables":[],"open_questions":[],"next_actions":[]}),
         );
         let refusals = refusal_records(&events_path);
-        let payload = json!({"schema":"narada.worker.run.v1","run_id":id,"task_label":task_label,"status":if successful{"completed"}else{"failed"},"completion_state":if turn_completed && assistant.is_some(){"complete"}else{"absent"},"phase":if successful{"completed"}else{"failed"},"heartbeat_at":finished,"terminal_event":turn_completed,"runtime":"narada-agent-runtime-server","authority":authority,"cognition":cognition,"resolved_invocation":resolved_invocation,"capability_snapshot":snapshot,"worker_session_id":provider_session.unwrap_or(session),"pid":child.id(),"summary":assistant.clone(),"result":assistant.clone(),"execution_log":{"events_ref":artifact_ref(&id,"events.jsonl"),"diagnostic_ref":artifact_ref(&id,"diagnostic.log")},"refusals":refusals,"error":final_error,"failure":failure,"timing":{"started_at":started_at,"finished_at":finished,"duration_ms":elapsed_ms},"artifacts":{"request":dir.join("request.json").to_string_lossy(),"events":events_path.to_string_lossy(),"diagnostic":diagnostic_path.to_string_lossy(),"last_message":dir.join("last_message.json").to_string_lossy()}});
+        let payload = json!({"schema":"narada.worker.run.v1","run_id":id,"task_label":task_label,"status":if successful{"completed"}else{"failed"},"completion_state":if turn_completed && assistant.is_some(){"complete"}else{"absent"},"phase":if successful{"completed"}else{"failed"},"heartbeat_at":finished,"terminal_event":turn_completed,"runtime":"narada-agent-runtime-server","authority":authority,"cognition":cognition,"resolved_invocation":resolved_invocation,"capability_snapshot":snapshot,"worker_session_id":provider_session.unwrap_or(session),"pid":child.id(),"summary":assistant.clone(),"result":assistant.clone(),"execution_log":{"events_ref":artifact_ref(&id,"events.jsonl"),"diagnostic_ref":artifact_ref(&id,"diagnostic.log")},"refusals":refusals,"error":final_error,"failure":failure,"timing":{"started_at":started_at,"admitted_at":admitted_at_text,"finished_at":finished,"queue_ms":queue_ms,"execution_ms":execution_ms,"duration_ms":elapsed_ms},"artifacts":{"request":dir.join("request.json").to_string_lossy(),"events":events_path.to_string_lossy(),"diagnostic":diagnostic_path.to_string_lossy(),"last_message":dir.join("last_message.json").to_string_lossy()}});
         let _ = write_json_atomic(&result_path, &payload);
     }
 }
@@ -2276,6 +2322,7 @@ fn input_schema(name: &str) -> Value {
                 "preflight_paths":{"type":"array","maxItems":64,"items":{"type":"object","properties":{"path":{"type":"string","minLength":1,"maxLength":4096},"access":{"type":"string","enum":["read","write","create"],"default":"read"}},"required":["path"],"additionalProperties":false}},
                 "invocation_plan_ref":{"type":"string","minLength":6,"maxLength":512,"pattern":"^plan:[A-Za-z0-9._:-]+$"},
                 "max_run_ms":{"type":"integer","minimum":1,"maximum":1800000,"default":300000,"description":"Hard worker runtime deadline enforced by the native authority."},
+                "queue_timeout_ms":{"type":"integer","minimum":1,"maximum":1800000,"default":300000,"description":"Bounded provider-admission wait. This clock is separate from max_run_ms, which begins only after admission."},
                 "wait_for_completion":{"type":"boolean","default":false,"description":"Return after bounded child completion polling when true; false returns the accepted running record immediately."},
                 "wait_timeout_ms":{"type":"integer","minimum":0,"maximum":100000,"default":30000,"description":"Maximum transport-safe inline completion wait when wait_for_completion is true. Longer work remains durable and must be recovered with worker_run_wait or worker_run_status."}
             },
@@ -2920,5 +2967,16 @@ mod tests {
         assert_eq!(result["status"], "reaped");
         assert_eq!(read_run(&root, id).expect("read")["status"], "cancelled");
         fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn provider_queue_timeout_is_distinct_and_discoverable() {
+        let schema = input_schema("worker_run");
+        assert_eq!(schema["properties"]["constraints"]["properties"]["queue_timeout_ms"]["default"], 300_000);
+        let failure = queue_timeout_failure("run-fixture", 300_000, 300_001);
+        assert_eq!(failure["code"], "provider_queue_timed_out");
+        assert_eq!(failure["queue_timeout_ms"], 300_000);
+        let root = std::env::temp_dir();
+        assert_eq!(policy(&root, &[root.clone()])["provider_transports"]["codex-subscription"]["capacity"]["lanes"], 1);
     }
 }

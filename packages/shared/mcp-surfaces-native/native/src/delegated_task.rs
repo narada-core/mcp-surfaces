@@ -2228,6 +2228,7 @@ const CONSTRAINT_FIELDS: &[&str] = &[
     "wait_for_completion",
     "wait_timeout_ms",
     "max_run_ms",
+    "queue_timeout_ms",
     "exit_interview",
     "max_concurrency",
     "max_retries",
@@ -2256,6 +2257,7 @@ fn constraints_schema() -> Value {
             "wait_for_completion":{"type":"boolean"},
             "wait_timeout_ms":{"type":"integer","minimum":1,"maximum":180000},
             "max_run_ms":{"type":"integer","minimum":1,"maximum":1800000},
+            "queue_timeout_ms":{"type":"integer","minimum":1,"maximum":1800000,"default":300000,"description":"Maximum provider-admission wait; max_run_ms begins only after provider admission."},
             "exit_interview":{"type":"boolean"},
             "max_concurrency":{"type":"integer","minimum":1,"maximum":32},
             "max_retries":{"type":"integer","minimum":0,"maximum":10},
@@ -2747,7 +2749,7 @@ fn max_concurrency(task: &Value) -> usize {
     task.pointer("/constraints/max_concurrency")
         .or_else(|| task.pointer("/execution/max_concurrency"))
         .and_then(Value::as_u64)
-        .unwrap_or(10)
+        .unwrap_or(1)
         .clamp(1, 32) as usize
 }
 fn acceptance_verdict(task: &Value, root: &Path) -> (&'static str, Vec<Value>) {
@@ -4811,5 +4813,17 @@ mod tests {
         let cycle = task_run(json!({"task_id":"task_cycle","objective":"cycle","constraints":{"authority":"read"},"depends_on_task_ids":["task_a"]}).as_object().unwrap(), &root).expect_err("cycle");
         assert_eq!(cycle["code"], "delegated_task_validation_failed");
         fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn delegated_tasks_propagate_queue_budget_and_default_to_provider_capacity() {
+        let schema = constraints_schema();
+        assert_eq!(schema["properties"]["queue_timeout_ms"]["default"], 300_000);
+        assert!(CONSTRAINT_FIELDS.contains(&"queue_timeout_ms"));
+        assert_eq!(max_concurrency(&json!({})), 1);
+        assert_eq!(asynchronous_worker_constraints(
+            &json!({"constraints":{"queue_timeout_ms":600000}}),
+            &json!({})
+        )["queue_timeout_ms"], 600_000);
     }
 }
