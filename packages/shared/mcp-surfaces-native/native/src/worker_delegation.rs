@@ -15,6 +15,7 @@ const MAX_RUNS: usize = 200;
 const MAX_FILE_BYTES: usize = 256_000;
 const MAX_NATIVE_READ_BYTES: usize = 64 * 1024;
 const MAX_NATIVE_READ_FILES: usize = 8;
+const MAX_INLINE_WAIT_MS: u64 = 100_000;
 const READ_ONLY_COMMAND_CONTRACT: &str = "READ-ONLY COMMAND CONTRACT (apply before acting): use one executable with literal argv per probe; use supplied native preflight evidence for path existence/readability instead of probing again; when constraints.preflight_paths contains access=read, the native authority injects bounded file evidence before launch; never combine probes with &&, ;, pipes, redirection, $(), backticks, or generated scripts. If a probe is refused, stop that probe and report the refusal; do not retry by bundling commands or changing shells. WORKER OUTPUT CONTRACT (apply before acting): return only the requested result; no preamble, progress narration, tool narration, or post-hoc workflow story. Keep the final response within 4096 characters unless the requested structured schema requires less. Put observed refusals in a refusals array and keep execution details out of the result. WINDOWS READ-ONLY PROBE: when a filesystem read probe is actually needed, use pwsh with literal argv [-NoProfile, -NonInteractive, -Command, Get-Content -LiteralPath <literal-path> -TotalCount 1]. Do not start with dotnet File.OpenRead, C# scripts, generated scripts, or alternate shells. If supplied native_read status is passed, command probes for that path are prohibited: do not call shell, structured-command, pwsh, dotnet, or any command tool; use the evidence above as authoritative and do not retry. Prefer supplied native preflight evidence and do not probe again when it is present.";
 const READ_TOOLS: &[(&str, &str)] = &[
     (
@@ -669,7 +670,7 @@ fn run_wait(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
         .get("timeout_ms")
         .and_then(Value::as_u64)
         .unwrap_or(30_000)
-        .min(300_000);
+        .min(MAX_INLINE_WAIT_MS);
     let (run, wait) = wait_for_run(root, &id, timeout_ms)?;
     Ok(
         json!({"schema":"narada.worker.run_wait.v1","status":"ok","wait":wait,"compact":compact,"site_scope":"current_site","run":if compact{minimal_run(&run)}else{compact_run(&run)},"native_read_only":true}),
@@ -1588,7 +1589,7 @@ fn worker_run(
         .and_then(|value| value.get("wait_timeout_ms"))
         .and_then(Value::as_u64)
         .unwrap_or(30_000)
-        .min(300_000);
+        .min(MAX_INLINE_WAIT_MS);
     for key in ["provider"] {
         if constraints.and_then(|value| value.get(key)).is_some() {
             return Err(error(
@@ -2017,6 +2018,7 @@ fn complete_native_run(
         .env("NARADA_CARRIER_SESSION_ID", &runtime_session)
         .env("NARADA_INTELLIGENCE_PLAN_REF", &plan_ref)
         .env("NARADA_NATIVE_PROVIDER_MODE", &provider_mode)
+        .env("NARADA_NATIVE_PROVIDER_TIMEOUT_MS", max_run_ms.to_string())
         .env(
             "NARADA_WORKER_CAPABILITY_JSON",
             serde_json::to_string(&capability_snapshot(
@@ -2269,7 +2271,7 @@ fn input_schema(name: &str) -> Value {
                 "invocation_plan_ref":{"type":"string","minLength":6,"maxLength":512,"pattern":"^plan:[A-Za-z0-9._:-]+$"},
                 "max_run_ms":{"type":"integer","minimum":1,"maximum":1800000,"default":300000,"description":"Hard worker runtime deadline enforced by the native authority."},
                 "wait_for_completion":{"type":"boolean","default":false,"description":"Return after bounded child completion polling when true; false returns the accepted running record immediately."},
-                "wait_timeout_ms":{"type":"integer","minimum":0,"maximum":300000,"default":30000,"description":"Maximum inline completion wait when wait_for_completion is true."}
+                "wait_timeout_ms":{"type":"integer","minimum":0,"maximum":100000,"default":30000,"description":"Maximum transport-safe inline completion wait when wait_for_completion is true. Longer work remains durable and must be recovered with worker_run_wait or worker_run_status."}
             },
             "additionalProperties":false
         })
@@ -2296,7 +2298,7 @@ fn input_schema(name: &str) -> Value {
             json!({"type":"object","properties":{"run_id":run_id(),"compact":{"type":"boolean","default":true}},"required":["run_id"],"additionalProperties":false})
         }
         "worker_run_wait" => {
-            json!({"type":"object","properties":{"run_id":run_id(),"compact":{"type":"boolean","default":true},"timeout_ms":{"type":"integer","minimum":0,"maximum":300000,"default":30000,"description":"Maximum bounded state-file polling interval."}},"required":["run_id"],"additionalProperties":false})
+            json!({"type":"object","properties":{"run_id":run_id(),"compact":{"type":"boolean","default":true},"timeout_ms":{"type":"integer","minimum":0,"maximum":100000,"default":30000,"description":"Maximum transport-safe bounded state-file polling interval. Repeat this read-only call for longer work."}},"required":["run_id"],"additionalProperties":false})
         }
         "worker_runs_list" => {
             json!({"type":"object","properties":{"limit":{"type":"integer","minimum":1,"maximum":200},"compact":{"type":"boolean","default":true},"site_scope":{"type":"string","enum":["current_site"],"default":"current_site","description":"Runs are filtered by the server-bound Site root; caller-supplied cross-site identity is not accepted."},"include_running":{"type":"boolean"},"include_completed":{"type":"boolean"}},"additionalProperties":false})
@@ -2566,12 +2568,12 @@ mod tests {
     fn wait_and_windows_toolchain_contracts_are_explicit() {
         assert_eq!(
             input_schema("worker_run_wait")["properties"]["timeout_ms"]["maximum"],
-            300_000
+            MAX_INLINE_WAIT_MS
         );
         assert_eq!(
             input_schema("worker_run")["properties"]["constraints"]["properties"]["wait_timeout_ms"]
                 ["maximum"],
-            300_000
+            MAX_INLINE_WAIT_MS
         );
         assert_eq!(
             guidance(&Map::new())["windows_rust_toolchain"]["status"],
