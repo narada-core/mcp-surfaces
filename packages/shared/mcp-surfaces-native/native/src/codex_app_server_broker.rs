@@ -26,6 +26,13 @@ struct BrokerState {
 }
 
 static BROKER: OnceLock<Mutex<Option<BrokerState>>> = OnceLock::new();
+static PROCESS_GENERATION: OnceLock<String> = OnceLock::new();
+
+fn process_generation() -> &'static str {
+    PROCESS_GENERATION
+        .get_or_init(|| uuid::Uuid::new_v4().to_string())
+        .as_str()
+}
 
 pub fn binding(site_root: &Path) -> Result<BrokerBinding, String> {
     let broker = BROKER.get_or_init(|| Mutex::new(None));
@@ -42,14 +49,7 @@ pub fn binding(site_root: &Path) -> Result<BrokerBinding, String> {
 }
 
 pub fn current_generation() -> Option<String> {
-    BROKER
-        .get()
-        .and_then(|broker| broker.lock().ok())
-        .and_then(|state| {
-            state
-                .as_ref()
-                .map(|state| state.binding.broker_generation.clone())
-        })
+    Some(process_generation().to_string())
 }
 
 fn start_broker(site_root: &Path) -> Result<BrokerState, String> {
@@ -60,7 +60,7 @@ fn start_broker(site_root: &Path) -> Result<BrokerState, String> {
         .map_err(|error| format!("codex_app_server_broker_address_failed:{error}"))?
         .to_string();
     let capability = uuid::Uuid::new_v4().to_string();
-    let broker_generation = uuid::Uuid::new_v4().to_string();
+    let broker_generation = process_generation().to_string();
     let scheduler = Arc::new(BrokerScheduler::new(AppServer::start(site_root)?));
     BrokerScheduler::start(Arc::clone(&scheduler))?;
     let server = Arc::clone(&scheduler);

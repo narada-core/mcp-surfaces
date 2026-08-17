@@ -1729,18 +1729,11 @@ fn task_status_with_roots(
 ) -> Result<Value, Value> {
     let id = task_id(args)?;
     let current = read_task(root, &id)?;
-    let has_unresolved_dependencies = !task_is_terminal(&current)
-        && current
-            .get("depends_on_task_ids")
-            .and_then(Value::as_array)
-            .is_some_and(|dependencies| !dependencies.is_empty());
-    let task = if args.get("refresh").and_then(Value::as_bool) == Some(true) {
-        assert_mutation_scope(&current, args, root)?;
-        advance_task_closure(root, &id, allowed_roots, &mut std::collections::BTreeSet::new())?
-    } else if has_unresolved_dependencies {
-        // Dependency transitions are lifecycle-owned projections. Reading a
-        // dependent task must not preserve stale waiting state after a
-        // predecessor has reached a terminal outcome.
+    let task = if !task_is_terminal(&current) {
+        // Worker and dependency transitions are lifecycle-owned projections.
+        // Ordinary status must reconcile every nonterminal task; otherwise an
+        // independent task can remain durably "running" after its worker has
+        // completed or become orphaned.
         advance_task_closure(root, &id, allowed_roots, &mut std::collections::BTreeSet::new())?
     } else {
         current
@@ -3157,7 +3150,7 @@ fn advance_value_with_roots(
             }
         } else if matches!(
             worker.as_str(),
-            "failed" | "cancelled" | "completed_with_errors"
+            "failed" | "cancelled" | "completed_with_errors" | "orphaned"
         ) {
             record_worker_terminal(&mut task, step_id, &run_id, &worker, &worker_run);
             let attempts = task["result"]["step_states"][step_id]["attempts"]
@@ -4794,6 +4787,59 @@ mod tests {
         assert_eq!(read_task(&root, "task_b").expect("persisted descendant")["external_dependencies"]["status"], "blocked");
         let events = task_events(json!({"task_id":"task_b","limit":20}).as_object().unwrap(), &root).expect("events");
         assert!(events["events"].as_array().is_some_and(|items| items.iter().any(|event| event["event_kind"] == "task_dependency_blocked")));
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn ordinary_status_reconciles_independent_worker_completion() {
+        let root = std::env::temp_dir().join(format!(
+            "narada-delegated-task-status-worker-reconcile-{}",
+            uuid::Uuid::new_v4()
+        ));
+        task_run(
+            json!({"task_id":"task_a","objective":"extract","constraints":{"authority":"read"},"execution":{"start":false}})
+                .as_object()
+                .unwrap(),
+            &root,
+        )
+        .expect("task");
+        let run_id = "run-status-reconcile";
+        let mut task = read_task(&root, "task_a").expect("task record");
+        task["status"] = json!("running");
+        task["result"]["step_states"]["primary"]["status"] = json!("running");
+        task["result"]["step_states"]["primary"]["attempts"] = json!(1);
+        task["result"]["step_states"]["primary"]["current_run_id"] = json!(run_id);
+        task["result"]["step_states"]["primary"]["run_ids"] = json!([run_id]);
+        write_task(&root, &task).expect("running task");
+        let run_dir = root
+            .join(".narada/runtime/worker-delegation")
+            .join(run_id);
+        fs::create_dir_all(&run_dir).expect("worker run directory");
+        fs::write(
+            run_dir.join("result.json"),
+            serde_json::to_vec(&json!({
+                "run_id":run_id,
+                "status":"completed",
+                "completion_state":"complete",
+                "phase":"completed",
+                "summary":"fixture complete",
+                "result":"fixture complete",
+                "timing":{"started_at":"2026-01-01T00:00:00Z","finished_at":"2026-01-01T00:00:01Z","duration_ms":1000}
+            }))
+            .expect("worker record"),
+        )
+        .expect("worker record write");
+        let status = task_status(
+            json!({"task_id":"task_a"}).as_object().unwrap(),
+            &root,
+        )
+        .expect("status reconciliation");
+        assert_eq!(status["task_status"], "completed");
+        assert_eq!(
+            read_task(&root, "task_a").expect("persisted task")["result"]["step_states"]
+                ["primary"]["status"],
+            "completed"
+        );
         fs::remove_dir_all(root).expect("cleanup");
     }
 
