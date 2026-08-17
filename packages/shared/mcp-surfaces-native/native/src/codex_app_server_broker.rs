@@ -144,17 +144,7 @@ impl AppServer {
         let command =
             std::env::var_os("NARADA_NATIVE_CODEX_COMMAND").unwrap_or_else(|| "codex".into());
         let mut child = Command::new(command)
-            .args([
-                "app-server",
-                "--listen",
-                "stdio://",
-                "-c",
-                "mcp_servers={}",
-                "-c",
-                "features.apps=false",
-                "-c",
-                "windows.sandbox=\"unelevated\"",
-            ])
+            .args(app_server_args())
             .env_remove("CODEX_PERMISSION_PROFILE")
             .env_remove("CODEX_THREAD_ID")
             .stdin(Stdio::piped())
@@ -351,6 +341,18 @@ impl AppServer {
     }
 }
 
+fn app_server_args() -> [&'static str; 7] {
+    [
+        "app-server",
+        "--listen",
+        "stdio://",
+        "-c",
+        "mcp_servers={}",
+        "-c",
+        "features.apps=false",
+    ]
+}
+
 impl Drop for AppServer {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -377,6 +379,15 @@ mod tests {
         assert_eq!(
             required_string(&request, "reasoning_effort").unwrap_err(),
             "codex_app_server_reasoning_effort_required"
+        );
+    }
+
+    #[test]
+    fn app_server_inherits_the_configured_windows_sandbox() {
+        let args = app_server_args();
+        assert!(
+            args.iter().all(|arg| !arg.starts_with("windows.sandbox=")),
+            "the broker must not replace the provisioned Windows sandbox mode"
         );
     }
 }
