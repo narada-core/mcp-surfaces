@@ -383,8 +383,8 @@ fn extend_epistemic_catalog(contract: &mut Value) {
 
 fn align_native_surface_descriptor_schemas(contract: &mut Value) {
     let Some(items) = contract.pointer_mut("/read_models/registrar_surface_list/items").and_then(Value::as_array_mut) else { return; };
-    let intent = || json!({"type":"object","properties":{"instruction":{"type":"string","minLength":1,"maxLength":65536},"task":{"type":"string","minLength":1,"maxLength":65536},"goal":{"type":"string","minLength":1,"maxLength":65536},"summary":{"type":"string","minLength":1,"maxLength":65536},"mode":{"type":"string","maxLength":256}},"additionalProperties":false,"anyOf":[{"required":["instruction"]},{"required":["task"]},{"required":["goal"]},{"required":["summary"]}]});
-    let constraints = || json!({"type":"object","properties":{"authority":{"type":"string","enum":["read","write","command"]},"cognition":{"type":"string","enum":["low","medium","high"]},"cwd":{"type":"string","minLength":1,"maxLength":4096},"invocation_plan_ref":{"type":"string","minLength":6,"maxLength":512,"pattern":"^plan:[A-Za-z0-9._:-]+$"},"max_run_ms":{"type":"integer","minimum":1,"maximum":1800000,"default":300000,"description":"Hard worker runtime deadline enforced by the native authority."},"wait_for_completion":{"type":"boolean","default":false,"description":"Return after bounded child completion polling when true; false returns the accepted running record immediately."},"wait_timeout_ms":{"type":"integer","minimum":0,"maximum":300000,"default":30000,"description":"Maximum inline completion wait when wait_for_completion is true."}},"additionalProperties":false});
+    let intent = || json!({"type":"object","properties":{"instruction":{"type":"string","minLength":1,"maxLength":65536},"task":{"type":"string","minLength":1,"maxLength":65536},"goal":{"type":"string","minLength":1,"maxLength":65536},"summary":{"type":"string","minLength":1,"maxLength":65536},"mode":{"type":"string","minLength":1,"maxLength":512}},"additionalProperties":false,"anyOf":[{"required":["instruction"]},{"required":["task"]},{"required":["goal"]},{"required":["summary"]}],"maxProperties":256});
+    let constraints = || json!({"type":"object","properties":{"authority":{"type":"string","enum":["read","write","command"]},"cognition":{"type":"string","enum":["low","medium","high"],"default":"low"},"cwd":{"type":"string","minLength":1,"maxLength":4096},"preflight_paths":{"type":"array","maxItems":64,"items":{"type":"object","properties":{"path":{"type":"string","minLength":1,"maxLength":4096},"access":{"type":"string","enum":["read","write","create"],"default":"read"}},"required":["path"],"additionalProperties":false,"maxProperties":256}},"invocation_plan_ref":{"type":"string","minLength":6,"maxLength":512,"pattern":"^plan:[A-Za-z0-9._:-]+$"},"max_run_ms":{"type":"integer","minimum":1,"maximum":1800000,"default":300000,"description":"Hard worker runtime deadline enforced by the native authority."},"wait_for_completion":{"type":"boolean","default":false,"description":"Return after bounded child completion polling when true; false returns the accepted running record immediately."},"wait_timeout_ms":{"type":"integer","minimum":0,"maximum":300000,"default":30000,"description":"Maximum inline completion wait when wait_for_completion is true."}},"additionalProperties":false,"maxProperties":256});
     for item in items {
         let id = item.get("id").and_then(Value::as_str).unwrap_or_default().to_owned();
         if id == "surface-feedback" { ensure_feedback_site_reporter_projection(item); }
@@ -394,6 +394,7 @@ fn align_native_surface_descriptor_schemas(contract: &mut Value) {
             let schema = match (id.as_str(), name) {
                 ("epistemic-graph", "epistemic_graph_guidance") => Some(json!({"type":"object","properties":{"workflow":{"type":"string","maxLength":256},"tool":{"type":"string","maxLength":256}},"additionalProperties":false})),
                 ("worker-delegation", "worker_run") => Some(json!({"type":"object","properties":{"intent":intent(),"constraints":constraints()},"required":["intent"],"additionalProperties":false})),
+                ("worker-delegation", "worker_run_batch") => Some(json!({"type":"object","properties":{"requests":{"type":"array","minItems":1,"maxItems":50,"items":{"type":"object","properties":{"intent":intent(),"constraints":constraints()},"required":["intent"],"additionalProperties":false,"maxProperties":256}}},"required":["requests"],"additionalProperties":false,"maxProperties":256})),
                 ("worker-delegation", "worker_config_resolve") => Some(json!({"type":"object","properties":{"cwd":{"type":"string","minLength":1,"maxLength":4096},"constraints":constraints()},"additionalProperties":false})),
                 ("surface-feedback", "surface_feedback_submit") => Some(json!({
                     "type":"object","properties":{
@@ -5544,6 +5545,25 @@ mod tests {
                 .and_then(Value::as_u64),
             Some(300_000)
         );
+        let run_constraints = schema("worker-delegation", "worker_run")
+            .pointer("/properties/constraints")
+            .cloned()
+            .unwrap();
+        let batch_item = schema("worker-delegation", "worker_run_batch")
+            .pointer("/properties/requests/items")
+            .cloned()
+            .unwrap();
+        assert_eq!(batch_item["properties"]["constraints"], run_constraints);
+        assert_eq!(batch_item["properties"]["intent"], schema("worker-delegation", "worker_run")["properties"]["intent"]);
+        assert!(batch_item.pointer("/properties/constraints/properties/preflight_paths").is_some());
+        for legacy_field in ["site_root", "provider", "resumable", "exit_interview", "verification_budget", "test_budget", "required_mcp_tools", "overrides"] {
+            assert!(
+                batch_item
+                    .pointer(&format!("/properties/constraints/properties/{legacy_field}"))
+                    .is_none(),
+                "legacy catalog-only field remained advertised: {legacy_field}"
+            );
+        }
         assert_eq!(schema("worker-delegation", "worker_config_resolve")["additionalProperties"], false);
         assert_eq!(schema("epistemic-graph", "epistemic_graph_guidance")["properties"]["workflow"]["type"], "string");
         let feedback = items.iter().find(|item| item["id"] == "surface-feedback").unwrap();

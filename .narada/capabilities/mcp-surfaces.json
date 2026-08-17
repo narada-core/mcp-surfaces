@@ -3,7 +3,7 @@
   "artifact_role": "site_capability_surface_registry_not_mcp_client_config",
   "site_id": "mcp-surfaces",
   "generated_by": "mcp-registrar",
-  "generated_at": "2026-08-17T15:13:06.3606299Z",
+  "generated_at": "2026-08-17T15:30:10.6043255Z",
   "generation_policy": {
     "source": ".ai/mcp + registrar surface catalog",
     "mode": "enabled_surface_tool_authority",
@@ -3003,12 +3003,41 @@
                           "low",
                           "medium",
                           "high"
-                        ]
+                        ],
+                        "default": "low"
                       },
                       "cwd": {
                         "type": "string",
                         "minLength": 1,
                         "maxLength": 4096
+                      },
+                      "preflight_paths": {
+                        "type": "array",
+                        "maxItems": 64,
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "path": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 4096
+                            },
+                            "access": {
+                              "type": "string",
+                              "enum": [
+                                "read",
+                                "write",
+                                "create"
+                              ],
+                              "default": "read"
+                            }
+                          },
+                          "required": [
+                            "path"
+                          ],
+                          "additionalProperties": false,
+                          "maxProperties": 256
+                        }
                       },
                       "invocation_plan_ref": {
                         "type": "string",
@@ -3036,7 +3065,8 @@
                         "description": "Maximum inline completion wait when wait_for_completion is true."
                       }
                     },
-                    "additionalProperties": false
+                    "additionalProperties": false,
+                    "maxProperties": 256
                   }
                 },
                 "additionalProperties": false
@@ -3212,7 +3242,8 @@
                       },
                       "mode": {
                         "type": "string",
-                        "maxLength": 256
+                        "minLength": 1,
+                        "maxLength": 512
                       }
                     },
                     "additionalProperties": false,
@@ -3237,7 +3268,8 @@
                           "summary"
                         ]
                       }
-                    ]
+                    ],
+                    "maxProperties": 256
                   },
                   "constraints": {
                     "type": "object",
@@ -3256,12 +3288,41 @@
                           "low",
                           "medium",
                           "high"
-                        ]
+                        ],
+                        "default": "low"
                       },
                       "cwd": {
                         "type": "string",
                         "minLength": 1,
                         "maxLength": 4096
+                      },
+                      "preflight_paths": {
+                        "type": "array",
+                        "maxItems": 64,
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "path": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 4096
+                            },
+                            "access": {
+                              "type": "string",
+                              "enum": [
+                                "read",
+                                "write",
+                                "create"
+                              ],
+                              "default": "read"
+                            }
+                          },
+                          "required": [
+                            "path"
+                          ],
+                          "additionalProperties": false,
+                          "maxProperties": 256
+                        }
                       },
                       "invocation_plan_ref": {
                         "type": "string",
@@ -3289,7 +3350,8 @@
                         "description": "Maximum inline completion wait when wait_for_completion is true."
                       }
                     },
-                    "additionalProperties": false
+                    "additionalProperties": false,
+                    "maxProperties": 256
                   }
                 },
                 "required": [
@@ -6117,47 +6179,59 @@
                           "type": "object",
                           "properties": {
                             "instruction": {
-                              "type": "string"
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 65536
+                            },
+                            "task": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 65536
+                            },
+                            "goal": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 65536
+                            },
+                            "summary": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 65536
                             },
                             "mode": {
                               "type": "string",
-                              "enum": [
-                                "audit_only",
-                                "plan_only",
-                                "implement",
-                                "implement_and_verify"
-                              ],
-                              "description": "Non-mechanical task mode. Defaults to audit_only for read authority and implement for write/command authority."
-                            },
-                            "output_contract": {
-                              "type": "object",
-                              "additionalProperties": true,
-                              "description": "Optional caller-owned structured output contract merged into the worker output contract."
+                              "minLength": 1,
+                              "maxLength": 512
                             }
                           },
-                          "required": [
-                            "instruction"
+                          "additionalProperties": false,
+                          "anyOf": [
+                            {
+                              "required": [
+                                "instruction"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "task"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "goal"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "summary"
+                              ]
+                            }
                           ],
-                          "additionalProperties": false
+                          "maxProperties": 256
                         },
                         "constraints": {
                           "type": "object",
                           "properties": {
-                            "cwd": {
-                              "type": "string"
-                            },
-                            "site_root": {
-                              "type": "string",
-                              "description": "Explicit Narada Site root for narada-agent-runtime-server workers. Defaults to nearest Site marker above cwd."
-                            },
-                            "invocation_plan_ref": {
-                              "type": "string",
-                              "description": "Optional immutable canonical Narada invocation-plan reference. When omitted, narada-agent-runtime-server resolves and admits its plan during canonical preflight."
-                            },
-                            "provider": {
-                              "type": "string",
-                              "description": "Legacy compatibility provider selector. Rejected for runtime narada-agent-runtime-server; that runtime uses the canonical invocation plan."
-                            },
                             "authority": {
                               "type": "string",
                               "enum": [
@@ -6173,104 +6247,23 @@
                                 "medium",
                                 "high"
                               ],
-                              "description": "Legacy compatibility cognition tier; canonical offerings declare their own plan-scoped capability vocabulary."
+                              "default": "low"
                             },
-                            "resumable": {
-                              "type": "boolean"
-                            },
-                            "wait_for_completion": {
-                              "type": "boolean",
-                              "description": "When true, wait boundedly for completion. Defaults to false so delegation returns promptly with run_id."
-                            },
-                            "wait_timeout_ms": {
-                              "type": "integer",
-                              "minimum": 1,
-                              "maximum": 180000,
-                              "description": "Maximum synchronous wait before returning the recoverable running run_id. Defaults to 180000."
-                            },
-                            "max_run_ms": {
-                              "type": "integer",
-                              "minimum": 1,
-                              "maximum": 1800000,
-                              "description": "Maximum worker runtime. The effective value is capped by the worker policy."
-                            },
-                            "exit_interview": {
-                              "type": "boolean",
-                              "description": "Ask the worker to include ergonomics feedback in its final output."
-                            },
-                            "verification_budget": {
-                              "type": "object",
-                              "description": "Advisory verification budget. Workers classify commands as focused or broad, respect stop discipline, and report budget adherence.",
-                              "properties": {
-                                "focus": {
-                                  "type": "string",
-                                  "enum": [
-                                    "focused",
-                                    "broad"
-                                  ],
-                                  "description": "Default command scope expected for verification."
-                                },
-                                "max_commands": {
-                                  "type": "integer",
-                                  "minimum": 0,
-                                  "maximum": 100
-                                },
-                                "max_minutes": {
-                                  "type": "number",
-                                  "minimum": 0
-                                },
-                                "stop_on_first_failure": {
-                                  "type": "boolean"
-                                },
-                                "broad_commands_allowed": {
-                                  "type": "boolean"
-                                },
-                                "notes": {
-                                  "type": "string"
-                                }
-                              },
-                              "additionalProperties": false
-                            },
-                            "test_budget": {
-                              "type": "object",
-                              "description": "Advisory test budget. Use for focused package-local checks before broader suites; workers report broad unrelated failures separately.",
-                              "properties": {
-                                "focus": {
-                                  "type": "string",
-                                  "enum": [
-                                    "focused",
-                                    "broad"
-                                  ],
-                                  "description": "Default command scope expected for verification."
-                                },
-                                "max_commands": {
-                                  "type": "integer",
-                                  "minimum": 0,
-                                  "maximum": 100
-                                },
-                                "max_minutes": {
-                                  "type": "number",
-                                  "minimum": 0
-                                },
-                                "stop_on_first_failure": {
-                                  "type": "boolean"
-                                },
-                                "broad_commands_allowed": {
-                                  "type": "boolean"
-                                },
-                                "notes": {
-                                  "type": "string"
-                                }
-                              },
-                              "additionalProperties": false
+                            "cwd": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 4096
                             },
                             "preflight_paths": {
                               "type": "array",
+                              "maxItems": 64,
                               "items": {
                                 "type": "object",
                                 "properties": {
                                   "path": {
-                                    "type": "string"
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 4096
                                   },
                                   "access": {
                                     "type": "string",
@@ -6278,92 +6271,60 @@
                                       "read",
                                       "write",
                                       "create"
-                                    ]
-                                  },
-                                  "label": {
-                                    "type": "string"
+                                    ],
+                                    "default": "read"
                                   }
                                 },
                                 "required": [
-                                  "path",
-                                  "access"
+                                  "path"
                                 ],
-                                "additionalProperties": false
-                              },
-                              "description": "Optional path capability checks recorded before the worker starts."
+                                "additionalProperties": false,
+                                "maxProperties": 256
+                              }
                             },
-                            "required_mcp_tools": {
-                              "type": "array",
-                              "items": {
-                                "type": "string"
-                              },
-                              "description": "Tool names the worker must have. For narada-agent-runtime-server, worker-delegation projects these through NARADA_WORKER_MCP_CONFIG; other runtimes record them as worker-verification requirements."
+                            "invocation_plan_ref": {
+                              "type": "string",
+                              "minLength": 6,
+                              "maxLength": 512,
+                              "pattern": "^plan:[A-Za-z0-9._:-]+$"
                             },
-                            "overrides": {
-                              "type": "object",
-                              "properties": {
-                                "runtime": {
-                                  "type": "string",
-                                  "enum": [
-                                    "codex",
-                                    "narada-agent-runtime-server"
-                                  ]
-                                },
-                                "sandbox": {
-                                  "type": "string",
-                                  "enum": [
-                                    "read-only",
-                                    "workspace-write",
-                                    "danger-full-access"
-                                  ]
-                                },
-                                "model": {
-                                  "type": "string"
-                                },
-                                "reasoning_effort": {
-                                  "type": "string"
-                                },
-                                "config": {
-                                  "type": "object",
-                                  "additionalProperties": {
-                                    "type": [
-                                      "string",
-                                      "number",
-                                      "boolean"
-                                    ]
-                                  }
-                                },
-                                "skip_git_repo_check": {
-                                  "type": "boolean"
-                                }
-                              },
-                              "required": [],
-                              "additionalProperties": false
+                            "max_run_ms": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 1800000,
+                              "default": 300000,
+                              "description": "Hard worker runtime deadline enforced by the native authority."
+                            },
+                            "wait_for_completion": {
+                              "type": "boolean",
+                              "default": false,
+                              "description": "Return after bounded child completion polling when true; false returns the accepted running record immediately."
+                            },
+                            "wait_timeout_ms": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 300000,
+                              "default": 30000,
+                              "description": "Maximum inline completion wait when wait_for_completion is true."
                             }
                           },
-                          "required": [
-                            "cwd"
-                          ],
-                          "additionalProperties": false
+                          "additionalProperties": false,
+                          "maxProperties": 256
                         }
                       },
                       "required": [
-                        "intent",
-                        "constraints"
+                        "intent"
                       ],
-                      "additionalProperties": false
+                      "additionalProperties": false,
+                      "maxProperties": 256
                     }
-                  },
-                  "max_parallel_runs": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 50
                   }
                 },
                 "required": [
                   "requests"
                 ],
-                "additionalProperties": false
+                "additionalProperties": false,
+                "maxProperties": 256
               },
               "output_schema": {
                 "type": "object",
@@ -6872,7 +6833,7 @@
       "runtime_binding": {
         "runtime_kind": "rust-stdio",
         "proxy_implementation": "native",
-        "entrypoint": "C:/Users/andrey/src/mcp-surfaces/packages/shared/mcp-surfaces-native/dist/native/versions/e1cbfcdb9fa1c469bffc3095b5ed89ba21313a2fdbecfcd33a4b96ab21788e6e/narada-mcp-surfaces.exe",
+        "entrypoint": "C:/Users/andrey/src/mcp-surfaces/packages/shared/mcp-surfaces-native/dist/native/versions/b10c598ecd2dd3c36bff5ddfa93c9a6566f0db7a1478226cc1607a636502e1c4/narada-mcp-surfaces.exe",
         "owner_site_id": "mcp-surfaces",
         "transport": {
           "type": "stdio",
@@ -6882,13 +6843,13 @@
             "--surface-id",
             "worker-delegation",
             "--child-command",
-            "C:/Users/andrey/src/mcp-surfaces/packages/shared/mcp-surfaces-native/dist/native/versions/e1cbfcdb9fa1c469bffc3095b5ed89ba21313a2fdbecfcd33a4b96ab21788e6e/narada-mcp-surfaces.exe",
+            "C:/Users/andrey/src/mcp-surfaces/packages/shared/mcp-surfaces-native/dist/native/versions/b10c598ecd2dd3c36bff5ddfa93c9a6566f0db7a1478226cc1607a636502e1c4/narada-mcp-surfaces.exe",
             "--artifact-manifest",
             "C:/Users/andrey/src/mcp-surfaces/.ai/runtime/workspace-artifact-manifest.json",
             "--runtime-contract-version",
             "8",
             "--entrypoint",
-            "C:/Users/andrey/src/mcp-surfaces/packages/shared/mcp-surfaces-native/dist/native/versions/e1cbfcdb9fa1c469bffc3095b5ed89ba21313a2fdbecfcd33a4b96ab21788e6e/narada-mcp-surfaces.exe",
+            "C:/Users/andrey/src/mcp-surfaces/packages/shared/mcp-surfaces-native/dist/native/versions/b10c598ecd2dd3c36bff5ddfa93c9a6566f0db7a1478226cc1607a636502e1c4/narada-mcp-surfaces.exe",
             "--child-invocation-kind",
             "native_entrypoint",
             "--",
