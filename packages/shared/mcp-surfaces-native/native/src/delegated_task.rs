@@ -1661,8 +1661,10 @@ fn record_worker_terminal(
     run: &Value,
 ) {
     let required_fields = required_contract_fields(task, Some(step_id));
-    let runtime_terminal_missing = run.get("phase").is_some()
-        && run.get("terminal_event").and_then(Value::as_bool) != Some(true);
+    let runtime_terminal_confirmed = run.get("terminal_event").and_then(Value::as_bool) == Some(true)
+        || run.get("completion_state").and_then(Value::as_str) == Some("complete")
+        || run.get("phase").and_then(Value::as_str) == Some("completed");
+    let runtime_terminal_missing = run.get("phase").is_some() && !runtime_terminal_confirmed;
     let output = if runtime_terminal_missing {
         Some(json!({
             "summary_text":Value::Null,
@@ -3548,6 +3550,28 @@ mod tests {
         assert_eq!(output["structured_output"]["repository"], "marici");
         assert_eq!(output["structured_output"]["branch"], "main");
         assert_eq!(output["truncated"], false);
+    }
+
+    #[test]
+    fn completed_native_worker_shape_is_terminal_without_terminal_event_field() {
+        let mut task = json!({
+            "acceptance":{"required":["items"]},
+            "workflow":{"steps":[{"id":"extract","output_schema":{"required":["items"]}}]},
+            "result":{"worker_refs":[{"step_id":"extract","run_id":"run-live","status":"running"}],"worker_outputs":[],"step_states":{"extract":{"status":"running"}}}
+        });
+        let run = json!({
+            "run_id":"run-live",
+            "status":"completed",
+            "completion_state":"complete",
+            "phase":"completed",
+            "summary":"{\"items\":[3,1,2]}",
+            "error":null
+        });
+        record_worker_terminal(&mut task, "extract", "run-live", "completed", &run);
+        assert_eq!(task["result"]["step_states"]["extract"]["worker_status"], "completed");
+        assert_eq!(task["result"]["step_states"]["extract"]["worker_output_contract"], "passed");
+        assert_eq!(task["result"]["worker_outputs"][0]["output"]["structured_output"]["items"], json!([3,1,2]));
+        assert!(task["result"]["worker_outputs"][0]["output"].get("worker_runtime_incomplete").is_none());
     }
 
     #[test]
