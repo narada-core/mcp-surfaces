@@ -31,6 +31,7 @@ const DEFAULT_ALLOWED_PREFIXES: &[&[&str]] = &[
     &["cargo", "check"],
     &["cargo", "test"],
     &["cargo", "build"],
+    &["cargo", "run"],
     &["cargo", "native-build"],
     &["cargo", "native-test"],
     &["cargo", "native-package"],
@@ -2186,6 +2187,7 @@ mod tests {
             ("fmt", vec!["--check"]),
             ("check", vec!["--locked"]),
             ("test", vec!["--locked"]),
+            ("run", vec!["--locked"]),
             ("native-release", Vec::<&str>::new()),
         ] {
             let mut argv = vec![subcommand.to_string()];

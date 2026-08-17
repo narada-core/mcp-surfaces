@@ -455,7 +455,12 @@ fn capability_snapshot(
     allowed_roots: &[PathBuf],
     runtime_probe: Option<&Value>,
 ) -> Value {
-    let writable = authority != "read";
+    let writable = authority == "write";
+    let write_roots = if writable {
+        vec![cwd.to_string_lossy().to_string()]
+    } else {
+        Vec::new()
+    };
     let effective_mode = if writable {
         "workspace_write"
     } else {
@@ -472,6 +477,9 @@ fn capability_snapshot(
         "provider_boundary":{"permission_profile":effective_mode,"writable_roots_injected":writable,"source":"native_process_environment_and_codex_cli"},
         "cwd":cwd.to_string_lossy(),
         "allowed_roots":allowed_roots.iter().map(|root|root.to_string_lossy()).collect::<Vec<_>>(),
+        "read_roots":allowed_roots.iter().map(|root|root.to_string_lossy()).collect::<Vec<_>>(),
+        "write_roots":write_roots,
+        "network":"denied",
         "filesystem":{"read":true,"write":writable,"patch":writable},
         "commands":{"execute":true,"write_effects":writable,"direct_file_mutation":writable,"working_directory_scoped":true,"tests_may_write_build_artifacts":writable},
         "approval":{"mode":if writable{"automatic_contained_review"}else{"not_required"},"human_interaction_required":false,"sandbox":if writable{"workspace-write"}else{"read-only"}},
@@ -1660,7 +1668,7 @@ fn worker_run(
         ));
     }
     let runtime = runtime_command(root)?;
-    let runtime_probe = if auth == "read" { None } else { Some(scoped_write_probe(&cwd)?) };
+    let runtime_probe = if auth == "write" { Some(scoped_write_probe(&cwd)?) } else { None };
     let preflight = preflight_paths(constraints, &cwd, allowed_roots)?;
     let prompt = format!(
         "{READ_ONLY_COMMAND_CONTRACT}\n\n{instruction_text}\n\n{}",
@@ -2010,22 +2018,14 @@ fn complete_native_run(
         .env("NARADA_INTELLIGENCE_PLAN_REF", &plan_ref)
         .env("NARADA_NATIVE_PROVIDER_MODE", &provider_mode)
         .env(
-            "NARADA_NATIVE_CODEX_SANDBOX",
-            if authority == "read" {
-                "read-only"
-            } else {
-                "workspace-write"
-            },
-        )
-        .env(
-            "NARADA_NATIVE_CODEX_WRITABLE_ROOTS",
-            serde_json::to_string(
-                &allowed_roots
-                    .iter()
-                    .map(|root| root.to_string_lossy().to_string())
-                    .collect::<Vec<_>>(),
-            )
-            .unwrap_or_else(|_| "[]".to_string()),
+            "NARADA_WORKER_CAPABILITY_JSON",
+            serde_json::to_string(&capability_snapshot(
+                &authority,
+                &cwd,
+                &allowed_roots,
+                None,
+            ))
+            .unwrap_or_else(|_| "{}".to_string()),
         )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -2728,6 +2728,19 @@ mod tests {
         assert_eq!(snapshot["validated_against_runtime"], true);
         assert_eq!(snapshot["approval"]["mode"], "automatic_contained_review");
         assert_eq!(snapshot["tool_bridge"]["kind"], "codex_builtin_repo_tools");
+        assert_eq!(snapshot["write_roots"], json!(["C:/workspace/repo"]));
+    }
+
+    #[test]
+    fn command_authority_does_not_escalate_to_write() {
+        let cwd = PathBuf::from("C:/workspace/repo");
+        let admission_root = PathBuf::from("C:/workspace");
+        let snapshot = capability_snapshot("command", &cwd, &[admission_root], None);
+        assert_eq!(snapshot["effective_mode"], "read_only");
+        assert_eq!(snapshot["filesystem"]["write"], false);
+        assert_eq!(snapshot["commands"]["execute"], true);
+        assert_eq!(snapshot["commands"]["write_effects"], false);
+        assert_eq!(snapshot["write_roots"], json!([]));
     }
 
     #[test]
