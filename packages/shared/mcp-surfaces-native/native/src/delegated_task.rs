@@ -1653,7 +1653,18 @@ fn record_worker_terminal(
     run: &Value,
 ) {
     let required_fields = required_contract_fields(task, Some(step_id));
-    let output = worker_output_from_run_with_required_fields(run, &required_fields).or_else(|| {
+    let runtime_terminal_missing = run.get("runtime").is_some()
+        && run.get("terminal_event").and_then(Value::as_bool) != Some(true);
+    let output = if runtime_terminal_missing {
+        Some(json!({
+            "summary_text":Value::Null,
+            "worker_runtime_incomplete":true,
+            "structured_output_error":{"code":"worker_runtime_incomplete_output","message":"terminal worker event was not observed"},
+            "truncated":false
+        }))
+    } else {
+        worker_output_from_run_with_required_fields(run, &required_fields)
+    }.or_else(|| {
         (!required_fields.is_empty()).then(|| {
             json!({
                 "summary_text":Value::Null,
@@ -1664,7 +1675,7 @@ fn record_worker_terminal(
         })
     });
     let contract_failed = structured_output_contract_failed(output.as_ref(), &required_fields);
-    let effective_status = if contract_failed { "failed" } else { status };
+    let effective_status = if contract_failed || runtime_terminal_missing { "failed" } else { status };
     if let Some(refs) = task["result"]["worker_refs"].as_array_mut() {
         if let Some(reference) = refs.iter_mut().find(|reference| {
             reference.get("run_id").and_then(Value::as_str) == Some(run_id)
@@ -3878,6 +3889,24 @@ mod tests {
         assert_eq!(task["result"]["step_states"]["inspect"]["worker_output_contract"], "failed");
         assert_eq!(task["result"]["worker_outputs"][0]["status"], "failed");
         assert_eq!(task["result"]["worker_outputs"][0]["output"]["structured_output_required"], true);
+    }
+
+    #[test]
+    fn runtime_progress_without_terminal_event_cannot_pass() {
+        let mut task = json!({
+            "objective":"compute the two invariants",
+            "result":{"step_states":{"implement":{"status":"running"}},"worker_refs":[{"step_id":"implement","run_id":"run-1","status":"running"}],"worker_outputs":[]}
+        });
+        record_worker_terminal(
+            &mut task,
+            "implement",
+            "run-1",
+            "completed",
+            &json!({"runtime":"narada-agent-runtime-server","status":"completed","summary":"I am starting the computation now"}),
+        );
+        assert_eq!(task["result"]["worker_outputs"][0]["status"], "failed");
+        assert_eq!(task["result"]["worker_outputs"][0]["output"]["worker_runtime_incomplete"], true);
+        assert_eq!(objective_verdict(&task).0, "failed");
     }
 
     #[test]
