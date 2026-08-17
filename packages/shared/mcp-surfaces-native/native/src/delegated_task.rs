@@ -14,6 +14,7 @@ const DEFAULT_COGNITION: &str = "low";
 const MAX_ITEMS: usize = 200;
 const MAX_FILE_BYTES: u64 = 256_000;
 const MAX_WORKER_OUTPUT_BYTES: usize = 32_000;
+const MAX_IMPORTED_TASK_OUTPUT_BYTES: usize = 32_000;
 const MAX_VALIDATED_REQUEST_BYTES: usize = 64_000;
 const MUTATING: &[&str] = &[
     "delegated_task_execute",
@@ -236,7 +237,7 @@ fn guidance_tool() -> Value {
     )
 }
 fn guidance(args: &Map<String, Value>) -> Value {
-    json!({"schema":"narada.mcp_surface.guidance.v0","status":"ok","surface_id":"delegated-task","guidance_tool":"delegated_task_guidance","purpose":"Validate, execute, and inspect durable delegated task workflows through native authority.","requested":{"workflow":args.get("workflow").cloned().unwrap_or(Value::Null),"tool":args.get("tool").cloned().unwrap_or(Value::Null)},"cognition":{"default":"low","omitted_constraint_behavior":"constraints.cognition resolves to low","mapping_surface":"worker-delegation","mapping_tool":"worker_cognition_defaults_inspect"},"first_use":["Call delegated_task_policy_inspect first.","Omitted constraints.cognition resolves to low; inspect worker-delegation's worker_cognition_defaults_inspect for the current model and reasoning-effort mapping.","Use delegated_task_execute for one bounded validate-run-wait workflow, or delegated_task_execute_batch for up to 16 independent tasks with explicit bounded concurrency; use the explicit validate, run, and wait tools when an agent must inspect or retain each lifecycle transition separately.","Call delegated_task_validate once, then pass its durable validated_request_ref to delegated_task_run so objective, constraints, workflow, and binding fields are not duplicated. request_valid proves only structural validity. execution_preflight_pending=true means worker-delegation.worker_run still must perform the authoritative existence, scope, and bounded native read check immediately before launch. For read-only file evidence, include each target path with access=read; the native authority injects its bounded content and the worker must not fall back to a shell read.","Prefer the site-scoped mcp_loader_call_binding_tool(binding_id, site_root, surface_id, tool_name, arguments) path when reopening a surface after a loader restart.","delegated_task_wait is the canonical terminal handoff and includes the complete compact result; delegated_task_result is a secondary durable readback.","Use bounded list/status/result/events readback.","Use explicit cancellation and disposition tools for lifecycle mutations."],"binding_reopen":{"tool_name":"mcp_loader_call_binding_tool","arguments":{"site_root":"<site_root>","binding_id":"<binding_id>","surface_id":"delegated-task","tool_name":"<child_tool>","arguments":{}}},"boundaries":["Native authority owns task.json/events.jsonl and validated request records under the bounded task root.","Worker launches cross the native worker-delegation authority boundary.","Cross-site ownership remains server-bound authority."]})
+    json!({"schema":"narada.mcp_surface.guidance.v0","status":"ok","surface_id":"delegated-task","guidance_tool":"delegated_task_guidance","purpose":"Validate, execute, and inspect durable delegated task workflows through native authority.","requested":{"workflow":args.get("workflow").cloned().unwrap_or(Value::Null),"tool":args.get("tool").cloned().unwrap_or(Value::Null)},"cognition":{"default":"low","omitted_constraint_behavior":"constraints.cognition resolves to low","mapping_surface":"worker-delegation","mapping_tool":"worker_cognition_defaults_inspect"},"first_use":["Call delegated_task_policy_inspect first.","Omitted constraints.cognition resolves to low; inspect worker-delegation's worker_cognition_defaults_inspect for the current model and reasoning-effort mapping.","Use delegated_task_execute for one bounded validate-run-wait workflow, or delegated_task_execute_batch for up to 16 independent tasks with explicit bounded concurrency; use the explicit validate, run, and wait tools when an agent must inspect or retain each lifecycle transition separately. Cross-task DAGs use delegated_task_run with depends_on_task_ids and explicit import_task_outputs/import_worker_refs; waiting or refreshing a descendant reconciles its dependency closure automatically, while failed or malformed predecessors durably block descendants.","Call delegated_task_validate once, then pass its durable validated_request_ref to delegated_task_run so objective, constraints, workflow, and binding fields are not duplicated. request_valid proves only structural validity. execution_preflight_pending=true means worker-delegation.worker_run still must perform the authoritative existence, scope, and bounded native read check immediately before launch. For read-only file evidence, include each target path with access=read; the native authority injects its bounded content and the worker must not fall back to a shell read.","Prefer the site-scoped mcp_loader_call_binding_tool(binding_id, site_root, surface_id, tool_name, arguments) path when reopening a surface after a loader restart.","delegated_task_wait is the canonical terminal handoff and includes the complete compact result; delegated_task_result is a secondary durable readback.","Use bounded list/status/result/events readback.","Use explicit cancellation and disposition tools for lifecycle mutations."],"binding_reopen":{"tool_name":"mcp_loader_call_binding_tool","arguments":{"site_root":"<site_root>","binding_id":"<binding_id>","surface_id":"delegated-task","tool_name":"<child_tool>","arguments":{}}},"boundaries":["Native authority owns task.json/events.jsonl and validated request records under the bounded task root.","Worker launches cross the native worker-delegation authority boundary.","Cross-site ownership remains server-bound authority."]})
 }
 
 fn task_root(root: &Path) -> PathBuf {
@@ -810,6 +811,7 @@ fn validate_with_options(
             }
         }
     }
+    diagnostics.extend(external_dependency_diagnostics(args, root));
     let preflight_requested = args
         .get("constraints")
         .and_then(Value::as_object)
@@ -1221,7 +1223,13 @@ fn compact_task(task: &Value, root: &Path) -> Value {
     let has_final_output = final_projection
         .get("final_structured_output")
         .is_some_and(|value| !value.is_null());
-    json!({"task_id":obj.get("task_id"),"task_status":obj.get("status"),"objective":obj.get("objective"),"owner_site_id":obj.get("owner_site_id"),"created_by_site_id":obj.get("created_by_site_id"),"visibility_scope":obj.get("visibility_scope"),"updated_at":obj.get("updated_at"),"summary":task_summary_value(task),"output_contract_verdict":output_contract,"objective_verdict":objective_verdict_value,"acceptance_verdict":result.and_then(|v|v.get("acceptance_verdict")).cloned().unwrap_or_else(||json!(derived_verdict)),"acceptance_checks":acceptance_checks,"final_step":final_projection.get("final_step"),"final_structured_output":final_projection.get("final_structured_output"),"prior_step_outputs_ref":final_projection.get("prior_step_outputs_ref"),"execution_binding":obj.get("execution_binding"),"timing":timing_projection(task),"worker_refs":if has_final_output{None}else{result.and_then(|v|v.get("worker_refs"))},"worker_outputs":if has_final_output{None}else{result.and_then(|v|v.get("worker_outputs"))}})
+    let prior_ref = final_projection.get("prior_step_outputs_ref").filter(|value| !value.is_null()).or_else(|| result.and_then(|value| value.get("prior_step_outputs_ref")));
+    json!({"task_id":obj.get("task_id"),"task_status":obj.get("status"),"objective":obj.get("objective"),"owner_site_id":obj.get("owner_site_id"),"created_by_site_id":obj.get("created_by_site_id"),"visibility_scope":obj.get("visibility_scope"),"updated_at":obj.get("updated_at"),"summary":task_summary_value(task),"output_contract_verdict":output_contract,"objective_verdict":objective_verdict_value,"acceptance_verdict":result.and_then(|v|v.get("acceptance_verdict")).cloned().unwrap_or_else(||json!(derived_verdict)),"acceptance_checks":acceptance_checks,"final_step":final_projection.get("final_step"),"final_structured_output":final_projection.get("final_structured_output"),"prior_step_outputs_ref":prior_ref,"depends_on_task_ids":obj.get("depends_on_task_ids"),"import_task_outputs":obj.get("import_task_outputs"),"external_dependencies":obj.get("external_dependencies"),"imported_task_outputs":result.and_then(|value| value.get("imported_task_outputs")),"execution_binding":obj.get("execution_binding"),"timing":timing_projection(task),"worker_refs":if has_final_output{None}else{result.and_then(|v|v.get("worker_refs"))},"worker_outputs":if has_final_output{None}else{result.and_then(|v|v.get("worker_outputs"))}})
+}
+
+fn prior_outputs_ref<'a>(task: &'a Value, projection: &'a Value) -> Option<&'a Value> {
+    projection.get("prior_step_outputs_ref").filter(|value| !value.is_null())
+        .or_else(|| task.pointer("/result/prior_step_outputs_ref").filter(|value| !value.is_null()))
 }
 
 fn parse_embedded_structured_output(text: &str) -> Option<Value> {
@@ -1719,10 +1727,9 @@ fn task_status_with_roots(
 ) -> Result<Value, Value> {
     let id = task_id(args)?;
     let task = if args.get("refresh").and_then(Value::as_bool) == Some(true) {
-        let _lock = lock_task(root, &id)?;
         let current = read_task(root, &id)?;
         assert_mutation_scope(&current, args, root)?;
-        advance_value_with_roots(current, root, allowed_roots)?
+        advance_task_closure(root, &id, allowed_roots, &mut std::collections::BTreeSet::new())?
     } else {
         read_task(root, &id)?
     };
@@ -1748,7 +1755,7 @@ fn task_result(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     let objective_verdict_value = objective_verdict(&task).0;
     let final_projection = final_step_projection(&task);
     Ok(
-        json!({"schema":"narada.delegated_task.result.v1","status":"ok","task_id":id,"task_status":task.get("status"),"result":result,"summary":task_summary_value(&task),"output_contract_verdict":output_contract,"objective_verdict":objective_verdict_value,"acceptance_verdict":task.pointer("/result/acceptance_verdict").cloned().unwrap_or_else(||json!(derived_verdict)),"acceptance_checks":acceptance_checks,"final_step":final_projection.get("final_step"),"final_structured_output":final_projection.get("final_structured_output"),"prior_step_outputs_ref":final_projection.get("prior_step_outputs_ref"),"canonical_terminal_handoff":terminal,"canonical_readback_tool":"delegated_task_wait","readback_role":"secondary_durable_readback"}),
+        json!({"schema":"narada.delegated_task.result.v1","status":"ok","task_id":id,"task_status":task.get("status"),"result":result,"summary":task_summary_value(&task),"output_contract_verdict":output_contract,"objective_verdict":objective_verdict_value,"acceptance_verdict":task.pointer("/result/acceptance_verdict").cloned().unwrap_or_else(||json!(derived_verdict)),"acceptance_checks":acceptance_checks,"final_step":final_projection.get("final_step"),"final_structured_output":final_projection.get("final_structured_output"),"prior_step_outputs_ref":prior_outputs_ref(&task, &final_projection),"canonical_terminal_handoff":terminal,"canonical_readback_tool":"delegated_task_wait","readback_role":"secondary_durable_readback"}),
     )
 }
 fn task_summary(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
@@ -1766,7 +1773,7 @@ fn task_summary(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> 
     let objective_verdict_value = objective_verdict(&task).0;
     let final_projection = final_step_projection(&task);
     Ok(
-        json!({"schema":"narada.delegated_task.summary.v1","status":"ok","task_id":id,"task_status":task.get("status"),"objective":task.get("objective"),"summary":task_summary_value(&task),"output_contract_verdict":output_contract,"objective_verdict":objective_verdict_value,"acceptance_verdict":result.get("acceptance_verdict").cloned().unwrap_or_else(||json!(derived_verdict)),"acceptance_checks":acceptance_checks,"final_step":final_projection.get("final_step"),"final_structured_output":final_projection.get("final_structured_output"),"prior_step_outputs_ref":final_projection.get("prior_step_outputs_ref"),"residual_risks":result.get("residual_risks").cloned().unwrap_or_else(||json!([])),"progress":result.get("progress"),"timing":timing_projection(&task),"canonical_terminal_handoff":terminal,"canonical_readback_tool":"delegated_task_wait"}),
+        json!({"schema":"narada.delegated_task.summary.v1","status":"ok","task_id":id,"task_status":task.get("status"),"objective":task.get("objective"),"summary":task_summary_value(&task),"output_contract_verdict":output_contract,"objective_verdict":objective_verdict_value,"acceptance_verdict":result.get("acceptance_verdict").cloned().unwrap_or_else(||json!(derived_verdict)),"acceptance_checks":acceptance_checks,"final_step":final_projection.get("final_step"),"final_structured_output":final_projection.get("final_structured_output"),"prior_step_outputs_ref":prior_outputs_ref(&task, &final_projection),"residual_risks":result.get("residual_risks").cloned().unwrap_or_else(||json!([])),"progress":result.get("progress"),"timing":timing_projection(&task),"canonical_terminal_handoff":terminal,"canonical_readback_tool":"delegated_task_wait"}),
     )
 }
 fn terminal_handoff(task: &Value, root: &Path) -> Value {
@@ -1786,7 +1793,7 @@ fn terminal_handoff(task: &Value, root: &Path) -> Value {
         "acceptance_checks":acceptance_checks_or_derive(task, root, result),
         "final_step":final_projection.get("final_step"),
         "final_structured_output":final_projection.get("final_structured_output"),
-        "prior_step_outputs_ref":final_projection.get("prior_step_outputs_ref"),
+        "prior_step_outputs_ref":prior_outputs_ref(task, &final_projection),
         "created_at":task.get("created_at"),
         "started_at":task.get("started_at"),
         "finished_at":task.get("finished_at"),
@@ -1914,12 +1921,9 @@ fn task_wait_with_roots(
         .clamp(50, 30000);
     let started = std::time::Instant::now();
     let task = loop {
-        let current = {
-            let _lock = lock_task(root, &id)?;
-            let current = read_task(root, &id)?;
-            assert_mutation_scope(&current, args, root)?;
-            advance_value_with_roots(current, root, allowed_roots)?
-        };
+        let scope_task = read_task(root, &id)?;
+        assert_mutation_scope(&scope_task, args, root)?;
+        let current = advance_task_closure(root, &id, allowed_roots, &mut std::collections::BTreeSet::new())?;
         if matches!(
             current.get("status").and_then(Value::as_str),
             Some("completed" | "failed" | "cancelled")
@@ -2344,6 +2348,159 @@ fn request_fingerprint(args: &Map<String, Value>, root: &Path, id: &str) -> Stri
     material.insert("external_dependencies".into(),json!({"depends_on_task_ids":args.get("depends_on_task_ids").cloned().unwrap_or_else(||json!([])),"import_task_outputs":args.get("import_task_outputs").cloned().unwrap_or_else(||json!([])),"import_worker_refs":args.get("import_worker_refs").cloned().unwrap_or_else(||json!([])),"source_task_ref":args.get("source_task_ref").cloned().unwrap_or_else(||json!({}))}));
     sha256_json(&Value::Object(material))
 }
+
+fn string_array(value: Option<&Value>) -> Option<Vec<String>> {
+    value?.as_array().map(|items| {
+        items.iter().filter_map(Value::as_str).map(str::to_string).collect()
+    })
+}
+
+fn external_dependency_diagnostics(args: &Map<String, Value>, root: &Path) -> Vec<Value> {
+    let mut diagnostics = Vec::new();
+    let task_id = stable_task_id(args);
+    let dependencies = match args.get("depends_on_task_ids") {
+        None => Vec::new(),
+        Some(value) => match string_array(Some(value)) {
+            Some(items) if items.len() == value.as_array().map(Vec::len).unwrap_or(0) => items,
+            _ => {
+                diagnostics.push(json!({"severity":"error","code":"depends_on_task_ids_must_be_string_array"}));
+                Vec::new()
+            }
+        },
+    };
+    let mut unique = std::collections::BTreeSet::new();
+    for dependency in &dependencies {
+        if safe_id(dependency).is_err() {
+            diagnostics.push(json!({"severity":"error","code":"dependency_task_id_invalid","task_id":dependency}));
+        } else if dependency == &task_id {
+            diagnostics.push(json!({"severity":"error","code":"task_dependency_cycle","task_id":task_id}));
+        } else if !unique.insert(dependency.clone()) {
+            diagnostics.push(json!({"severity":"error","code":"duplicate_dependency_task_id","task_id":dependency}));
+        } else if !task_path(root, dependency).is_ok_and(|path| path.is_file()) {
+            diagnostics.push(json!({"severity":"error","code":"dependency_task_not_found","task_id":dependency}));
+        } else if let Ok(predecessor) = read_task(root, dependency) {
+            if dependency_reaches(root, dependency, &task_id, &mut std::collections::BTreeSet::new()) {
+                diagnostics.push(json!({"severity":"error","code":"task_dependency_cycle","task_id":task_id,"via":dependency}));
+            }
+            let authority_rank = |value: Option<&str>| match value { Some("read") => 0, Some("write") => 1, Some("command") => 2, _ => 0 };
+            let predecessor_rank = authority_rank(predecessor.pointer("/constraints/authority").and_then(Value::as_str));
+            let downstream_rank = authority_rank(args.get("constraints").and_then(|value| value.get("authority")).and_then(Value::as_str));
+            if downstream_rank > predecessor_rank {
+                diagnostics.push(json!({"severity":"error","code":"dependency_authority_escalation","task_id":dependency,"predecessor_authority":predecessor.pointer("/constraints/authority"),"downstream_authority":args.get("constraints").and_then(|value| value.get("authority"))}));
+            }
+        }
+    }
+    for field in ["import_task_outputs", "import_worker_refs"] {
+        let imports = match args.get(field) {
+            None => Vec::new(),
+            Some(value) => match string_array(Some(value)) {
+                Some(items) if items.len() == value.as_array().map(Vec::len).unwrap_or(0) => items,
+                _ => {
+                    diagnostics.push(json!({"severity":"error","code":format!("{field}_must_be_string_array")}));
+                    Vec::new()
+                }
+            },
+        };
+        for imported in imports {
+            if !dependencies.contains(&imported) {
+                diagnostics.push(json!({"severity":"error","code":"task_import_must_name_declared_dependency","field":field,"task_id":imported}));
+            }
+        }
+    }
+    diagnostics
+}
+
+fn dependency_reaches(root: &Path, start: &str, target: &str, seen: &mut std::collections::BTreeSet<String>) -> bool {
+    if start == target { return true; }
+    if !seen.insert(start.to_string()) { return false; }
+    read_task(root, start).ok()
+        .and_then(|task| task.get("depends_on_task_ids").and_then(Value::as_array).cloned())
+        .is_some_and(|dependencies| dependencies.iter().filter_map(Value::as_str).any(|dependency| dependency_reaches(root, dependency, target, seen)))
+}
+
+fn external_dependency_gate(task: &mut Value, root: &Path) -> Result<bool, Value> {
+    let dependencies = task.get("depends_on_task_ids").and_then(Value::as_array).cloned().unwrap_or_default();
+    if dependencies.is_empty() {
+        task["external_dependencies"]["status"] = json!("resolved");
+        return Ok(true);
+    }
+    let id = task.get("task_id").and_then(Value::as_str).unwrap_or("unknown").to_string();
+    let mut waiting = Vec::new();
+    let mut blocked = Vec::new();
+    for dependency in &dependencies {
+        let Some(dependency_id) = dependency.as_str() else { continue };
+        let predecessor = read_task(root, dependency_id)?;
+        match predecessor.get("status").and_then(Value::as_str) {
+            Some("completed") => {}
+            Some("failed" | "cancelled") => blocked.push(dependency_id.to_string()),
+            _ => waiting.push(dependency_id.to_string()),
+        }
+    }
+    if !blocked.is_empty() {
+        task["external_dependencies"] = json!({"status":"blocked","resolved_at":null,"blocked_by":blocked});
+        for state in task["result"]["step_states"].as_object_mut().into_iter().flat_map(|states| states.values_mut()) {
+            if state.get("status").and_then(Value::as_str) == Some("pending") {
+                state["status"] = json!("blocked");
+                state["blocked_by_external_tasks"] = json!(blocked);
+                state["finished_at"] = json!(now());
+            }
+        }
+        task["status"] = json!("failed");
+        set_outcome_verdicts(task, "failed");
+        append_event(root, &id, "task_dependency_blocked", json!({"blocked_by":blocked}))?;
+        return Ok(false);
+    }
+    if !waiting.is_empty() {
+        task["external_dependencies"] = json!({"status":"waiting","resolved_at":null,"waiting_for":waiting,"blocked_by":[]});
+        return Ok(false);
+    }
+    if task.pointer("/external_dependencies/status").and_then(Value::as_str) != Some("resolved") {
+        let imports = task.get("import_task_outputs").and_then(Value::as_array).cloned().unwrap_or_default();
+        let mut resolved = Vec::new();
+        let mut total_bytes = 0usize;
+        for imported in imports {
+            let dependency_id = imported.as_str().unwrap_or_default();
+            let predecessor = read_task(root, dependency_id)?;
+            let output = final_step_projection(&predecessor).get("final_structured_output").cloned().unwrap_or(Value::Null);
+            if output.is_null() {
+                task["external_dependencies"] = json!({"status":"blocked","resolved_at":null,"blocked_by":[dependency_id],"reason":"predecessor_structured_output_missing"});
+                task["status"] = json!("failed");
+                set_outcome_verdicts(task, "failed");
+                append_event(root, &id, "task_dependency_blocked", json!({"blocked_by":[dependency_id],"reason":"predecessor_structured_output_missing"}))?;
+                return Ok(false);
+            }
+            total_bytes = total_bytes.saturating_add(serde_json::to_vec(&output).map(|bytes| bytes.len()).unwrap_or(MAX_IMPORTED_TASK_OUTPUT_BYTES + 1));
+            if total_bytes > MAX_IMPORTED_TASK_OUTPUT_BYTES {
+                return Err(error("imported_task_outputs_too_large", "imported_task_outputs_too_large"));
+            }
+            resolved.push(json!({"task_id":dependency_id,"source_ref":format!("delegated-task://{dependency_id}/result#final_structured_output"),"structured_output":output}));
+        }
+        let worker_imports = task.get("import_worker_refs").and_then(Value::as_array).cloned().unwrap_or_default();
+        let mut resolved_worker_refs = Vec::new();
+        for imported in worker_imports {
+            let dependency_id = imported.as_str().unwrap_or_default();
+            let predecessor = read_task(root, dependency_id)?;
+            let refs = predecessor.pointer("/result/worker_refs").and_then(Value::as_array).cloned().unwrap_or_default();
+            total_bytes = total_bytes.saturating_add(serde_json::to_vec(&refs).map(|bytes| bytes.len()).unwrap_or(MAX_IMPORTED_TASK_OUTPUT_BYTES + 1));
+            if total_bytes > MAX_IMPORTED_TASK_OUTPUT_BYTES {
+                return Err(error("imported_task_outputs_too_large", "imported_task_outputs_too_large"));
+            }
+            resolved_worker_refs.push(json!({"task_id":dependency_id,"source_ref":format!("delegated-task://{dependency_id}/result#worker_refs"),"worker_refs":refs}));
+        }
+        task["result"]["imported_task_outputs"] = json!(resolved);
+        task["result"]["imported_worker_refs"] = json!(resolved_worker_refs);
+        task["result"]["prior_step_outputs_ref"] = json!(format!("delegated-task://{id}/imported-task-outputs"));
+        task["external_dependencies"] = json!({"status":"resolved","resolved_at":now(),"blocked_by":[]});
+        append_event(root, &id, "task_dependencies_resolved", json!({"depends_on_task_ids":dependencies,"imported_task_ids":task["import_task_outputs"],"imported_worker_ref_task_ids":task["import_worker_refs"],"prior_step_outputs_ref":task["result"]["prior_step_outputs_ref"]}))?;
+    }
+    Ok(true)
+}
+
+fn imported_output_instruction(task: &Value) -> Option<String> {
+    let imports = task.pointer("/result/imported_task_outputs").and_then(Value::as_array).filter(|items| !items.is_empty())?;
+    let payload = serde_json::to_string(imports).ok()?;
+    Some(format!("\n\nDECLARED PREDECESSOR OUTPUTS (the only cross-task context; consume these typed structured outputs, not predecessor transcripts):\n{payload}"))
+}
 #[cfg(test)]
 fn task_run(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     task_run_with_roots(args, root, &[root.to_path_buf()])
@@ -2390,9 +2547,13 @@ fn task_run_with_roots(
     let step_states = initial_step_states(&workflow);
     let site = current_site_id(root);
     let fingerprint = request_fingerprint(args, root, &id);
-    let mut task = json!({"schema":"narada.delegated_task.task.v1","task_id":id,"owner_site_id":site,"owner_site_root":if site.is_some(){json!(root.to_string_lossy())}else{Value::Null},"created_by_site_id":site,"visibility_scope":if site.is_some(){"site"}else{"user_global"},"task_root_scope":"site_root","status":"accepted_for_execution","objective":objective,"request_fingerprint":fingerprint,"validated_request_ref":original_validation_ref,"created_at":created,"created_at_ms":created_ms,"started_at":null,"started_at_ms":null,"finished_at":null,"finished_at_ms":null,"duration_ms":null,"updated_at":created,"cancelled_at":null,"idempotency_key":args.get("idempotency_key"),"constraints":normalized_constraints(args.get("constraints")),"workflow":workflow,"execution":normalized_execution(args.get("execution")),"acceptance":args.get("acceptance").cloned().unwrap_or_else(||json!({})),"result":{"schema":"narada.delegated_task.handoff.v1","output_contract_verdict":"pending","objective_verdict":"pending","acceptance_verdict":"pending","step_states":step_states,"worker_refs":[],"worker_outputs":[],"residual_risks":[],"observed_incoherencies":[],"verification":[],"changed_files":[]},"summary":null});
+    let dependencies = args.get("depends_on_task_ids").cloned().unwrap_or_else(||json!([]));
+    let imports = args.get("import_task_outputs").cloned().unwrap_or_else(||json!([]));
+    let worker_imports = args.get("import_worker_refs").cloned().unwrap_or_else(||json!([]));
+    let result = json!({"schema":"narada.delegated_task.handoff.v1","output_contract_verdict":"pending","objective_verdict":"pending","acceptance_verdict":"pending","step_states":step_states,"worker_refs":[],"worker_outputs":[],"imported_task_outputs":[],"prior_step_outputs_ref":null,"residual_risks":[],"observed_incoherencies":[],"verification":[],"changed_files":[]});
+    let mut task = json!({"schema":"narada.delegated_task.task.v1","task_id":id,"owner_site_id":site,"owner_site_root":if site.is_some(){json!(root.to_string_lossy())}else{Value::Null},"created_by_site_id":site,"visibility_scope":if site.is_some(){"site"}else{"user_global"},"task_root_scope":"site_root","status":"accepted_for_execution","objective":objective,"request_fingerprint":fingerprint,"validated_request_ref":original_validation_ref,"created_at":created,"created_at_ms":created_ms,"started_at":null,"started_at_ms":null,"finished_at":null,"finished_at_ms":null,"duration_ms":null,"updated_at":created,"cancelled_at":null,"idempotency_key":args.get("idempotency_key"),"constraints":normalized_constraints(args.get("constraints")),"workflow":workflow,"execution":normalized_execution(args.get("execution")),"acceptance":args.get("acceptance").cloned().unwrap_or_else(||json!({})),"depends_on_task_ids":dependencies,"import_task_outputs":imports,"import_worker_refs":worker_imports,"external_dependencies":{"status":"pending","resolved_at":null,"blocked_by":[]},"result":result,"summary":null});
     write_task(root, &task)?;
-    append_event(root, &id, "task_created", json!({"objective":objective}))?;
+    append_event(root, &id, "task_created", json!({"objective":objective,"depends_on_task_ids":task["depends_on_task_ids"],"import_task_outputs":task["import_task_outputs"]}))?;
     if task.pointer("/execution/start").and_then(Value::as_bool) != Some(false) {
         task = advance_value_with_roots(task, root, allowed_roots)?;
     }
@@ -2913,6 +3074,12 @@ fn advance_value_with_roots(
         return Ok(task);
     }
     let id = task["task_id"].as_str().unwrap_or_default().to_string();
+    if !external_dependency_gate(&mut task, root)? {
+        finalize_timing(&mut task);
+        task["updated_at"] = json!(now());
+        write_task(root, &task)?;
+        return Ok(task);
+    }
     let step_ids = task
         .pointer("/workflow/steps")
         .and_then(Value::as_array)
@@ -3126,6 +3293,9 @@ fn advance_value_with_roots(
             let instruction = structured_output_instruction_for_step(&task, Some(step))
                 .map(|contract| format!("{instruction}{contract}"))
                 .unwrap_or_else(|| instruction.to_string());
+            let instruction = imported_output_instruction(&task)
+                .map(|imports| format!("{instruction}{imports}"))
+                .unwrap_or(instruction);
             // The lifecycle authority owns polling and durable recovery. Never
             // let a worker child synchronously occupy this MCP request.
             let constraints = asynchronous_worker_constraints(&task, step);
@@ -3239,6 +3409,26 @@ fn advance_value_with_roots(
     task["updated_at"] = json!(now());
     write_task(root, &task)?;
     Ok(task)
+}
+
+fn advance_task_closure(
+    root: &Path,
+    id: &str,
+    allowed_roots: &[PathBuf],
+    visiting: &mut std::collections::BTreeSet<String>,
+) -> Result<Value, Value> {
+    if !visiting.insert(id.to_string()) {
+        return Err(json!({"schema":"narada.delegated_task.error.v1","code":"task_dependency_cycle","message":"task_dependency_cycle","task_id":id}));
+    }
+    let snapshot = read_task(root, id)?;
+    let dependencies = snapshot.get("depends_on_task_ids").and_then(Value::as_array).cloned().unwrap_or_default();
+    for dependency in dependencies.iter().filter_map(Value::as_str) {
+        let _ = advance_task_closure(root, dependency, allowed_roots, visiting)?;
+    }
+    visiting.remove(id);
+    let _lock = lock_task(root, id)?;
+    let current = read_task(root, id)?;
+    advance_value_with_roots(current, root, allowed_roots)
 }
 fn task_cancel(args: &Map<String, Value>, root: &Path, takeover: bool) -> Result<Value, Value> {
     let id = task_id(args)?;
@@ -4487,6 +4677,74 @@ mod tests {
             tasks_list(json!({"view":"history"}).as_object().unwrap(), &root).expect("history");
         assert_eq!(active["count"], 1);
         assert_eq!(history["count"], 1);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    fn complete_fixture_task(root: &Path, id: &str, output: Option<Value>) {
+        let mut task = read_task(root, id).expect("fixture task");
+        task["status"] = json!("completed");
+        task["result"]["step_states"]["primary"]["status"] = json!("completed");
+        task["result"]["step_states"]["primary"]["finished_at"] = json!(now());
+        if let Some(output) = output {
+            task["result"]["worker_outputs"] = json!([{"step_id":"primary","run_id":"fixture","status":"completed","output":{"structured_output":output,"summary_text":"fixture","truncated":false}}]);
+        }
+        write_task(root, &task).expect("complete fixture task");
+    }
+
+    #[test]
+    fn cross_task_dependency_is_persisted_waits_and_imports_bounded_output() {
+        let root = std::env::temp_dir().join(format!("narada-delegated-task-cross-dag-{}", uuid::Uuid::new_v4()));
+        task_run(json!({"task_id":"task_a","objective":"extract typed list","constraints":{"authority":"read"},"execution":{"start":false}}).as_object().unwrap(), &root).expect("A");
+        let b_args = json!({"task_id":"task_b","objective":"reduce typed list","constraints":{"authority":"read"},"depends_on_task_ids":["task_a"],"import_task_outputs":["task_a"],"workflow":{"steps":[{"id":"record","kind":"note"}]}});
+        let b = task_run(b_args.as_object().unwrap(), &root).expect("B");
+        assert_eq!(b["task_status"], "accepted_for_execution");
+        let waiting = read_task(&root, "task_b").expect("persisted B");
+        assert_eq!(waiting["depends_on_task_ids"], json!(["task_a"]));
+        assert_eq!(waiting["import_task_outputs"], json!(["task_a"]));
+        assert_eq!(waiting["external_dependencies"]["status"], "waiting");
+        assert_eq!(waiting["result"]["step_states"]["record"]["status"], "pending");
+        complete_fixture_task(&root, "task_a", Some(json!({"items":[3,1,2]})));
+        let resolved = advance_task_closure(&root, "task_b", &[root.clone()], &mut std::collections::BTreeSet::new()).expect("automatic dependency closure");
+        assert_eq!(resolved["status"], "completed");
+        assert_eq!(resolved["external_dependencies"]["status"], "resolved");
+        assert_eq!(resolved["result"]["imported_task_outputs"][0]["task_id"], "task_a");
+        assert_eq!(resolved["result"]["imported_task_outputs"][0]["structured_output"]["items"], json!([3,1,2]));
+        assert!(resolved["result"]["prior_step_outputs_ref"].as_str().is_some());
+        let replay = task_run(b_args.as_object().unwrap(), &root).expect("idempotent replay");
+        assert_eq!(replay["created"], false);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn malformed_or_failed_predecessor_blocks_descendant_without_worker_start() {
+        let root = std::env::temp_dir().join(format!("narada-delegated-task-cross-block-{}", uuid::Uuid::new_v4()));
+        task_run(json!({"task_id":"task_a","objective":"extract","constraints":{"authority":"read"},"execution":{"start":false}}).as_object().unwrap(), &root).expect("A");
+        task_run(json!({"task_id":"task_b","objective":"consume","constraints":{"authority":"read"},"depends_on_task_ids":["task_a"],"import_task_outputs":["task_a"],"execution":{"start":false}}).as_object().unwrap(), &root).expect("B");
+        complete_fixture_task(&root, "task_a", None);
+        let blocked = advance_task_closure(&root, "task_b", &[root.clone()], &mut std::collections::BTreeSet::new()).expect("blocked result");
+        assert_eq!(blocked["status"], "failed");
+        assert_eq!(blocked["external_dependencies"]["reason"], "predecessor_structured_output_missing");
+        assert!(blocked["result"]["worker_refs"].as_array().is_some_and(Vec::is_empty));
+        let events = task_events(json!({"task_id":"task_b","limit":20}).as_object().unwrap(), &root).expect("events");
+        assert!(events["events"].as_array().is_some_and(|items| items.iter().any(|event| event["event_kind"] == "task_dependency_blocked")));
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn cross_task_dependencies_reject_missing_imports_cycles_and_authority_escalation() {
+        let root = std::env::temp_dir().join(format!("narada-delegated-task-cross-invalid-{}", uuid::Uuid::new_v4()));
+        task_run(json!({"task_id":"task_a","objective":"A","constraints":{"authority":"read"},"execution":{"start":false}}).as_object().unwrap(), &root).expect("A");
+        let missing = task_run(json!({"task_id":"task_missing","objective":"missing","constraints":{"authority":"read"},"depends_on_task_ids":["absent"]}).as_object().unwrap(), &root).expect_err("missing predecessor");
+        assert_eq!(missing["code"], "delegated_task_validation_failed");
+        let undeclared = task_run(json!({"task_id":"task_import","objective":"import","constraints":{"authority":"read"},"import_task_outputs":["task_a"]}).as_object().unwrap(), &root).expect_err("undeclared import");
+        assert_eq!(undeclared["code"], "delegated_task_validation_failed");
+        let escalation = task_run(json!({"task_id":"task_write","objective":"write","constraints":{"authority":"write"},"depends_on_task_ids":["task_a"]}).as_object().unwrap(), &root).expect_err("authority escalation");
+        assert_eq!(escalation["code"], "delegated_task_validation_failed");
+        let mut a = read_task(&root, "task_a").expect("A task");
+        a["depends_on_task_ids"] = json!(["task_cycle"]);
+        write_task(&root, &a).expect("legacy cyclic edge fixture");
+        let cycle = task_run(json!({"task_id":"task_cycle","objective":"cycle","constraints":{"authority":"read"},"depends_on_task_ids":["task_a"]}).as_object().unwrap(), &root).expect_err("cycle");
+        assert_eq!(cycle["code"], "delegated_task_validation_failed");
         fs::remove_dir_all(root).expect("cleanup");
     }
 }
