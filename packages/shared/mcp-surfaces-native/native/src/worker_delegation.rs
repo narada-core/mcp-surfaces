@@ -843,6 +843,9 @@ fn require_current_site_scope(args: &Map<String, Value>) -> Result<(), Value> {
 }
 fn compact_text(value: Option<&Value>) -> Value {
     let Some(value) = value else { return Value::Null; };
+    if value.is_null() {
+        return Value::Null;
+    }
     let text = value
         .as_str()
         .map(str::to_string)
@@ -2202,6 +2205,7 @@ mod tests {
             "error":null
         }));
         assert_eq!(minimal["task_label"], "inspect ledger");
+        assert_eq!(minimal["error"], Value::Null);
         assert!(minimal.get("capability_snapshot").is_none());
         assert!(minimal.get("resolved_invocation").is_none());
         let batch = input_schema("worker_run_wait_batch");
