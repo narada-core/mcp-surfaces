@@ -15,11 +15,15 @@ const MAX_RUNS: usize = 200;
 const MAX_FILE_BYTES: usize = 256_000;
 const MAX_NATIVE_READ_BYTES: usize = 64 * 1024;
 const MAX_NATIVE_READ_FILES: usize = 8;
-const READ_ONLY_COMMAND_CONTRACT: &str = "READ-ONLY COMMAND CONTRACT (apply before acting): use one executable with literal argv per probe; use supplied native preflight evidence for path existence/readability instead of probing again; when constraints.preflight_paths contains access=read, the native authority injects bounded file evidence before launch; never combine probes with &&, ;, pipes, redirection, $(), backticks, or generated scripts. If a probe is refused, stop that probe and report the refusal; do not retry by bundling commands or changing shells. WINDOWS READ-ONLY PROBE: when a filesystem read probe is actually needed, use pwsh with literal argv [-NoProfile, -NonInteractive, -Command, Get-Content -LiteralPath <literal-path> -TotalCount 1]. Do not start with dotnet File.OpenRead, C# scripts, generated scripts, or alternate shells. If supplied native_read status is passed, command probes for that path are prohibited: do not call shell, structured-command, pwsh, dotnet, or any command tool; use the evidence above as authoritative and do not retry. Prefer supplied native preflight evidence and do not probe again when it is present.";
+const READ_ONLY_COMMAND_CONTRACT: &str = "READ-ONLY COMMAND CONTRACT (apply before acting): use one executable with literal argv per probe; use supplied native preflight evidence for path existence/readability instead of probing again; when constraints.preflight_paths contains access=read, the native authority injects bounded file evidence before launch; never combine probes with &&, ;, pipes, redirection, $(), backticks, or generated scripts. If a probe is refused, stop that probe and report the refusal; do not retry by bundling commands or changing shells. WORKER OUTPUT CONTRACT (apply before acting): return only the requested result; no preamble, progress narration, tool narration, or post-hoc workflow story. Keep the final response within 4096 characters unless the requested structured schema requires less. Put observed refusals in a refusals array and keep execution details out of the result. WINDOWS READ-ONLY PROBE: when a filesystem read probe is actually needed, use pwsh with literal argv [-NoProfile, -NonInteractive, -Command, Get-Content -LiteralPath <literal-path> -TotalCount 1]. Do not start with dotnet File.OpenRead, C# scripts, generated scripts, or alternate shells. If supplied native_read status is passed, command probes for that path are prohibited: do not call shell, structured-command, pwsh, dotnet, or any command tool; use the evidence above as authoritative and do not retry. Prefer supplied native preflight evidence and do not probe again when it is present.";
 const READ_TOOLS: &[(&str, &str)] = &[
     (
         "worker_output_show",
         "Read a bounded materialized worker artifact.",
+    ),
+    (
+        "worker_result_show",
+        "Read a bounded final worker result directly, with durable raw-output and execution-log references.",
     ),
     (
         "worker_operator_affordances",
@@ -70,6 +74,12 @@ const MUTATING_TOOLS: &[&str] = &[
     "worker_run_reap",
     "worker_run_batch",
 ];
+const COMMAND_TOOLS: &[(&str, &str)] = &[
+    (
+        "worker_command_run",
+        "Run one bounded literal-argv command without starting a reasoning worker.",
+    ),
+];
 
 pub fn list_tools() -> Vec<Value> {
     let mut tools = vec![guidance_tool()];
@@ -83,6 +93,9 @@ pub fn list_tools() -> Vec<Value> {
             input_schema(name),
             false,
         ));
+    }
+    for (name, description) in COMMAND_TOOLS {
+        tools.push(command_tool(name, description, input_schema(name)));
     }
     tools
 }
@@ -144,6 +157,7 @@ pub fn call_tool(
         "worker_runs_synthesize" => runs_synthesize(args, root),
         "worker_dashboard_describe" => dashboard(args, root),
         "worker_output_show" => output_show(args, root),
+        "worker_result_show" => result_show(args, root),
         "worker_operator_affordances" => Ok(affordances()),
         "worker_cognition_defaults_update" => cognition_defaults_update(args, root),
         "worker_run" => worker_run(args, root, allowed_roots, None, "worker_run"),
@@ -151,6 +165,20 @@ pub fn call_tool(
         "worker_resume" => worker_resume(args, root, allowed_roots),
         "worker_run_reap" => worker_run_reap(args, root),
         "worker_run_batch" => worker_run_batch(args, root, allowed_roots),
+        "worker_command_run" => command_run(args, root, allowed_roots),
+        "worker_delegate_batch" => {
+            let mut failure = error(
+                "worker_tool_renamed",
+                "worker_delegate_batch was renamed to worker_run_batch",
+            );
+            failure["migration"] = json!({
+                "from":"worker_delegate_batch",
+                "to":"worker_run_batch",
+                "replacement_tool":"worker_run_batch",
+                "reason":"The native worker surface uses worker_run_batch as the canonical batch entrypoint."
+            });
+            Err(failure)
+        }
         _ => Err(error("unknown_tool", &format!("unknown_tool:{name}"))),
     }
 }
@@ -164,7 +192,7 @@ fn guidance_tool() -> Value {
     )
 }
 fn guidance(args: &Map<String, Value>) -> Value {
-    json!({"schema":"narada.worker.guidance.v1","status":"ok","server_name":SERVER_NAME,"requested":{"workflow":args.get("workflow").cloned().unwrap_or(Value::Null),"tool":args.get("tool").cloned().unwrap_or(Value::Null)},"cognition":{"default":"low","omitted_constraint_behavior":"constraints.cognition resolves to low","mapping_tool":"worker_cognition_defaults_inspect"},"first_use":["Inspect worker_policy_inspect.","Omitted constraints.cognition resolves to low; use worker_cognition_defaults_inspect for the current model and reasoning-effort mapping.","Resolve worker inputs without launching with worker_config_resolve.","Launch with worker_run or worker_edit. Set constraints.wait_for_completion=true with a bounded wait_timeout_ms when one-call completion is preferred; omitted or false returns the accepted running record immediately.","Read durable runs with worker_run_status or worker_run_wait; worker_run_wait is the canonical bounded state-file poll and does not launch a child.","Use worker_output_show for bounded artifact readback.","For read-only file evidence, supply constraints.preflight_paths entries with access=read; native authority injects bounded content before launch.",READ_ONLY_COMMAND_CONTRACT],"windows_rust_toolchain":{"status":"caller_environment_required","remediation":"For MSVC Rust linking, launch the carrier from a Developer PowerShell or initialize VsDevCmd before starting the carrier so link.exe is inherited by workers.","probe":"worker_policy_inspect reports the inherited PATH boundary; workers do not perform open-ended Visual Studio discovery."},"boundaries":["The native Rust surface launches only the native Rust narada-agent-runtime-server.","Credentials remain SecretStore-referenced and are never returned.","Run records are bounded to the site worker-delegation root."]})
+    json!({"schema":"narada.worker.guidance.v1","status":"ok","server_name":SERVER_NAME,"requested":{"workflow":args.get("workflow").cloned().unwrap_or(Value::Null),"tool":args.get("tool").cloned().unwrap_or(Value::Null)},"cognition":{"default":"low","omitted_constraint_behavior":"constraints.cognition resolves to low","mapping_tool":"worker_cognition_defaults_inspect","mapping_semantics":"cognition selects the admitted model tier; reasoning_effort is disclosed separately and is not a promise of low latency"},"first_use":["Inspect worker_policy_inspect.","Omitted constraints.cognition resolves to low; use worker_cognition_defaults_inspect for the current model and reasoning-effort mapping.","Resolve worker inputs without launching with worker_config_resolve.","For a simple literal-argv probe, use worker_command_run; it does not start a reasoning worker and returns separate execution and objective verdicts.","Launch with worker_run or worker_edit. Set constraints.wait_for_completion=true with a bounded wait_timeout_ms when one-call completion is preferred; omitted or false returns the accepted running record immediately.","Read durable runs with worker_run_status or worker_run_wait; worker_run_wait is the canonical bounded state-file poll and does not launch a child.","Use worker_result_show for direct bounded final-result readback, or worker_output_show for any artifact reference.","For read-only file evidence, supply constraints.preflight_paths entries with access=read; native authority injects bounded content before launch.",READ_ONLY_COMMAND_CONTRACT],"windows_rust_toolchain":{"status":"caller_environment_required","remediation":"For MSVC Rust linking, launch the carrier from a Developer PowerShell or initialize VsDevCmd before starting the carrier so link.exe is inherited by workers.","probe":"worker_policy_inspect reports the inherited PATH boundary; workers do not perform open-ended Visual Studio discovery."},"boundaries":["The native Rust surface launches only the native Rust narada-agent-runtime-server.","Credentials remain SecretStore-referenced and are never returned.","Run records are bounded to the site worker-delegation root."]})
 }
 
 fn run_root(root: &Path) -> PathBuf {
@@ -392,6 +420,31 @@ fn run_path(root: &Path, id: &str) -> Result<PathBuf, Value> {
 fn read_run(root: &Path, id: &str) -> Result<Value, Value> {
     read_json(&run_path(root, id)?)
 }
+fn read_reconciled_run(root: &Path, id: &str) -> Result<Value, Value> {
+    let path = run_path(root, id)?;
+    let mut run = read_json(&path)?;
+    if run.get("status").and_then(Value::as_str) == Some("running") {
+        let expected = run
+            .pointer("/resolved_invocation/provider_broker_generation")
+            .and_then(Value::as_str);
+        let expected_owned = expected.map(str::to_string);
+        let current = crate::codex_app_server_broker::binding().ok().map(|binding| binding.broker_generation);
+        if let (Some(expected), Some(current)) = (expected_owned.as_deref(), current.as_deref()) {
+            if expected != current {
+                let at = now();
+                run["status"] = json!("orphaned");
+                run["completion_state"] = json!("partial");
+                run["phase"] = json!("orphaned");
+                run["heartbeat_at"] = json!(at.clone());
+                run["error"] = json!("worker_orphaned:broker_generation_mismatch");
+                run["orphaned"] = json!({"reason":"broker_generation_mismatch","expected":expected,"current":current,"at":at});
+                run["timing"]["finished_at"] = json!(at);
+                write_json_atomic(&path, &run)?;
+            }
+        }
+    }
+    Ok(run)
+}
 
 fn policy(root: &Path, allowed_roots: &[PathBuf]) -> Value {
     json!({"schema":"narada.worker.policy.v1","status":"ok","server_name":SERVER_NAME,"run_root":run_root(root).to_string_lossy(),"site_root":root.to_string_lossy(),"allowed_roots":allowed_roots.iter().map(|allowed|allowed.to_string_lossy()).collect::<Vec<_>>(),"allowed_runtimes":["narada-agent-runtime-server"],"allowed_authorities":["read","write","command"],"default_cognition":DEFAULT_COGNITION,"native_execution":"rust_authority","secret_projection":"secret_store_reference_only","provider_transports":{"codex-subscription":{"transport":"codex_app_server_broker","host_lifecycle":"owned_by_surface_process","thread_policy":"fresh_ephemeral_per_turn","fallback":"none"},"deepseek-api":{"transport":"native_http"},"openrouter-api":{"transport":"native_http"}},"windows_msvc_environment":{"inherited":true,"automatic_discovery":false,"remediation":"Initialize VsDevCmd or use Developer PowerShell before launching the carrier."}})
@@ -470,7 +523,7 @@ fn cognition_defaults_for(root: &Path) -> Value {
         .unwrap_or_else(empty_defaults)
 }
 fn cognition_defaults(root: &Path) -> Value {
-    json!({"schema":"narada.worker.cognition_defaults.v1","status":"ok","default_cognition":DEFAULT_COGNITION,"defaults":cognition_defaults_for(root),"source":"native_contract","canonical_runtime":"narada-agent-runtime-server uses an immutable invocation plan","native_read_only":true})
+    json!({"schema":"narada.worker.cognition_defaults.v1","status":"ok","default_cognition":DEFAULT_COGNITION,"defaults":cognition_defaults_for(root),"mapping_semantics":"cognition selects the model tier; reasoning_effort is an independent admitted setting and does not mean low latency","source":"native_contract","canonical_runtime":"narada-agent-runtime-server uses an immutable invocation plan","native_read_only":true})
 }
 fn config_resolve(
     args: &Map<String, Value>,
@@ -532,7 +585,7 @@ fn config_resolve(
 }
 fn run_status(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
     let id = run_id(args)?;
-    let run = read_run(root, &id)?;
+    let run = read_reconciled_run(root, &id)?;
     let compact = args.get("compact").and_then(Value::as_bool).unwrap_or(true);
     Ok(
         json!({"schema":"narada.worker.run_status.v1","status":"ok","run_id":id,"compact":compact,"site_scope":"current_site","run":if compact{minimal_run(&run)}else{compact_run(&run)},"native_read_only":true}),
@@ -566,7 +619,7 @@ fn runs_list(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
             if !id.starts_with("run-") {
                 continue;
             }
-            if let Ok(run) = read_run(root, &id) {
+            if let Ok(run) = read_reconciled_run(root, &id) {
                 let terminal =
                     !matches!(run.get("status").and_then(Value::as_str), Some("running"));
                 if (terminal && include_completed) || (!terminal && include_running) {
@@ -587,7 +640,7 @@ fn runs_list(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
 }
 fn wait_for_run(root: &Path, id: &str, timeout_ms: u64) -> Result<(Value, Value), Value> {
     let started = Instant::now();
-    let mut run = read_run(root, id)?;
+    let mut run = read_reconciled_run(root, id)?;
     while run.get("status").and_then(Value::as_str) == Some("running")
         && started.elapsed() < Duration::from_millis(timeout_ms)
     {
@@ -703,7 +756,7 @@ fn dashboard(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
         .clamp(1, 200) as usize;
     let mut runs = if mode == "single_run" {
         let id = run_id(args)?;
-        vec![compact_run(&read_run(root, &id)?)]
+        vec![compact_run(&read_reconciled_run(root, &id)?)]
     } else {
         let list = runs_list(&json!({"limit":200}).as_object().unwrap(), root)?;
         list.get("runs")
@@ -829,8 +882,89 @@ fn output_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
         json!({"schema":"narada.worker.output_page.v1","status":"ok","ref":reference,"path":path.to_string_lossy(),"byte_size":byte_size,"offset":offset,"limit":limit,"next_offset":if end<chars.len(){json!(end)}else{Value::Null},"output_text":chunk,"output_truncated":end<chars.len(),"native_read_only":true}),
     )
 }
+fn result_show(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
+    let id = run_id(args)?;
+    let run = read_reconciled_run(root, &id)?;
+    let reference = format!("worker-artifact:{id}/last_message.json");
+    let mut page_args = args.clone();
+    page_args.insert("ref".into(), json!(reference));
+    let page = output_show(&page_args, root)?;
+    let object = run.as_object().cloned().unwrap_or_default();
+    Ok(json!({
+        "schema":"narada.worker.result.v1",
+        "status":"ok",
+        "run_id":id,
+        "run_status":object.get("status"),
+        "completion_state":object.get("completion_state"),
+        "result_ref":reference,
+        "result":page.get("output_text"),
+        "result_page":page,
+        "execution_log":execution_log_refs(&id, object.get("artifacts")),
+        "refusals":refusals_value(&object),
+        "native_read_only":true
+    }))
+}
+
+fn bounded_text(text: &[u8], limit: usize) -> String {
+    let value = String::from_utf8_lossy(text);
+    let chars = value.chars().take(limit).collect::<String>();
+    if value.chars().count() > limit { format!("{}…", chars) } else { chars }
+}
+fn command_run(args: &Map<String, Value>, root: &Path, allowed_roots: &[PathBuf]) -> Result<Value, Value> {
+    if args.get("authority").and_then(Value::as_str) != Some("command") {
+        return Err(error("worker_command_authority_required", "worker_command_authority_required"));
+    }
+    let command = required_string(args, "command", "worker_command_required")?;
+    if command.chars().any(|c| matches!(c, '&' | ';' | '|' | '>' | '<' | '`' | '$')) {
+        return Err(error("worker_command_literal_argv_required", "worker_command_literal_argv_required"));
+    }
+    let cwd = args.get("cwd").and_then(Value::as_str).map(PathBuf::from).unwrap_or_else(|| root.to_path_buf());
+    if !allowed_roots.iter().any(|allowed| is_within(&cwd, allowed)) {
+        return Err(error("worker_cwd_outside_allowed_roots", "worker_cwd_outside_allowed_roots"));
+    }
+    let argv = args.get("args").and_then(Value::as_array).cloned().unwrap_or_default();
+    if argv.len() > 64 || argv.iter().any(|value| !value.is_string() || value.as_str().unwrap_or_default().len() > 4096) {
+        return Err(error("worker_command_args_invalid", "worker_command_args_invalid"));
+    }
+    let timeout_ms = args.get("timeout_ms").and_then(Value::as_u64).unwrap_or(10_000).clamp(1, 60_000);
+    let stdout_limit = args.get("stdout_limit").and_then(Value::as_u64).unwrap_or(4_096).clamp(1, 65_536) as usize;
+    let stderr_limit = args.get("stderr_limit").and_then(Value::as_u64).unwrap_or(4_096).clamp(1, 65_536) as usize;
+    let started = Instant::now();
+    let mut child = Command::new(command).args(argv.iter().filter_map(Value::as_str)).current_dir(&cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|err| json!({"schema":"narada.worker.command.v1","code":"worker_command_launch_failed","message":"worker_command_launch_failed","error":err.to_string(),"execution_verdict":"failed","objective_verdict":"failed"}))?;
+    let mut timed_out = false;
+    loop {
+        if child.try_wait().map_err(|_| error("worker_command_wait_failed", "worker_command_wait_failed"))?.is_some() { break; }
+        if started.elapsed() >= Duration::from_millis(timeout_ms) {
+            timed_out = true;
+            let _ = child.kill();
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    let output = child.wait_with_output().map_err(|_| error("worker_command_output_failed", "worker_command_output_failed"))?;
+    let exit_code = output.status.code();
+    let execution_verdict = if timed_out { "failed" } else { "passed" };
+    let objective_verdict = if !timed_out && output.status.success() { "passed" } else { "failed" };
+    Ok(json!({
+        "schema":"narada.worker.command.v1",
+        "status":"ok",
+        "command":command,
+        "cwd":cwd.to_string_lossy(),
+        "exit_code":exit_code,
+        "timed_out":timed_out,
+        "timeout_ms":timeout_ms,
+        "elapsed_ms":started.elapsed().as_millis() as u64,
+        "execution_verdict":execution_verdict,
+        "objective_verdict":objective_verdict,
+        "objective_result":objective_verdict,
+        "stdout":bounded_text(&output.stdout, stdout_limit),
+        "stderr":bounded_text(&output.stderr, stderr_limit),
+        "native_read_only":false
+    }))
+}
+
 fn affordances() -> Value {
-    json!({"schema":"narada.worker.operator_affordances.v1","status":"ok","read_tools":READ_TOOLS.iter().map(|(n,_)|*n).collect::<Vec<_>>(),"mutation_tools":MUTATING_TOOLS,"native_read_only":true,"execution_authority":"rust"})
+    json!({"schema":"narada.worker.operator_affordances.v1","status":"ok","read_tools":READ_TOOLS.iter().map(|(n,_)|*n).collect::<Vec<_>>(),"mutation_tools":MUTATING_TOOLS,"command_tools":COMMAND_TOOLS.iter().map(|(n,_)|*n).collect::<Vec<_>>(),"native_read_only":true,"execution_authority":"rust"})
 }
 fn require_current_site_scope(args: &Map<String, Value>) -> Result<(), Value> {
     match args.get("site_scope").and_then(Value::as_str) {
@@ -864,22 +998,46 @@ fn compact_text(value: Option<&Value>) -> Value {
 }
 fn minimal_run(run: &Value) -> Value {
     let o = run.as_object().cloned().unwrap_or_default();
+    let id = o.get("run_id").and_then(Value::as_str).unwrap_or_default();
     json!({
         "run_id":o.get("run_id"),
         "task_label":o.get("task_label"),
         "status":o.get("status"),
         "completion_state":o.get("completion_state"),
+        "phase":o.get("phase"),
+        "heartbeat_at":o.get("heartbeat_at"),
         "started_at":o.get("timing").and_then(|v|v.get("started_at")),
         "finished_at":o.get("timing").and_then(|v|v.get("finished_at")),
         "duration_ms":o.get("timing").and_then(|v|v.get("duration_ms")),
         "updated_at":o.get("updated_at").or_else(||o.get("timing").and_then(|v|v.get("finished_at"))),
         "summary":compact_text(o.get("summary").or_else(||o.get("last_message"))),
+        "result":compact_text(o.get("result").or_else(||o.get("summary")).or_else(||o.get("last_message"))),
+        "result_ref":artifact_ref(id, "last_message.json"),
+        "execution_log":execution_log_refs(id, o.get("artifacts")),
+        "refusals":refusals_value(&o),
         "error":compact_text(o.get("error"))
     })
 }
 fn compact_run(run: &Value) -> Value {
     let o = run.as_object().cloned().unwrap_or_default();
-    json!({"run_id":o.get("run_id"),"status":o.get("status"),"completion_state":o.get("completion_state"),"authority":o.get("authority"),"resolved_invocation":o.get("resolved_invocation"),"capability_snapshot":o.get("capability_snapshot"),"worker_session_id":o.get("worker_session_id"),"started_at":o.get("timing").and_then(|v|v.get("started_at")),"finished_at":o.get("timing").and_then(|v|v.get("finished_at")),"duration_ms":o.get("timing").and_then(|v|v.get("duration_ms")),"summary":o.get("summary").or_else(||o.get("last_message")),"summary_preview":o.get("summary").or_else(||o.get("last_message")),"error":o.get("error"),"error_preview":o.get("error"),"failure":o.get("failure"),"updated_at":o.get("updated_at").or_else(||o.get("timing").and_then(|v|v.get("finished_at")))})
+    let id = o.get("run_id").and_then(Value::as_str).unwrap_or_default();
+    json!({"run_id":o.get("run_id"),"status":o.get("status"),"completion_state":o.get("completion_state"),"phase":o.get("phase"),"heartbeat_at":o.get("heartbeat_at"),"authority":o.get("authority"),"resolved_invocation":o.get("resolved_invocation"),"capability_snapshot":o.get("capability_snapshot"),"worker_session_id":o.get("worker_session_id"),"started_at":o.get("timing").and_then(|v|v.get("started_at")),"finished_at":o.get("timing").and_then(|v|v.get("finished_at")),"duration_ms":o.get("timing").and_then(|v|v.get("duration_ms")),"summary":o.get("summary").or_else(||o.get("last_message")),"summary_preview":compact_text(o.get("summary").or_else(||o.get("last_message"))),"result_ref":artifact_ref(id, "last_message.json"),"execution_log":execution_log_refs(id, o.get("artifacts")),"refusals":refusals_value(&o),"error":o.get("error"),"error_preview":compact_text(o.get("error")),"failure":o.get("failure"),"updated_at":o.get("updated_at").or_else(||o.get("timing").and_then(|v|v.get("finished_at")))})
+}
+
+fn artifact_ref(id: &str, name: &str) -> Value {
+    if id.is_empty() { Value::Null } else { json!(format!("worker-artifact:{id}/{name}")) }
+}
+fn execution_log_refs(id: &str, artifacts: Option<&Value>) -> Value {
+    json!({
+        "events_ref":artifacts.and_then(|v|v.get("events")).cloned().unwrap_or_else(||artifact_ref(id,"events.jsonl")),
+        "diagnostic_ref":artifacts.and_then(|v|v.get("diagnostic")).cloned().unwrap_or_else(||artifact_ref(id,"diagnostic.log"))
+    })
+}
+fn refusals_value(object: &Map<String, Value>) -> Value {
+    object.get("refusals")
+        .or_else(|| object.get("failure").and_then(|v|v.get("refusals")))
+        .cloned()
+        .unwrap_or_else(|| json!([]))
 }
 
 fn resolved_invocation(
@@ -1559,7 +1717,7 @@ fn worker_run(
     write_json_atomic(&dir.join("request.json"), &request)?;
     fs::write(dir.join("worker_prompt.txt"), &prompt)
         .map_err(|_| error("worker_write_failed", "worker_write_failed"))?;
-    let running = json!({"schema":"narada.worker.run.v1","run_id":id,"task_label":task_label.clone(),"status":"running","completion_state":"pending","runtime":"narada-agent-runtime-server","authority":auth,"resolved_invocation":resolved_invocation.clone(),"capability_snapshot":capabilities.clone(),"worker_session_id":session,"origin_tool":tool_name,"pid":null,"summary":null,"error":null,"timing":{"started_at":started.clone(),"finished_at":null,"duration_ms":null},"artifacts":{"request":dir.join("request.json").to_string_lossy(),"events":dir.join("events.jsonl").to_string_lossy(),"diagnostic":dir.join("diagnostic.log").to_string_lossy(),"last_message":dir.join("last_message.json").to_string_lossy()}});
+    let running = json!({"schema":"narada.worker.run.v1","run_id":id,"task_label":task_label.clone(),"status":"running","completion_state":"pending","phase":"starting","heartbeat_at":started.clone(),"runtime":"narada-agent-runtime-server","authority":auth,"resolved_invocation":resolved_invocation.clone(),"capability_snapshot":capabilities.clone(),"worker_session_id":session,"origin_tool":tool_name,"pid":null,"summary":null,"result":null,"error":null,"refusals":[],"timing":{"started_at":started.clone(),"finished_at":null,"duration_ms":null},"artifacts":{"request":dir.join("request.json").to_string_lossy(),"events":dir.join("events.jsonl").to_string_lossy(),"diagnostic":dir.join("diagnostic.log").to_string_lossy(),"last_message":dir.join("last_message.json").to_string_lossy()}});
     write_json_atomic(&dir.join("result.json"), &running)?;
     let root_owned = root.to_path_buf();
     let dir_owned = dir.clone();
@@ -1764,6 +1922,49 @@ fn event_text(event: &Value) -> Option<String> {
             })
         })
 }
+fn phase_for_event(kind: &str) -> &'static str {
+    match kind {
+        "assistant_message" | "turn_complete" | "carrier_turn_completed" => "formatting_output",
+        "tool_call" | "tool_use" | "command_started" | "command_finished" => "executing_command",
+        "reasoning" | "thinking" | "provider_reasoning" => "reasoning",
+        "session_started" | "provider_request_started" | "provider_request" => "awaiting_provider",
+        "error" | "turn_failed" | "carrier_turn_failed" | "carrier_turn_blocked" | "session_control_rejected" => "failed",
+        _ => "awaiting_provider",
+    }
+}
+fn update_run_progress(path: &Path, phase: &str, broker_generation: Option<&str>) {
+    if let Ok(mut run) = read_json(path) {
+        if run.get("status").and_then(Value::as_str) == Some("running") {
+            run["phase"] = json!(phase);
+            run["heartbeat_at"] = json!(now());
+            if let Some(generation) = broker_generation {
+                run["broker_generation"] = json!(generation);
+            }
+            let _ = write_json_atomic(path, &run);
+        }
+    }
+}
+fn refusal_records(path: &Path) -> Value {
+    let Ok(file) = fs::File::open(path) else { return json!([]); };
+    let mut records = Vec::new();
+    for line in BufReader::new(file).lines().take(256).flatten() {
+        if line.len() > 16_384 { continue; }
+        let Ok(event) = serde_json::from_str::<Value>(&line) else { continue; };
+        let kind = event.get("event").or_else(|| event.get("type")).and_then(Value::as_str).unwrap_or_default();
+        let schema = event.get("schema").and_then(Value::as_str).unwrap_or_default();
+        if kind.contains("refusal") || schema.contains("refusal") {
+            records.push(json!({
+                "event":kind,
+                "tool":event.get("tool"),
+                "operation":event.get("operation"),
+                "target_path":event.get("target_path"),
+                "actual_refusal":event.get("actual_refusal").or_else(||event.get("message"))
+            }));
+            if records.len() >= 32 { break; }
+        }
+    }
+    json!(records)
+}
 fn complete_native_run(
     runtime: PathBuf,
     cwd: PathBuf,
@@ -1855,15 +2056,24 @@ fn complete_native_run(
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(err) => {
-            let failed = json!({"schema":"narada.worker.run.v1","run_id":id,"task_label":task_label,"status":"failed","completion_state":"absent","runtime":"narada-agent-runtime-server","authority":authority,"cognition":cognition,"resolved_invocation":resolved_invocation,"worker_session_id":session,"summary":null,"error":format!("worker_launch_failed:{err}"),"timing":{"started_at":started_at,"finished_at":now(),"duration_ms":0}});
+            let failed = json!({"schema":"narada.worker.run.v1","run_id":id,"task_label":task_label,"status":"failed","completion_state":"absent","phase":"failed","heartbeat_at":now(),"runtime":"narada-agent-runtime-server","authority":authority,"cognition":cognition,"resolved_invocation":resolved_invocation,"worker_session_id":session,"summary":null,"result":null,"execution_log":{"events_ref":artifact_ref(&id,"events.jsonl"),"diagnostic_ref":artifact_ref(&id,"diagnostic.log")},"refusals":[],"error":format!("worker_launch_failed:{err}"),"timing":{"started_at":started_at,"finished_at":now(),"duration_ms":0}});
             let _ = write_json_atomic(&result_path, &failed);
             return;
         }
     };
     if let Ok(mut running) = read_json(&result_path) {
         running["pid"] = json!(child.id());
+        running["phase"] = json!("awaiting_provider");
+        running["heartbeat_at"] = json!(now());
         let _ = write_json_atomic(&result_path, &running);
     }
+    update_run_progress(
+        &result_path,
+        "awaiting_provider",
+        resolved_invocation
+            .get("provider_broker_generation")
+            .and_then(Value::as_str),
+    );
     let stderr = child.stderr.take();
     let diagnostics = diagnostic_path.clone();
     thread::spawn(move || {
@@ -1883,6 +2093,7 @@ fn complete_native_run(
         let mut provider_host_generation = None;
         let mut runtime_error = None;
         let mut failure = Value::Null;
+        let mut turn_completed = false;
         let mut close_sent = false;
         if let Some(stdout) = child.stdout.take() {
             let (line_tx, line_rx) = mpsc::channel();
@@ -1908,6 +2119,7 @@ fn complete_native_run(
                         );
                     }
                     let _ = child.kill();
+                    update_run_progress(&result_path, "failed", provider_host_generation.as_deref());
                     break;
                 }
                 if read_json(&result_path)
@@ -1936,6 +2148,7 @@ fn complete_native_run(
                     .or_else(|| event.get("type"))
                     .and_then(Value::as_str)
                     .unwrap_or("");
+                update_run_progress(&result_path, phase_for_event(kind), provider_host_generation.as_deref());
                 if kind == "assistant_message" {
                     assistant = event_text(&event);
                 }
@@ -1972,6 +2185,7 @@ fn complete_native_run(
                         | "carrier_turn_blocked"
                 ) && !close_sent
                 {
+                    turn_completed = matches!(kind, "turn_complete" | "carrier_turn_completed");
                     close_sent = true;
                     let close = json!({"id":format!("worker-close-{id}"),"method":"session.close","params":{}});
                     let _ = writeln!(stdin, "{close}");
@@ -1987,11 +2201,12 @@ fn complete_native_run(
         let finished = now();
         let successful = status.as_ref().is_some_and(|v| v.success())
             && assistant.is_some()
-            && runtime_error.is_none();
+            && runtime_error.is_none()
+            && turn_completed;
         if let Some(message) = assistant.as_ref() {
             let _ = write_json_atomic(
                 &dir.join("last_message.json"),
-                &json!({"summary":message,"deliverables":[],"open_questions":[],"next_actions":[]}),
+                &json!({"result":message,"summary":message,"deliverables":[],"open_questions":[],"next_actions":[]}),
             );
         }
         let snapshot = read_json(&dir.join("request.json"))
@@ -2005,11 +2220,18 @@ fn complete_native_run(
         let final_error = runtime_error.or_else(|| {
             if successful {
                 None
+            } else if !turn_completed {
+                Some("worker_runtime_incomplete_output:terminal_turn_event_missing".to_string())
             } else {
                 Some(format!("worker_runtime_exit:{:?}", status.and_then(|v| v.code())))
             }
         });
-        let payload = json!({"schema":"narada.worker.run.v1","run_id":id,"task_label":task_label,"status":if successful{"completed"}else{"failed"},"completion_state":if assistant.is_some(){"complete"}else{"absent"},"runtime":"narada-agent-runtime-server","authority":authority,"cognition":cognition,"resolved_invocation":resolved_invocation,"capability_snapshot":snapshot,"worker_session_id":provider_session.unwrap_or(session),"pid":child.id(),"summary":assistant,"error":final_error,"failure":failure,"timing":{"started_at":started_at,"finished_at":finished,"duration_ms":elapsed_ms},"artifacts":{"request":dir.join("request.json").to_string_lossy(),"events":events_path.to_string_lossy(),"diagnostic":diagnostic_path.to_string_lossy(),"last_message":dir.join("last_message.json").to_string_lossy()}});
+        let _ = write_json_atomic(
+            &dir.join("last_message.json"),
+            &json!({"result":assistant.clone(),"summary":assistant.clone(),"error":final_error.clone(),"failure":failure.clone(),"deliverables":[],"open_questions":[],"next_actions":[]}),
+        );
+        let refusals = refusal_records(&events_path);
+        let payload = json!({"schema":"narada.worker.run.v1","run_id":id,"task_label":task_label,"status":if successful{"completed"}else{"failed"},"completion_state":if turn_completed && assistant.is_some(){"complete"}else{"absent"},"phase":if successful{"completed"}else{"failed"},"heartbeat_at":finished,"terminal_event":turn_completed,"runtime":"narada-agent-runtime-server","authority":authority,"cognition":cognition,"resolved_invocation":resolved_invocation,"capability_snapshot":snapshot,"worker_session_id":provider_session.unwrap_or(session),"pid":child.id(),"summary":assistant.clone(),"result":assistant.clone(),"execution_log":{"events_ref":artifact_ref(&id,"events.jsonl"),"diagnostic_ref":artifact_ref(&id,"diagnostic.log")},"refusals":refusals,"error":final_error,"failure":failure,"timing":{"started_at":started_at,"finished_at":finished,"duration_ms":elapsed_ms},"artifacts":{"request":dir.join("request.json").to_string_lossy(),"events":events_path.to_string_lossy(),"diagnostic":diagnostic_path.to_string_lossy(),"last_message":dir.join("last_message.json").to_string_lossy()}});
         let _ = write_json_atomic(&result_path, &payload);
     }
 }
@@ -2091,6 +2313,9 @@ fn input_schema(name: &str) -> Value {
         "worker_output_show" => {
             json!({"type":"object","properties":{"ref":{"type":"string","minLength":1,"maxLength":512},"output_ref":{"type":"string","minLength":1,"maxLength":512},"offset":{"type":"integer","minimum":0,"maximum":256000},"limit":{"type":"integer","minimum":1,"maximum":256000}},"anyOf":[{"required":["ref"]},{"required":["output_ref"]}],"additionalProperties":false})
         }
+        "worker_result_show" => {
+            json!({"type":"object","properties":{"run_id":run_id(),"offset":{"type":"integer","minimum":0,"maximum":256000},"limit":{"type":"integer","minimum":1,"maximum":256000}},"required":["run_id"],"additionalProperties":false})
+        }
         "worker_cognition_defaults_update" => {
             json!({"type":"object","properties":{"provider":short_string(),"cognition":{"type":"string","enum":["low","medium","high"]},"model":short_string(),"reasoning_effort":short_string(),"actor":short_string()},"required":["provider","cognition","model","reasoning_effort"],"additionalProperties":false})
         }
@@ -2107,11 +2332,17 @@ fn input_schema(name: &str) -> Value {
         "worker_run_batch" => {
             json!({"type":"object","properties":{"requests":{"type":"array","minItems":1,"maxItems":50,"items":run_request()}},"required":["requests"],"additionalProperties":false})
         }
+        "worker_command_run" => {
+            json!({"type":"object","properties":{"authority":{"type":"string","const":"command"},"command":{"type":"string","minLength":1,"maxLength":512},"args":{"type":"array","maxItems":64,"items":{"type":"string","maxLength":4096}},"cwd":{"type":"string","minLength":1,"maxLength":4096},"timeout_ms":{"type":"integer","minimum":1,"maximum":60000,"default":10000},"stdout_limit":{"type":"integer","minimum":1,"maximum":65536,"default":4096},"stderr_limit":{"type":"integer","minimum":1,"maximum":65536,"default":4096}},"required":["authority","command"],"additionalProperties":false})
+        }
         _ => json!({"type":"object","additionalProperties":false}),
     }
 }
 fn tool(name: &str, description: &str, schema: Value, read_only: bool) -> Value {
     json!({"name":name,"description":description,"annotations":{"title":name,"readOnlyHint":read_only,"destructiveHint":!read_only,"idempotentHint":read_only,"openWorldHint":false},"inputSchema":schema,"outputSchema":{"type":"object","additionalProperties":true}})
+}
+fn command_tool(name: &str, description: &str, schema: Value) -> Value {
+    json!({"name":name,"description":description,"annotations":{"title":name,"readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":false},"inputSchema":schema,"outputSchema":{"type":"object","additionalProperties":true}})
 }
 
 #[cfg(test)]
