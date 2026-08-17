@@ -3,7 +3,7 @@
   "artifact_role": "site_capability_surface_registry_not_mcp_client_config",
   "site_id": "mcp-surfaces",
   "generated_by": "mcp-registrar",
-  "generated_at": "2026-08-17T20:17:32.5518882Z",
+  "generated_at": "2026-08-17T20:26:40.7023347Z",
   "generation_policy": {
     "source": ".ai/mcp + registrar surface catalog",
     "mode": "enabled_surface_tool_authority",
@@ -6828,7 +6828,7 @@
       "runtime_binding": {
         "runtime_kind": "rust-stdio",
         "proxy_implementation": "native",
-        "entrypoint": "C:/Users/andrey/src/mcp-surfaces/packages/shared/mcp-surfaces-native/dist/native/versions/048f261eaf9c81ecd11d28aea074c134a66d5f681890e3ac46654fe79112bc30/narada-mcp-surfaces.exe",
+        "entrypoint": "C:/Users/andrey/src/mcp-surfaces/packages/shared/mcp-surfaces-native/dist/native/versions/6098ae2a6c25d185bd91b2326777dab6c83b53a6f0787c13e58da13115ae2f4a/narada-mcp-surfaces.exe",
         "owner_site_id": "mcp-surfaces",
         "transport": {
           "type": "stdio",
@@ -6838,13 +6838,13 @@
             "--surface-id",
             "worker-delegation",
             "--child-command",
-            "C:/Users/andrey/src/mcp-surfaces/packages/shared/mcp-surfaces-native/dist/native/versions/048f261eaf9c81ecd11d28aea074c134a66d5f681890e3ac46654fe79112bc30/narada-mcp-surfaces.exe",
+            "C:/Users/andrey/src/mcp-surfaces/packages/shared/mcp-surfaces-native/dist/native/versions/6098ae2a6c25d185bd91b2326777dab6c83b53a6f0787c13e58da13115ae2f4a/narada-mcp-surfaces.exe",
             "--artifact-manifest",
             "C:/Users/andrey/src/mcp-surfaces/.ai/runtime/workspace-artifact-manifest.json",
             "--runtime-contract-version",
             "8",
             "--entrypoint",
-            "C:/Users/andrey/src/mcp-surfaces/packages/shared/mcp-surfaces-native/dist/native/versions/048f261eaf9c81ecd11d28aea074c134a66d5f681890e3ac46654fe79112bc30/narada-mcp-surfaces.exe",
+            "C:/Users/andrey/src/mcp-surfaces/packages/shared/mcp-surfaces-native/dist/native/versions/6098ae2a6c25d185bd91b2326777dab6c83b53a6f0787c13e58da13115ae2f4a/narada-mcp-surfaces.exe",
             "--child-invocation-kind",
             "native_entrypoint",
             "--",

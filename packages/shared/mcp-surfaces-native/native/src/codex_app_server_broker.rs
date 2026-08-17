@@ -358,7 +358,7 @@ impl AppServer {
     }
 }
 
-fn app_server_args() -> [&'static str; 7] {
+fn app_server_args() -> [&'static str; 9] {
     [
         "app-server",
         "--listen",
@@ -367,6 +367,8 @@ fn app_server_args() -> [&'static str; 7] {
         "mcp_servers={}",
         "-c",
         "features.apps=false",
+        "-c",
+        "windows.sandbox=\"unelevated\"",
     ]
 }
 
@@ -400,11 +402,11 @@ mod tests {
     }
 
     #[test]
-    fn app_server_inherits_the_configured_windows_sandbox() {
+    fn app_server_uses_the_narrow_root_compatible_windows_sandbox() {
         let args = app_server_args();
         assert!(
-            args.iter().all(|arg| !arg.starts_with("windows.sandbox=")),
-            "the broker must not replace the provisioned Windows sandbox mode"
+            args.contains(&"windows.sandbox=\"unelevated\""),
+            "the broker must avoid the elevated setup payload transport limit"
         );
     }
 }
