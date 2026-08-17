@@ -16,6 +16,7 @@ const MAX_FILE_BYTES: u64 = 256_000;
 const MAX_WORKER_OUTPUT_BYTES: usize = 32_000;
 const MAX_VALIDATED_REQUEST_BYTES: usize = 64_000;
 const MUTATING: &[&str] = &[
+    "delegated_task_execute",
     "delegated_task_run",
     "delegated_task_advance",
     "delegated_task_cancel",
@@ -40,6 +41,11 @@ pub fn list_tools() -> Vec<Value> {
             "delegated_task_validate",
             "Validate delegated task input and persist a reusable validated-request reference without running a task.",
             json!({"type":"object","properties":{"objective":{"type":"string"},"workflow":{"type":"object"},"constraints":constraints_schema(),"acceptance":{"type":"object"},"execution":{"type":"object"},"execution_binding":{"type":"object"}},"additionalProperties":false}),
+        ),
+        (
+            "delegated_task_execute",
+            "Validate, run, and wait through the same durable gates in one bounded call.",
+            mutation_schema("delegated_task_execute"),
         ),
         (
             "delegated_task_status",
@@ -74,7 +80,12 @@ pub fn list_tools() -> Vec<Value> {
         validate_tool["annotations"]["destructiveHint"] = json!(false);
         validate_tool["annotations"]["stateChangingHint"] = json!(true);
     }
-    for name in MUTATING {
+    if let Some(execute_tool) = tools.iter_mut().find(|tool| tool["name"] == "delegated_task_execute") {
+        execute_tool["annotations"]["readOnlyHint"] = json!(false);
+        execute_tool["annotations"]["destructiveHint"] = json!(false);
+        execute_tool["annotations"]["stateChangingHint"] = json!(true);
+    }
+    for name in MUTATING.iter().filter(|name| **name != "delegated_task_execute") {
         tools.push(tool(
             name,
             "Delegated task mutation remains owned by the worker/task authority.",
@@ -95,6 +106,14 @@ fn mutation_schema(name: &str) -> Value {
     let scope = json!({"expected_owner_site_id":{"type":"string"},"allow_cross_site":{"type":"boolean","default":false}});
     let mut properties = scope.as_object().cloned().unwrap_or_default();
     match name {
+        "delegated_task_execute" => {
+            for field in ["objective","idempotency_key"] { properties.insert(field.into(),json!({"type":"string"})); }
+            for field in ["workflow","acceptance","execution","execution_binding"] { properties.insert(field.into(),json!({"type":"object"})); }
+            properties.insert("constraints".into(), constraints_schema());
+            properties.insert("timeout_ms".into(),json!({"type":"integer","minimum":0,"maximum":600000,"default":30000}));
+            properties.insert("poll_ms".into(),json!({"type":"integer","minimum":50,"maximum":30000,"default":5000}));
+            json!({"type":"object","properties":properties,"required":["objective","idempotency_key"],"additionalProperties":false})
+        }
         "delegated_task_run" => {
             for field in ["objective","idempotency_key","task_id"] { properties.insert(field.into(),json!({"type":"string"})); }
             for field in ["intent","workflow","acceptance","result_policy","execution","execution_binding","source_task_ref"] { properties.insert(field.into(),json!({"type":"object"})); }
@@ -161,6 +180,7 @@ pub fn call_tool(
         "delegated_task_policy_inspect" => Ok(policy_with_roots(root, allowed_roots)),
         "delegated_task_template_catalog" => Ok(template_catalog(args)),
         "delegated_task_validate" => validate(args, root),
+        "delegated_task_execute" => task_execute(args, root, allowed_roots),
         "delegated_tasks_list" => tasks_list(args, root),
         "delegated_task_status" => task_status_with_roots(args, root, allowed_roots),
         "delegated_task_result" => task_result(args, root),
@@ -185,7 +205,7 @@ fn guidance_tool() -> Value {
     )
 }
 fn guidance(args: &Map<String, Value>) -> Value {
-    json!({"schema":"narada.mcp_surface.guidance.v0","status":"ok","surface_id":"delegated-task","guidance_tool":"delegated_task_guidance","purpose":"Validate, execute, and inspect durable delegated task workflows through native authority.","requested":{"workflow":args.get("workflow").cloned().unwrap_or(Value::Null),"tool":args.get("tool").cloned().unwrap_or(Value::Null)},"cognition":{"default":"low","omitted_constraint_behavior":"constraints.cognition resolves to low","mapping_surface":"worker-delegation","mapping_tool":"worker_cognition_defaults_inspect"},"first_use":["Call delegated_task_policy_inspect first.","Omitted constraints.cognition resolves to low; inspect worker-delegation's worker_cognition_defaults_inspect for the current model and reasoning-effort mapping.","Call delegated_task_validate once, then pass its durable validated_request_ref to delegated_task_run so objective, constraints, workflow, and binding fields are not duplicated. Validation is structural only: when constraints.preflight_paths is present, validate reports preflight_status=deferred and worker-delegation.worker_run performs the authoritative existence, scope, and bounded native read check immediately before launch. For read-only file evidence, include each target path with access=read; the native authority injects its bounded content and the worker must not fall back to a shell read.","Prefer the site-scoped mcp_loader_call_binding_tool(binding_id, site_root, surface_id, tool_name, arguments) path when reopening a surface after a loader restart.","delegated_task_wait is the canonical terminal handoff and includes the complete compact result; delegated_task_result is a secondary durable readback.","Use bounded list/status/result/events readback.","Use explicit cancellation and disposition tools for lifecycle mutations."],"binding_reopen":{"tool_name":"mcp_loader_call_binding_tool","arguments":{"site_root":"<site_root>","binding_id":"<binding_id>","surface_id":"delegated-task","tool_name":"<child_tool>","arguments":{}}},"boundaries":["Native authority owns task.json/events.jsonl and validated request records under the bounded task root.","Worker launches cross the native worker-delegation authority boundary.","Cross-site ownership remains server-bound authority."]})
+    json!({"schema":"narada.mcp_surface.guidance.v0","status":"ok","surface_id":"delegated-task","guidance_tool":"delegated_task_guidance","purpose":"Validate, execute, and inspect durable delegated task workflows through native authority.","requested":{"workflow":args.get("workflow").cloned().unwrap_or(Value::Null),"tool":args.get("tool").cloned().unwrap_or(Value::Null)},"cognition":{"default":"low","omitted_constraint_behavior":"constraints.cognition resolves to low","mapping_surface":"worker-delegation","mapping_tool":"worker_cognition_defaults_inspect"},"first_use":["Call delegated_task_policy_inspect first.","Omitted constraints.cognition resolves to low; inspect worker-delegation's worker_cognition_defaults_inspect for the current model and reasoning-effort mapping.","Use delegated_task_execute for a simple bounded validate-run-wait workflow; use the explicit validate, run, and wait tools when an agent must inspect or retain each lifecycle transition separately.","Call delegated_task_validate once, then pass its durable validated_request_ref to delegated_task_run so objective, constraints, workflow, and binding fields are not duplicated. Validation is structural only: when constraints.preflight_paths is present, validate reports preflight_status=deferred and worker-delegation.worker_run performs the authoritative existence, scope, and bounded native read check immediately before launch. For read-only file evidence, include each target path with access=read; the native authority injects its bounded content and the worker must not fall back to a shell read.","Prefer the site-scoped mcp_loader_call_binding_tool(binding_id, site_root, surface_id, tool_name, arguments) path when reopening a surface after a loader restart.","delegated_task_wait is the canonical terminal handoff and includes the complete compact result; delegated_task_result is a secondary durable readback.","Use bounded list/status/result/events readback.","Use explicit cancellation and disposition tools for lifecycle mutations."],"binding_reopen":{"tool_name":"mcp_loader_call_binding_tool","arguments":{"site_root":"<site_root>","binding_id":"<binding_id>","surface_id":"delegated-task","tool_name":"<child_tool>","arguments":{}}},"boundaries":["Native authority owns task.json/events.jsonl and validated request records under the bounded task root.","Worker launches cross the native worker-delegation authority boundary.","Cross-site ownership remains server-bound authority."]})
 }
 
 fn task_root(root: &Path) -> PathBuf {
@@ -601,8 +621,22 @@ fn compact_template(template: &Value) -> Value {
         "title":template.get("title"),
         "stages":stages,
         "authority":if template.get("authority_gates").is_some(){"native task authority with explicit publication gates"}else{"native worker authority"},
+        "best_for":template_fit(template.get("template_id").and_then(Value::as_str)).0,
+        "avoid_when":template_fit(template.get("template_id").and_then(Value::as_str)).1,
         "detail_available":true
     })
+}
+
+fn template_fit(id: Option<&str>) -> (Value, Value) {
+    match id.unwrap_or_default() {
+        "task_executability_assessment_v1" => (json!(["bounded pre-implementation feasibility and blocker assessment"]), json!(["the objective is already approved for direct implementation"])),
+        "implement" => (json!(["one bounded implementation or verification step"]), json!(["independent review or repair loops are required"])),
+        "implement_review" => (json!(["implementation requiring an independent review gate"]), json!(["a single trivial worker result is sufficient"])),
+        "research_synthesize" => (json!(["evidence gathering followed by synthesis and review"]), json!(["the task is a deterministic code edit"])),
+        "implement_review_repair_verify" => (json!(["high-risk changes needing review, repair, and final verification"]), json!(["latency matters more than redundant assurance"])),
+        "commit_push_guarded" => (json!(["explicitly authorized commit and push workflows"]), json!(["publication authority has not been granted"])),
+        _ => (json!([]), json!([])),
+    }
 }
 
 fn template_catalog(args: &Map<String, Value>) -> Value {
@@ -621,7 +655,12 @@ fn template_catalog(args: &Map<String, Value>) -> Value {
         .collect::<Vec<_>>();
     let details = mode == "detail" || id.is_some();
     let projected = if details {
-        templates
+        templates.into_iter().map(|mut template| {
+            let (best_for, avoid_when) = template_fit(template.get("template_id").and_then(Value::as_str));
+            template["best_for"] = best_for;
+            template["avoid_when"] = avoid_when;
+            template
+        }).collect()
     } else {
         templates.iter().map(compact_template).collect::<Vec<_>>()
     };
@@ -1655,9 +1694,30 @@ fn terminal_handoff(task: &Value, root: &Path) -> Value {
         "final_step":final_projection.get("final_step"),
         "final_structured_output":final_projection.get("final_structured_output"),
         "prior_step_outputs_ref":final_projection.get("prior_step_outputs_ref"),
+        "created_at":task.get("created_at"),
+        "started_at":task.get("started_at"),
+        "finished_at":task.get("finished_at"),
+        "duration_ms":task.get("duration_ms"),
         "details_ref":format!("delegated-task://{task_id}/result"),
         "details_tool":"delegated_task_result"
     })
+}
+fn task_execute(args: &Map<String, Value>, root: &Path, allowed_roots: &[PathBuf]) -> Result<Value, Value> {
+    let validation = validate(args, root)?;
+    let validated_request_ref = validation.get("validated_request_ref").cloned()
+        .ok_or_else(|| error("validated_request_ref_missing", "validated_request_ref_missing"))?;
+    let mut run_args = Map::new();
+    run_args.insert("validated_request_ref".into(), validated_request_ref);
+    run_args.insert("idempotency_key".into(), args.get("idempotency_key").cloned().unwrap_or(Value::Null));
+    let run = task_run_with_roots(&run_args, root, allowed_roots)?;
+    let task_id = run.get("task_id").cloned().ok_or_else(|| error("task_id_required", "task_id_required"))?;
+    let mut wait_args = Map::new();
+    wait_args.insert("task_id".into(), task_id);
+    for field in ["timeout_ms", "poll_ms"] {
+        if let Some(value) = args.get(field) { wait_args.insert(field.into(), value.clone()); }
+    }
+    let wait = task_wait_with_roots(&wait_args, root, allowed_roots)?;
+    Ok(json!({"schema":"narada.delegated_task.execute.v1","status":wait.get("status"),"validation":validation,"run":{"task_id":run.get("task_id"),"created":run.get("created")},"terminal":wait}))
 }
 #[cfg(test)]
 fn task_wait(args: &Map<String, Value>, root: &Path) -> Result<Value, Value> {
@@ -1752,6 +1812,19 @@ fn now() -> String {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default()
+}
+fn now_ms() -> i128 {
+    time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000
+}
+fn finalize_timing(task: &mut Value) {
+    if !task_is_terminal(task) || task.get("finished_at_ms").and_then(Value::as_i64).is_some() { return; }
+    let finished_ms = now_ms();
+    let started_ms = task.get("started_at_ms").and_then(Value::as_i64)
+        .or_else(|| task.get("created_at_ms").and_then(Value::as_i64))
+        .map(i128::from).unwrap_or(finished_ms);
+    task["finished_at"] = json!(now());
+    task["finished_at_ms"] = json!(finished_ms);
+    task["duration_ms"] = json!(finished_ms.saturating_sub(started_ms));
 }
 fn write_task(root: &Path, task: &Value) -> Result<(), Value> {
     let id = task
@@ -2129,11 +2202,12 @@ fn task_run_with_roots(
         );
     }
     let created = now();
+    let created_ms = now_ms();
     let workflow = normalize_workflow(args.get("workflow"));
     let step_states = initial_step_states(&workflow);
     let site = current_site_id(root);
     let fingerprint = request_fingerprint(args, root, &id);
-    let mut task = json!({"schema":"narada.delegated_task.task.v1","task_id":id,"owner_site_id":site,"owner_site_root":if site.is_some(){json!(root.to_string_lossy())}else{Value::Null},"created_by_site_id":site,"visibility_scope":if site.is_some(){"site"}else{"user_global"},"task_root_scope":"site_root","status":"accepted_for_execution","objective":objective,"request_fingerprint":fingerprint,"validated_request_ref":original_validation_ref,"created_at":created,"updated_at":created,"cancelled_at":null,"idempotency_key":args.get("idempotency_key"),"constraints":normalized_constraints(args.get("constraints")),"workflow":workflow,"execution":normalized_execution(args.get("execution")),"acceptance":args.get("acceptance").cloned().unwrap_or_else(||json!({})),"result":{"schema":"narada.delegated_task.handoff.v1","output_contract_verdict":"pending","objective_verdict":"pending","acceptance_verdict":"pending","step_states":step_states,"worker_refs":[],"worker_outputs":[],"residual_risks":[],"observed_incoherencies":[],"verification":[],"changed_files":[]},"summary":null});
+    let mut task = json!({"schema":"narada.delegated_task.task.v1","task_id":id,"owner_site_id":site,"owner_site_root":if site.is_some(){json!(root.to_string_lossy())}else{Value::Null},"created_by_site_id":site,"visibility_scope":if site.is_some(){"site"}else{"user_global"},"task_root_scope":"site_root","status":"accepted_for_execution","objective":objective,"request_fingerprint":fingerprint,"validated_request_ref":original_validation_ref,"created_at":created,"created_at_ms":created_ms,"started_at":null,"started_at_ms":null,"finished_at":null,"finished_at_ms":null,"duration_ms":null,"updated_at":created,"cancelled_at":null,"idempotency_key":args.get("idempotency_key"),"constraints":normalized_constraints(args.get("constraints")),"workflow":workflow,"execution":normalized_execution(args.get("execution")),"acceptance":args.get("acceptance").cloned().unwrap_or_else(||json!({})),"result":{"schema":"narada.delegated_task.handoff.v1","output_contract_verdict":"pending","objective_verdict":"pending","acceptance_verdict":"pending","step_states":step_states,"worker_refs":[],"worker_outputs":[],"residual_risks":[],"observed_incoherencies":[],"verification":[],"changed_files":[]},"summary":null});
     write_task(root, &task)?;
     append_event(root, &id, "task_created", json!({"objective":objective}))?;
     if task.pointer("/execution/start").and_then(Value::as_bool) != Some(false) {
@@ -2400,6 +2474,16 @@ fn acceptance_verdict(task: &Value, root: &Path) -> (&'static str, Vec<Value>) {
         "changes_made":changes_made,
         "status":if authority == "read" {if changed_files == 0 && !changes_made {"passed"} else {"failed"}} else {"not_applicable"}
     }));
+    if task.pointer("/acceptance/strict_clean_run").and_then(Value::as_bool) == Some(true) {
+        let terminal = task_is_terminal(task);
+        let states = result.get("step_states").and_then(Value::as_object);
+        let clean = states.is_some_and(|states| !states.is_empty() && states.values().all(|state| {
+            state.get("attempts").and_then(Value::as_u64).unwrap_or(0) <= 1
+                && state.get("error").is_none_or(Value::is_null)
+                && matches!(state.get("status").and_then(Value::as_str), Some("completed" | "skipped" | "noted"))
+        }));
+        checks.push(json!({"kind":"strict_clean_run","requested":true,"attempts_at_most_one":clean,"no_step_errors":clean,"status":if !terminal {"pending"} else if clean {"passed"} else {"failed"}}));
+    }
     for item in task
         .pointer("/acceptance/required_files")
         .and_then(Value::as_array)
@@ -2732,7 +2816,11 @@ fn advance_value_with_roots(
         }
     }
     let (current_acceptance, current_checks) = acceptance_verdict(&task, root);
-    set_outcome_verdicts(&mut task, current_acceptance);
+    if task_is_terminal(&task) {
+        set_outcome_verdicts(&mut task, current_acceptance);
+    } else {
+        set_outcome_verdicts(&mut task, "pending");
+    }
     task["result"]["acceptance_checks"] = json!(current_checks);
     if task.get("status").and_then(Value::as_str) != Some("failed") {
         let steps = task
@@ -2868,6 +2956,10 @@ fn advance_value_with_roots(
                 .get("run_id")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
+            if task.get("started_at").is_none_or(Value::is_null) {
+                task["started_at"] = json!(now());
+                task["started_at_ms"] = json!(now_ms());
+            }
             let attempts = task["result"]["step_states"][&step_id]["attempts"]
                 .as_u64()
                 .unwrap_or(0)
@@ -2891,6 +2983,17 @@ fn advance_value_with_roots(
                 &id,
                 "worker_started",
                 json!({"step_id":step_id,"run_id":run_id,"attempt":attempts}),
+            )?;
+            append_event(
+                root,
+                &id,
+                "evidence_resolution_completed",
+                json!({
+                    "step_id":step_id,
+                    "run_id":run_id,
+                    "preflight_evidence_ref":run.pointer("/resolved_invocation/preflight_evidence_ref"),
+                    "native_evidence_count":run.pointer("/capability_snapshot/preflight/items").and_then(Value::as_array).map(Vec::len).unwrap_or(0)
+                }),
             )?;
             active += 1;
         }
@@ -2943,6 +3046,7 @@ fn advance_value_with_roots(
             )?;
         }
     }
+    finalize_timing(&mut task);
     task["updated_at"] = json!(now());
     write_task(root, &task)?;
     Ok(task)
@@ -2962,6 +3066,7 @@ fn task_cancel(args: &Map<String, Value>, root: &Path, takeover: bool) -> Result
         ));
     }
     task["status"] = json!("cancelled");
+    finalize_timing(&mut task);
     task["updated_at"] = json!(now());
     let kind = if takeover {
         "task_parent_takeover"
@@ -3206,6 +3311,8 @@ mod tests {
         assert_eq!(compact["mode"], "compact");
         assert!(compact["templates"][0].get("stages").is_some());
         assert!(compact["templates"][0].get("detail_available").is_some());
+        assert!(compact["templates"][0].get("best_for").is_some());
+        assert!(compact["templates"][0].get("avoid_when").is_some());
         let detail = template_catalog(
             json!({"template_id":"implement_review"})
                 .as_object()
@@ -3213,6 +3320,8 @@ mod tests {
         );
         assert_eq!(detail["mode"], "detail");
         assert!(detail["templates"][0].get("steps").is_some());
+        assert!(detail["templates"][0]["best_for"].as_array().is_some_and(|items| !items.is_empty()));
+        assert!(detail["templates"][0]["avoid_when"].as_array().is_some_and(|items| !items.is_empty()));
     }
 
     #[test]
@@ -3272,6 +3381,33 @@ mod tests {
         assert!(checks.iter().any(|check| {
             check["kind"] == "objective_outcome" && check["verdict"] == "pending"
         }));
+    }
+
+    #[test]
+    fn strict_clean_run_is_pending_then_auditable_at_terminal_state() {
+        let mut task = json!({
+            "status":"running",
+            "objective":"inspect",
+            "acceptance":{"strict_clean_run":true},
+            "result":{"worker_outputs":[],"step_states":{"inspect":{"status":"running","attempts":1,"error":null}}}
+        });
+        let (pending, pending_checks) = acceptance_verdict(&task, Path::new("."));
+        assert_eq!(pending, "pending");
+        assert!(pending_checks.iter().any(|check| check["kind"] == "strict_clean_run" && check["status"] == "pending"));
+        task["status"] = json!("completed");
+        task["result"]["step_states"]["inspect"]["status"] = json!("completed");
+        let (passed, terminal_checks) = acceptance_verdict(&task, Path::new("."));
+        assert_eq!(passed, "passed");
+        assert!(terminal_checks.iter().any(|check| check["kind"] == "strict_clean_run" && check["status"] == "passed"));
+    }
+
+    #[test]
+    fn terminal_handoff_exposes_task_timing() {
+        let task = json!({"task_id":"timed","status":"completed","created_at":"2026-01-01T00:00:00Z","started_at":"2026-01-01T00:00:01Z","finished_at":"2026-01-01T00:00:02Z","duration_ms":1000,"result":{"acceptance_verdict":"passed","step_states":{}}});
+        let handoff = terminal_handoff(&task, Path::new("."));
+        assert_eq!(handoff["duration_ms"], 1000);
+        assert_eq!(handoff["started_at"], "2026-01-01T00:00:01Z");
+        assert_eq!(handoff["finished_at"], "2026-01-01T00:00:02Z");
     }
 
     #[test]
@@ -3469,6 +3605,17 @@ mod tests {
             .expect("wait tool");
         assert_eq!(wait["annotations"]["destructiveHint"], false);
         assert_eq!(wait["annotations"]["stateChangingHint"], true);
+        let execute = tools
+            .iter()
+            .find(|tool| tool["name"] == "delegated_task_execute")
+            .expect("execute tool");
+        assert_eq!(execute["annotations"]["readOnlyHint"], false);
+        assert_eq!(execute["annotations"]["destructiveHint"], false);
+        assert_eq!(execute["annotations"]["stateChangingHint"], true);
+        assert_eq!(
+            execute["inputSchema"]["required"],
+            json!(["objective", "idempotency_key"])
+        );
         let cancel = tools
             .iter()
             .find(|tool| tool["name"] == "delegated_task_cancel")
