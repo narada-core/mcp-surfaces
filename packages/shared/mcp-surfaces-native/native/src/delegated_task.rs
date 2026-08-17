@@ -2206,6 +2206,12 @@ fn asynchronous_worker_constraints(task: &Value, step: &Value) -> Value {
     }
     constraints
 }
+fn worker_status_args(run_id: &str) -> Map<String, Value> {
+    json!({"run_id":run_id,"compact":false})
+        .as_object()
+        .cloned()
+        .expect("worker status arguments are an object")
+}
 const CONSTRAINT_FIELDS: &[&str] = &[
     "authority",
     "cwd",
@@ -3110,7 +3116,7 @@ fn advance_value_with_roots(
             .to_string();
         let status = crate::worker_delegation::call_tool(
             "worker_run_status",
-            json!({"run_id":run_id}).as_object().unwrap(),
+            &worker_status_args(&run_id),
             root,
             allowed_roots,
         )?;
@@ -3645,6 +3651,13 @@ mod tests {
         assert!(instruction.contains("exactly one JSON object"));
         assert!(instruction.contains("entire final answer"));
         assert!(!instruction.contains("explanation may follow"));
+    }
+
+    #[test]
+    fn terminal_worker_poll_requests_full_durable_result() {
+        let args = worker_status_args("run-test");
+        assert_eq!(args.get("run_id"), Some(&json!("run-test")));
+        assert_eq!(args.get("compact"), Some(&json!(false)));
     }
 
     #[test]
