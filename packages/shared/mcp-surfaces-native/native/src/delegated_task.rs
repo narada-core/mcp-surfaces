@@ -819,9 +819,9 @@ fn validate_with_options(
         "preflight_remediation":if preflight_requested{"worker_run enforces path existence and scope immediately before launch; validation does not inspect the filesystem"}else{"No preflight paths were requested."}
     });
     if valid && persist_reference {
-        let reference = format!("vr_{}", uuid::Uuid::new_v4().simple());
         let request = Value::Object(args.clone());
         let digest = sha256_json(&request);
+        let reference = format!("vr_{}", &digest[..32]);
         let record = json!({
             "schema":"narada.delegated_task.validated_request.v1",
             "validated_request_ref":reference,
@@ -1921,16 +1921,18 @@ fn stable_task_id(args: &Map<String, Value>) -> String {
     if let Some(id) = args.get("task_id").and_then(Value::as_str) {
         return id.to_string();
     }
-    if let Some(reference) = args.get("validated_request_ref").and_then(Value::as_str) {
-        let digest = Sha256::digest(reference.as_bytes());
+    // A caller-supplied idempotency key is the durable operation identity.
+    // Validation references identify payload records and must not fork retries.
+    if let Some(key) = args.get("idempotency_key").and_then(Value::as_str) {
+        let digest = Sha256::digest(key.as_bytes());
         let prefix = digest[..8]
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
         return format!("task_{prefix}");
     }
-    if let Some(key) = args.get("idempotency_key").and_then(Value::as_str) {
-        let digest = Sha256::digest(key.as_bytes());
+    if let Some(reference) = args.get("validated_request_ref").and_then(Value::as_str) {
+        let digest = Sha256::digest(reference.as_bytes());
         let prefix = digest[..8]
             .iter()
             .map(|byte| format!("{byte:02x}"))
@@ -3619,6 +3621,75 @@ mod tests {
         )
         .expect_err("drift must be refused");
         assert_eq!(drift["code"], "validated_request_drift");
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn execute_identity_reuses_identical_validation_and_prioritizes_idempotency_key() {
+        let root = std::env::temp_dir().join(format!(
+            "narada-delegated-task-execute-idempotency-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let request = json!({
+            "objective":"return ok",
+            "idempotency_key":"execute-retry",
+            "execution":{"start":false}
+        });
+        let first_validation =
+            validate(request.as_object().unwrap(), &root).expect("first validation");
+        let replay_validation =
+            validate(request.as_object().unwrap(), &root).expect("replay validation");
+        assert_eq!(
+            first_validation["validated_request_ref"],
+            replay_validation["validated_request_ref"]
+        );
+        let reference = first_validation["validated_request_ref"].clone();
+        let first = task_run(
+            json!({
+                "validated_request_ref":reference,
+                "idempotency_key":"execute-retry"
+            })
+            .as_object()
+            .unwrap(),
+            &root,
+        )
+        .expect("first run");
+        let replay = task_run(
+            json!({
+                "validated_request_ref":replay_validation["validated_request_ref"],
+                "idempotency_key":"execute-retry"
+            })
+            .as_object()
+            .unwrap(),
+            &root,
+        )
+        .expect("replay");
+        assert_eq!(first["task_id"], replay["task_id"]);
+        assert_eq!(first["created"], true);
+        assert_eq!(replay["created"], false);
+
+        let changed_validation = validate(
+            json!({
+                "objective":"different payload",
+                "idempotency_key":"execute-retry",
+                "execution":{"start":false}
+            })
+            .as_object()
+            .unwrap(),
+            &root,
+        )
+        .expect("changed validation");
+        let conflict = task_run(
+            json!({
+                "validated_request_ref":changed_validation["validated_request_ref"],
+                "idempotency_key":"execute-retry"
+            })
+            .as_object()
+            .unwrap(),
+            &root,
+        )
+        .expect_err("changed payload under the same key must conflict");
+        assert_eq!(conflict["code"], "delegated_task_idempotency_conflict");
         fs::remove_dir_all(root).expect("cleanup");
     }
 
