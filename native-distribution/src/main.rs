@@ -17,6 +17,8 @@ const RUNTIME_PACKAGES: &[&str] = &[
     "narada-mcp-runtime",
     "narada-mcp-surfaces-native",
 ];
+const NARADA_AGENT_RUNTIME_MANIFEST: &str =
+    "packages/agent-runtime-server/native/Cargo.toml";
 
 #[derive(Clone, Copy)]
 struct DistributionArtifact {
@@ -174,13 +176,25 @@ fn cargo(root: &Path, arguments: &[&str], phase: &str) -> Result<(), String> {
 }
 
 fn build(root: &Path) -> Result<Value, String> {
+    let narada_root = narada_source_root(root)?.join("narada");
+    cargo(
+        &narada_root,
+        &[
+            "build",
+            "--release",
+            "--locked",
+            "--manifest-path",
+            NARADA_AGENT_RUNTIME_MANIFEST,
+        ],
+        "native_agent_runtime_build",
+    )?;
     let mut arguments = vec!["build", "--release", "--locked"];
     for package in RUNTIME_PACKAGES {
         arguments.extend(["--package", package]);
     }
     cargo(root, &arguments, "native_build")?;
     Ok(
-        json!({"schema":"narada.native_distribution.build.v1","status":"built","package_count":RUNTIME_PACKAGES.len()}),
+        json!({"schema":"narada.native_distribution.build.v1","status":"built","package_count":RUNTIME_PACKAGES.len(),"external_runtime_dependencies":[{"manifest":NARADA_AGENT_RUNTIME_MANIFEST,"status":"built"}]}),
     )
 }
 
@@ -638,6 +652,16 @@ mod tests {
     #[test]
     fn native_distribution_has_no_javascript_subprocess() {
         verify_native_distribution_source(include_str!("main.rs")).unwrap();
+    }
+
+    #[test]
+    fn native_distribution_builds_its_external_provider_runtime_dependency() {
+        assert_eq!(
+            NARADA_AGENT_RUNTIME_MANIFEST,
+            "packages/agent-runtime-server/native/Cargo.toml"
+        );
+        let source = include_str!("main.rs");
+        assert!(source.contains("native_agent_runtime_build"));
     }
 
     #[test]
