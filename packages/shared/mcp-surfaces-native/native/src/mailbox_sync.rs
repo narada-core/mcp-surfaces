@@ -3192,7 +3192,13 @@ fn create_windows_junction(target: &Path, link: &Path) -> std::io::Result<()> {
     }
     buffer.extend_from_slice(&0_u16.to_le_bytes());
 
-    let mut link_wide = link.as_os_str().encode_wide().collect::<Vec<_>>();
+    // CreateFileW still applies the legacy MAX_PATH limit unless the absolute
+    // path uses Win32's extended-length form. Graph message/conversation IDs
+    // routinely make mailbox view paths exceed that limit.
+    let link_text = windows_extended_path_text(link);
+    let mut link_wide = std::ffi::OsStr::new(&link_text)
+        .encode_wide()
+        .collect::<Vec<_>>();
     link_wide.push(0);
     let handle = unsafe {
         CreateFileW(
@@ -3847,6 +3853,47 @@ fn normalized_path_text(path: &Path) -> String {
     #[cfg(not(windows))]
     {
         value.to_string()
+    }
+}
+
+#[cfg(windows)]
+fn windows_extended_path_text(path: &Path) -> String {
+    let normalized = path.to_string_lossy().replace('/', r"\");
+    if normalized.starts_with(r"\\?\") {
+        normalized
+    } else if let Some(unc) = normalized.strip_prefix(r"\\") {
+        format!(r"\\?\UNC\{unc}")
+    } else {
+        format!(r"\\?\{normalized}")
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_path_tests {
+    use super::windows_extended_path_text;
+    use std::path::Path;
+
+    #[test]
+    fn junction_open_path_uses_extended_length_form() {
+        let path = Path::new(
+            r"C:\mailbox\views\by-thread\conversation\members\message",
+        );
+        assert_eq!(
+            windows_extended_path_text(path),
+            r"\\?\C:\mailbox\views\by-thread\conversation\members\message",
+        );
+    }
+
+    #[test]
+    fn junction_open_path_preserves_existing_extended_and_unc_paths() {
+        assert_eq!(
+            windows_extended_path_text(Path::new(r"\\?\C:\mailbox\view")),
+            r"\\?\C:\mailbox\view",
+        );
+        assert_eq!(
+            windows_extended_path_text(Path::new(r"\\server\share\mailbox\view")),
+            r"\\?\UNC\server\share\mailbox\view",
+        );
     }
 }
 
