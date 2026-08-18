@@ -3118,126 +3118,25 @@ fn link_view(path: &Path, target: &Path) -> Result<(), Value> {
             .map_err(|e| error("mailbox_projection_view_directory_failed", &e.to_string()))?;
     }
     #[cfg(windows)]
-    let result = create_windows_junction(target, path);
+    let result = create_windows_view_reference(target, path);
     #[cfg(unix)]
     let result = std::os::unix::fs::symlink(target, path);
     result.map_err(|e| error("mailbox_projection_view_link_failed", &e.to_string()))
 }
 
 #[cfg(windows)]
-fn create_windows_junction(target: &Path, link: &Path) -> std::io::Result<()> {
-    use std::ffi::c_void;
-    use std::os::windows::ffi::OsStrExt;
-    use std::ptr::null_mut;
-
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn CreateFileW(
-            file_name: *const u16,
-            desired_access: u32,
-            share_mode: u32,
-            security_attributes: *mut c_void,
-            creation_disposition: u32,
-            flags_and_attributes: u32,
-            template_file: *mut c_void,
-        ) -> *mut c_void;
-        fn DeviceIoControl(
-            device: *mut c_void,
-            control_code: u32,
-            input: *mut c_void,
-            input_size: u32,
-            output: *mut c_void,
-            output_size: u32,
-            bytes_returned: *mut u32,
-            overlapped: *mut c_void,
-        ) -> i32;
-        fn CloseHandle(handle: *mut c_void) -> i32;
-    }
-
-    const GENERIC_WRITE: u32 = 0x4000_0000;
-    const OPEN_EXISTING: u32 = 3;
-    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-    const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
-    const FSCTL_SET_REPARSE_POINT: u32 = 0x0009_00A4;
-
+fn create_windows_view_reference(target: &Path, link: &Path) -> std::io::Result<()> {
+    // Mailbox views are derived indexes, not filesystem authority. A small
+    // reference directory is portable across ordinary Windows sessions and
+    // avoids junction privileges and MAX_PATH-sensitive Win32 calls.
     fs::create_dir(link)?;
-    let target = fs::canonicalize(target)?;
-    let printable = normalized_path_text(&target);
-    let substitute = format!(r"\??\{printable}");
-    let substitute_wide = std::ffi::OsStr::new(&substitute)
-        .encode_wide()
-        .collect::<Vec<_>>();
-    let printable_wide = std::ffi::OsStr::new(&printable)
-        .encode_wide()
-        .collect::<Vec<_>>();
-    let substitute_bytes = (substitute_wide.len() * 2) as u16;
-    let printable_bytes = (printable_wide.len() * 2) as u16;
-    let path_bytes = substitute_bytes as usize + 2 + printable_bytes as usize + 2;
-    let data_length = (8 + path_bytes) as u16;
-    let mut buffer = Vec::with_capacity(8 + data_length as usize);
-    buffer.extend_from_slice(&IO_REPARSE_TAG_MOUNT_POINT.to_le_bytes());
-    buffer.extend_from_slice(&data_length.to_le_bytes());
-    buffer.extend_from_slice(&0_u16.to_le_bytes());
-    buffer.extend_from_slice(&0_u16.to_le_bytes());
-    buffer.extend_from_slice(&substitute_bytes.to_le_bytes());
-    buffer.extend_from_slice(&(substitute_bytes + 2).to_le_bytes());
-    buffer.extend_from_slice(&printable_bytes.to_le_bytes());
-    for value in substitute_wide {
-        buffer.extend_from_slice(&value.to_le_bytes());
+    let result = fs::canonicalize(target).and_then(|target| {
+        fs::write(link.join(".narada-view-target"), normalized_path_text(&target))
+    });
+    if result.is_err() {
+        let _ = fs::remove_dir_all(link);
     }
-    buffer.extend_from_slice(&0_u16.to_le_bytes());
-    for value in printable_wide {
-        buffer.extend_from_slice(&value.to_le_bytes());
-    }
-    buffer.extend_from_slice(&0_u16.to_le_bytes());
-
-    // CreateFileW still applies the legacy MAX_PATH limit unless the absolute
-    // path uses Win32's extended-length form. Graph message/conversation IDs
-    // routinely make mailbox view paths exceed that limit.
-    let link_text = windows_extended_path_text(link);
-    let mut link_wide = std::ffi::OsStr::new(&link_text)
-        .encode_wide()
-        .collect::<Vec<_>>();
-    link_wide.push(0);
-    let handle = unsafe {
-        CreateFileW(
-            link_wide.as_ptr(),
-            GENERIC_WRITE,
-            0,
-            null_mut(),
-            OPEN_EXISTING,
-            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
-            null_mut(),
-        )
-    };
-    if handle as isize == -1 {
-        let failure = std::io::Error::last_os_error();
-        let _ = fs::remove_dir(link);
-        return Err(failure);
-    }
-    let mut returned = 0_u32;
-    let success = unsafe {
-        DeviceIoControl(
-            handle,
-            FSCTL_SET_REPARSE_POINT,
-            buffer.as_mut_ptr().cast(),
-            buffer.len() as u32,
-            null_mut(),
-            0,
-            &mut returned,
-            null_mut(),
-        )
-    };
-    unsafe {
-        CloseHandle(handle);
-    }
-    if success == 0 {
-        let failure = std::io::Error::last_os_error();
-        let _ = fs::remove_dir(link);
-        return Err(failure);
-    }
-    Ok(())
+    result
 }
 
 fn unlink_view(path: &Path) -> Result<(), Value> {
@@ -3853,47 +3752,6 @@ fn normalized_path_text(path: &Path) -> String {
     #[cfg(not(windows))]
     {
         value.to_string()
-    }
-}
-
-#[cfg(windows)]
-fn windows_extended_path_text(path: &Path) -> String {
-    let normalized = path.to_string_lossy().replace('/', r"\");
-    if normalized.starts_with(r"\\?\") {
-        normalized
-    } else if let Some(unc) = normalized.strip_prefix(r"\\") {
-        format!(r"\\?\UNC\{unc}")
-    } else {
-        format!(r"\\?\{normalized}")
-    }
-}
-
-#[cfg(all(test, windows))]
-mod windows_path_tests {
-    use super::windows_extended_path_text;
-    use std::path::Path;
-
-    #[test]
-    fn junction_open_path_uses_extended_length_form() {
-        let path = Path::new(
-            r"C:\mailbox\views\by-thread\conversation\members\message",
-        );
-        assert_eq!(
-            windows_extended_path_text(path),
-            r"\\?\C:\mailbox\views\by-thread\conversation\members\message",
-        );
-    }
-
-    #[test]
-    fn junction_open_path_preserves_existing_extended_and_unc_paths() {
-        assert_eq!(
-            windows_extended_path_text(Path::new(r"\\?\C:\mailbox\view")),
-            r"\\?\C:\mailbox\view",
-        );
-        assert_eq!(
-            windows_extended_path_text(Path::new(r"\\server\share\mailbox\view")),
-            r"\\?\UNC\server\share\mailbox\view",
-        );
     }
 }
 
