@@ -3064,9 +3064,9 @@ fn mark_views(root: &Path, payload: &Value) -> Result<(), Value> {
         link_view(
             &root
                 .join("views/by-thread")
-                .join(safe_segment(conversation))
+                .join(view_segment(conversation))
                 .join("members")
-                .join(safe_segment(message_id)),
+                .join(view_segment(message_id)),
             &message_path,
         )?;
     }
@@ -3080,13 +3080,13 @@ fn mark_views(root: &Path, payload: &Value) -> Result<(), Value> {
         link_view(
             &root
                 .join("views/by-folder")
-                .join(safe_segment(folder))
+                .join(view_segment(folder))
                 .join("members")
-                .join(safe_segment(message_id)),
+                .join(view_segment(message_id)),
             &message_path,
         )?;
     }
-    let unread = root.join("views/unread").join(safe_segment(message_id));
+    let unread = root.join("views/unread").join(view_segment(message_id));
     if payload
         .get("flags")
         .and_then(|value| value.get("is_read"))
@@ -3097,7 +3097,7 @@ fn mark_views(root: &Path, payload: &Value) -> Result<(), Value> {
     } else {
         unlink_view(&unread)?;
     }
-    let flagged = root.join("views/flagged").join(safe_segment(message_id));
+    let flagged = root.join("views/flagged").join(view_segment(message_id));
     if payload
         .get("flags")
         .and_then(|value| value.get("is_flagged"))
@@ -3137,6 +3137,15 @@ fn create_windows_view_reference(target: &Path, link: &Path) -> std::io::Result<
         let _ = fs::remove_dir_all(link);
     }
     result
+}
+
+fn view_segment(value: &str) -> String {
+    let segment = safe_segment(value);
+    if segment.chars().count() <= 64 {
+        segment
+    } else {
+        format!("key_{}", &sha256_hex(value.as_bytes())[..32])
+    }
 }
 
 fn unlink_view(path: &Path) -> Result<(), Value> {
