@@ -11,6 +11,7 @@
     "build:carrier-artifacts": "cargo native-package",
     "build:carrier-artifacts:compat": "node --import tsx scripts/build-carrier-artifacts.ts",
     "materialize:carrier": "cargo native-materialize",
+    "materialize:carrier:all": "pwsh -NoLogo -NoProfile -File ./tools/materialize-all-carriers.ps1 -NoNotification",
     "materialize:carrier:native": "cargo native-materialize",
     "build:materializer:native": "cargo native-build",
     "normalize:newlines": "node scripts/check-newlines.mjs --write",

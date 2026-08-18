@@ -152,7 +152,7 @@ Use this surface for any MCP usage friction, runtime failures, schema issues, or
 
 ```powershell
 pnpm build
-pnpm materialize:carrier -- --materialize-all [--output-dir <directory>]
+pnpm materialize:carrier:all
 pnpm typecheck
 pnpm test
 pnpm test:build-availability-boundary
