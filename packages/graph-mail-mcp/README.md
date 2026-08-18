@@ -145,7 +145,9 @@ Reply and reply-all tools also accept the explicit `comment_html` mode. This
 mode performs a governed two-phase operation: Graph first creates the normal
 unsent reply (including its generated recipients and quoted history), then the
 surface reads that draft and patches an HTML body containing the authored
-`comment_html` followed by the preserved quote. This keeps paragraph
+`comment_html`, the optional site-configured `reply_signature_name`, and the
+preserved quote. Callers provide unsigned `comment_html` when the policy
+declares a signature. This keeps paragraph
 boundaries, reply-all recipients, quote history, and the unsent state together;
 `comment_html` cannot be combined with `comment`, `body_text`, or `body_html`.
 

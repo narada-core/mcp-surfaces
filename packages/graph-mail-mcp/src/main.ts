@@ -708,7 +708,7 @@ function replyDraftProperties() {
     mailbox_id: { type: 'string', default: 'me', description: 'Mailbox id or user principal. Defaults to the only allowed mailbox when policy has one, otherwise me.' },
     message_id: { type: 'string', description: 'Original message id.' },
     comment: { type: 'string', description: 'Optional reply comment.' },
-    comment_html: { type: 'string', description: 'Governed HTML reply body. Creates the Graph reply first, then preserves its generated quote while applying this HTML body.' },
+    comment_html: { type: 'string', description: 'Governed unsigned HTML reply body. Creates the Graph reply first, applies the site-configured reply signature when present, then preserves the generated quote.' },
     body_text: { type: 'string', description: 'Optional replacement body text.' },
     body_html: { type: 'string', description: 'Optional replacement body HTML.' },
   };
@@ -1144,6 +1144,7 @@ async function graphMailDoctor(state: GraphMailServerState): Promise<GraphMailRe
     allow_folder_create: policy.allow_folder_create,
     allow_message_move: policy.allow_message_move,
     allow_message_mark_read: policy.allow_message_mark_read,
+    reply_signature_name: policy.reply_signature_name,
     mailbox_organization_approval_token_configured: !!policy.mailbox_organization_approval_token,
     server_name: state.serverName,
   };
@@ -1598,7 +1599,10 @@ async function graphMailHtmlReplyDraftCreate(
   const observed = asRecord(await graphRequest({ policy, accessToken, fetchImpl }, { method: 'GET', path: draftPath }));
   const quoteHtml = graphBodyAsHtml(observed.body ?? created.body);
   if (!quoteHtml.trim()) throw new Error('graph_reply_html_quote_missing');
-  const composedHtml = `${commentHtml}<div data-narada-quoted-history="true">${quoteHtml}</div>`;
+  const signatureHtml = policy.reply_signature_name
+    ? `<p>Thanks,<br>${escapeHtml(policy.reply_signature_name)}</p>`
+    : '';
+  const composedHtml = `${commentHtml}${signatureHtml}<div data-narada-quoted-history="true">${quoteHtml}</div>`;
   const patched = asRecord(await graphRequest({
     policy,
     accessToken,
@@ -1617,6 +1621,8 @@ async function graphMailHtmlReplyDraftCreate(
     status: 'created',
     draft: patched,
     reply_body_mode: 'comment_html',
+    reply_signature_name: policy.reply_signature_name,
+    signature_applied: Boolean(policy.reply_signature_name),
     quote_preserved: true,
     unsent: patched.isDraft !== false,
   };

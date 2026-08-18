@@ -21,6 +21,7 @@ export type GraphMailPolicy = {
   allow_folder_create: boolean;
   allow_message_move: boolean;
   allow_message_mark_read: boolean;
+  reply_signature_name: string | null;
   mailbox_organization_approval_token: string | null;
 };
 
@@ -73,6 +74,11 @@ export function loadGraphMailPolicy(siteRootInput: string): GraphMailPolicy {
     allow_folder_create: config.allow_folder_create === true || config.allowFolderCreate === true,
     allow_message_move: config.allow_message_move === true || config.allowMessageMove === true,
     allow_message_mark_read: config.allow_message_mark_read === true || config.allowMessageMarkRead === true,
+    reply_signature_name: typeof config.reply_signature_name === 'string' && config.reply_signature_name.trim() !== ''
+      ? config.reply_signature_name.trim()
+      : typeof config.replySignatureName === 'string' && config.replySignatureName.trim() !== ''
+        ? config.replySignatureName.trim()
+        : null,
     mailbox_organization_approval_token: typeof config.mailbox_organization_approval_token === 'string'
       ? config.mailbox_organization_approval_token
       : typeof config.mailboxOrganizationApprovalToken === 'string'

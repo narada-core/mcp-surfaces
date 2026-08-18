@@ -81,6 +81,7 @@ try {
   writeFileSync(join(root, '.ai', 'graph-mail-mcp.json'), JSON.stringify({
     graph_base_url: 'https://graph.example.test/v1.0',
     allowed_mailboxes: ['support@example.test'],
+    reply_signature_name: 'Ezra',
   }));
 
   const attachmentCalls: CapturedRequest[] = [];
@@ -117,6 +118,7 @@ try {
   assert.equal(doctor.result.structuredContent.allow_folder_create, false);
   assert.equal(doctor.result.structuredContent.allow_message_move, false);
   assert.equal(doctor.result.structuredContent.allow_message_mark_read, false);
+  assert.equal(doctor.result.structuredContent.reply_signature_name, 'Ezra');
   assert.equal(doctor.result.structuredContent.mailbox_organization_approval_token_configured, false);
   assert.deepEqual(doctor.result.structuredContent.allowed_attachment_roots, [root]);
 
@@ -460,6 +462,7 @@ try {
     allow_folder_create: true,
     allow_message_move: true,
     allow_message_mark_read: true,
+    reply_signature_name: 'Ezra',
     mailbox_organization_approval_token: 'organize-123',
   }));
   const folderCalls: CapturedRequest[] = [];
@@ -1440,6 +1443,8 @@ try {
   assert.equal(htmlReply.result.structuredContent.reply_body_mode, 'comment_html');
   assert.equal(htmlReply.result.structuredContent.quote_preserved, true);
   assert.equal(htmlReply.result.structuredContent.unsent, true);
+  assert.equal(htmlReply.result.structuredContent.signature_applied, true);
+  assert.equal(htmlReply.result.structuredContent.reply_signature_name, 'Ezra');
   assert.equal(htmlReply.result.structuredContent.draft.isDraft, true);
   assert.equal(htmlReplyCalls.length, 3);
   assert.equal(htmlReplyCalls[0].init.method, 'POST');
@@ -1449,6 +1454,11 @@ try {
   const htmlPatch = JSON.parse(htmlReplyCalls[2].init.body);
   assert.equal(htmlPatch.body.contentType, 'HTML');
   assert.match(htmlPatch.body.content, /<p>First paragraph\.<\/p><p>Second paragraph\.<\/p>/);
+  assert.match(htmlPatch.body.content, /<p>Thanks,<br>Ezra<\/p>/);
+  assert.ok(
+    htmlPatch.body.content.indexOf('<p>Thanks,<br>Ezra</p>')
+      < htmlPatch.body.content.indexOf('data-narada-quoted-history'),
+  );
   assert.match(htmlPatch.body.content, /Original quoted history/);
 
   const blockedMailbox = await rpc({
