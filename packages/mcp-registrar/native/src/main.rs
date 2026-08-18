@@ -312,6 +312,12 @@ fn extend_epistemic_catalog(contract: &mut Value) {
         ("epistemic_graph_query_batch", true),
         ("epistemic_graph_source_inspect", true),
         ("epistemic_graph_neighborhood", true),
+        ("epistemic_graph_snapshot", true),
+        ("epistemic_graph_sequence_create", false),
+        ("epistemic_graph_sequence_status", true),
+        ("epistemic_graph_sequence_list", true),
+        ("epistemic_graph_sequence_claim_next", false),
+        ("epistemic_graph_sequence_claims", true),
         ("epistemic_graph_proposal_submit", false),
         ("epistemic_graph_submit_review_admit", false),
         ("epistemic_graph_capture_sources", false),
@@ -393,6 +399,11 @@ fn align_native_surface_descriptor_schemas(contract: &mut Value) {
             let name = tool.get("name").and_then(Value::as_str).unwrap_or_default();
             let schema = match (id.as_str(), name) {
                 ("epistemic-graph", "epistemic_graph_guidance") => Some(json!({"type":"object","properties":{"workflow":{"type":"string","maxLength":256},"tool":{"type":"string","maxLength":256}},"additionalProperties":false})),
+                ("epistemic-graph", "epistemic_graph_sequence_create") => Some(json!({"type":"object","properties":{"sequence_name":{"type":"string","minLength":1,"maxLength":120},"actor":{"type":"string","minLength":1,"maxLength":256},"authority_basis":{"type":"object","minProperties":1,"maxProperties":32},"start_at":{"type":"integer","minimum":1,"default":1},"idempotency_key":{"type":"string","minLength":1,"maxLength":256}},"required":["sequence_name","actor","authority_basis"],"additionalProperties":false})),
+                ("epistemic-graph", "epistemic_graph_sequence_status") => Some(json!({"type":"object","properties":{"sequence_name":{"type":"string","minLength":1,"maxLength":120}},"required":["sequence_name"],"additionalProperties":false})),
+                ("epistemic-graph", "epistemic_graph_sequence_list") => Some(json!({"type":"object","properties":{"limit":{"type":"integer","minimum":1,"maximum":100,"default":100},"offset":{"type":"integer","minimum":0,"default":0}},"additionalProperties":false})),
+                ("epistemic-graph", "epistemic_graph_sequence_claim_next") => Some(json!({"type":"object","properties":{"sequence_name":{"type":"string","minLength":1,"maxLength":120},"actor":{"type":"string","minLength":1,"maxLength":256},"authority_basis":{"type":"object","minProperties":1,"maxProperties":32},"idempotency_key":{"type":"string","minLength":1,"maxLength":256}},"required":["sequence_name","actor","authority_basis","idempotency_key"],"additionalProperties":false})),
+                ("epistemic-graph", "epistemic_graph_sequence_claims") => Some(json!({"type":"object","properties":{"sequence_name":{"type":"string","minLength":1,"maxLength":120},"limit":{"type":"integer","minimum":1,"maximum":100,"default":100},"offset":{"type":"integer","minimum":0,"default":0}},"required":["sequence_name"],"additionalProperties":false})),
                 ("worker-delegation", "worker_run") => Some(json!({"type":"object","properties":{"intent":intent(),"constraints":constraints()},"required":["intent"],"additionalProperties":false})),
                 ("worker-delegation", "worker_run_batch") => Some(json!({"type":"object","properties":{"requests":{"type":"array","minItems":1,"maxItems":50,"items":{"type":"object","properties":{"intent":intent(),"constraints":constraints()},"required":["intent"],"additionalProperties":false,"maxProperties":256}}},"required":["requests"],"additionalProperties":false,"maxProperties":256})),
                 ("worker-delegation", "worker_run_status") => Some(json!({"type":"object","properties":{"run_id":{"type":"string","minLength":1,"maxLength":256},"compact":{"type":"boolean","default":true}},"required":["run_id"],"additionalProperties":false})),
@@ -5393,8 +5404,14 @@ mod tests {
             .and_then(|items| items.iter().find(|item| item["id"] == "epistemic-graph"))
             .expect("epistemic catalog");
         let names = surface["tools"].as_array().expect("tool names");
-        assert_eq!(names.len(), 15);
+        assert_eq!(names.len(), 21);
         for required in [
+            "epistemic_graph_snapshot",
+            "epistemic_graph_sequence_create",
+            "epistemic_graph_sequence_status",
+            "epistemic_graph_sequence_list",
+            "epistemic_graph_sequence_claim_next",
+            "epistemic_graph_sequence_claims",
             "epistemic_graph_query_batch",
             "epistemic_graph_source_inspect",
             "epistemic_graph_capture_sources",

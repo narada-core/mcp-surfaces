@@ -6,6 +6,16 @@ The `epistemic-graph` surface is the protocol adapter for a Site-owned problem-s
 
 The immutable, hash-linked ledger under `.narada/epistemic/ledger` is authoritative. SQLite under `.narada/.ai/epistemic-graph` is a disposable read projection and may always be rebuilt from the ledger.
 
+Site-owned numeric sequences are a separate coordination authority under
+`.narada/epistemic/sequences`; they are not graph assertions and never enter the
+epistemic event ledger. Create a sequence with
+`epistemic_graph_sequence_create`, allocate a permanent number with
+`epistemic_graph_sequence_claim_next`, and inspect it with
+`epistemic_graph_sequence_status`, `epistemic_graph_sequence_list`, or
+`epistemic_graph_sequence_claims`. Claims advance by one, are never released or
+reused, and require an idempotency key so a transport retry returns the original
+number. Callers own prefixes, padding, and display formatting.
+
 Clients must not write either location. They call the Site-bound authority through MCP (and, for the Operator Console, through the HTTP adapter to the same Rust authority). There must be one serialization point for mutations. Adapters do not fall back to direct storage when the authority is unavailable.
 
 Admission proves only structural validity, provenance, and policy compliance. It does not establish that a conjecture is true.

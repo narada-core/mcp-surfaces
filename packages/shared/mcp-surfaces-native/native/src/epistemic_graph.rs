@@ -1,3 +1,4 @@
+use fs2::FileExt;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -5,6 +6,8 @@ use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::{Duration, Instant};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -31,6 +34,8 @@ const MAX_PAGE: u64 = 100;
 const MAX_BATCH_QUERIES: usize = 20;
 const MAX_SOURCE_FILES: usize = 20;
 const MAX_SOURCE_BYTES: u64 = 1_048_576;
+const AUTHORITY_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
+const AUTHORITY_LOCK_POLL: Duration = Duration::from_millis(25);
 
 pub fn list_tools() -> Vec<Value> {
     vec![
@@ -74,6 +79,36 @@ pub fn list_tools() -> Vec<Value> {
             "epistemic_graph_snapshot",
             "Read a ledger-head-bound, independently paged node and edge snapshot for operator visualization.",
             json!({"type":"object","properties":{"entity_offset":{"type":"integer","minimum":0},"relation_offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":1000},"expected_ledger_head":{"type":["string","null"]}},"additionalProperties":false}),
+            true,
+        ),
+        tool(
+            "epistemic_graph_sequence_create",
+            "Create an immutable Site-owned numeric sequence.",
+            sequence_create_schema(),
+            false,
+        ),
+        tool(
+            "epistemic_graph_sequence_status",
+            "Inspect one sequence and verify its immutable claim chain.",
+            sequence_name_schema(),
+            true,
+        ),
+        tool(
+            "epistemic_graph_sequence_list",
+            "List Site-owned sequences with bounded pagination.",
+            page_schema(),
+            true,
+        ),
+        tool(
+            "epistemic_graph_sequence_claim_next",
+            "Atomically and permanently claim the next number in a Site-owned sequence.",
+            sequence_claim_schema(),
+            false,
+        ),
+        tool(
+            "epistemic_graph_sequence_claims",
+            "Read bounded immutable claim history for one sequence.",
+            sequence_claims_schema(),
             true,
         ),
         tool(
@@ -142,6 +177,11 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, site_root: &Path) -> Res
         "epistemic_graph_source_inspect" => source_inspect(site_root, args),
         "epistemic_graph_neighborhood" => neighborhood(site_root, args),
         "epistemic_graph_snapshot" => snapshot(site_root, args),
+        "epistemic_graph_sequence_create" => sequence_create(site_root, args),
+        "epistemic_graph_sequence_status" => sequence_status(site_root, args),
+        "epistemic_graph_sequence_list" => sequence_list(site_root, args),
+        "epistemic_graph_sequence_claim_next" => sequence_claim_next(site_root, args),
+        "epistemic_graph_sequence_claims" => sequence_claims(site_root, args),
         "epistemic_graph_proposal_submit" => proposal_submit(site_root, args),
         "epistemic_graph_submit_review_admit" => submit_review_admit(site_root, args),
         "epistemic_graph_capture_sources" => capture_sources(site_root, args),
@@ -157,6 +197,255 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, site_root: &Path) -> Res
             Value::Null,
         )),
     }
+}
+
+fn sequence_create(root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
+    prepare(root)?;
+    let name = validated_sequence_name(args)?;
+    let actor = required(args, "actor")?;
+    let authority_basis = required_object(args, "authority_basis")?;
+    let start_at = optional_u64(args, "start_at", 1)?;
+    if start_at == 0 {
+        return Err(error(
+            "sequence_start_invalid",
+            "sequence start_at must be at least 1",
+            json!({"start_at":start_at}),
+        ));
+    }
+    let lock_key = format!("sequence-{}", sha256(name.as_bytes()));
+    with_authority_lock(root, &lock_key, || {
+        let directory = sequence_directory(root, &name);
+        let manifest_path = directory.join("sequence.json");
+        if manifest_path.exists() {
+            let manifest = read_json(&manifest_path)?;
+            verify_sequence_manifest(&manifest, &name)?;
+            if manifest.get("start_at").and_then(Value::as_u64) != Some(start_at) {
+                return Err(error(
+                    "sequence_configuration_conflict",
+                    "sequence already exists with a different start_at",
+                    json!({"sequence_name":name,"existing_start_at":manifest.get("start_at"),"requested_start_at":start_at}),
+                ));
+            }
+            return sequence_status_value(root, &name, "already_exists");
+        }
+        fs::create_dir_all(directory.join("claims"))
+            .map_err(io_error("sequence_claim_store_create_failed"))?;
+        fs::create_dir_all(directory.join("idempotency"))
+            .map_err(io_error("sequence_idempotency_store_create_failed"))?;
+        let mut manifest = json!({
+            "schema":"narada.epistemic.sequence.v1",
+            "sequence_id":format!("seq-{}", &sha256(name.as_bytes())[..24]),
+            "sequence_name":name,
+            "start_at":start_at,
+            "step":1,
+            "created_by":actor,
+            "authority_basis":authority_basis,
+            "idempotency_key":args.get("idempotency_key").cloned().unwrap_or(Value::Null),
+            "created_at":now()
+        });
+        let hash = digest_value(&manifest)?;
+        manifest["creation_hash"] = json!(hash);
+        write_new_json(&manifest_path, &manifest)?;
+        sequence_status_value(root, &name, "created")
+    })
+}
+
+fn sequence_status(root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
+    let name = validated_sequence_name(args)?;
+    let lock_key = format!("sequence-{}", sha256(name.as_bytes()));
+    with_authority_lock(root, &lock_key, || {
+        sequence_status_value(root, &name, "ready")
+    })
+}
+
+fn sequence_status_value(root: &Path, name: &str, status: &str) -> Result<Value, Value> {
+    let manifest = load_sequence_manifest(root, name)?;
+    let claims = verified_sequence_claims(root, name, &manifest)?;
+    let start_at = manifest["start_at"].as_u64().unwrap();
+    let last_claim = claims.last().cloned().unwrap_or(Value::Null);
+    let last_value = last_claim.get("value").and_then(Value::as_u64);
+    let next_value = match last_value {
+        Some(value) => value.checked_add(1).map(Value::from).unwrap_or(Value::Null),
+        None => Value::from(start_at),
+    };
+    Ok(json!({
+        "schema":"narada.epistemic.sequence.status.v1",
+        "status":status,
+        "sequence_id":manifest["sequence_id"],
+        "sequence_name":name,
+        "start_at":start_at,
+        "step":1,
+        "claim_count":claims.len(),
+        "last_claimed_value":last_value,
+        "next_value":next_value,
+        "exhausted":next_value.is_null(),
+        "latest_claim":last_claim,
+        "integrity_status":"valid"
+    }))
+}
+
+fn sequence_list(root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
+    let limit = page_limit(args)?;
+    let offset = page_offset(args)?;
+    let mut items = Vec::new();
+    if sequences(root).exists() {
+        for entry in
+            fs::read_dir(sequences(root)).map_err(io_error("sequence_store_read_failed"))?
+        {
+            let Ok(entry) = entry else { continue };
+            let manifest_path = entry.path().join("sequence.json");
+            if !manifest_path.exists() {
+                continue;
+            }
+            let hash = entry.file_name().to_string_lossy().to_string();
+            let item = with_authority_lock(root, &format!("sequence-{hash}"), || {
+                let manifest = read_json(&manifest_path)?;
+                let name = manifest
+                    .get("sequence_name")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        error(
+                            "sequence_manifest_invalid",
+                            "sequence manifest lacks sequence_name",
+                            json!({"path":manifest_path.to_string_lossy()}),
+                        )
+                    })?;
+                verify_sequence_manifest(&manifest, name)?;
+                let claims = verified_sequence_claims(root, name, &manifest)?;
+                Ok(json!({
+                    "sequence_id":manifest["sequence_id"],
+                    "sequence_name":name,
+                    "start_at":manifest["start_at"],
+                    "claim_count":claims.len(),
+                    "last_claimed_value":claims.last().and_then(|claim| claim.get("value")).cloned().unwrap_or(Value::Null),
+                    "created_at":manifest["created_at"]
+                }))
+            })?;
+            items.push(item);
+        }
+    }
+    items.sort_by(|left, right| {
+        left["sequence_name"]
+            .as_str()
+            .cmp(&right["sequence_name"].as_str())
+    });
+    let total = items.len();
+    let page = items
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .collect::<Vec<_>>();
+    let count = page.len();
+    Ok(
+        json!({"schema":"narada.epistemic.sequence.list.v1","items":page,"offset":offset,"limit":limit,"count":count,"total":total,"has_more":offset+count<total}),
+    )
+}
+
+fn sequence_claim_next(root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
+    prepare(root)?;
+    let name = validated_sequence_name(args)?;
+    let actor = required(args, "actor")?;
+    let authority_basis = required_object(args, "authority_basis")?;
+    let idempotency_key = required(args, "idempotency_key")?;
+    let request_digest = digest_value(
+        &json!({"sequence_name":name,"actor":actor,"authority_basis":authority_basis}),
+    )?;
+    let lock_key = format!("sequence-{}", sha256(name.as_bytes()));
+    with_authority_lock(root, &lock_key, || {
+        let manifest = load_sequence_manifest(root, &name)?;
+        let claims = verified_sequence_claims(root, &name, &manifest)?;
+        if let Some(claim) = find_sequence_claim_by_idempotency(&claims, &idempotency_key) {
+            if claim.get("request_digest").and_then(Value::as_str) != Some(request_digest.as_str())
+            {
+                return Err(error(
+                    "sequence_claim_idempotency_conflict",
+                    "idempotency key already names a different claim request",
+                    json!({"sequence_name":name,"idempotency_key":idempotency_key,"claim_id":claim["claim_id"]}),
+                ));
+            }
+            recover_sequence_idempotency_index(root, &name, &idempotency_key, claim)?;
+            return Ok(sequence_claim_receipt(claim, true));
+        }
+        let start_at = manifest["start_at"].as_u64().unwrap();
+        let value = match claims.last().and_then(|claim| claim["value"].as_u64()) {
+            Some(previous) => previous.checked_add(1).ok_or_else(|| {
+                error(
+                    "sequence_exhausted",
+                    "sequence has exhausted u64 values",
+                    json!({"sequence_name":name,"last_claimed_value":previous}),
+                )
+            })?,
+            None => start_at,
+        };
+        let previous_hash = claims
+            .last()
+            .and_then(|claim| claim["claim_hash"].as_str())
+            .map(str::to_string);
+        let claim_id = format!(
+            "seqclaim-{}",
+            &sha256(format!("{name}\0{idempotency_key}").as_bytes())[..24]
+        );
+        let mut claim = json!({
+            "schema":"narada.epistemic.sequence.claim.v1",
+            "sequence_id":manifest["sequence_id"],
+            "sequence_name":name,
+            "value":value,
+            "claim_id":claim_id,
+            "previous_claim_hash":previous_hash,
+            "actor":actor,
+            "authority_basis":authority_basis,
+            "idempotency_key":idempotency_key,
+            "request_digest":request_digest,
+            "claimed_at":now()
+        });
+        let claim_hash = digest_value(&claim)?;
+        claim["claim_hash"] = json!(claim_hash);
+        write_new_json(
+            &sequence_claims_directory(root, &name).join(format!("claim-{value:020}.json")),
+            &claim,
+        )?;
+        recover_sequence_idempotency_index(root, &name, &idempotency_key, &claim)?;
+        Ok(sequence_claim_receipt(&claim, false))
+    })
+}
+
+fn sequence_claims(root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
+    let name = validated_sequence_name(args)?;
+    let limit = page_limit(args)?;
+    let offset = page_offset(args)?;
+    let lock_key = format!("sequence-{}", sha256(name.as_bytes()));
+    with_authority_lock(root, &lock_key, || {
+        let manifest = load_sequence_manifest(root, &name)?;
+        let claims = verified_sequence_claims(root, &name, &manifest)?;
+        let total = claims.len();
+        let page = claims
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .collect::<Vec<_>>();
+        let count = page.len();
+        Ok(
+            json!({"schema":"narada.epistemic.sequence.claims.v1","sequence_name":name,"claims":page,"offset":offset,"limit":limit,"count":count,"total":total,"has_more":offset+count<total}),
+        )
+    })
+}
+
+fn sequence_claim_receipt(claim: &Value, replay: bool) -> Value {
+    let next_value = claim["value"]
+        .as_u64()
+        .and_then(|value| value.checked_add(1));
+    json!({
+        "schema":"narada.epistemic.sequence.claim.receipt.v1",
+        "status":if replay{"idempotent_replay"}else{"claimed"},
+        "idempotency_replay":replay,
+        "sequence_id":claim["sequence_id"],
+        "sequence_name":claim["sequence_name"],
+        "value":claim["value"],
+        "claim_id":claim["claim_id"],
+        "claimed_at":claim["claimed_at"],
+        "next_value":next_value,
+        "exhausted":next_value.is_none()
+    })
 }
 
 fn proposal_submit(root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
@@ -744,6 +1033,11 @@ fn proposal_review(root: &Path, args: &Map<String, Value>) -> Result<Value, Valu
 
 fn proposal_admit(root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
     prepare(root)?;
+    with_authority_lock(root, "ledger", || proposal_admit_locked(root, args))
+}
+
+fn proposal_admit_locked(root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
+    prepare(root)?;
     let id = required(args, "proposal_id")?;
     let actor = required(args, "actor")?;
     let proposal = load_proposal(root, &id)?;
@@ -771,6 +1065,21 @@ fn proposal_admit(root: &Path, args: &Map<String, Value>) -> Result<Value, Value
                 "idempotency key already names a different proposal admission",
                 json!({"idempotency_key":idem,"existing_event_id":event_id.trim()}),
             ));
+        }
+        return Ok(admission_receipt(&event));
+    }
+    if let Some(event) = find_ledger_event_by_idempotency(root, &idem)? {
+        if event.get("proposal_id") != Some(&json!(id))
+            || event.get("proposal_digest") != proposal.get("digest")
+        {
+            return Err(error(
+                "admission_idempotency_conflict",
+                "idempotency key already names a different proposal admission",
+                json!({"idempotency_key":idem,"existing_event_id":event["event_id"]}),
+            ));
+        }
+        if !idem_path.exists() {
+            write_new(&idem_path, event["event_id"].as_str().unwrap().as_bytes())?;
         }
         return Ok(admission_receipt(&event));
     }
@@ -1546,6 +1855,319 @@ fn validate_operations(ops: &[Value], require_evidence: bool) -> Result<(), Valu
     Ok(())
 }
 
+fn with_authority_lock<T>(
+    root: &Path,
+    key: &str,
+    action: impl FnOnce() -> Result<T, Value>,
+) -> Result<T, Value> {
+    let lock_directory = runtime(root).join("locks");
+    fs::create_dir_all(&lock_directory).map_err(io_error("authority_lock_store_create_failed"))?;
+    let lock_path = lock_directory.join(format!("{}.lock", safe_name(key)));
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(io_error("authority_lock_open_failed"))?;
+    let started = Instant::now();
+    loop {
+        match file.try_lock_exclusive() {
+            Ok(()) => break,
+            Err(source)
+                if authority_lock_contended(&source)
+                    && started.elapsed() < AUTHORITY_LOCK_TIMEOUT =>
+            {
+                thread::sleep(AUTHORITY_LOCK_POLL)
+            }
+            Err(source) if authority_lock_contended(&source) => {
+                return Err(error(
+                    "authority_busy",
+                    "authority lock could not be acquired within the bounded timeout",
+                    json!({"lock_key":key,"timeout_ms":AUTHORITY_LOCK_TIMEOUT.as_millis(),"source":source.to_string()}),
+                ));
+            }
+            Err(source) => {
+                return Err(error(
+                    "authority_lock_failed",
+                    "authority lock acquisition failed",
+                    json!({"lock_key":key,"source":source.to_string()}),
+                ));
+            }
+        }
+    }
+    let result = action();
+    let unlock = FileExt::unlock(&file);
+    match (result, unlock) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(failure), _) => Err(failure),
+        (Ok(_), Err(source)) => Err(error(
+            "authority_unlock_failed",
+            "authority mutation completed but its process lock could not be released",
+            json!({"lock_key":key,"source":source.to_string()}),
+        )),
+    }
+}
+
+fn authority_lock_contended(source: &std::io::Error) -> bool {
+    source.kind() == std::io::ErrorKind::WouldBlock
+        || matches!(source.raw_os_error(), Some(32 | 33))
+}
+
+fn validated_sequence_name(args: &Map<String, Value>) -> Result<String, Value> {
+    let name = required(args, "sequence_name")?;
+    if name.trim() != name || name.chars().count() > 120 || name.chars().any(char::is_control) {
+        return Err(error(
+            "sequence_name_invalid",
+            "sequence_name must be 1-120 non-control characters without surrounding whitespace",
+            json!({"sequence_name":name}),
+        ));
+    }
+    Ok(name)
+}
+
+fn required_object(args: &Map<String, Value>, key: &str) -> Result<Value, Value> {
+    let value = args
+        .get(key)
+        .filter(|value| value.as_object().is_some_and(|object| !object.is_empty()))
+        .cloned()
+        .ok_or_else(|| {
+            error(
+                "required_argument_missing",
+                &format!("required_argument_missing:{key}"),
+                json!({"field":key}),
+            )
+        })?;
+    let bytes = serde_json::to_vec(&value).map_err(|source| {
+        error(
+            "json_encode_failed",
+            &source.to_string(),
+            json!({"field":key}),
+        )
+    })?;
+    if bytes.len() > 8192 {
+        return Err(error(
+            "argument_too_large",
+            "authority_basis exceeds the bounded 8192-byte envelope",
+            json!({"field":key,"bytes":bytes.len(),"max_bytes":8192}),
+        ));
+    }
+    Ok(value)
+}
+
+fn optional_u64(args: &Map<String, Value>, key: &str, default: u64) -> Result<u64, Value> {
+    match args.get(key) {
+        None => Ok(default),
+        Some(value) => value.as_u64().ok_or_else(|| {
+            error(
+                "argument_invalid",
+                &format!("{key} must be an unsigned integer"),
+                json!({"field":key,"value":value}),
+            )
+        }),
+    }
+}
+
+fn page_limit(args: &Map<String, Value>) -> Result<usize, Value> {
+    let value = optional_u64(args, "limit", 100)?;
+    if !(1..=100).contains(&value) {
+        return Err(error(
+            "page_limit_invalid",
+            "limit must be between 1 and 100",
+            json!({"limit":value}),
+        ));
+    }
+    Ok(value as usize)
+}
+
+fn page_offset(args: &Map<String, Value>) -> Result<usize, Value> {
+    usize::try_from(optional_u64(args, "offset", 0)?).map_err(|_| {
+        error(
+            "page_offset_invalid",
+            "offset exceeds platform bounds",
+            json!({"offset":args.get("offset")}),
+        )
+    })
+}
+
+fn sequence_directory(root: &Path, name: &str) -> PathBuf {
+    sequences(root).join(sha256(name.as_bytes()))
+}
+
+fn sequence_claims_directory(root: &Path, name: &str) -> PathBuf {
+    sequence_directory(root, name).join("claims")
+}
+
+fn load_sequence_manifest(root: &Path, name: &str) -> Result<Value, Value> {
+    let path = sequence_directory(root, name).join("sequence.json");
+    if !path.exists() {
+        return Err(error(
+            "sequence_not_found",
+            "sequence does not exist",
+            json!({"sequence_name":name}),
+        ));
+    }
+    let manifest = read_json(&path)?;
+    verify_sequence_manifest(&manifest, name)?;
+    Ok(manifest)
+}
+
+fn verify_sequence_manifest(manifest: &Value, expected_name: &str) -> Result<(), Value> {
+    let expected_id = format!("seq-{}", &sha256(expected_name.as_bytes())[..24]);
+    if manifest.get("schema") != Some(&json!("narada.epistemic.sequence.v1"))
+        || manifest.get("sequence_name").and_then(Value::as_str) != Some(expected_name)
+        || manifest.get("sequence_id").and_then(Value::as_str) != Some(expected_id.as_str())
+        || manifest
+            .get("start_at")
+            .and_then(Value::as_u64)
+            .is_none_or(|value| value == 0)
+        || manifest.get("step").and_then(Value::as_u64) != Some(1)
+    {
+        return Err(error(
+            "sequence_manifest_invalid",
+            "sequence manifest has invalid identity or configuration",
+            json!({"sequence_name":expected_name}),
+        ));
+    }
+    let actual = manifest
+        .get("creation_hash")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            error(
+                "sequence_manifest_invalid",
+                "sequence manifest lacks creation_hash",
+                json!({"sequence_name":expected_name}),
+            )
+        })?;
+    let mut unhashed = manifest.clone();
+    unhashed.as_object_mut().unwrap().remove("creation_hash");
+    let expected = digest_value(&unhashed)?;
+    if actual != expected {
+        return Err(error(
+            "sequence_manifest_hash_invalid",
+            "sequence manifest hash does not match",
+            json!({"sequence_name":expected_name,"expected_hash":expected,"actual_hash":actual}),
+        ));
+    }
+    Ok(())
+}
+
+fn verified_sequence_claims(
+    root: &Path,
+    name: &str,
+    manifest: &Value,
+) -> Result<Vec<Value>, Value> {
+    let directory = sequence_claims_directory(root, name);
+    if !directory.exists() {
+        return Ok(Vec::new());
+    }
+    let mut paths = fs::read_dir(&directory)
+        .map_err(io_error("sequence_claim_store_read_failed"))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("json"))
+        .collect::<Vec<_>>();
+    paths.sort();
+    let total = paths.len();
+    let mut claims = Vec::with_capacity(total);
+    let mut expected_value = manifest["start_at"].as_u64().unwrap();
+    let mut previous_hash: Option<String> = None;
+    let mut idempotency_keys = HashSet::new();
+    let mut claim_ids = HashSet::new();
+    for (index, path) in paths.into_iter().enumerate() {
+        let claim = read_json(&path)?;
+        let actual_hash = claim
+            .get("claim_hash")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                error(
+                    "sequence_claim_invalid",
+                    "sequence claim lacks claim_hash",
+                    json!({"path":path.to_string_lossy()}),
+                )
+            })?;
+        let mut unhashed = claim.clone();
+        unhashed.as_object_mut().unwrap().remove("claim_hash");
+        let computed_hash = digest_value(&unhashed)?;
+        let idempotency_key = claim.get("idempotency_key").and_then(Value::as_str);
+        let claim_id = claim.get("claim_id").and_then(Value::as_str);
+        if claim.get("schema") != Some(&json!("narada.epistemic.sequence.claim.v1"))
+            || claim.get("sequence_name").and_then(Value::as_str) != Some(name)
+            || claim.get("sequence_id") != manifest.get("sequence_id")
+            || claim.get("value").and_then(Value::as_u64) != Some(expected_value)
+            || claim.get("previous_claim_hash").and_then(Value::as_str) != previous_hash.as_deref()
+            || claim
+                .get("request_digest")
+                .and_then(Value::as_str)
+                .is_none()
+            || idempotency_key.is_none_or(str::is_empty)
+            || claim_id.is_none_or(str::is_empty)
+            || !idempotency_keys.insert(idempotency_key.unwrap().to_string())
+            || !claim_ids.insert(claim_id.unwrap().to_string())
+            || actual_hash != computed_hash
+        {
+            return Err(error(
+                "sequence_claim_chain_invalid",
+                "sequence claim chain is not contiguous and hash-valid",
+                json!({"sequence_name":name,"path":path.to_string_lossy(),"expected_value":expected_value}),
+            ));
+        }
+        previous_hash = Some(actual_hash.to_string());
+        claims.push(claim);
+        if index + 1 < total {
+            expected_value = expected_value.checked_add(1).ok_or_else(|| {
+                error(
+                    "sequence_claim_chain_invalid",
+                    "claim exists after u64 exhaustion",
+                    json!({"sequence_name":name}),
+                )
+            })?;
+        }
+    }
+    Ok(claims)
+}
+
+fn find_sequence_claim_by_idempotency<'a>(claims: &'a [Value], key: &str) -> Option<&'a Value> {
+    claims
+        .iter()
+        .find(|claim| claim.get("idempotency_key").and_then(Value::as_str) == Some(key))
+}
+
+fn recover_sequence_idempotency_index(
+    root: &Path,
+    name: &str,
+    key: &str,
+    claim: &Value,
+) -> Result<(), Value> {
+    let directory = sequence_directory(root, name).join("idempotency");
+    fs::create_dir_all(&directory).map_err(io_error("sequence_idempotency_store_create_failed"))?;
+    let path = directory.join(format!("{}.json", sha256(key.as_bytes())));
+    if path.exists() {
+        let existing = read_json(&path)?;
+        if existing.get("claim_id") != claim.get("claim_id") {
+            return Err(error(
+                "sequence_claim_idempotency_conflict",
+                "idempotency index names a different claim",
+                json!({"sequence_name":name,"idempotency_key":key,"existing_claim_id":existing.get("claim_id"),"claim_id":claim.get("claim_id")}),
+            ));
+        }
+        return Ok(());
+    }
+    write_new_json(
+        &path,
+        &json!({"schema":"narada.epistemic.sequence.idempotency.v1","idempotency_key":key,"claim_id":claim["claim_id"],"value":claim["value"]}),
+    )
+}
+
+fn find_ledger_event_by_idempotency(root: &Path, key: &str) -> Result<Option<Value>, Value> {
+    for path in ledger_files(root)? {
+        let event = read_json(&path)?;
+        if event.get("idempotency_key").and_then(Value::as_str) == Some(key) {
+            return Ok(Some(event));
+        }
+    }
+    Ok(None)
+}
+
 fn prepare(root: &Path) -> Result<(), Value> {
     fs::create_dir_all(ledger(root)).map_err(io_error("ledger_create_failed"))?;
     fs::create_dir_all(proposals(root)).map_err(io_error("proposal_store_create_failed"))?;
@@ -1564,6 +2186,9 @@ fn ledger(root: &Path) -> PathBuf {
 }
 fn proposals(root: &Path) -> PathBuf {
     control(root).join("epistemic/proposals")
+}
+fn sequences(root: &Path) -> PathBuf {
+    control(root).join("epistemic/sequences")
 }
 fn runtime(root: &Path) -> PathBuf {
     control(root).join(".ai/epistemic-graph")
@@ -1683,6 +2308,12 @@ fn guidance() -> Value {
             {"step":4,"tools":["epistemic_graph_proposal_review","epistemic_graph_proposal_admit"],"manual_only":true,"why":"Use separate calls only when the operator wants an explicit pause between proposal, review, and admission."},
             {"step":5,"tool":"epistemic_graph_neighborhood","why":"Verify the admitted problem situation and its relations."}
         ],
+        "sequence_workflow":[
+            {"step":1,"tool":"epistemic_graph_sequence_create","why":"Create a named Site-owned numeric authority once; start_at defaults to 1."},
+            {"step":2,"tool":"epistemic_graph_sequence_claim_next","why":"Claim one permanent number using a unique idempotency key for the claim intent."},
+            {"step":3,"tools":["epistemic_graph_sequence_status","epistemic_graph_sequence_claims"],"why":"Verify current allocation state or audit bounded immutable claims."}
+        ],
+        "sequence_semantics":{"authority":"Separate immutable coordination records under .narada/epistemic/sequences; not epistemic assertions or graph events.","claim":"Permanent, monotonic, increment-by-one, never released or reused.","formatting":"The authority returns unsigned integers; callers own prefixes, padding, and display formatting."},
         "entity_kinds":ENTITY_KINDS,
         "core_relations":CORE_RELATIONS,
         "extension_relation_rule":"Any relation outside core_relations must be namespaced, for example marici:refines or marici:generalizes.",
@@ -1717,6 +2348,38 @@ fn guidance_with_request(args: &Map<String, Value>) -> Value {
 }
 fn non_empty_string() -> Value {
     json!({"type":"string","minLength":1})
+}
+fn sequence_name_property() -> Value {
+    json!({"type":"string","minLength":1,"maxLength":120,"description":"Stable Site-owned sequence name; surrounding whitespace and control characters are refused."})
+}
+fn authority_basis_property() -> Value {
+    json!({"type":"object","minProperties":1,"maxProperties":32,"description":"Why this actor may mutate the Site-owned sequence authority; the encoded object may not exceed 8192 bytes."})
+}
+fn sequence_create_schema() -> Value {
+    json!({"type":"object","properties":{
+        "sequence_name":sequence_name_property(),
+        "actor":{"type":"string","minLength":1,"maxLength":256},
+        "authority_basis":authority_basis_property(),
+        "start_at":{"type":"integer","minimum":1,"default":1},
+        "idempotency_key":{"type":"string","minLength":1,"maxLength":256}
+    },"required":["sequence_name","actor","authority_basis"],"additionalProperties":false})
+}
+fn sequence_name_schema() -> Value {
+    json!({"type":"object","properties":{"sequence_name":sequence_name_property()},"required":["sequence_name"],"additionalProperties":false})
+}
+fn page_schema() -> Value {
+    json!({"type":"object","properties":{"limit":{"type":"integer","minimum":1,"maximum":100,"default":100},"offset":{"type":"integer","minimum":0,"default":0}},"additionalProperties":false})
+}
+fn sequence_claim_schema() -> Value {
+    json!({"type":"object","properties":{
+        "sequence_name":sequence_name_property(),
+        "actor":{"type":"string","minLength":1,"maxLength":256},
+        "authority_basis":authority_basis_property(),
+        "idempotency_key":{"type":"string","minLength":1,"maxLength":256,"description":"Required unique claim intent. Exact retries return the original number; incompatible reuse is refused."}
+    },"required":["sequence_name","actor","authority_basis","idempotency_key"],"additionalProperties":false})
+}
+fn sequence_claims_schema() -> Value {
+    json!({"type":"object","properties":{"sequence_name":sequence_name_property(),"limit":{"type":"integer","minimum":1,"maximum":100,"default":100},"offset":{"type":"integer","minimum":0,"default":0}},"required":["sequence_name"],"additionalProperties":false})
 }
 fn evidence_schema() -> Value {
     json!({"type":"object","properties":{"source_id":non_empty_string(),"locator":non_empty_string(),"paraphrase":non_empty_string()},"required":["source_id","locator","paraphrase"],"additionalProperties":false})
@@ -1842,8 +2505,8 @@ mod tests {
         let extension = json!({"op":"entity.declare","entity_id":"exp:demo","kind":"cintamani:experiment","title":"Demo experiment","version":"1","payload":{"intent":"falsification"}});
         validate_operations(&[extension], false).expect("namespaced extension kind must validate");
         let bare = json!({"op":"entity.declare","entity_id":"exp:demo","kind":"experiment","title":"Demo experiment"});
-        let failure =
-            validate_operations(&[bare], false).expect_err("unnamespaced extension kind must refuse");
+        let failure = validate_operations(&[bare], false)
+            .expect_err("unnamespaced extension kind must refuse");
         assert_eq!(failure["code"], "invalid_entity_kind");
         assert_eq!(failure["details"]["kind"], "experiment");
     }
@@ -2342,5 +3005,275 @@ mod tests {
             first["admission"]["event_id"]
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    fn sequence_test_create(root: &Path, name: &str, start_at: u64) -> Value {
+        sequence_create(
+            root,
+            &Map::from_iter([
+                ("sequence_name".into(), json!(name)),
+                ("actor".into(), json!("tester")),
+                ("authority_basis".into(), json!({"kind":"test"})),
+                ("start_at".into(), json!(start_at)),
+            ]),
+        )
+        .expect("create sequence")
+    }
+
+    fn sequence_test_claim(root: &Path, name: &str, key: &str) -> Result<Value, Value> {
+        sequence_claim_next(
+            root,
+            &Map::from_iter([
+                ("sequence_name".into(), json!(name)),
+                ("actor".into(), json!("tester")),
+                ("authority_basis".into(), json!({"kind":"test"})),
+                ("idempotency_key".into(), json!(key)),
+            ]),
+        )
+    }
+
+    #[test]
+    fn sequences_create_claim_replay_and_page_immutable_history() {
+        let root = std::env::temp_dir().join(format!("epistemic-sequence-{}", Uuid::new_v4()));
+        let created = sequence_test_create(&root, "ledger-entry", 40);
+        assert_eq!(created["status"], "created");
+        assert_eq!(created["next_value"], 40);
+        let first = sequence_test_claim(&root, "ledger-entry", "entry-a").expect("first claim");
+        let second = sequence_test_claim(&root, "ledger-entry", "entry-b").expect("second claim");
+        let replay = sequence_test_claim(&root, "ledger-entry", "entry-a").expect("claim replay");
+        assert_eq!(first["value"], 40);
+        assert_eq!(second["value"], 41);
+        assert_eq!(replay["value"], 40);
+        assert_eq!(replay["idempotency_replay"], true);
+        let status = sequence_status(
+            &root,
+            &Map::from_iter([("sequence_name".into(), json!("ledger-entry"))]),
+        )
+        .expect("status");
+        assert_eq!(status["claim_count"], 2);
+        assert_eq!(status["next_value"], 42);
+        let page = sequence_claims(
+            &root,
+            &Map::from_iter([
+                ("sequence_name".into(), json!("ledger-entry")),
+                ("limit".into(), json!(1)),
+            ]),
+        )
+        .expect("claims page");
+        assert_eq!(page["count"], 1);
+        assert_eq!(page["has_more"], true);
+        let listed = sequence_list(&root, &Map::new()).expect("sequence list");
+        assert_eq!(listed["items"][0]["sequence_name"], "ledger-entry");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn sequence_claim_idempotency_is_recovered_from_canonical_history() {
+        let root =
+            std::env::temp_dir().join(format!("epistemic-sequence-recovery-{}", Uuid::new_v4()));
+        sequence_test_create(&root, "research-item", 1);
+        let first = sequence_test_claim(&root, "research-item", "research-a").expect("claim");
+        fs::remove_file(
+            sequence_directory(&root, "research-item")
+                .join("idempotency")
+                .join(format!("{}.json", sha256(b"research-a"))),
+        )
+        .expect("remove disposable index");
+        let replay =
+            sequence_test_claim(&root, "research-item", "research-a").expect("recover replay");
+        assert_eq!(replay["claim_id"], first["claim_id"]);
+        assert_eq!(replay["idempotency_replay"], true);
+        assert!(sequence_directory(&root, "research-item")
+            .join("idempotency")
+            .join(format!("{}.json", sha256(b"research-a")))
+            .exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn concurrent_sequence_claims_are_unique_and_contiguous() {
+        let root =
+            std::env::temp_dir().join(format!("epistemic-sequence-concurrent-{}", Uuid::new_v4()));
+        sequence_test_create(&root, "parallel", 1);
+        let root = std::sync::Arc::new(root);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(12));
+        let handles = (0..12)
+            .map(|index| {
+                let root = root.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    sequence_test_claim(&root, "parallel", &format!("parallel-{index}"))
+                        .expect("parallel claim")["value"]
+                        .as_u64()
+                        .unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut values = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+        values.sort_unstable();
+        assert_eq!(values, (1..=12).collect::<Vec<_>>());
+        assert_eq!(
+            sequence_status(
+                &root,
+                &Map::from_iter([("sequence_name".into(), json!("parallel"))])
+            )
+            .unwrap()["integrity_status"],
+            "valid"
+        );
+        let _ = fs::remove_dir_all(root.as_path());
+    }
+
+    #[test]
+    fn sequence_refuses_reconfiguration_conflicting_replay_and_tampering() {
+        let root =
+            std::env::temp_dir().join(format!("epistemic-sequence-invalid-{}", Uuid::new_v4()));
+        sequence_test_create(&root, "audit", 5);
+        let conflict = sequence_create(
+            &root,
+            &Map::from_iter([
+                ("sequence_name".into(), json!("audit")),
+                ("actor".into(), json!("tester")),
+                ("authority_basis".into(), json!({"kind":"test"})),
+                ("start_at".into(), json!(6)),
+            ]),
+        )
+        .expect_err("configuration conflict");
+        assert_eq!(conflict["code"], "sequence_configuration_conflict");
+        sequence_test_claim(&root, "audit", "same-key").expect("claim");
+        let replay_conflict = sequence_claim_next(
+            &root,
+            &Map::from_iter([
+                ("sequence_name".into(), json!("audit")),
+                ("actor".into(), json!("other")),
+                ("authority_basis".into(), json!({"kind":"test"})),
+                ("idempotency_key".into(), json!("same-key")),
+            ]),
+        )
+        .expect_err("replay conflict");
+        assert_eq!(
+            replay_conflict["code"],
+            "sequence_claim_idempotency_conflict"
+        );
+        let claim_path =
+            sequence_claims_directory(&root, "audit").join("claim-00000000000000000005.json");
+        let mut claim = read_json(&claim_path).unwrap();
+        claim["actor"] = json!("tampered");
+        fs::write(&claim_path, serde_json::to_vec_pretty(&claim).unwrap()).unwrap();
+        let corrupt = sequence_status(
+            &root,
+            &Map::from_iter([("sequence_name".into(), json!("audit"))]),
+        )
+        .expect_err("tampered claim");
+        assert_eq!(corrupt["code"], "sequence_claim_chain_invalid");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn sequence_refuses_invalid_names_and_reports_exhaustion() {
+        let root =
+            std::env::temp_dir().join(format!("epistemic-sequence-exhausted-{}", Uuid::new_v4()));
+        let invalid = sequence_create(
+            &root,
+            &Map::from_iter([
+                ("sequence_name".into(), json!(" bad ")),
+                ("actor".into(), json!("tester")),
+                ("authority_basis".into(), json!({"kind":"test"})),
+            ]),
+        )
+        .expect_err("invalid name");
+        assert_eq!(invalid["code"], "sequence_name_invalid");
+        sequence_test_create(&root, "finite", u64::MAX);
+        let final_claim = sequence_test_claim(&root, "finite", "last").expect("last claim");
+        assert_eq!(final_claim["value"], u64::MAX);
+        assert_eq!(final_claim["exhausted"], true);
+        let exhausted =
+            sequence_test_claim(&root, "finite", "past-end").expect_err("sequence exhausted");
+        assert_eq!(exhausted["code"], "sequence_exhausted");
+        let status = sequence_status(
+            &root,
+            &Map::from_iter([("sequence_name".into(), json!("finite"))]),
+        )
+        .expect("exhausted status");
+        assert_eq!(status["next_value"], Value::Null);
+        assert_eq!(status["exhausted"], true);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ledger_admission_lock_serializes_writers_and_recovers_idempotency_index() {
+        let root = std::env::temp_dir().join(format!("epistemic-ledger-lock-{}", Uuid::new_v4()));
+        let proposals = (0..2)
+            .map(|index| proposal_submit(&root, &Map::from_iter([("actor".into(), json!("tester")), ("authority_basis".into(), json!({"kind":"test"})), ("idempotency_key".into(), json!(format!("proposal-{index}"))), ("expected_ledger_head".into(), Value::Null), ("operations".into(), json!([{"op":"entity.declare","entity_id":format!("claim:lock-{index}"),"kind":"claim","title":format!("Lock {index}")}]))])).expect("proposal"))
+            .collect::<Vec<_>>();
+        let root = std::sync::Arc::new(root);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let handles = proposals
+            .into_iter()
+            .enumerate()
+            .map(|(index, proposal)| {
+                let root = root.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    proposal_admit(
+                        &root,
+                        &Map::from_iter([
+                            ("proposal_id".into(), proposal["proposal_id"].clone()),
+                            ("actor".into(), json!("tester")),
+                            ("authority_basis".into(), json!({"kind":"test"})),
+                            ("expected_ledger_head".into(), Value::Null),
+                            (
+                                "idempotency_key".into(),
+                                json!(format!("admission-{index}")),
+                            ),
+                        ]),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        let results = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| {
+                    result.as_ref().is_err_and(|failure| {
+                        failure["code"] == "ledger_head_conflict"
+                            || failure["code"] == "proposal_not_admissible"
+                    })
+                })
+                .count(),
+            1
+        );
+        verify_ledger(&root).expect("serialized ledger");
+        assert_eq!(ledger_files(&root).unwrap().len(), 1);
+        let admitted = results.into_iter().find_map(Result::ok).unwrap();
+        let event = read_json(
+            &ledger(&root).join(format!("{}.json", admitted["event_id"].as_str().unwrap())),
+        )
+        .unwrap();
+        let key = event["idempotency_key"].as_str().unwrap();
+        fs::remove_file(ledger(&root).join(format!("idem-{}.txt", safe_name(key))))
+            .expect("remove disposable ledger index");
+        let replay = proposal_admit(
+            &root,
+            &Map::from_iter([
+                ("proposal_id".into(), event["proposal_id"].clone()),
+                ("actor".into(), json!("tester")),
+                ("authority_basis".into(), json!({"kind":"test"})),
+                ("idempotency_key".into(), json!(key)),
+            ]),
+        )
+        .expect("recover ledger replay");
+        assert_eq!(replay["event_id"], admitted["event_id"]);
+        assert_eq!(ledger_files(&root).unwrap().len(), 1);
+        let _ = fs::remove_dir_all(root.as_path());
     }
 }
