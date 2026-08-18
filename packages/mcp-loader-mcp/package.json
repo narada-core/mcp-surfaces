@@ -25,7 +25,8 @@
     "test": "pnpm run test:bun",
     "test:bun": "pnpm --filter @narada-core/mcp-e2e-harness build && pnpm build && bun dist/test/protocol-smoke.test.js && bun dist/test/mcp-loader-mcp.test.js",
     "test:node": "pnpm --filter @narada-core/mcp-e2e-harness build && pnpm build && node dist/test/protocol-smoke.test.js && node dist/test/mcp-loader-mcp.test.js",
-    "test:native": "cargo test --locked --manifest-path native/Cargo.toml",
+    "test:native": "cargo test --locked --manifest-path native/Cargo.toml && pnpm run test:native:fabric",
+    "test:native:fabric": "pnpm --filter @narada-core/mcp-e2e-harness build && pnpm build && node --test dist/test/epistemic-sequence-fabric.e2e.test.js",
     "benchmark:loader": "tsx scripts/benchmark-loader.ts"
   },
   "dependencies": {

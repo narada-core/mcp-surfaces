@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 import { test } from 'node:test';
 import { requireNativeArtifact } from '@narada-core/mcp-runtime-proxy/native-artifact';
 
-const packageRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
+const packageRoot = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const executable = requireNativeArtifact(packageRoot, process.platform === 'win32' ? 'narada-mcp-loader.exe' : 'narada-mcp-loader');
 
 test('native loader keeps a runtime-proxy child across stateful task-lifecycle calls', async (t) => {
@@ -61,6 +61,7 @@ test('native loader keeps a runtime-proxy child across stateful task-lifecycle c
   writeFileSync(join(root, '.ai', 'mcp', 'config.json'), JSON.stringify({
     mcpServers: {
       'task-lifecycle': {
+        binding_id: 'task-lifecycle',
         command: proxyEntrypoint,
         args: [
           'proxy',
@@ -111,7 +112,7 @@ test('native loader keeps a runtime-proxy child across stateful task-lifecycle c
 
     const opened = await call('tools/call', {
       name: 'mcp_loader_open_surface',
-      arguments: { site_root: root, surface_id: 'task-lifecycle' },
+      arguments: { site_root: root, binding_id: 'task-lifecycle', surface_id: 'task-lifecycle' },
     }, 2);
     assert.equal(opened.schema, 'narada.mcp_loader.surface_handle_opened.v1');
     const connectionId = opened.connection_id;

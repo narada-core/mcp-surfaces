@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 import { test } from 'node:test';
 import { requireNativeArtifact } from '@narada-core/mcp-runtime-proxy/native-artifact';
 
-const packageRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
+const packageRoot = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const workspaceRoot = resolve(packageRoot, '..', '..');
 const loaderExecutable = requireNativeArtifact(packageRoot, process.platform === 'win32' ? 'narada-mcp-loader.exe' : 'narada-mcp-loader');
 const runtimeExecutable = requireNativeArtifact(resolve(workspaceRoot, 'packages', 'shared', 'mcp-runtime-proxy'), process.platform === 'win32' ? 'narada-mcp-runtime.exe' : 'narada-mcp-runtime');
@@ -57,7 +57,11 @@ function startLoader(root: string) {
 
 function writeFabric(root: string, servers: Record<string, unknown>) {
   mkdirSync(join(root, '.ai', 'mcp'), { recursive: true });
-  writeFileSync(join(root, '.ai', 'mcp', 'config.json'), JSON.stringify({ mcpServers: servers }), 'utf8');
+  const boundServers = Object.fromEntries(Object.entries(servers).map(([id, server]) => [
+    id,
+    { ...(server as Record<string, unknown>), binding_id: id },
+  ]));
+  writeFileSync(join(root, '.ai', 'mcp', 'config.json'), JSON.stringify({ mcpServers: boundServers }), 'utf8');
 }
 
 test('native loader attaches native_entrypoint and native_applet children', async (t) => {
@@ -93,20 +97,20 @@ test('native loader attaches native_entrypoint and native_applet children', asyn
     const initialized = await loader.call('initialize', { protocolVersion: '2024-11-05' });
     assert.equal(initialized.serverInfo.name, 'mcp-loader-mcp');
 
-    const nativeEntrypoint = await loader.call('tools/call', { name: 'mcp_loader_open_surface', arguments: { site_root: root, surface_id: 'native-entrypoint' } });
+    const nativeEntrypoint = await loader.call('tools/call', { name: 'mcp_loader_open_surface', arguments: { site_root: root, binding_id: 'native-entrypoint', surface_id: 'native-entrypoint' } });
     assert.equal(nativeEntrypoint.schema, 'narada.mcp_loader.surface_handle_opened.v1');
     opened.push(nativeEntrypoint.connection_id);
     const nativeEntrypointTools = await loader.call('tools/call', { name: 'mcp_loader_list_tools', arguments: { connection_id: nativeEntrypoint.connection_id } });
     assert.ok(nativeEntrypointTools.tools.some((tool: any) => tool.name === 'task_lifecycle_guidance'));
 
-    const nativeApplet = await loader.call('tools/call', { name: 'mcp_loader_open_surface', arguments: { site_root: root, surface_id: 'native-applet' } });
+    const nativeApplet = await loader.call('tools/call', { name: 'mcp_loader_open_surface', arguments: { site_root: root, binding_id: 'native-applet', surface_id: 'native-applet' } });
     assert.equal(nativeApplet.schema, 'narada.mcp_loader.surface_handle_opened.v1');
     opened.push(nativeApplet.connection_id);
     const nativeAppletTools = await loader.call('tools/call', { name: 'mcp_loader_list_tools', arguments: { connection_id: nativeApplet.connection_id } });
     assert.ok(nativeAppletTools.tools.some((tool: any) => tool.name === 'fs_stat'));
 
     if (process.env.USERPROFILE || process.env.HOME) {
-      const filesystem = await loader.call('tools/call', { name: 'mcp_loader_open_surface', arguments: { site_root: root, surface_id: 'filesystem-user-home-anchor' } });
+      const filesystem = await loader.call('tools/call', { name: 'mcp_loader_open_surface', arguments: { site_root: root, binding_id: 'filesystem-user-home-anchor', surface_id: 'filesystem-user-home-anchor' } });
       assert.equal(filesystem.schema, 'narada.mcp_loader.surface_handle_opened.v1');
       opened.push(filesystem.connection_id);
       const filesystemTools = await loader.call('tools/call', { name: 'mcp_loader_list_tools', arguments: { connection_id: filesystem.connection_id } });
@@ -116,14 +120,14 @@ test('native loader attaches native_entrypoint and native_applet children', asyn
     await assert.rejects(
       loader.call('tools/call', {
         name: 'mcp_loader_open_surface',
-        arguments: { site_root: root, surface_id: 'native-entrypoint', entrypoint: taskExecutable },
+        arguments: { site_root: root, binding_id: 'native-entrypoint', surface_id: 'native-entrypoint', entrypoint: taskExecutable },
       }),
       /entrypoint_not_allowed/,
     );
     await assert.rejects(
       loader.call('tools/call', {
         name: 'mcp_loader_open_surface',
-        arguments: { site_root: root, surface_id: 'native-entrypoint', args: ['--unexpected'] },
+        arguments: { site_root: root, binding_id: 'native-entrypoint', surface_id: 'native-entrypoint', args: ['--unexpected'] },
       }),
       /site_fabric_invocation_override_not_allowed/,
     );
