@@ -239,16 +239,24 @@ fn run_claimed_generation(
     let processing = process_batch(db, scope, generation_id, lease_token, &batch);
     drop(lock);
     if let Err(failure) = processing {
-        let message = failure
+        let code = failure
+            .get("code")
+            .and_then(Value::as_str)
+            .unwrap_or("mailbox_sync_fatal_failure");
+        let detail = failure
             .get("message")
             .and_then(Value::as_str)
-            .or_else(|| failure.get("code").and_then(Value::as_str))
-            .unwrap_or("mailbox_sync_fatal_failure");
+            .unwrap_or(code);
+        let message = if detail == code {
+            code.to_string()
+        } else {
+            format!("{code}: {detail}")
+        };
         let failed = fail_generation(
             db,
             generation_id,
             lease_token,
-            &bounded_error(message),
+            &bounded_error(&message),
             &now_iso_millis(),
         )?;
         return Ok(blocked_generation_operation(&failed, false));
@@ -2534,6 +2542,13 @@ fn process_batch(
         if index % 10 == 0 {
             renew_lease(domain_db, &scope.scope_id, generation_id, lease_token)?;
         }
+        // Fact ingestion and projection idempotency are separate concerns. An apply
+        // marker proves that the filesystem projection exists; it does not prove
+        // that the fact referenced by this generation exists in the fact store.
+        // Always ingest the immutable fact before using the projection marker.
+        let (fact_id, fact_type, provenance, payload_json) =
+            fact_for_record(record, batch.next_checkpoint.as_deref())?;
+        ingest_fact(&facts, &fact_id, &fact_type, &provenance, &payload_json)?;
         let marker = apply_marker_path(&scope.root_dir, &record.record_id);
         if marker.is_file() {
             validate_apply_marker(&marker)?;
@@ -2545,9 +2560,6 @@ fn process_batch(
             )?;
             continue;
         }
-        let (fact_id, fact_type, provenance, payload_json) =
-            fact_for_record(record, batch.next_checkpoint.as_deref())?;
-        ingest_fact(&facts, &fact_id, &fact_type, &provenance, &payload_json)?;
         assert_lease(domain_db, &scope.scope_id, generation_id, lease_token)?;
         let applied = project_record(scope, record)?;
         assert_lease(domain_db, &scope.scope_id, generation_id, lease_token)?;
@@ -3456,7 +3468,6 @@ fn fact_for_record(
     });
     let payload = json!({
         "record_id":record.record_id,
-        "ordinal":record.ordinal,
         "event":record.payload,
     });
     let identity = json!({
@@ -3524,6 +3535,37 @@ impl SyncLock {
                 Err(value) => return Err(value.to_string()),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn immutable_fact_identity_does_not_depend_on_batch_ordinal() {
+        let record = SourceRecord {
+            record_id: "event-1".to_string(),
+            ordinal: Some("1".to_string()),
+            payload: json!({
+                "event_kind":"upsert",
+                "message_id":"message-1"
+            }),
+            provenance: json!({
+                "sourceId":"graph",
+                "sourceVersion":"v1",
+                "observedAt":"2026-08-18T00:00:00.000Z"
+            }),
+        };
+        let mut reordered = record.clone();
+        reordered.ordinal = Some("246".to_string());
+
+        let first = fact_for_record(&record, Some("cursor-a")).expect("first fact");
+        let second = fact_for_record(&reordered, Some("cursor-b")).expect("second fact");
+
+        assert_eq!(first.0, second.0);
+        assert_eq!(first.3, second.3);
+        assert!(!first.3.contains("ordinal"));
     }
 }
 
