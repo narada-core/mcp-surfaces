@@ -2845,7 +2845,7 @@ fn refused(root: &Path, event_kind: &str, reason: &str, extra: Value) -> Result<
     Ok(json!({"schema":"narada.graph_mail_mcp.mailbox_organization_write.v1","status":"refused","reason":reason}))
 }
 
-fn record_audit(root: &Path, event: Value) -> Result<(), Value> {
+pub(crate) fn record_audit(root: &Path, event: Value) -> Result<(), Value> {
     let path = root.join(".ai/audit/graph-mail-mcp.jsonl");
     if let Some(parent) = path.parent() { fs::create_dir_all(parent).map_err(|e| unavailable("graph_mail_audit_write_failed", &e.to_string()))?; }
     let mut object = event.as_object().cloned().unwrap_or_default();

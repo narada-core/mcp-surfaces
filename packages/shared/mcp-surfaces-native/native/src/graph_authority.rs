@@ -25,6 +25,7 @@ enum GraphAuth {
         client_id: String,
         client_secret: String,
     },
+    Unavailable(Value),
     Missing,
 }
 
@@ -48,6 +49,7 @@ impl GraphAuth {
                 client_id,
                 client_secret,
             } => request_client_credentials(endpoint, client_id, client_secret),
+            Self::Unavailable(error) => Err(error.clone()),
             Self::Missing => Err(unavailable(
                 "graph_access_token_missing",
                 "set MS_GRAPH_ACCESS_TOKEN or GRAPH_TENANT_ID/GRAPH_CLIENT_ID/GRAPH_CLIENT_SECRET",
@@ -494,7 +496,7 @@ fn resolve_auth_with_delegated_token(
     if metadata.len() > MAX_CONFIG_BYTES {
         return GraphAuth::Missing;
     }
-    let Ok(text) = fs::read_to_string(path) else {
+    let Ok(text) = fs::read_to_string(&path) else {
         return GraphAuth::Missing;
     };
     let Ok(value) = serde_json::from_str::<Value>(&text) else {
@@ -511,7 +513,7 @@ fn resolve_auth_with_delegated_token(
         .unwrap_or(0);
     let now_ms = (OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
     if expires_at_ms <= now_ms + 60_000 {
-        return GraphAuth::Missing;
+        return refresh_delegated_token(root, &path, &value, now_ms, request_delegated_refresh);
     }
     value
         .get("access_token")
@@ -519,6 +521,176 @@ fn resolve_auth_with_delegated_token(
         .filter(|value| !value.trim().is_empty())
         .map(|value| GraphAuth::AccessToken(value.to_string()))
         .unwrap_or(GraphAuth::Missing)
+}
+
+fn refresh_delegated_token<F>(
+    root: &Path,
+    path: &Path,
+    token: &Value,
+    now_ms: i64,
+    refresh: F,
+) -> GraphAuth
+where
+    F: FnOnce(&str, &str, &str, &str) -> Result<Value, Value>,
+{
+    let required = |name: &str| {
+        token
+            .get(name)
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(ToOwned::to_owned)
+    };
+    let Some(tenant_id) = required("tenant_id") else {
+        return GraphAuth::Unavailable(unavailable(
+            "graph_delegated_token_refresh_unavailable",
+            "persisted delegated token has no tenant_id",
+        ));
+    };
+    let Some(client_id) = required("client_id") else {
+        return GraphAuth::Unavailable(unavailable(
+            "graph_delegated_token_refresh_unavailable",
+            "persisted delegated token has no client_id",
+        ));
+    };
+    let Some(scope) = required("scope") else {
+        return GraphAuth::Unavailable(unavailable(
+            "graph_delegated_token_refresh_unavailable",
+            "persisted delegated token has no scope",
+        ));
+    };
+    let Some(refresh_token) = required("refresh_token") else {
+        return GraphAuth::Unavailable(unavailable(
+            "graph_delegated_token_refresh_unavailable",
+            "persisted delegated token has no refresh_token",
+        ));
+    };
+    let payload = match refresh(&tenant_id, &client_id, &scope, &refresh_token) {
+        Ok(payload) => payload,
+        Err(error) => return GraphAuth::Unavailable(error),
+    };
+    let Some(access_token) = payload
+        .get("access_token")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(ToOwned::to_owned)
+    else {
+        return GraphAuth::Unavailable(unavailable(
+            "ms_graph_delegated_token_refresh_invalid",
+            "refresh response has no access_token",
+        ));
+    };
+    let expires_in = payload
+        .get("expires_in")
+        .and_then(Value::as_u64)
+        .unwrap_or(3599)
+        .max(60);
+    let rotated_refresh_token = payload
+        .get("refresh_token")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(&refresh_token);
+    let refreshed = json!({
+        "schema":"narada.graph_mail_mcp.delegated_token.v1",
+        "auth_mode":"delegated_device_code",
+        "tenant_id":tenant_id,
+        "client_id":client_id,
+        "scope":scope,
+        "access_token":access_token,
+        "refresh_token":rotated_refresh_token,
+        "expires_at_ms":now_ms.saturating_add((expires_in as i64).saturating_mul(1000)),
+        "acquired_at":OffsetDateTime::now_utc().format(&Rfc3339).unwrap_or_else(|_| "unknown".to_string())
+    });
+    if let Err(error) = persist_delegated_token(path, &refreshed) {
+        return GraphAuth::Unavailable(error);
+    }
+    let _ = crate::graph_mail_authority::record_audit(root, json!({
+        "event_kind":"delegated_token_refreshed",
+        "expires_at_ms":refreshed.get("expires_at_ms")
+    }));
+    GraphAuth::AccessToken(access_token)
+}
+
+fn request_delegated_refresh(
+    tenant_id: &str,
+    client_id: &str,
+    scope: &str,
+    refresh_token: &str,
+) -> Result<Value, Value> {
+    let endpoint = format!(
+        "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
+        encode_component(tenant_id)
+    );
+    validate_token_endpoint(&endpoint)?;
+    let form = format!(
+        "client_id={}&scope={}&refresh_token={}&grant_type=refresh_token",
+        encode_component(client_id),
+        encode_component(scope),
+        encode_component(refresh_token),
+    );
+    let response = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .post(&endpoint)
+        .set("Accept", "application/json")
+        .set("Content-Type", "application/x-www-form-urlencoded")
+        .send_string(&form);
+    let (status, body) = match response {
+        Ok(response) => read_response_body(response)?,
+        Err(ureq::Error::Status(code, response)) => {
+            let (_, body) = read_response_body(response)?;
+            return Err(unavailable(
+                "ms_graph_delegated_token_refresh_failed",
+                &format!("http_status={code};body={}", redact(&body)),
+            ));
+        }
+        Err(error) => {
+            return Err(unavailable(
+                "ms_graph_delegated_token_refresh_failed",
+                &error.to_string(),
+            ))
+        }
+    };
+    if !(200..300).contains(&status) {
+        return Err(unavailable(
+            "ms_graph_delegated_token_refresh_failed",
+            &format!("http_status={status};body={}", redact(&body)),
+        ));
+    }
+    serde_json::from_str(&body).map_err(|_| {
+        unavailable(
+            "ms_graph_delegated_token_refresh_invalid",
+            "refresh response is not JSON",
+        )
+    })
+}
+
+fn persist_delegated_token(path: &Path, token: &Value) -> Result<(), Value> {
+    let text = serde_json::to_string_pretty(token).map_err(|error| {
+        unavailable(
+            "graph_delegated_token_persist_failed",
+            &error.to_string(),
+        )
+    })?;
+    if text.len() as u64 > MAX_CONFIG_BYTES {
+        return Err(unavailable(
+            "graph_delegated_token_persist_failed",
+            "delegated token exceeds bounded size",
+        ));
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            unavailable(
+                "graph_delegated_token_persist_failed",
+                &error.to_string(),
+            )
+        })?;
+    }
+    fs::write(path, text).map_err(|error| {
+        unavailable(
+            "graph_delegated_token_persist_failed",
+            &error.to_string(),
+        )
+    })
 }
 
 fn record_calendar_audit(root: &Path, event: Value) -> Result<(), Value> {
@@ -814,6 +986,7 @@ fn unavailable(reason: &str, detail: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn encoding_is_url_safe() {
@@ -827,6 +1000,59 @@ mod tests {
         assert_eq!(failure["code"], "graph_access_token_missing");
         assert_eq!(failure["message"], "graph_access_token_missing");
         assert_eq!(failure["status"], "unavailable");
+    }
+
+    #[test]
+    fn expired_delegated_token_refreshes_persists_and_survives_restart() {
+        let unique = OffsetDateTime::now_utc().unix_timestamp_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "narada-graph-refresh-{}-{unique}",
+            std::process::id()
+        ));
+        let path = root.join(".ai/runtime/graph-mail-mcp/delegated-token.json");
+        let token = json!({
+            "schema":"narada.graph_mail_mcp.delegated_token.v1",
+            "auth_mode":"delegated_device_code",
+            "tenant_id":"organizations",
+            "client_id":"client",
+            "scope":"https://graph.microsoft.com/Mail.ReadWrite offline_access",
+            "access_token":"expired-access",
+            "refresh_token":"refresh-one",
+            "expires_at_ms":1
+        });
+        let refresh_count = AtomicUsize::new(0);
+        let now_ms =
+            (OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
+        let refreshed = refresh_delegated_token(
+            &root,
+            &path,
+            &token,
+            now_ms,
+            |tenant, client, scope, refresh_token| {
+                refresh_count.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(tenant, "organizations");
+                assert_eq!(client, "client");
+                assert!(scope.contains("offline_access"));
+                assert_eq!(refresh_token, "refresh-one");
+                Ok(json!({
+                    "access_token":"fresh-access",
+                    "refresh_token":"refresh-two",
+                    "expires_in":3600
+                }))
+            },
+        );
+        assert_eq!(refreshed.access_token().expect("refreshed token"), "fresh-access");
+        assert_eq!(refresh_count.load(Ordering::SeqCst), 1);
+
+        let persisted: Value =
+            serde_json::from_str(&fs::read_to_string(&path).expect("persisted token"))
+                .expect("persisted token JSON");
+        assert_eq!(persisted["refresh_token"], "refresh-two");
+        assert_eq!(persisted["access_token"], "fresh-access");
+
+        let restarted = resolve_auth_with_delegated_token(&root, &HashMap::new());
+        assert_eq!(restarted.access_token().expect("restart token"), "fresh-access");
+        fs::remove_dir_all(root).expect("remove test root");
     }
 
     #[test]
