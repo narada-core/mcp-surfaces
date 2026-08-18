@@ -130,6 +130,7 @@ struct Policy {
     device_code_client_id: Option<String>,
     device_code_allowed_scopes: Vec<String>,
     organization_approval_token: Option<String>,
+    reply_signature_name: Option<String>,
 }
 
 impl Policy {
@@ -209,6 +210,11 @@ impl Policy {
             device_code_client_id: optional_config_string(&object, "device_code_client_id", "deviceCodeClientId"),
             device_code_allowed_scopes: allowed_scopes,
             organization_approval_token,
+            reply_signature_name: optional_config_string(
+                &object,
+                "reply_signature_name",
+                "replySignatureName",
+            ),
         })
     }
 
@@ -1317,9 +1323,10 @@ fn html_reply_draft_create(
             "Graph did not return quoted history",
         ));
     }
-    let composed_html = format!(
-        "{}<div data-narada-quoted-history=\"true\">{}</div>",
-        comment_html, quote_html
+    let composed_html = compose_reply_html(
+        &comment_html,
+        &quote_html,
+        policy.reply_signature_name.as_deref(),
     );
     let patched = policy.adapter.request(
         "PATCH",
@@ -1343,9 +1350,21 @@ fn html_reply_draft_create(
         "status":"created",
         "draft":patched,
         "reply_body_mode":"comment_html",
+        "reply_signature_name":policy.reply_signature_name,
+        "signature_applied":policy.reply_signature_name.is_some(),
         "quote_preserved":true,
         "unsent":patched.get("isDraft").and_then(Value::as_bool) != Some(false)
     }))
+}
+
+fn compose_reply_html(comment_html: &str, quote_html: &str, signature_name: Option<&str>) -> String {
+    let signature_html = signature_name
+        .map(|name| format!("<p>Thanks,<br>{}</p>", escape_html(name)))
+        .unwrap_or_default();
+    format!(
+        "{}{}<div data-narada-quoted-history=\"true\">{}</div>",
+        comment_html, signature_html, quote_html
+    )
 }
 
 fn reply_all_to_last_in_thread(
@@ -2952,5 +2971,14 @@ mod tests {
     fn bounded_base64_decoder_matches_attachment_bytes() {
         assert_eq!(decode_base64("SGVsbG8=").unwrap(), b"Hello");
         assert!(decode_base64("not-base64").is_err());
+    }
+
+    #[test]
+    fn governed_html_reply_applies_escaped_signature_before_quote() {
+        let html = compose_reply_html("<p>Done.</p>", "<p>Original</p>", Some("Ezra & Team"));
+        assert_eq!(
+            html,
+            "<p>Done.</p><p>Thanks,<br>Ezra &amp; Team</p><div data-narada-quoted-history=\"true\"><p>Original</p></div>"
+        );
     }
 }
