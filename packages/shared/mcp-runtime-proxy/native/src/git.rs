@@ -1,9 +1,10 @@
 use crate::filesystem::{parse_site_extra_allowed_roots, read_message, write_message};
 use crate::protocol;
+use fs2::FileExt;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::env;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{self, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -35,6 +36,95 @@ struct WorkScope {
     expires_at: OffsetDateTime,
 }
 
+fn work_scope_error(error: impl std::fmt::Display) -> GitError {
+    GitError::new(
+        "git_work_scope_store_unavailable",
+        "git_work_scope_store_unavailable",
+        json!({"error": error.to_string()}),
+    )
+}
+
+fn work_scope_value(scope: &WorkScope) -> Value {
+    json!({
+        "reference": scope.reference,
+        "repository_root": scope.repository_root,
+        "owner_id": scope.owner_id,
+        "authority": scope.authority,
+        "allowed_paths": scope.allowed_paths,
+        "base_state": scope.base_state,
+        "created_at": scope.created_at,
+        "expires_at": scope.expires_at.format(&Rfc3339).unwrap_or_default(),
+    })
+}
+
+fn work_scope_from_value(value: Value) -> Result<WorkScope, GitError> {
+    let field = |name: &str| {
+        value.get(name).and_then(Value::as_str).map(str::to_string).ok_or_else(|| {
+            work_scope_error(format!("stored work scope is missing {name}"))
+        })
+    };
+    let expires_at = OffsetDateTime::parse(&field("expires_at")?, &Rfc3339)
+        .map_err(work_scope_error)?;
+    let allowed_paths = value
+        .get("allowed_paths")
+        .and_then(Value::as_array)
+        .ok_or_else(|| work_scope_error("stored work scope is missing allowed_paths"))?
+        .iter()
+        .map(|item| item.as_str().map(str::to_string).ok_or_else(|| work_scope_error("stored allowed path is not a string")))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(WorkScope {
+        reference: field("reference")?,
+        repository_root: field("repository_root")?,
+        owner_id: field("owner_id")?,
+        authority: field("authority")?,
+        allowed_paths,
+        base_state: value.get("base_state").cloned().unwrap_or(Value::Null),
+        created_at: field("created_at")?,
+        expires_at,
+    })
+}
+
+fn with_work_scope_lock<T>(state: &State, action: impl FnOnce(&Path) -> Result<T, GitError>) -> Result<T, GitError> {
+    fs::create_dir_all(&state.work_scope_store).map_err(work_scope_error)?;
+    let lock_path = state.work_scope_store.join("store.lock");
+    let lock = OpenOptions::new().create(true).read(true).write(true).open(lock_path).map_err(work_scope_error)?;
+    lock.lock_exclusive().map_err(work_scope_error)?;
+    let result = action(&state.work_scope_store);
+    fs2::FileExt::unlock(&lock).map_err(work_scope_error)?;
+    result
+}
+
+fn load_work_scopes_unlocked(store: &Path) -> Result<HashMap<String, WorkScope>, GitError> {
+    let mut scopes = HashMap::new();
+    for entry in fs::read_dir(store).map_err(work_scope_error)? {
+        let path = entry.map_err(work_scope_error)?.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let value: Value = serde_json::from_slice(&fs::read(&path).map_err(work_scope_error)?)
+            .map_err(work_scope_error)?;
+        let scope = work_scope_from_value(value)?;
+        scopes.insert(scope.reference.clone(), scope);
+    }
+    Ok(scopes)
+}
+
+fn persist_work_scope_unlocked(store: &Path, scope: &WorkScope) -> Result<(), GitError> {
+    let target = store.join(format!("{}.json", scope.reference));
+    let temporary = store.join(format!("{}.tmp", scope.reference));
+    fs::write(&temporary, serde_json::to_vec(&work_scope_value(scope)).map_err(work_scope_error)?)
+        .map_err(work_scope_error)?;
+    fs::rename(&temporary, &target).map_err(work_scope_error)
+}
+
+fn remove_work_scope_unlocked(store: &Path, reference: &str) -> Result<(), GitError> {
+    let path = store.join(format!("{reference}.json"));
+    if path.exists() {
+        fs::remove_file(path).map_err(work_scope_error)?;
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 struct State {
     mode: String,
@@ -43,7 +133,7 @@ struct State {
     max_output_bytes: usize,
     output_root: PathBuf,
     env: HashMap<String, String>,
-    work_scopes: Arc<Mutex<HashMap<String, WorkScope>>>,
+    work_scope_store: PathBuf,
     git_write_lock: Arc<Mutex<()>>,
 }
 
@@ -232,6 +322,7 @@ fn parse_state(args: &[String]) -> Result<State, String> {
             allowed_roots.push(path);
         }
     }
+    let work_scope_store = output_root.join(".ai").join("runtime").join("git-work-scopes");
     Ok(State {
         mode,
         allowed_roots,
@@ -239,7 +330,7 @@ fn parse_state(args: &[String]) -> Result<State, String> {
         max_output_bytes,
         output_root,
         env: env::vars().collect(),
-        work_scopes: Arc::new(Mutex::new(HashMap::new())),
+        work_scope_store,
         git_write_lock: Arc::new(Mutex::new(())),
     })
 }
@@ -436,7 +527,7 @@ fn tool_input_schema(name: &str) -> Value {
         "git_branch_delete" => json!({"properties": {"working_directory": working_directory, "branch": {"type":"string"}, "merged_into": {"type":"string"}, "work_scope_ref": work_scope}, "required":["branch","merged_into","work_scope_ref"]}),
         "git_branch_delete_remote" => json!({"properties": {"working_directory": working_directory, "remote": {"type":"string"}, "branch": {"type":"string"}, "merged_into": {"type":"string"}, "work_scope_ref": work_scope}, "required":["remote","branch","merged_into","work_scope_ref"]}),
         "git_output_show" => {
-            json!({"properties": {"ref": {"type": "string"}, "output_ref": {"type": "string"}, "offset": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 20000}}, "anyOf": [{"required": ["ref"]}, {"required": ["output_ref"]}]})
+            json!({"properties": {"ref": {"type": "string", "description": "Output reference. Supply ref or output_ref; runtime validation rejects an empty request."}, "output_ref": {"type": "string", "description": "Compatibility alias for ref. Supply exactly one reference field."}, "offset": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 20000}}})
         }
         "git_changed_summary" => {
             json!({"properties": {"working_directory": working_directory, "pathspecs": paths, "relevance_filters": paths}})
@@ -932,14 +1023,12 @@ fn git_begin_work_scope(
         created_at: created.format(&Rfc3339).unwrap_or_default(),
         expires_at: expires,
     };
-    let mut scopes = state.work_scopes.lock().map_err(|_| {
-        GitError::new(
-            "git_work_scope_store_unavailable",
-            "git_work_scope_store_unavailable",
-            json!({}),
-        )
-    })?;
-    scopes.retain(|_, existing| existing.expires_at > OffsetDateTime::now_utc());
+    with_work_scope_lock(state, |store| {
+    let mut scopes = load_work_scopes_unlocked(store)?;
+    for expired in scopes.values().filter(|scope| scope.expires_at <= OffsetDateTime::now_utc()).map(|scope| scope.reference.clone()).collect::<Vec<_>>() {
+        remove_work_scope_unlocked(store, &expired)?;
+        scopes.remove(&expired);
+    }
     for existing in scopes.values() {
         let overlap = if authority == "repository_topology"
             || existing.authority == "repository_topology"
@@ -965,10 +1054,11 @@ fn git_begin_work_scope(
             ));
         }
     }
-    scopes.insert(reference.clone(), scope.clone());
+    persist_work_scope_unlocked(store, &scope)?;
     Ok(
         json!({"schema": "narada.git.work_scope.v1", "status": "ok", "working_directory": cwd.to_string_lossy(), "repository_root": repository_root, "work_scope_ref": reference, "owner_id": owner_id, "authority": authority, "allowed_paths": allowed_paths, "base_state": base_state, "created_at": scope.created_at, "expires_at": expires.format(&Rfc3339).unwrap_or_default(), "mutation_started": true, "summary": if authority == "repository_topology" { "repository topology scope leased".to_string() } else { format!("work scope issued for {} path{}", scope.allowed_paths.len(), if scope.allowed_paths.len() == 1 { "" } else { "s" }) }}),
     )
+    })
 }
 
 fn git_end_work_scope(
@@ -1017,13 +1107,8 @@ fn git_end_work_scope(
     )?
     .trim()
     .to_string();
-    let mut scopes = state.work_scopes.lock().map_err(|_| {
-        GitError::new(
-            "git_work_scope_store_unavailable",
-            "git_work_scope_store_unavailable",
-            json!({}),
-        )
-    })?;
+    with_work_scope_lock(state, |store| {
+    let scopes = load_work_scopes_unlocked(store)?;
     let Some(scope) = scopes.get(reference).cloned() else {
         return Err(GitError::new(
             "git_work_scope_ref_not_found",
@@ -1032,7 +1117,7 @@ fn git_end_work_scope(
         ));
     };
     if scope.expires_at <= OffsetDateTime::now_utc() {
-        scopes.remove(reference);
+        remove_work_scope_unlocked(store, reference)?;
         return Err(GitError::new(
             "git_work_scope_ref_expired",
             "git_work_scope_ref_expired",
@@ -1053,8 +1138,9 @@ fn git_end_work_scope(
             json!({"work_scope_ref": reference, "expected_owner_id": scope.owner_id, "supplied_owner_id": owner_id, "mutation_started": false, "atomic": true}),
         ));
     }
-    scopes.remove(reference);
+    remove_work_scope_unlocked(store, reference)?;
     Ok(json!({"schema": "narada.git.work_scope_end.v1", "status": "released", "work_scope_ref": reference, "owner_id": owner_id, "authority": scope.authority, "released_paths": scope.allowed_paths, "mutation_started": true}))
+    })
 }
 
 
@@ -1205,13 +1291,8 @@ fn resolve_work_scope(
     reference: &str,
     repository_root: &str,
 ) -> Result<WorkScope, GitError> {
-    let mut scopes = state.work_scopes.lock().map_err(|_| {
-        GitError::new(
-            "git_work_scope_store_unavailable",
-            "git_work_scope_store_unavailable",
-            json!({}),
-        )
-    })?;
+    with_work_scope_lock(state, |store| {
+    let scopes = load_work_scopes_unlocked(store)?;
     let Some(scope) = scopes.get(reference).cloned() else {
         return Err(GitError::new(
             "git_work_scope_ref_not_found",
@@ -1220,7 +1301,7 @@ fn resolve_work_scope(
         ));
     };
     if scope.expires_at <= OffsetDateTime::now_utc() {
-        scopes.remove(reference);
+        remove_work_scope_unlocked(store, reference)?;
         return Err(GitError::new(
             "git_work_scope_ref_expired",
             "git_work_scope_ref_expired",
@@ -1235,6 +1316,7 @@ fn resolve_work_scope(
         ));
     }
     Ok(scope)
+    })
 }
 
 fn git_workflow_record(
@@ -2852,6 +2934,11 @@ mod tests {
             .find(|tool| tool["name"] == "git_show")
             .unwrap();
         assert_eq!(show["inputSchema"]["required"], json!(["commit"]));
+        let output_show = tools
+            .iter()
+            .find(|tool| tool["name"] == "git_output_show")
+            .unwrap();
+        assert!(output_show["inputSchema"].get("anyOf").is_none());
     }
 
     fn assert_bounded(schema: &Value) {
@@ -2919,5 +3006,46 @@ mod tests {
     fn status_parser_preserves_upstream_for_push_resolution() {
         let status = parse_status("## main...origin/main\0");
         assert_eq!(status["upstream"], "origin/main");
+    }
+
+    #[test]
+    fn work_scope_survives_git_surface_process_replacement() {
+        let root = env::temp_dir().join(unique_id("narada-git-work-scope-test"));
+        let store = root.join("scopes");
+        let state = State {
+            mode: "write".to_string(),
+            allowed_roots: vec![root.clone()],
+            max_timeout_ms: DEFAULT_MAX_TIMEOUT_MS,
+            max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
+            output_root: root.clone(),
+            env: HashMap::new(),
+            work_scope_store: store.clone(),
+            git_write_lock: Arc::new(Mutex::new(())),
+        };
+        let scope = WorkScope {
+            reference: "gws_durable_test".to_string(),
+            repository_root: root.to_string_lossy().to_string(),
+            owner_id: "test-owner".to_string(),
+            authority: "paths".to_string(),
+            allowed_paths: vec!["README.md".to_string()],
+            base_state: json!({"head": "abc"}),
+            created_at: OffsetDateTime::now_utc().format(&Rfc3339).unwrap(),
+            expires_at: OffsetDateTime::now_utc() + TimeDuration::minutes(1),
+        };
+        with_work_scope_lock(&state, |path| persist_work_scope_unlocked(path, &scope)).unwrap();
+
+        let replacement_state = State {
+            git_write_lock: Arc::new(Mutex::new(())),
+            ..state.clone()
+        };
+        let recovered = resolve_work_scope(
+            &replacement_state,
+            "gws_durable_test",
+            &root.to_string_lossy(),
+        )
+        .unwrap();
+        assert_eq!(recovered.owner_id, "test-owner");
+        assert_eq!(recovered.allowed_paths, vec!["README.md"]);
+        fs::remove_dir_all(root).unwrap();
     }
 }

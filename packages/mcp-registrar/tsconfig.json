@@ -7,7 +7,9 @@
     "tsBuildInfoFile": "dist/.tsbuildinfo"
   },
   "references": [
+    { "path": "../shared/mcp-e2e-harness" },
+    { "path": "../shared/mcp-fabric-compiler" },
     { "path": "../shared/mcp-runtime-proxy" }
   ],
-  "include": ["scripts/build-native.ts", "test/native-contract.test.ts"]
+  "include": ["scripts/build-native.ts", "test/native-contract.test.ts", "test/kimi-materialized-schema-contract.test.ts"]
 }

@@ -1060,6 +1060,7 @@ dependencies = [
 name = "narada-mcp-runtime"
 version = "0.1.0"
 dependencies = [
+ "fs2",
  "hex",
  "narada-mcp-materialization-contract",
  "rhai",

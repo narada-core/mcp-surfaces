@@ -39,7 +39,7 @@ const OMIT = new Set([
   'retry_of_run_id', 'retry_of_handoff_id', 'retry_run_id', 'retry_handoff_id', 'original_outbox_event_id',
   'reopened_outbox_event_id', 'occurrence_key', 'handoff_occurrence_key',
   'retry_occurrence_key',
-  'request_fingerprint', 'lease_token', 'lease_expires_at', 'trigger_source_ref', 'triggered_by',
+  'request_fingerprint', 'lease_token', 'lease_expires_at', 'lease_ms', 'lease_remaining_ms', 'next', 'trigger_source_ref', 'triggered_by',
   'created_at', 'updated_at', 'completed_at', 'started_at', 'recorded_at', 'available_at',
   'registered_at', 'processed_at', 'compacted_at', 'idempotency_key',
 ]);
@@ -60,7 +60,8 @@ function assertSame(label, left, right) {
   const rhs = JSON.stringify(normalizedRight);
   if (lhs !== rhs) {
     const difference = firstDifference(normalizedLeft, normalizedRight);
-    throw new Error(`${label}:path=${difference.path}:node=${JSON.stringify(difference.left).slice(0, 800)}:rust=${JSON.stringify(difference.right).slice(0, 800)}`);
+    const render = (value) => (JSON.stringify(value) ?? String(value)).slice(0, 800);
+    throw new Error(`${label}:path=${difference.path}:node=${render(difference.left)}:rust=${render(difference.right)}`);
   }
 }
 
@@ -122,7 +123,7 @@ function assertDiagnosticPair(label, nodeResponses, rustResponses) {
 function bootstrap(node, rust) {
   const templates = [
     {
-      sop_id: 'engine-flow', title: 'Engine flow', status: 'active',
+      sop_id: 'engine-flow', title: 'Engine flow',
       input_schema: { type: 'object', properties: { ticket: { type: 'string' }, include_optional: { type: 'boolean' } }, required: ['ticket'] },
       output: { ticket: { $ref: 'input.ticket' } },
       output_schema: { type: 'object', properties: { ticket: { type: 'string' } }, required: ['ticket'] },
@@ -132,12 +133,12 @@ function bootstrap(node, rust) {
       ],
     },
     {
-      sop_id: 'manual-flow', title: 'Manual flow', status: 'active',
+      sop_id: 'manual-flow', title: 'Manual flow',
       output: { approved: { $ref: 'steps.approve.result.approved' } },
       steps: [{ id: 'approve', executor: 'agent', title: 'Approve', instructions: 'Approve {{input.ticket}}', result_schema: { type: 'object', properties: { approved: { type: 'boolean' } }, required: ['approved'] } }],
     },
     {
-      sop_id: 'action-flow', title: 'Action flow', status: 'active',
+      sop_id: 'action-flow', title: 'Action flow',
       output: { written: { $ref: 'steps.write.result.written' } },
       steps: [{
         id: 'write', executor: 'action', title: 'Write', instructions: 'Write {{input.ticket}}',
@@ -146,12 +147,12 @@ function bootstrap(node, rust) {
       }],
     },
     {
-      sop_id: 'child-flow', title: 'Child flow', status: 'active',
+      sop_id: 'child-flow', title: 'Child flow',
       output: { child_ticket: { $ref: 'input.ticket' } },
       steps: [{ id: 'child-engine', executor: 'engine', title: 'Child engine', instructions: 'Child' }],
     },
     {
-      sop_id: 'parent-flow', title: 'Parent flow', status: 'active',
+      sop_id: 'parent-flow', title: 'Parent flow',
       output: { child_ticket: { $ref: 'steps.child.result.output.child_ticket' } },
       steps: [{ id: 'child', executor: 'sop', title: 'Child', instructions: 'Run child', sop_id: 'child-flow', sop_version: 1, input: { ticket: { $ref: 'input.ticket' } } }],
     },

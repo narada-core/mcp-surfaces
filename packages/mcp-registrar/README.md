@@ -175,9 +175,9 @@ profile may layer over them.
 
 ## Kimi Carrier Contract
 
-`pnpm test:registrar:kimi-contract` materializes the real `kimi-andrey` configuration, launches every emitted stdio server with its generated command and arguments, performs MCP initialization and `tools/list`, and validates every tool `inputSchema` against the strict contract from [MoonshotAI/walle v0.1.13](https://github.com/MoonshotAI/walle). This deterministic test requires no Kimi account or provider call and is included in the registrar package test.
+`pnpm --filter @narada-core/mcp-registrar test:kimi-materialized-schema` launches every server in the materialized Kimi configuration, performs MCP initialization and `tools/list`, and validates every tool `inputSchema` against the strict contract from [MoonshotAI/walle v0.1.13](https://github.com/MoonshotAI/walle). The native runtime-proxy unit suite separately covers Kimi's carrier-edge legacy handshake posture.
 
-The contract probe is intentionally serial and places each launched server in the Rust-backed E2E process scope. This keeps the live carrier projection coverage intact while ensuring runtime-proxy descendants are reclaimed when each probe closes.
+The carrier configuration itself is generated transactionally by `tools/materialize-all-carriers.ps1`; restart Kimi after materialization so its proxy loads the refreshed carrier behavior. The schema contract test requires no Kimi account or provider call.
 
 `pnpm test:registrar:kimi-live` adds one real non-interactive Kimi provider turn with the complete materialized MCP config. It is skipped unless `NARADA_KIMI_CARRIER_LIVE_E2E=1`; running it requires operator approval and an authenticated Kimi installation. Set `NARADA_KIMI_COMMAND` to override the executable and `NARADA_KIMI_LIVE_TIMEOUT_MS` to override the 120-second timeout.
 
@@ -203,5 +203,6 @@ commands.
 
 ```
 cargo test --locked --manifest-path packages/mcp-registrar/native/Cargo.toml
-pnpm test:registrar:kimi-contract
+pnpm --filter @narada-core/mcp-registrar test:native:node-contract
+pnpm --filter @narada-core/mcp-registrar test:kimi-materialized-schema
 ```

@@ -10,6 +10,7 @@
     "build:native": "tsx scripts/build-native.ts",
     "test:native:contract": "cargo test --locked --manifest-path native/Cargo.toml",
     "test:native:node-contract": "pnpm run build && node dist/test/native-contract.test.js",
+    "test:kimi-materialized-schema": "pnpm --filter @narada-core/mcp-e2e-harness build && pnpm --filter @narada-core/mcp-fabric-compiler build && pnpm run build && node --test dist/test/kimi-materialized-schema-contract.test.js",
     "typecheck": "tsc -b --pretty false",
     "test": "cargo test --locked --manifest-path native/Cargo.toml"
   },
@@ -26,6 +27,8 @@
     "sops/"
   ],
   "devDependencies": {
+    "@narada-core/mcp-e2e-harness": "workspace:*",
+    "@narada-core/mcp-fabric-compiler": "workspace:*",
     "@types/node": "^22.15.3",
     "typescript": "^5.8.3"
   }

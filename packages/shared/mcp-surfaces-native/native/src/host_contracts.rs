@@ -162,9 +162,7 @@ pub fn call_tool(
         ),
         ("graph-mail", "graph_mail_doctor") => Ok(graph_mail_doctor(root)),
         ("graph-mail", "graph_mail_auth_status") => Ok(graph_mail_auth_status(root)),
-        ("graph-mail", "graph_mail_output_show") => {
-            output_show(args, root)
-        }
+        ("graph-mail", "graph_mail_output_show") => output_show(args, root),
         _ => Err(boundary(
             surface_id,
             name,
@@ -183,11 +181,8 @@ fn entries(surface_id: &str) -> &'static [(&'static str, bool)] {
     }
 }
 fn guidance(surface_id: &str) -> Value {
-    tool(
-        &format!("{}_guidance", surface_id.replace('-', "_")),
-        format!("Show model-facing operating guidance for {surface_id} MCP workflows."),
-        true,
-    )
+    let name = format!("{}_guidance", surface_id.replace('-', "_"));
+    json!({"name":name,"description":format!("Show model-facing operating guidance for {surface_id} MCP workflows."),"inputSchema":{"type":"object","properties":{"workflow":{"type":"string","maxLength":256},"tool":{"type":"string","maxLength":256}},"additionalProperties":false},"annotations":{"title":name,"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false},"outputSchema":{"type":"object","additionalProperties":true}})
 }
 fn guidance_result(surface_id: &str, args: &Map<String, Value>) -> Value {
     json!({"schema":"narada.host_surface.guidance.v1","status":"ok","surface_id":surface_id,"requested":args,"native_contract":"status probes and explicit authority boundaries","native_read_only":true})
@@ -348,7 +343,7 @@ fn graph_mail_tool_contract(name: &str) -> (&'static str, Value, Vec<&'static st
         "graph_mail_folder_list" => ("List live Graph mail folders for an allowed mailbox.", json!({"mailbox_id":mailbox(),"parent_folder_id":id("Optional parent folder id."),"select":{"type":"string","maxLength":8192},"limit":limit(50,100)}), vec![]),
         "graph_mail_folder_create" => ("Create a mail folder when mailbox-organization policy permits it.", json!({"mailbox_id":mailbox(),"display_name":{"type":"string","minLength":1,"maxLength":256},"parent_folder_id":id("Optional parent folder id."),"confirm_write":{"type":"boolean","const":true},"approval_token":token("Optional configured approval token.")}), vec!["display_name"]),
         "graph_mail_message_move" => ("Move one message when mailbox-organization policy permits it.", json!({"mailbox_id":mailbox(),"message_id":id("Graph message id."),"destination_folder_id":id("Destination folder id or well-known name."),"confirm_write":{"type":"boolean","const":true},"approval_token":token("Optional configured approval token.")}), vec!["message_id","destination_folder_id"]),
-        "graph_mail_message_mark_read" => ("Idempotently mark a message read after durable downstream admission.", json!({"mailbox_id":mailbox(),"message_id":id("Graph message id."),"confirm_write":{"type":"boolean","const":true},"idempotency_key":id("Stable action occurrence key.")}), vec!["message_id","idempotency_key"]),
+        "graph_mail_message_mark_read" => ("Idempotently mark a message read after durable downstream admission.", json!({"mailbox_id":mailbox(),"message_id":id("Graph message id."),"confirm_write":{"type":"boolean","const":true},"approval_token":token("Optional configured mailbox-organization approval token."),"idempotency_key":id("Stable action occurrence key.")}), vec!["message_id","idempotency_key"]),
         "graph_mail_attachment_list" => ("List bounded attachment metadata for a message or draft.", json!({"mailbox_id":mailbox(),"message_id":id("Message id."),"draft_id":id("Draft id alias."),"limit":limit(20,100),"top":limit(20,100)}), vec![]),
         "graph_mail_attachment_get" => ("Read one attachment with content excluded unless explicitly requested and bounded.", json!({"mailbox_id":mailbox(),"message_id":id("Message id."),"draft_id":id("Draft id alias."),"attachment_id":id("Attachment id."),"include_content":{"type":"boolean","default":false}}), vec!["attachment_id"]),
         "graph_mail_attachment_download_file" => ("Download one permitted attachment beneath an allowed local root.", json!({"mailbox_id":mailbox(),"message_id":id("Message id."),"attachment_id":id("Attachment id."),"file_path":{"type":"string","minLength":1,"maxLength":4096}}), vec!["attachment_id","file_path"]),
@@ -377,7 +372,6 @@ fn operator_status(root: &Path) -> Value {
     let state_root = operator_state_root();
     operator_status_at(root, &state_root)
 }
-
 
 fn operator_status_at(root: &Path, state_root: &Path) -> Value {
     let state_directory = state_root.join("operator-console");
@@ -856,5 +850,4 @@ mod tests {
         assert_eq!(response["overlay"]["action_state"]["status"], "succeeded");
         let _ = fs::remove_dir_all(root);
     }
-
 }

@@ -165,13 +165,19 @@ fn close(args: &Map<String, Value>, site_root: &Path) -> Result<Value, Value> {
 
 fn inspect(site_root: &Path) -> Value {
     let directory = state_directory();
+    let state_root = directory.parent().unwrap_or(&directory);
     let pid = fs::read_to_string(directory.join("overlay.pid"))
         .ok()
         .and_then(|value| value.trim().parse::<u32>().ok());
     json!({
         "schema":"narada.window_surface_overlay.result.v1","id":"operator-console",
         "state":if pid.is_some(){"running"}else{"stopped"},"pid":pid,
-        "state_directory":directory,"document":read_json(&directory.join("document.json")),
+        "state_directory":directory,"document_path":directory.join("document.json"),
+        "document":read_json(&directory.join("document.json")),
+        "action_state":read_json(&directory.join("action-state.json")),
+        "visibility_state":read_json(&directory.join("visibility.state.json")),
+        "surface_snapshot":read_json(&state_root.join("surface.snapshot.json")),
+        "focus_owner":read_json(&state_root.join("focus.owner.json")),
         "narada_root":narada_root(site_root)
     })
 }
@@ -273,7 +279,7 @@ fn state_directory() -> PathBuf {
 fn narada_root(site_root: &Path) -> PathBuf {
     env::var_os("NARADA_ROOT")
         .map(PathBuf::from)
-        .unwrap_or_else(|| site_root.parent().unwrap_or(site_root).join("src/narada"))
+        .unwrap_or_else(|| site_root.to_path_buf())
 }
 
 fn ensure_local_runtime(site_root: &Path) -> Result<String, Value> {
@@ -368,7 +374,12 @@ fn write_atomic(path: &Path, value: &Value) -> Result<(), Value> {
 }
 
 fn wrap(operation: &str, command: &str, overlay: Value) -> Value {
-    json!({"schema":"narada.operator_console_overlay.mcp_result.v1","status":"ok","operation":operation,"command":command,"overlay_id":"operator-console","overlay":overlay})
+    let narada_root = overlay.get("narada_root").cloned().unwrap_or(Value::Null);
+    let mut overlay = overlay;
+    if let Some(object) = overlay.as_object_mut() {
+        object.remove("narada_root");
+    }
+    json!({"schema":"narada.operator_console_overlay.mcp_result.v1","status":"ok","operation":operation,"command":command,"overlay_id":"operator-console","narada_root":narada_root,"overlay":overlay})
 }
 
 fn error(code: &str, message: &str) -> Value {

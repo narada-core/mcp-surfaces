@@ -3222,7 +3222,10 @@ fn find_patch_context(lines: &[String], context: &[&str], start: usize) -> Optio
     if context.is_empty() {
         return Some(start.min(lines.len()));
     }
-    (start..=lines.len().saturating_sub(context.len())).find(|index| {
+    if context.len() > lines.len() || start > lines.len() - context.len() {
+        return None;
+    }
+    (start..=lines.len() - context.len()).find(|index| {
         lines[*index..*index + context.len()]
             .iter()
             .map(String::as_str)
@@ -4899,6 +4902,27 @@ mod tests {
             patch_outcome(&state, &json!({"operation_id":"patch-two"})).unwrap()["status"],
             "checked"
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_apply_patch_rejects_malformed_delete_add_without_panicking() {
+        let root = test_root("native-patch-delete-add-malformed");
+        let state = test_state(&root, "write");
+        fs::write(root.join("old.txt"), "old\n").unwrap();
+        let malformed = "*** Begin Patch\n*** Delete File: old.txt\n*** Add File: new.txt\nmissing-plus-prefix\n*** End Patch";
+        let error = apply_patch_tool(
+            &state,
+            &json!({"patch":malformed,"operation_id":"delete-add-malformed"}),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "patch_context_not_found");
+        assert_eq!(fs::read_to_string(root.join("old.txt")).unwrap(), "old\n");
+        assert!(!root.join("new.txt").exists());
+        let outcome =
+            patch_outcome(&state, &json!({"operation_id":"delete-add-malformed"})).unwrap();
+        assert_eq!(outcome["status"], "failed_before_mutation");
+        assert_eq!(outcome["retry_safe"], true);
         fs::remove_dir_all(root).unwrap();
     }
 

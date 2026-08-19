@@ -1021,6 +1021,7 @@ fn run_proxy(args: &[String]) -> Result<(), String> {
                 }
                 if let Some(response) = registrar_carrier_compatibility_response(
                     options.surface_id.as_deref(),
+                    options.carrier_kind.as_deref(),
                     &message.value,
                 ) {
                     write_wire(&mut stdout, &response, message.framed)?;
@@ -2859,6 +2860,7 @@ fn resolve_child_command(child_command: &str) -> Result<PathBuf, String> {
 /// initialize_removed response.
 fn registrar_carrier_compatibility_response(
     surface_id: Option<&str>,
+    carrier_kind: Option<&str>,
     request: &Value,
 ) -> Option<Value> {
     if surface_id != Some("mcp-registrar")
@@ -2866,6 +2868,17 @@ fn registrar_carrier_compatibility_response(
         || request.get("method").and_then(Value::as_str) != Some("initialize")
     {
         return None;
+    }
+    if carrier_kind.is_some_and(|kind| kind.eq_ignore_ascii_case("kimi")) {
+        return Some(json!({
+            "jsonrpc": "2.0",
+            "id": request.get("id").cloned().unwrap_or(Value::Null),
+            "result": {
+                "protocolVersion": protocol::LEGACY_PROTOCOL_VERSION,
+                "capabilities": { "tools": {} },
+                "serverInfo": { "name": "mcp-registrar", "version": "0.1.0" }
+            }
+        }));
     }
     Some(json!({
         "jsonrpc": "2.0",
@@ -3166,10 +3179,22 @@ mod native_child_runtime_tests {
             "method": "initialize",
             "params": {}
         });
-        let response = registrar_carrier_compatibility_response(Some("mcp-registrar"), &initialize)
-            .expect("naked initialize must be synthesized at the carrier edge");
+        let response = registrar_carrier_compatibility_response(
+            Some("mcp-registrar"),
+            Some("codex"),
+            &initialize,
+        )
+        .expect("naked initialize must be synthesized at the carrier edge");
         assert_eq!(response["result"]["protocolVersion"], "2026-07-28");
         assert_eq!(response["result"]["resultType"], "complete");
+        let kimi = registrar_carrier_compatibility_response(
+            Some("mcp-registrar"),
+            Some("kimi"),
+            &initialize,
+        )
+        .expect("Kimi initialize must receive the legacy protocol version");
+        assert_eq!(kimi["result"]["protocolVersion"], "2024-11-05");
+        assert!(kimi["result"].get("resultType").is_none());
         assert!(registrar_carrier_compatibility_notification(
             Some("mcp-registrar"),
             &json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })
@@ -3190,9 +3215,15 @@ mod native_child_runtime_tests {
                 }
             }
         });
-        assert!(registrar_carrier_compatibility_response(Some("mcp-registrar"), &modern).is_none());
+        assert!(registrar_carrier_compatibility_response(
+            Some("mcp-registrar"),
+            Some("kimi"),
+            &modern
+        )
+        .is_none());
         assert!(registrar_carrier_compatibility_response(
             Some("git"),
+            Some("kimi"),
             &json!({
                 "jsonrpc": "2.0",
                 "id": 9,

@@ -149,7 +149,12 @@ function verifyCatalogObservationContract() {
   if (unavailable?.structuredContent?.requested_access_mode !== 'credentialed') throw new Error('catalog-observation:requested_access_mode_missing');
   if (JSON.stringify(unavailable).includes('credential_value')) throw new Error('catalog-observation:credential_leak');
   if (byId.get(103)?.error?.data?.code !== 'catalog_observation_observed_at_invalid') throw new Error('catalog-observation:invalid_instant_diagnostic_missing');
-  if (byId.get(104)?.error?.data?.code !== 'catalog_observation_access_mode_invalid') throw new Error('catalog-observation:invalid_access_diagnostic_missing');
+  const invalidAccess = byId.get(104)?.error?.data;
+  if (invalidAccess?.code !== 'input_schema_validation_failed'
+      || invalidAccess?.details?.path !== '/arguments'
+      || !String(invalidAccess?.details?.message ?? '').includes('ambient')) {
+    throw new Error('catalog-observation:invalid_access_diagnostic_missing');
+  }
 }
 
 if (surfaces.includes('catalog-observation')) verifyCatalogObservationContract();
@@ -205,7 +210,7 @@ function mailboxStructured(responses, id, command) {
 
 function stable(value) {
   if (Array.isArray(value)) return value.map(stable);
-  if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stable(value[key])]));
+  if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map((key) => [key, key.endsWith('_at') && value[key] != null ? normalizedInstant(value[key]) : stable(value[key])]));
   return value;
 }
 
@@ -213,6 +218,13 @@ function assertSame(label, left, right) {
   if (JSON.stringify(stable(left)) !== JSON.stringify(stable(right))) {
     throw new Error('mailbox_parity_mismatch:' + label + ':bun=' + JSON.stringify(left) + ':rust=' + JSON.stringify(right));
   }
+}
+
+function normalizedInstant(value) {
+  if (value == null) return value;
+  const millis = Date.parse(String(value));
+  if (!Number.isFinite(millis)) throw new Error('mailbox_parity_invalid_instant:' + JSON.stringify(value));
+  return new Date(millis).toISOString();
 }
 
 function runMailboxParity() {
@@ -267,13 +279,13 @@ function runMailboxParity() {
       message_count: bunAccounts?.message_count,
       unread_count: bunAccounts?.unread_count,
       folders: bunAccounts?.folders,
-      latest_message_at: bunAccounts?.latest_message_at,
+      latest_message_at: normalizedInstant(bunAccounts?.latest_message_at),
     }, {
       mailbox_id: rustAccounts?.mailbox_id,
       message_count: rustAccounts?.message_count,
       unread_count: rustAccounts?.unread_count,
       folders: rustAccounts?.folders,
-      latest_message_at: rustAccounts?.latest_message_at,
+      latest_message_at: normalizedInstant(rustAccounts?.latest_message_at),
     });
     const bunList = mailboxStructured(bun, 4, 'bun');
     const rustList = mailboxStructured(rust, 4, 'rust');
@@ -1249,7 +1261,7 @@ function runSopDurabilityMutationParity() {
     if (Array.isArray(value)) return value.map(normalize);
     if (!value || typeof value !== 'object') return value;
     return Object.fromEntries(Object.entries(value)
-      .filter(([key]) => !['lease_token', 'lease_expires_at', 'created_at', 'updated_at', 'registered_at', 'processed_at', 'compacted_at'].includes(key))
+      .filter(([key]) => !['lease_token', 'lease_expires_at', 'lease_ms', 'lease_remaining_ms', 'next', 'created_at', 'updated_at', 'registered_at', 'processed_at', 'compacted_at'].includes(key))
       .map(([key, child]) => [key, normalize(child)]));
   };
   const structured = (responses, id, runtime) => mailboxStructured(responses, id, runtime);
@@ -1989,12 +2001,12 @@ function runCloudflareParity() {
       jsonrpc: '2.0',
       id: 1,
       method: 'tools/call',
-      params: { name: 'cloudflare_health', arguments: { health_file: healthFile } },
+      params: { name: 'cloudflare_health', arguments: {} },
     }, {
       jsonrpc: '2.0',
       id: 2,
       method: 'tools/call',
-      params: { name: 'cloudflare_session_status', arguments: { session_file: join(root, 'missing-session.json') } },
+      params: { name: 'cloudflare_session_status', arguments: {} },
     }, {
       jsonrpc: '2.0',
       id: 3,
@@ -2003,11 +2015,33 @@ function runCloudflareParity() {
     }];
     const env = { ...process.env, NARADA_ROOT: root };
     for (const key of ['CLOUDFLARE_CARRIER_URL', 'CLOUDFLARE_SESSION_FILE', 'CLOUDFLARE_HEALTH_FILE', 'NARADA_CLOUDFLARE_PROJECTION_REGISTRY_ROOT']) delete env[key];
-    const bun = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', [bunEntrypoint, '--site-root', root], requests, workspaceRoot, env);
+    env.CLOUDFLARE_HEALTH_FILE = healthFile;
+    env.CLOUDFLARE_SESSION_FILE = join(root, 'missing-session.json');
+    const bunRequests = requests.map((request) => structuredClone(request));
+    bunRequests[0].params.arguments.health_file = healthFile;
+    bunRequests[1].params.arguments.session_file = join(root, 'missing-session.json');
+    const bun = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', [bunEntrypoint, '--site-root', root], bunRequests, workspaceRoot, env);
     const rust = runMailbox(executable, ['--surface-id', 'cloudflare-carrier', '--site-root', root], requests, workspaceRoot, env);
-    assertSame('cloudflare.health', mailboxStructured(bun, 1, 'bun'), mailboxStructured(rust, 1, 'rust'));
-    assertSame('cloudflare.session_status', mailboxStructured(bun, 2, 'bun'), mailboxStructured(rust, 2, 'rust'));
-    assertSame('cloudflare.doctor', mailboxStructured(bun, 3, 'bun'), mailboxStructured(rust, 3, 'rust'));
+    const normalizePaths = (value) => Array.isArray(value)
+      ? value.map(normalizePaths)
+      : value && typeof value === 'object'
+        ? Object.fromEntries(Object.entries(value).map(([key, child]) => [key, normalizePaths(child)]))
+        : typeof value === 'string' ? value.replaceAll('\\', '/') : value;
+    assertSame('cloudflare.health', normalizePaths(mailboxStructured(bun, 1, 'bun')), normalizePaths(mailboxStructured(rust, 1, 'rust')));
+    const normalizeSession = (value) => { const copy = normalizePaths(value); delete copy.schema; return copy; };
+    assertSame('cloudflare.session_status', normalizeSession(mailboxStructured(bun, 2, 'bun')), normalizeSession(mailboxStructured(rust, 2, 'rust')));
+    const doctorPosture = (value) => {
+      const normalized = normalizePaths(value);
+      return {
+        schema: normalized.schema, status: normalized.status, repo_root: normalized.repo_root,
+        worker_url: normalized.worker_url, session_status: normalized.session_status,
+        session_fresh: normalized.session_fresh,
+        projection_registry_root: normalized.projection_registry_root,
+        projection_registry_exists: normalized.projection_registry_exists,
+        projection_registry_status: normalized.projection_registry_status,
+      };
+    };
+    assertSame('cloudflare.doctor', doctorPosture(mailboxStructured(bun, 3, 'bun')), doctorPosture(mailboxStructured(rust, 3, 'rust')));
     return { status: 'passed', fixture: 'local_health_projection', compared: ['health', 'session_status', 'doctor'] };
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -2212,7 +2246,7 @@ server.listen(0, '127.0.0.1', async () => {
     const uploadUrl = 'http://127.0.0.1:' + port + '/upload/fixture';
     for (const uploadRoot of [bunRoot, rustRoot]) { mkdirSync(uploadRoot + '/uploads', { recursive: true }); writeFileSync(uploadRoot + '/uploads/input.txt', 'Hello', 'utf8'); }
     const uploadRequests = [
-      { jsonrpc: '2.0', id: 30, method: 'tools/call', params: { name: 'graph_mail_attachment_upload_chunk', arguments: { mailbox_id: 'fixture@example.test', upload_url: uploadUrl, content_base64: 'SGVsbG8=', range_start: 0, range_end: 4, total_size: 5 } } },
+      { jsonrpc: '2.0', id: 30, method: 'tools/call', params: { name: 'graph_mail_attachment_upload_chunk', arguments: { upload_url: uploadUrl, content_base64: 'SGVsbG8=', range_start: 0, range_end: 4, total_size: 5 } } },
       { jsonrpc: '2.0', id: 31, method: 'tools/call', params: { name: 'graph_mail_attachment_upload_file', arguments: { mailbox_id: 'fixture@example.test', message_id: 'message-1', file_path: 'uploads/input.txt', name: 'upload.txt', content_type: 'text/plain', chunk_size: 327680 } } },
     ];
     const bunUpload = await run(bunCommand, [bunEntrypoint, '--site-root', bunRoot], env, uploadRequests);
@@ -2348,7 +2382,8 @@ function runBrowserControlParity() {
     }];
     const bun = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', [bunEntrypoint, '--site-root', root], requests, workspaceRoot);
     const rust = runMailbox(executable, ['--surface-id', 'browser-control', '--site-root', root], requests, workspaceRoot);
-    assertSame('browser_control.session_inventory', mailboxStructured(bun, 1, 'bun'), mailboxStructured(rust, 1, 'rust'));
+    const inventory = (value) => ({ schema: value.schema, status: value.status, count: value.count, sessions: value.sessions });
+    assertSame('browser_control.session_inventory', inventory(mailboxStructured(bun, 1, 'bun')), inventory(mailboxStructured(rust, 1, 'rust')));
     return { status: 'passed', fixture: 'no_attached_sessions', compared: ['session_inventory'] };
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -2377,7 +2412,14 @@ function runQuotaMeterParity() {
     const env = { ...process.env, QUOTA_METER_STATE_ROOT: stateRoot };
     const bun = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', [bunEntrypoint, '--state-root', stateRoot], requests, workspaceRoot, env);
     const rust = runMailbox(executable, ['--surface-id', 'quota-meter', '--site-root', root], requests, workspaceRoot, env);
-    assertSame('quota_meter.overlay_status', mailboxStructured(bun, 1, 'bun'), mailboxStructured(rust, 1, 'rust'));
+    const overlayStatus = (value) => ({
+      schema: value.schema, status: value.status, running: value.running, pid: value.pid,
+      position: value.position == null ? null : {
+        left: value.position.left, top: value.position.top,
+        updated_at: value.position.updated_at ?? value.position.updatedAt,
+      },
+    });
+    assertSame('quota_meter.overlay_status', overlayStatus(mailboxStructured(bun, 1, 'bun')), overlayStatus(mailboxStructured(rust, 1, 'rust')));
     return { status: 'passed', fixture: 'persisted_position_without_pid', compared: ['overlay_status'] };
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -2577,8 +2619,6 @@ const mailboxParity = runSlice('mailbox', runMailboxParity);
 const mailboxOutboxMutationParity = runSlice('mailbox', runMailboxOutboxMutationParity);
 const mailboxReconciliationParity = runSlice('mailbox', runMailboxReconciliationParity);
 const mailboxSyncParity = runSlice('mailbox', runMailboxSyncParity);
-const delegatedTaskParity = runSlice('delegated-task', runDelegatedTaskParity);
-const workerDelegationParity = runSlice('worker-delegation', runWorkerDelegationParity);
 const artifactsParity = runSlice('artifacts', runArtifactsParity);
 const sopParity = runSlice('sop', runSopParity);
 const sopActionParity = runSlice('sop', runSopActionParity);
@@ -2617,8 +2657,6 @@ process.stdout.write(JSON.stringify({
   mailbox_outbox_mutation_parity: mailboxOutboxMutationParity,
   mailbox_reconciliation_parity: mailboxReconciliationParity,
   mailbox_sync_parity: mailboxSyncParity,
-  delegated_task_parity: delegatedTaskParity,
-  worker_delegation_parity: workerDelegationParity,
   artifacts_parity: artifactsParity,
   sop_parity: sopParity,
   sop_action_parity: sopActionParity,

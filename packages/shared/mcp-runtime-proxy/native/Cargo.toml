@@ -13,6 +13,7 @@ name = "narada-mcp-rhai-filesystem"
 path = "src/rhai_main.rs"
 
 [dependencies]
+fs2 = "0.4"
 hex = "0.4"
 narada-mcp-materialization-contract = { path = "../../mcp-materialization-contract-native/native" }
 rhai = { version = "1.25.1", default-features = false, features = [

@@ -556,11 +556,17 @@ export class MailboxDomainService {
     const store = this.openStore();
     try {
       const generation = store.requireGeneration(generationId);
+      const offset = boundedInteger(args.offset, 0, 0, Number.MAX_SAFE_INTEGER);
+      const limit = boundedInteger(args.limit, 100, 1, 100);
+      const records = store.generationRecords(generationId).slice(offset, offset + limit).map(publicGenerationRecord);
       return {
         schema: 'narada.mailbox.sync_generation.v1',
         generation: publicGeneration(generation),
-        records: store.generationRecords(generationId).slice(0, 100).map(publicGenerationRecord),
-        records_truncated: generation.batch_record_count > 100,
+        offset,
+        limit,
+        records,
+        next_offset: offset + records.length < generation.batch_record_count ? offset + records.length : null,
+        records_truncated: offset + records.length < generation.batch_record_count,
       };
     } finally {
       store.close();

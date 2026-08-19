@@ -7,10 +7,16 @@ import { fileURLToPath } from 'node:url';
 const nativeRootUrl = existsSync(fileURLToPath(new URL('../../native/', import.meta.url)))
   ? new URL('../../native/', import.meta.url)
   : new URL('../native/', import.meta.url);
-const executable = fileURLToPath(new URL(
-  `target/release/narada-mcp-registrar${process.platform === 'win32' ? '.exe' : ''}`,
-  nativeRootUrl,
-));
+const executableName = `narada-mcp-registrar${process.platform === 'win32' ? '.exe' : ''}`;
+const executableCandidates = [
+  new URL(`../../../../target/release/${executableName}`, import.meta.url),
+  new URL(`target/release/${executableName}`, nativeRootUrl),
+];
+const executableUrl = executableCandidates.find((candidate) => existsSync(fileURLToPath(candidate)));
+if (!executableUrl) {
+  throw new Error(`native_registrar_executable_missing:${executableCandidates.map((candidate) => fileURLToPath(candidate)).join(',')}`);
+}
+const executable = fileURLToPath(executableUrl);
 const contractPath = fileURLToPath(new URL('tool-catalog.json.gz', nativeRootUrl));
 const contract = JSON.parse(gunzipSync(readFileSync(contractPath)).toString('utf8'));
 
@@ -40,8 +46,32 @@ const client = nativeClient(executable);
 try {
   const initialized = await client.request('initialize', { protocolVersion: '2024-11-05' });
   assert.equal(initialized.result.serverInfo.name, 'mcp-registrar');
+  const discovered = await client.request('server/discover', {
+    _meta: {
+      'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+      'io.modelcontextprotocol/clientInfo': { name: 'native-contract-test', version: '1' },
+      'io.modelcontextprotocol/clientCapabilities': {},
+    },
+  });
+  assert.deepEqual(discovered.result.supportedVersions, ['2026-07-28', '2024-11-05']);
   const listed = await client.request('tools/list', {});
-  assert.deepEqual(listed.result.tools, contract.tools);
+  const listedTools = listed.result.tools as any[];
+  const listedByName = new Map(listedTools.map((tool: any) => [tool.name, tool]));
+  assert.equal(listedByName.size, contract.tools.length);
+  for (const expected of contract.tools as any[]) {
+    const actual = listedByName.get(expected.name);
+    assert.ok(actual, `native dispatcher missing catalog tool: ${expected.name}`);
+    assert.equal(actual.description, expected.description);
+    assert.deepEqual(actual.annotations, expected.annotations);
+    assert.deepEqual(actual.outputSchema, expected.outputSchema);
+    assert.equal(actual.inputSchema.type, expected.inputSchema.type);
+    assert.equal(actual.inputSchema.additionalProperties, false);
+    assert.equal(typeof actual.inputSchema.maxProperties, 'number');
+    assert.deepEqual(actual.inputSchema.required ?? [], expected.inputSchema.required ?? []);
+    for (const property of Object.keys(expected.inputSchema.properties ?? {})) {
+      assert.ok(actual.inputSchema.properties?.[property], `${expected.name} lost input property: ${property}`);
+    }
+  }
   for (const tool of contract.tools) {
     const response = await client.request('tools/call', { name: tool.name, arguments: {} });
     assert.ok(response.result || response.error, `tool did not produce a result or refusal: ${tool.name}`);
@@ -55,7 +85,7 @@ try {
     const response = await client.request('tools/call', { name, arguments: {} });
     assert.equal(response.error, undefined, response.error?.message);
     assert.ok(Array.isArray(response.result.structuredContent.items));
-    assert.equal(response.result.structuredContent.count, response.result.structuredContent.items.length);
+    assert.equal(response.result.structuredContent.total, response.result.structuredContent.items.length);
   }
   const unknown = await client.request('tools/call', { name: 'registrar_not_real', arguments: {} });
   assert.equal(unknown.error.code, -32000);

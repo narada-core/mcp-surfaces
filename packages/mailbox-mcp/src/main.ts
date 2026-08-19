@@ -165,6 +165,8 @@ export function listTools(): unknown[] {
     }, ['scope_id', 'message_id']),
     tool('mailbox_generation_show', 'Show bounded metadata and receipts for one synchronization generation.', {
       generation_id: { type: 'string' },
+      offset: { type: 'integer', minimum: 0, default: 0 },
+      limit: { type: 'integer', minimum: 1, maximum: 100, default: 100 },
     }, ['generation_id']),
     tool('mailbox_outbox_consumer_register', 'Register an immutable scoped and topic-filtered durable consumer.', {
       consumer_id: { type: 'string' },
