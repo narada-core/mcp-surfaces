@@ -2636,6 +2636,51 @@ mod tests {
     }
 
     #[test]
+    fn communication_entities_require_bounded_provenance_fields() {
+        let engine = engine();
+        let complete = json!({
+            "op":"entity.declare",
+            "entity_id":"communication:caroline-to-benincasa-1",
+            "kind":"communication",
+            "title":"Flavor result handoff",
+            "sender":"marici.Caroline",
+            "recipient":"marici.Benincasa",
+            "body":"The loop phase is chart-level.",
+            "intent":"result",
+            "sent_at":"2026-08-19T19:00:00Z"
+        });
+        engine
+            .validate_operations(&[complete], false)
+            .expect("complete communication must validate");
+
+        let incomplete = json!({
+            "op":"entity.declare",
+            "entity_id":"communication:incomplete",
+            "kind":"communication",
+            "title":"Incomplete message",
+            "sender":"marici.Caroline",
+            "recipient":"marici.Benincasa",
+            "intent":"result",
+            "sent_at":"2026-08-19T19:00:00Z"
+        });
+        let failure = engine
+            .validate_operations(&[incomplete], false)
+            .expect_err("communication without body must refuse");
+        assert_eq!(failure["code"], "required_argument_missing");
+        assert_eq!(failure["details"]["field"], "body");
+
+        let guidance = engine.guidance();
+        assert_eq!(
+            guidance.pointer("/communication_model/entity_kind"),
+            Some(&json!("communication"))
+        );
+        assert_eq!(
+            guidance.pointer("/communication_model/rule"),
+            Some(&json!("Communication records provenance and argumentative causality, but does not become epistemic evidence unless a separate reviewed promotes_to_evidence relation is admitted."))
+        );
+    }
+
+    #[test]
     fn source_inspection_returns_all_relevant_sections_with_line_ranges() {
         let engine = engine();
         let root = std::env::temp_dir().join(format!("epistemic-source-test-{}", Uuid::new_v4()));
