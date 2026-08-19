@@ -68,7 +68,7 @@
     "test:quota-meter": "pnpm --filter @narada-core/quota-meter-mcp test",
     "test:operator-console-overlay": "pnpm --filter @narada-core/operator-console-overlay-mcp test",
     "test:browser-control": "pnpm --filter @narada-core/browser-control-mcp test",
-    "test:surface-feedback": "pnpm --filter @narada-core/surface-feedback-mcp test",
+    "test:surface-feedback": "cargo test --locked --manifest-path packages/shared/mcp-surfaces-native/native/Cargo.toml surface_feedback",
     "test:launcher": "pnpm --filter @narada-core/launcher-mcp test",
     "test:launcher:e2e:host": "pnpm --filter @narada-core/launcher-mcp test:e2e:host",
     "test:mcp-loader": "pnpm --filter @narada-core/mcp-loader-mcp test",

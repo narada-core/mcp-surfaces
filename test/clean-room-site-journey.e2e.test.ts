@@ -13,7 +13,8 @@ const surfacesRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const naradaRoot = resolve(process.env.NARADA_CORE_ROOT ?? join(surfacesRoot, '..', 'narada'));
 const cli = join(naradaRoot, 'packages', 'layers', 'cli', 'dist', 'main.js');
 const taskServer = join(surfacesRoot, 'packages', 'task-lifecycle-mcp', 'dist', 'src', 'task-lifecycle', 'task-mcp-server.js');
-const feedbackServer = join(surfacesRoot, 'packages', 'surface-feedback-mcp', 'dist', 'src', 'main.js');
+const feedbackNativePointer = JSON.parse(readFileSync(join(surfacesRoot, 'packages', 'shared', 'mcp-surfaces-native', 'dist', 'native', 'current.json'), 'utf8')) as { artifacts: Record<string, string> };
+const feedbackServer = join(surfacesRoot, 'packages', 'shared', 'mcp-surfaces-native', 'dist', 'native', feedbackNativePointer.artifacts['narada-mcp-surfaces.exe']);
 const contextServer = join(surfacesRoot, 'packages', 'agent-context-mcp', 'dist', 'src', 'main.js');
 const externallyManagedRoot = process.env.NARADA_CLEAN_ROOM_SITE_ROOT;
 const root = externallyManagedRoot ? resolve(externallyManagedRoot) : mkdtempSync(join(tmpdir(), 'narada-clean-room-site-'));
@@ -88,7 +89,7 @@ try {
   const closed = await full(await task.client.request(10, 'tools/call', { name: 'task_lifecycle_close', arguments: { task_number: taskNumber, agent_id: `${siteId}.builder`, mode: 'peer_reviewed' } }), task.client, 900);
   assert.equal(closed.new_status, 'closed', JSON.stringify(closed));
 
-  feedback = spawnJsonlMcpServer(process.execPath, [feedbackServer, '--feedback-root', join(siteRoot, '.ai', 'feedback'), '--canonical-feedback-root', join(siteRoot, '.ai', 'feedback'), '--task-lifecycle-root', workspace, '--site-id', siteId, '--owned-surface-id', 'surface-feedback'], { cwd: workspace, env: siteFabricChildEnv(workspace, { NARADA_AGENT_ID: `${siteId}.architect`, NARADA_SITE_ROOT: workspace }), label: 'clean-room feedback' });
+  feedback = spawnJsonlMcpServer(feedbackServer, ['--surface-id', 'surface-feedback', '--feedback-root', join(siteRoot, '.ai', 'feedback'), '--canonical-feedback-root', join(siteRoot, '.ai', 'feedback'), '--task-lifecycle-root', workspace, '--site-id', siteId, '--owned-surface-id', 'surface-feedback'], { cwd: workspace, env: siteFabricChildEnv(workspace, { NARADA_AGENT_ID: `${siteId}.architect`, NARADA_SITE_ROOT: workspace }), label: 'clean-room feedback' });
   const submitted = body(await feedback.client.request(11, 'tools/call', { name: 'surface_feedback_submit', arguments: { surface_id: 'surface-feedback', submitter_site_id: siteId, submitter_principal: `${siteId}.architect`, kind: 'observation', summary: 'Clean-room feedback route', details: 'Prove feedback converts into governed work on the same fresh Site.' } }));
   const converted = body(await feedback.client.request(12, 'tools/call', { name: 'surface_feedback_convert_to_task', arguments: { feedback_id: submitted.feedback_id } }));
   assert.equal(converted.status, 'converted');

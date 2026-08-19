@@ -883,28 +883,6 @@ importers:
         specifier: ^5.8.3
         version: 5.9.3
 
-  packages/surface-feedback-mcp:
-    dependencies:
-      '@narada-core/mcp-fabric-contracts':
-        specifier: workspace:*
-        version: link:../shared/mcp-fabric-contracts
-      '@narada-core/sqlite':
-        specifier: workspace:*
-        version: link:../../../narada-core/packages/sqlite
-      '@narada-core/task-lifecycle-mcp':
-        specifier: workspace:*
-        version: link:../task-lifecycle-mcp
-    devDependencies:
-      '@narada-core/mcp-e2e-harness':
-        specifier: workspace:*
-        version: link:../shared/mcp-e2e-harness
-      '@types/node':
-        specifier: ^22.15.3
-        version: 22.19.19
-      typescript:
-        specifier: ^5.8.3
-        version: 5.9.3
-
   packages/task-lifecycle-mcp:
     dependencies:
       '@narada-core/execution-contract':

@@ -1400,26 +1400,6 @@ function runSopDurabilityMutationParity() {
   }
 }
 
-function runSurfaceFeedbackParity() {
-  const workspaceRoot = resolve(packageRoot, '..', '..', '..');
-  const bunEntrypoint = join(workspaceRoot, 'packages', 'surface-feedback-mcp', 'src', 'main.ts');
-  if (!existsSync(bunEntrypoint)) throw new Error('surface_feedback_parity_bun_entrypoint_missing:' + bunEntrypoint);
-  const root = mkdtempSync(join(tmpdir(), 'narada-surface-feedback-native-parity-'));
-  try {
-    const requests = [{
-      jsonrpc: '2.0',
-      id: 1,
-      method: 'tools/call',
-      params: { name: 'surface_feedback_live_proof_template', arguments: { workflow: 'fixture', surface_id: 'calendar' } },
-    }];
-    const bun = runMailbox(process.env.NARADA_BUN_EXECUTABLE ?? 'bun', [bunEntrypoint, '--feedback-root', root, '--canonical-feedback-root', root], requests, workspaceRoot);
-    const rust = runMailbox(executable, ['--surface-id', 'surface-feedback', '--site-root', root], requests, workspaceRoot);
-    assertSame('surface_feedback.live_proof_template', mailboxStructured(bun, 1, 'bun'), mailboxStructured(rust, 1, 'rust'));
-    return { status: 'passed', fixture: 'live_proof_template', compared: ['full_structured_content'] };
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-}
 
 function runOperatorRoutingParity() {
   const root = mkdtempSync(join(tmpdir(), 'narada-operator-routing-native-'));
@@ -2610,7 +2590,6 @@ const sopRunCoverageParity = runSlice('sop', runSopRunCoverageParity);
 const sopOutboxParity = runSlice('sop', runSopOutboxParity);
 const sopDurabilityMutationParity = runSlice('sop', runSopDurabilityMutationParity);
 const sopEngineParity = runSlice('sop', () => runSopEngineParity({ executable, workspaceRoot: resolve(packageRoot, '..', '..', '..') }));
-const surfaceFeedbackParity = runSlice('surface-feedback', runSurfaceFeedbackParity);
 const operatorRoutingParity = runSlice('operator-routing', runOperatorRoutingParity);
 const siteInboxParity = runSlice('site-inbox', runSiteInboxParity);
 const siteLifecycleAuthorityParity = runSlice('site-lifecycle', runSiteLifecycleAuthorityParity);
@@ -2651,7 +2630,6 @@ process.stdout.write(JSON.stringify({
   sop_outbox_parity: sopOutboxParity,
   sop_durability_mutation_parity: sopDurabilityMutationParity,
   sop_engine_parity: sopEngineParity,
-  surface_feedback_parity: surfaceFeedbackParity,
   operator_routing_parity: operatorRoutingParity,
   site_inbox_parity: siteInboxParity,
   site_lifecycle_authority_parity: siteLifecycleAuthorityParity,

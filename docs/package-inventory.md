@@ -40,7 +40,6 @@ Review revision: `eeb464249eda123f844997481aaaf26d3b7a5880`
 | `packages/sop-mcp` | `@narada-core/sop-mcp` | Versioned procedure templates and durable run execution. | [README](../packages/sop-mcp/README.md) |
 | `packages/speech-mcp` | `@narada-core/speech-mcp` | Policy-gated speech, capture, and transcription. | [README](../packages/speech-mcp/README.md) |
 | `packages/structured-command-mcp` | `@narada-core/structured-command-mcp` | Structured, policy-gated local command execution. | [README](../packages/structured-command-mcp/README.md) |
-| `packages/surface-feedback-mcp` | `@narada-core/surface-feedback-mcp` | Cross-site MCP surface feedback intake and routing. | [README](../packages/surface-feedback-mcp/README.md) |
 | `packages/task-lifecycle-mcp` | `@narada-core/task-lifecycle-mcp` | Task lifecycle runtime and tool dispatch. | [README](../packages/task-lifecycle-mcp/README.md) |
 | `packages/work-lifecycle-mcp` | `@narada-core/work-lifecycle-mcp` | Site-scoped ticket and task lifecycle authority. | [README](../packages/work-lifecycle-mcp/README.md) |
 

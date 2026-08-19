@@ -40,7 +40,6 @@ Current packages:
 - `@narada-core/sop-mcp`: versioned standard operating procedure runbook engine with SQLite-backed execution.
 - `@narada-core/scheduler-mcp`: Windows Task Scheduler MCP surface for governed task registration, inspection, and execution.
 - `@narada-core/mcp-registrar`: MCP surface registrar for binding/unbinding surfaces across Narada sites and carriers.
-- `@narada-core/surface-feedback-mcp`: cross-site MCP surface feedback intake and routing MCP surface.
 - `@narada-core/launcher-mcp`: read-only launcher registry, option matrix, plan, and coherence MCP surface.
 - `@narada-core/mcp-loader-mcp`: policy-gated runtime MCP surface loader and proxy.
 - `@narada-core/runtime-introspection-mcp`: Narada-owned runtime trace and session composition analysis MCP surface.
@@ -118,7 +117,7 @@ Agents can submit feedback about any MCP surface via `@narada-core/surface-feedb
 
 Read calls must pass `scope` explicitly. `all_authorized` and `store_reconciliation` require the canonical feedback store (`feedback_global_read_requires_canonical_store` otherwise); `authority_visible` and `authority_site_submissions` are server-bound submitter-Site views; `owned_surfaces` requires server-bound owned surfaces. Submitter-site visibility compares server-bound authority to declared metadata and is not authenticated provenance; `submitter_site_id_filter` is declarative metadata filtering only and never establishes provenance or authorization.
 
-The native authority is an append-only event ledger under `<feedback_root>/ledger/` (`narada.event-ledger.v1`; see `docs/event-ledger-format.md`). The SQLite state under `<feedback_root>/.ai/feedback/projection.sqlite` is a disposable fold projection rebuilt from the ledger on every read. A legacy `.feedback/surface-feedback.db` store is migrated once automatically into the ledger and never written again. The TypeScript implementation in `packages/surface-feedback-mcp` is frozen legacy/rollback and reads only pre-migration state.
+The native authority is an append-only event ledger under `<feedback_root>/ledger/` (`narada.event-ledger.v1`; see `docs/event-ledger-format.md`). The SQLite state under `<feedback_root>/.ai/feedback/projection.sqlite` is a disposable fold projection rebuilt from the ledger on every read. A legacy `.feedback/surface-feedback.db` store is migrated once automatically into the ledger and never written again. The TypeScript implementation was removed; the native shared surface (`@narada-core/mcp-surfaces-native`) is the only implementation.
 
 Kinds:
 

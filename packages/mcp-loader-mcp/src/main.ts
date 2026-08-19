@@ -1925,10 +1925,7 @@ const SHARED_SURFACE_REGISTRY: Record<string, { entrypoint: string; args: string
   'sop': { entrypoint: `${MCP_SURFACES_ROOT}/sop-mcp/dist/src/main.js`, args: ['--sop-root', '{site_root}', '--server-name', '{site_id}-sop'] },
   'scheduler': { entrypoint: `${MCP_SURFACES_ROOT}/scheduler-mcp/dist/src/main.js`, args: ['--allowed-root', '{site_root}'] },
   'mcp-registrar': { entrypoint: requiredNativeSurfaceEntrypoint('mcp-registrar', `narada-mcp-registrar${process.platform === 'win32' ? '.exe' : ''}`), args: [] },
-  'surface-feedback': {
-    entrypoint: `${MCP_SURFACES_ROOT}/surface-feedback-mcp/dist/src/main.js`,
-    args: ['--feedback-root', '{site_control_root}/feedback', '--canonical-feedback-root', '{site_control_root}/feedback', '--task-lifecycle-root', '{site_root}', '--site-id', '{site_id}'],
-  },
+  'surface-feedback': { entrypoint: requiredNativeSurfaceEntrypoint('shared/mcp-surfaces-native', 'narada-mcp-surfaces.exe'), args: ['--surface-id', 'surface-feedback', '--feedback-root', '{site_control_root}/feedback', '--canonical-feedback-root', '{site_control_root}/feedback', '--task-lifecycle-root', '{site_root}', '--site-id', '{site_id}'] },
   'speech': { entrypoint: `${MCP_SURFACES_ROOT}/speech-mcp/dist/src/main.js`, args: [] },
   'cloudflare-carrier': { entrypoint: `${MCP_SURFACES_ROOT}/cloudflare-carrier-mcp/dist/src/main.js`, args: ['--site-root', '{site_root}'] },
   'site-coherence': { entrypoint: `${MCP_SURFACES_ROOT}/site-coherence-mcp/dist/src/main.js`, args: ['--site-root', '{site_root}'] },

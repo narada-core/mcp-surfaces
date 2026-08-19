@@ -10,6 +10,7 @@ use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 
 const CONTRACT: &[u8] = include_bytes!("../tool-catalog.json.gz");
+const LEGACY_PROTOCOL_VERSION: &str = "2024-11-05";
 const MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
 const MAX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_HEADER_BYTES: usize = 64 * 1024;
@@ -78,11 +79,22 @@ fn dispatch(request: &Value) -> Value {
             return error(id, "modern_metadata_required".into());
         }
     }
+    if method == "initialize" && !modern {
+        return json!({
+            "jsonrpc":"2.0",
+            "id":id,
+            "result":{
+                "protocolVersion":LEGACY_PROTOCOL_VERSION,
+                "capabilities":{"tools":{}},
+                "serverInfo":{"name":"mcp-registrar","version":"0.1.0"}
+            }
+        });
+    }
     if method == "initialize" {
         return error(id, "initialize_removed".into());
     }
     if modern && method == "server/discover" {
-        return json!({"jsonrpc":"2.0","id":id,"result":{"resultType":"complete","supportedVersions":[MODERN_PROTOCOL_VERSION],"capabilities":{"tools":{}},"serverInfo":{"name":"mcp-registrar","version":"0.1.0"},"_meta":{"io.modelcontextprotocol/serverInfo":{"name":"mcp-registrar","version":"0.1.0"}}}});
+        return json!({"jsonrpc":"2.0","id":id,"result":{"resultType":"complete","supportedVersions":[MODERN_PROTOCOL_VERSION,LEGACY_PROTOCOL_VERSION],"capabilities":{"tools":{}},"serverInfo":{"name":"mcp-registrar","version":"0.1.0"},"_meta":{"io.modelcontextprotocol/serverInfo":{"name":"mcp-registrar","version":"0.1.0"}}}});
     }
     let mut contract: Value = match decode_contract() {
         Ok(v) => v,
@@ -431,6 +443,32 @@ fn align_native_surface_descriptor_schemas(contract: &mut Value) {
 }
 
 fn ensure_feedback_site_reporter_projection(item: &mut Value) {
+    // The TypeScript rollback package (packages/surface-feedback-mcp) was removed;
+    // the default projection is native-only and resolves to the shared native surface.
+    let native_entrypoint = "{mcp_surfaces_root}/shared/mcp-surfaces-native/dist/native/narada-mcp-surfaces.exe";
+    let default_args = json!(["--feedback-root","{site_control_root}/feedback","--canonical-feedback-root","{site_control_root}/feedback","--task-lifecycle-root","{site_root}","--site-id","{site_id}"]);
+    item["package"] = json!("mcp-surfaces-native");
+    item["entrypoint"] = json!(native_entrypoint);
+    if let Some(descriptor) = item.get_mut("descriptor") {
+        descriptor["package"] = json!("@narada-core/mcp-surfaces-native");
+        descriptor["surface_version"] = json!("0.3.0");
+        if let Some(projections) = descriptor.get_mut("projections").and_then(Value::as_array_mut) {
+            for projection in projections.iter_mut() {
+                if projection["id"] == "default" {
+                    projection["transport"] = json!({"kind":"stdio","command":"narada-mcp-surfaces","args":default_args,"env":["NARADA_SURFACE_FEEDBACK_ROOT"]});
+                }
+            }
+        }
+    }
+    if let Some(projections) = item.get_mut("projections").and_then(Value::as_array_mut) {
+        for projection in projections.iter_mut() {
+            if projection["id"] == "default" {
+                projection["command"] = json!("narada-mcp-surfaces");
+                projection["entrypoint"] = json!(native_entrypoint);
+                projection["args"] = default_args.clone();
+            }
+        }
+    }
     let args = json!(["--feedback-root","{user_site_control_root}/feedback","--canonical-feedback-root","{user_site_control_root}/feedback","--task-lifecycle-root","{site_root}","--site-id","{site_id}"]);
     let descriptor_projection = json!({
         "id":"site-reporter","transport":{"kind":"stdio","command":"narada-mcp-surfaces","args":args,"env":["NARADA_SURFACE_FEEDBACK_ROOT"]},
@@ -5610,10 +5648,11 @@ mod tests {
     #[test]
     fn protocol_versions_are_honest_and_modern_requests_are_self_describing() {
         for version in ["2024-11-05", "2025-03-26", "2099-01-01"] {
-            let removed = dispatch(
+            let initialized = dispatch(
                 &json!({"id":1,"method":"initialize","params":{"protocolVersion":version}}),
             );
-            assert_eq!(removed["error"]["message"], "initialize_removed");
+            assert_eq!(initialized["result"]["protocolVersion"], LEGACY_PROTOCOL_VERSION);
+            assert_eq!(initialized["result"]["serverInfo"]["name"], "mcp-registrar");
         }
         let incomplete = dispatch(
             &json!({"id":3,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":MODERN_PROTOCOL_VERSION}}}),
@@ -5625,6 +5664,10 @@ mod tests {
         assert_eq!(
             modern["result"]["supportedVersions"][0],
             MODERN_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            modern["result"]["supportedVersions"][1],
+            LEGACY_PROTOCOL_VERSION
         );
         assert_eq!(modern["result"]["resultType"], "complete");
     }
