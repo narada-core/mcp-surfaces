@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "rootDir": ".",
+    "outDir": "dist",
+    "tsBuildInfoFile": "dist/.tsbuildinfo"
+  },
+  "references": [
+    { "path": "../shared/mcp-e2e-harness" },
+    { "path": "../shared/mcp-runtime-proxy" }
+  ],
+  "include": ["scripts/**/*.ts", "test/**/*.ts"]
+}

@@ -9,7 +9,7 @@ import { pathToFileURL } from 'node:url';
 import { DatabaseSync } from '@narada-core/sqlite';
 
 const SERVER_NAME = 'surface-feedback-mcp';
-const SERVER_VERSION = '0.2.0';
+const SERVER_VERSION = '0.3.0';
 const PROTOCOL_VERSION = '2024-11-05';
 
 const FEEDBACK_KINDS = ['bug', 'improvement', 'gap', 'observation'] as const;

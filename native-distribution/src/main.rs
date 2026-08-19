@@ -10,6 +10,7 @@ use time::OffsetDateTime;
 
 const RUNTIME_PACKAGES: &[&str] = &[
     "narada-agent-context-mcp",
+    "narada-ledger-domain",
     "narada-mcp-loader",
     "narada-mcp-registrar",
     "narada-mcp-lifecycle",
@@ -32,6 +33,12 @@ const ARTIFACTS: &[DistributionArtifact] = &[
         "narada-agent-context-mcp",
         "narada-agent-context-mcp",
         "packages/agent-context-mcp/dist/native",
+        "narada.mcp_runtime_proxy.native_artifact_pointer.v1",
+    ),
+    artifact(
+        "narada-ledger-domain",
+        "narada-ledger-domain",
+        "packages/ledger-domain-mcp/dist/native",
         "narada.mcp_runtime_proxy.native_artifact_pointer.v1",
     ),
     artifact(

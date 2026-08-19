@@ -21,6 +21,7 @@ Review revision: `eeb464249eda123f844997481aaaf26d3b7a5880`
 | `packages/git-mcp` | `@narada-core/git-mcp` | Structured, policy-gated Git management. | [README](../packages/git-mcp/README.md) |
 | `packages/graph-mail-mcp` | `@narada-core/graph-mail-mcp` | Policy-gated Microsoft Graph mail reads and draft management. | [README](../packages/graph-mail-mcp/README.md) |
 | `packages/launcher-mcp` | `@narada-core/launcher-mcp` | Read-only launcher registry, option, plan, and coherence projections. | [README](../packages/launcher-mcp/README.md) |
+| `packages/ledger-domain-mcp` | `@narada-core/ledger-domain-mcp` | Generic `narada.ledger-domain.v1` engine hosting one static domain descriptor as an event-ledger MCP surface. | [README](../packages/ledger-domain-mcp/README.md) |
 | `packages/local-filesystem-mcp` | `@narada-core/local-filesystem-mcp` | Governed local filesystem inspection and mutation. | [README](../packages/local-filesystem-mcp/README.md) |
 | `packages/mailbox-mcp` | `@narada-core/mailbox-mcp` | Mailbox synchronization, admission, events, and bounded local projection reads. | [README](../packages/mailbox-mcp/README.md) |
 | `packages/mcp-loader-mcp` | `@narada-core/mcp-loader-mcp` | Policy-gated runtime attachment and proxying. | [README](../packages/mcp-loader-mcp/README.md) |
@@ -48,6 +49,7 @@ Review revision: `eeb464249eda123f844997481aaaf26d3b7a5880`
 | Package path | Package | Purpose | README |
 | --- | --- | --- | --- |
 | `packages/shared/execution-contract` | `@narada-core/execution-contract` | Typed execution binding and request fingerprint contract. | [README](../packages/shared/execution-contract/README.md) |
+| `packages/shared/ledger-domain-epistemic` | `@narada-core/ledger-domain-epistemic` | Static `narada.ledger-domain.v1` descriptor for the epistemic-graph domain. | [README](../packages/shared/ledger-domain-epistemic/README.md) |
 | `packages/shared/mcp-affordances` | `@narada-core/mcp-affordances` | UI-neutral MCP affordance schema and validation helpers. | [README](../packages/shared/mcp-affordances/README.md) |
 | `packages/shared/mcp-e2e-harness` | `@narada-core/mcp-e2e-harness` | Bounded mechanics for real MCP end-to-end tests. | [README](../packages/shared/mcp-e2e-harness/README.md) |
 | `packages/shared/mcp-fabric-compiler` | `@narada-core/mcp-fabric-compiler` | Manifest and carrier projection compiler. | [README](../packages/shared/mcp-fabric-compiler/README.md) |
@@ -63,6 +65,12 @@ Review revision: `eeb464249eda123f844997481aaaf26d3b7a5880`
 | `packages/shared/mcp-telemetry` | `@narada-core/mcp-telemetry` | Optional metadata-only MCP telemetry helpers. | [README](../packages/shared/mcp-telemetry/README.md) |
 | `packages/shared/mcp-transport` | `@narada-core/mcp-transport` | Payload, output-reference, and transport helpers. | [README](../packages/shared/mcp-transport/README.md) |
 | `packages/shared/provider-registry` | `@narada-core/provider-registry` | Typed provider/model capability registry loading and resolution. | [README](../packages/shared/provider-registry/README.md) |
+
+`packages/shared/event-ledger-native` is a Rust-only shared crate
+(`narada-mcp-event-ledger`) with no `package.json` manifest, so it has no row
+above; it is consumed as a Cargo path dependency by
+`@narada-core/mcp-surfaces-native` and implements the
+[`narada.event-ledger.v1`](event-ledger-format.md) regime.
 
 ## Documentation contract
 

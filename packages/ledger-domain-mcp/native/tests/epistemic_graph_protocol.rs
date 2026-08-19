@@ -1,11 +1,16 @@
 use serde_json::{json, Value};
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Barrier};
 use std::thread;
 use uuid::Uuid;
+
+fn domain_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../shared/ledger-domain-epistemic/domain.json")
+}
 
 fn rpc(id: u64, method: &str, params: Value) -> Value {
     json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})
@@ -16,10 +21,10 @@ fn tool(id: u64, name: &str, arguments: Value) -> Value {
 }
 
 fn run(root: &Path, requests: &[Value]) -> Vec<Value> {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_narada-mcp-surfaces"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_narada-ledger-domain"))
         .args([
-            "--surface-id",
-            "epistemic-graph",
+            "--domain",
+            &domain_path().to_string_lossy(),
             "--site-root",
             &root.to_string_lossy(),
         ])
@@ -27,14 +32,14 @@ fn run(root: &Path, requests: &[Value]) -> Vec<Value> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn epistemic graph");
+        .expect("spawn ledger domain surface");
     {
         let input = child.stdin.as_mut().expect("stdin");
         for request in requests {
             writeln!(input, "{request}").expect("write request");
         }
     }
-    let output = child.wait_with_output().expect("wait for epistemic graph");
+    let output = child.wait_with_output().expect("wait for ledger domain surface");
     assert!(
         output.status.success(),
         "{}",

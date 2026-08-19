@@ -1,0 +1,6 @@
+{
+  "schema": "narada.epistemic.sequence.idempotency.v1",
+  "idempotency_key": "fixture-c2",
+  "claim_id": "seqclaim-5af73fd1cc588a5ed972163e",
+  "value": 41
+}

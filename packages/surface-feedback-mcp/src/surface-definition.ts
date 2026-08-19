@@ -6,7 +6,7 @@ const READ_ONLY_TOOLS = ["surface_feedback_guidance","surface_feedback_doctor","
 export function surfaceDefinition(): DefinedSurface {
   return defineNativeSurface({
     surface_id: 'surface-feedback',
-    surface_version: '0.2.0',
+    surface_version: '0.3.0',
     package: '@narada-core/surface-feedback-mcp',
     entrypoint: '{mcp_surfaces_root}/surface-feedback-mcp/dist/src/main.js',
     tools: listTools() as McpToolDefinition[],

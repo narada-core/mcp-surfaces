@@ -1,0 +1,33 @@
+{
+  "schema": "narada.epistemic.event.v1",
+  "sequence": 2,
+  "event_id": "ev-000000000002-6a9b4be5-0b3c-43f4-841f-9cc4fa3adbe4",
+  "event_kind": "proposal_admitted",
+  "previous_hash": "cef4a417635ced54603e7dbed20335d48fdaff9e20a16a2d06b8bc047a77042d",
+  "proposal_id": "ep_681aee99-aa60-4c54-b993-e5889b2d0775",
+  "proposal_digest": "3cc84d4b8ccbf5ce1c29bfaf0eea7c1e9b5077a1f4c10ead5a9b06219973c200",
+  "operations": [
+    {
+      "op": "entity.declare",
+      "entity_id": "claim:fixture",
+      "kind": "claim",
+      "title": "Fixture claim"
+    },
+    {
+      "op": "relation.declare",
+      "relation_id": "rel:fixture-addresses",
+      "relation_type": "addresses",
+      "source_id": "claim:fixture",
+      "target_id": "problem:fixture"
+    }
+  ],
+  "actor": "fixture",
+  "authority_basis": {
+    "kind": "fixture",
+    "summary": "Golden event-ledger fixture."
+  },
+  "idempotency_key": "fixture-a2",
+  "occurred_at": "2026-08-18T20:06:01.8107983Z",
+  "certifies_truth": false,
+  "event_hash": "9db97e3f331dcad30811dcaa28c384b2e6b1c89e8e16d31173d1b6b81e348ab0"
+}

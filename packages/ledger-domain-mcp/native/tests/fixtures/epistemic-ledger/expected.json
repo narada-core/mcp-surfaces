@@ -1,0 +1,40 @@
+{
+  "schema": "narada.epistemic.golden-fixture.v1",
+  "ledger_head": "1b62e5c86fccaf114e039ffd2fba18cfc85b8abb627f561d02dde3a6b629cca6",
+  "event_ids": [
+    "ev-000000000001-661b7fb2-0263-4054-97f2-617383e93e50",
+    "ev-000000000002-6a9b4be5-0b3c-43f4-841f-9cc4fa3adbe4",
+    "ev-000000000003-3d8b6db0-89e5-4643-990d-fb74af19961f"
+  ],
+  "event_hashes": [
+    "cef4a417635ced54603e7dbed20335d48fdaff9e20a16a2d06b8bc047a77042d",
+    "9db97e3f331dcad30811dcaa28c384b2e6b1c89e8e16d31173d1b6b81e348ab0",
+    "1b62e5c86fccaf114e039ffd2fba18cfc85b8abb627f561d02dde3a6b629cca6"
+  ],
+  "replay": {
+    "proposal_id": "ep_681aee99-aa60-4c54-b993-e5889b2d0775",
+    "idempotency_key": "fixture-a2",
+    "event_id": "ev-000000000002-6a9b4be5-0b3c-43f4-841f-9cc4fa3adbe4"
+  },
+  "scan": {
+    "idempotency_key": "fixture-a3",
+    "event_id": "ev-000000000003-3d8b6db0-89e5-4643-990d-fb74af19961f"
+  },
+  "sequence": {
+    "name": "fixture-ledger-entry",
+    "sequence_id": "seq-e5d0e73ffcc66299af64876b",
+    "creation_hash": "55775b95b672d49ef9436e5367502f81239a75a6e25201f5f0d2cf8677ecc0f8",
+    "claim_ids": [
+      "seqclaim-6f23b8eadfea83bb2cfb14af",
+      "seqclaim-5af73fd1cc588a5ed972163e"
+    ],
+    "claim_hashes": [
+      "988bdc67a135b483a4b58419db373ffdb7788117e78f345573197dd4570988af",
+      "305d50d4e258898e4aeeb77a86909f1b8e350dab1a1e0ecf4c8bfe857e66656f"
+    ],
+    "values": [
+      40,
+      41
+    ]
+  }
+}

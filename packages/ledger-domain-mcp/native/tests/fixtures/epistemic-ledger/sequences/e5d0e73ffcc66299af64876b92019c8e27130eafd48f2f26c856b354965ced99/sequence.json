@@ -1,0 +1,14 @@
+{
+  "schema": "narada.epistemic.sequence.v1",
+  "sequence_id": "seq-e5d0e73ffcc66299af64876b",
+  "sequence_name": "fixture-ledger-entry",
+  "start_at": 40,
+  "step": 1,
+  "created_by": "fixture",
+  "authority_basis": {
+    "kind": "fixture"
+  },
+  "idempotency_key": null,
+  "created_at": "2026-08-18T20:06:01.8943639Z",
+  "creation_hash": "55775b95b672d49ef9436e5367502f81239a75a6e25201f5f0d2cf8677ecc0f8"
+}

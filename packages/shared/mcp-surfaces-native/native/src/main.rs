@@ -18,7 +18,6 @@ mod calendar;
 mod cloudflare_carrier_authority;
 mod codex_app_server_broker;
 mod delegated_task;
-mod epistemic_graph;
 mod graph_authority;
 mod graph_mail_authority;
 mod host_contracts;
@@ -777,7 +776,6 @@ fn raw_list_tools(surface_id: &str) -> Vec<Value> {
         "delegated-task" => delegated_task::list_tools(),
         "worker-delegation" => worker_delegation::list_tools(),
         "artifacts" | "nars-session" | "quota-meter" => local_admin::list_tools(surface_id),
-        "epistemic-graph" => epistemic_graph::list_tools(),
         "mailbox" => mailbox::list_tools(),
         "scheduler" => scheduler::list_tools(),
         "speech" => speech_authority::list_tools(),
@@ -953,7 +951,6 @@ fn call_tool(
             local_admin::call_tool(surface_id, name, &args, &options.site_root)
         }
         ("mailbox", name) => mailbox::call_tool(name, &args, &options.site_root),
-        ("epistemic-graph", name) => epistemic_graph::call_tool(name, &args, &options.site_root),
         ("speech", name) => speech_authority::call_tool(name, &args, &options.site_root),
         ("browser-control", name) => {
             browser_control_authority::call_tool(name, &args, &options.site_root)

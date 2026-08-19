@@ -3,6 +3,7 @@
 ## Verification
 
 ```powershell
+pnpm --filter @narada-core/surface-feedback-mcp test
 cargo test --locked --manifest-path packages/shared/mcp-surfaces-native/native/Cargo.toml surface_feedback
 ```
 
@@ -13,7 +14,13 @@ The default implementation is the native Rust `surface-feedback` applet in
 
 ## Purpose
 
-Provides a single durable feedback channel for MCP surfaces. Agents across all Narada sites can report surface issues without needing to know which site owns the surface. SQLite-backed for durability.
+Provides a single durable feedback channel for MCP surfaces. Agents across all Narada sites can report surface issues without needing to know which site owns the surface.
+
+## Storage
+
+The authoritative store is an append-only, hash-chained event ledger under `<feedback_root>/ledger/` (`narada.surface_feedback.event.v1` events on the shared `narada.event-ledger.v1` regime; see [docs/event-ledger-format.md](../../docs/event-ledger-format.md)). The SQLite database at `<feedback_root>/.ai/feedback/projection.sqlite` is a disposable fold projection rebuilt from the ledger on every read; deleting it only triggers a rebuild.
+
+A legacy `<feedback_root>/.feedback/surface-feedback.db` store is migrated once automatically into the ledger — preserving original timestamps and feedback-event history, marked by `migration-complete.json` — and is never written again. The TypeScript implementation in this package is frozen legacy/rollback and reads only pre-migration state.
 
 ## Tools
 
@@ -32,11 +39,11 @@ Every list, queue, show, and stats call must provide `scope` explicitly:
 
 | Scope | Meaning | Required server posture |
 |------|---------|-------------------------|
-| `all_authorized` | Canonical local feedback-store view | Ready native feedback store |
-| `store_reconciliation` | Every row physically present in the store, for existence and task-linkage reconciliation | Ready native feedback store; read-only and does not broaden mutation authority |
-| `authority_visible` | Reserved authority-filtered view | Advertised for protocol stability but unavailable in the current native projection |
-| `owned_surfaces` | Reserved surface-owner view | Advertised for protocol stability but unavailable in the current native projection |
-| `authority_site_submissions` | Reserved submitter-Site view | Advertised for protocol stability but unavailable in the current native projection |
+| `all_authorized` | Canonical local feedback-store view | Canonical feedback store (`feedback_global_read_requires_canonical_store` otherwise) |
+| `store_reconciliation` | Every row physically present in the store, for existence and task-linkage reconciliation | Canonical feedback store; read-only and does not broaden mutation authority |
+| `authority_visible` | Authority-filtered view of the bound Site's submissions | Server-bound Site authority |
+| `owned_surfaces` | Surface-owner view over the bound authority's owned surfaces | Server-bound owned surfaces (`--owned-surface-id` or `NARADA_OWNED_SURFACE_IDS`) |
+| `authority_site_submissions` | Submitter-Site view of the bound Site's submissions | Server-bound Site authority |
 
 `submitter_site_id_filter` is an optional metadata filter for list and queue. It does not authenticate the submitter, establish provenance, or expand authorization. The submitter site recorded in a feedback entry remains declarative submission metadata. Use canonical Site IDs for new submissions; generated server keys and session aliases are not Site IDs.
 

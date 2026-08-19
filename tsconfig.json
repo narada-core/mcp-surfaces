@@ -23,6 +23,9 @@
       "path": "./packages/shared/execution-contract"
     },
     {
+      "path": "./packages/shared/ledger-domain-epistemic"
+    },
+    {
       "path": "./packages/shared/mcp-transport"
     },
     {
@@ -78,6 +81,9 @@
     },
     {
       "path": "./packages/launcher-mcp"
+    },
+    {
+      "path": "./packages/ledger-domain-mcp"
     },
     {
       "path": "./packages/runtime-introspection-mcp"

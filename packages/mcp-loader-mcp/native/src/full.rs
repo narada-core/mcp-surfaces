@@ -3692,6 +3692,7 @@ fn site_fabric_diagnostics(
         "site-lifecycle",
         "artifacts",
         "epistemic-graph",
+        "ledger-domain",
         "nars-session",
         "quota-meter",
     ] {

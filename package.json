@@ -43,6 +43,8 @@
     "test:mcp-e2e-harness": "pnpm --filter @narada-core/mcp-e2e-harness test",
     "test:mcp-fabric-contracts": "pnpm --filter @narada-core/mcp-fabric-contracts test",
     "test:mcp-fabric-compiler": "pnpm --filter @narada-core/mcp-fabric-compiler test",
+    "test:ledger-domain-epistemic": "pnpm --filter @narada-core/ledger-domain-epistemic test",
+    "test:ledger-domain": "pnpm --filter @narada-core/ledger-domain-mcp test",
     "test:provider-registry": "pnpm --filter @narada-core/provider-registry test",
     "test:structured-command": "pnpm --filter @narada-core/structured-command-mcp test",
     "test:git": "pnpm --filter @narada-core/git-mcp test",

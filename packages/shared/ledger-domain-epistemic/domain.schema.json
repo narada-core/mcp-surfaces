@@ -1,0 +1,378 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://narada.local/schemas/ledger-domain.v1.json",
+  "title": "narada.ledger-domain.v1",
+  "description": "Declarative domain descriptor for the generic ledger-domain engine. Normative reference: docs/ledger-domain-descriptor.md.",
+  "type": "object",
+  "required": ["schema", "identity", "storage", "entities", "relations", "operations", "id_derivation", "projection", "query", "caps", "features", "guidance", "tools"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "narada.ledger-domain.v1"},
+    "identity": {
+      "type": "object",
+      "required": ["domain_id", "tool_prefix", "schema_namespace", "error_schema_id", "implementation"],
+      "additionalProperties": false,
+      "properties": {
+        "domain_id": {"type": "string", "minLength": 1},
+        "tool_prefix": {"type": "string", "minLength": 1},
+        "schema_namespace": {"type": "string", "minLength": 1},
+        "error_schema_id": {"type": "string", "minLength": 1},
+        "implementation": {"type": "string", "minLength": 1}
+      }
+    },
+    "storage": {
+      "type": "object",
+      "required": ["control_root_subdir", "runtime_subdir", "ledger_file_prefix", "event_schema_id", "event_hash_field", "subdirs"],
+      "additionalProperties": false,
+      "properties": {
+        "control_root_subdir": {"type": "string", "minLength": 1},
+        "runtime_subdir": {"type": "string", "minLength": 1},
+        "ledger_file_prefix": {"type": "string", "minLength": 1},
+        "event_schema_id": {"type": "string", "minLength": 1},
+        "event_hash_field": {"type": "string", "minLength": 1},
+        "subdirs": {
+          "type": "object",
+          "required": ["ledger", "proposals", "sequences"],
+          "additionalProperties": false,
+          "properties": {
+            "ledger": {"type": "string", "minLength": 1},
+            "proposals": {"type": "string", "minLength": 1},
+            "sequences": {"type": "string", "minLength": 1}
+          }
+        }
+      }
+    },
+    "entities": {
+      "type": "object",
+      "required": ["core_kinds", "required_fields", "extension_rule"],
+      "additionalProperties": false,
+      "properties": {
+        "core_kinds": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "required_fields": {
+          "type": "object",
+          "required": ["always", "conditional"],
+          "additionalProperties": false,
+          "properties": {
+            "always": {"type": "array", "items": {"type": "string", "minLength": 1}},
+            "conditional": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["when_kind", "requires"],
+                "additionalProperties": false,
+                "properties": {
+                  "when_kind": {"type": "string", "minLength": 1},
+                  "requires": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+                }
+              }
+            }
+          }
+        },
+        "extension_rule": {
+          "type": "object",
+          "required": ["must_contain", "refusal_code"],
+          "properties": {
+            "must_contain": {"const": ":"},
+            "pattern": {"type": "string"},
+            "examples": {"type": "array", "items": {"type": "string"}},
+            "refusal_code": {"type": "string", "minLength": 1}
+          }
+        }
+      }
+    },
+    "relations": {
+      "type": "object",
+      "required": ["core", "extension_pattern", "extension_rule"],
+      "additionalProperties": false,
+      "properties": {
+        "core": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "extension_pattern": {"type": "string", "minLength": 1},
+        "extension_rule": {
+          "type": "object",
+          "required": ["must_contain", "refusal_code"],
+          "properties": {
+            "must_contain": {"const": ":"},
+            "pattern": {"type": "string"},
+            "examples": {"type": "array", "items": {"type": "string"}},
+            "refusal_code": {"type": "string", "minLength": 1}
+          }
+        }
+      }
+    },
+    "operations": {
+      "type": "object",
+      "required": ["kinds", "count", "additional_properties", "required_fields", "evidence_entry", "evidence_required_at_review", "reference_bindings", "reference_resolution_scope", "schema"],
+      "additionalProperties": false,
+      "properties": {
+        "kinds": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "count": {
+          "type": "object",
+          "required": ["min", "max"],
+          "additionalProperties": false,
+          "properties": {
+            "min": {"type": "integer", "minimum": 1},
+            "max": {"type": "integer", "minimum": 1}
+          }
+        },
+        "additional_properties": {"type": "boolean"},
+        "required_fields": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+        },
+        "evidence_entry": {"type": "object"},
+        "evidence_required_at_review": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "reference_bindings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["operation", "fields"],
+            "additionalProperties": false,
+            "properties": {
+              "operation": {"type": "string", "minLength": 1},
+              "fields": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+            }
+          }
+        },
+        "reference_resolution_scope": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"enum": ["projection_entities", "intra_proposal_entity_declares"]}
+        },
+        "schema": {"type": "object", "required": ["oneOf"], "properties": {"oneOf": {"type": "array", "minItems": 1}}}
+      }
+    },
+    "id_derivation": {
+      "type": "object",
+      "required": ["digest_rule", "safe_name_rule", "entity", "relation", "local_ref_wiring", "operation_identity_prefixes", "derived_idempotency_keys", "generated_ids"],
+      "additionalProperties": false,
+      "properties": {
+        "digest_rule": {"type": "string", "minLength": 1},
+        "safe_name_rule": {"type": "string", "minLength": 1},
+        "entity": {
+          "type": "object",
+          "required": ["applies_to", "when", "template", "digest_input_fields"],
+          "properties": {
+            "applies_to": {"const": "entity.declare"},
+            "when": {"type": "string", "minLength": 1},
+            "template": {"type": "string", "minLength": 1},
+            "digest_input_fields": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+            "digest_input_note": {"type": "string"}
+          }
+        },
+        "relation": {
+          "type": "object",
+          "required": ["applies_to", "when", "template", "hash_input"],
+          "properties": {
+            "applies_to": {"const": "relation.declare"},
+            "when": {"type": "string", "minLength": 1},
+            "template": {"type": "string", "minLength": 1},
+            "hash_input": {"type": "string", "minLength": 1}
+          }
+        },
+        "local_ref_wiring": {
+          "type": "object",
+          "required": ["declare_field", "uniqueness", "duplicate_refusal_code", "reference_fields", "unresolved_refusal_code"],
+          "properties": {
+            "declare_field": {"const": "local_ref"},
+            "uniqueness": {"const": "proposal"},
+            "duplicate_refusal_code": {"type": "string", "minLength": 1},
+            "reference_fields": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "string", "minLength": 1}},
+            "unresolved_refusal_code": {"type": "string", "minLength": 1}
+          }
+        },
+        "operation_identity_prefixes": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "type": "object",
+            "required": ["prefix", "id_field"],
+            "additionalProperties": false,
+            "properties": {
+              "prefix": {"type": "string", "minLength": 1},
+              "id_field": {"type": "string", "minLength": 1}
+            }
+          }
+        },
+        "derived_idempotency_keys": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "type": "object",
+            "required": ["template", "input_fields"],
+            "additionalProperties": false,
+            "properties": {
+              "template": {"type": "string", "minLength": 1},
+              "input_fields": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+            }
+          }
+        },
+        "generated_ids": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "string", "minLength": 1}}
+      }
+    },
+    "projection": {
+      "type": "object",
+      "required": ["ddl", "fold", "write_mode", "payload_column", "event_column"],
+      "additionalProperties": false,
+      "properties": {
+        "ddl": {"type": "string", "minLength": 1},
+        "fold": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["operation", "table", "key_field", "columns"],
+            "additionalProperties": false,
+            "properties": {
+              "operation": {"type": "string", "minLength": 1},
+              "table": {"enum": ["entities", "relations", "records"]},
+              "key_field": {"type": "string", "minLength": 1},
+              "columns": {"type": "object", "additionalProperties": {"type": "string", "minLength": 1}}
+            }
+          }
+        },
+        "write_mode": {"const": "insert or replace"},
+        "payload_column": {"type": "string", "minLength": 1},
+        "event_column": {"type": "string", "minLength": 1}
+      }
+    },
+    "query": {
+      "type": "object",
+      "required": ["record_kind_enum", "entity_compact_projection", "entity_full_projection", "record_compact_projection", "record_full_projection", "text_filter", "neighborhood_relation_fields", "neighborhood_record_match_fields", "neighborhood_record_fields"],
+      "additionalProperties": false,
+      "properties": {
+        "record_kind_enum": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "entity_compact_projection": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "entity_full_projection": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "record_compact_projection": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "record_full_projection": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "text_filter": {"type": "string", "minLength": 1},
+        "neighborhood_relation_fields": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "neighborhood_record_match_fields": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "neighborhood_record_fields": {"type": "array", "minItems": 1, "items": {"type": "string"}}
+      }
+    },
+    "caps": {"type": "object", "minProperties": 1},
+    "features": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "proposals": {
+          "type": "object",
+          "required": ["enabled", "proposal_schema_id", "submission_receipt_schema_id", "review_schema_id", "admission_receipt_schema_id", "rejection_schema_id", "resubmission_schema_id", "source_capture_schema_id", "compound_schema_id", "read_schema_id", "event_kind", "compound", "review_gate_preserved", "certifies_truth", "capture_sources", "resubmit"],
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "proposal_schema_id": {"type": "string", "minLength": 1},
+            "submission_receipt_schema_id": {"type": "string", "minLength": 1},
+            "review_schema_id": {"type": "string", "minLength": 1},
+            "admission_receipt_schema_id": {"type": "string", "minLength": 1},
+            "rejection_schema_id": {"type": "string", "minLength": 1},
+            "resubmission_schema_id": {"type": "string", "minLength": 1},
+            "source_capture_schema_id": {"type": "string", "minLength": 1},
+            "compound_schema_id": {"type": "string", "minLength": 1},
+            "read_schema_id": {"type": "string", "minLength": 1},
+            "event_kind": {"type": "string", "minLength": 1},
+            "compound": {"type": "boolean"},
+            "review_gate_preserved": {"const": true},
+            "certifies_truth": {"const": false},
+            "capture_sources": {"type": "object"},
+            "resubmit": {"type": "object"}
+          }
+        },
+        "sequences": {
+          "type": "object",
+          "required": ["enabled", "manifest_schema_id", "claim_schema_id", "claim_receipt_schema_id", "status_schema_id", "list_schema_id", "claims_schema_id", "idempotency_schema_id", "step", "start_at_min", "claim_file_pattern", "manifest_hash_field", "claim_hash_field", "claim_chain_field"],
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "manifest_schema_id": {"type": "string", "minLength": 1},
+            "claim_schema_id": {"type": "string", "minLength": 1},
+            "claim_receipt_schema_id": {"type": "string", "minLength": 1},
+            "status_schema_id": {"type": "string", "minLength": 1},
+            "list_schema_id": {"type": "string", "minLength": 1},
+            "claims_schema_id": {"type": "string", "minLength": 1},
+            "idempotency_schema_id": {"type": "string", "minLength": 1},
+            "step": {"const": 1},
+            "start_at_min": {"const": 1},
+            "claim_file_pattern": {"type": "string", "minLength": 1},
+            "manifest_hash_field": {"type": "string", "minLength": 1},
+            "claim_hash_field": {"type": "string", "minLength": 1},
+            "claim_chain_field": {"type": "string", "minLength": 1}
+          }
+        },
+        "source_inspect": {
+          "type": "object",
+          "required": ["enabled", "keywords", "keyword_match", "response_schema_id", "containment", "outside_refusal_code", "too_large_refusal_code"],
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "keywords": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+            "keyword_match": {"type": "string", "minLength": 1},
+            "response_schema_id": {"type": "string", "minLength": 1},
+            "containment": {"type": "string", "minLength": 1},
+            "outside_refusal_code": {"type": "string", "minLength": 1},
+            "too_large_refusal_code": {"type": "string", "minLength": 1}
+          }
+        },
+        "snapshot": {
+          "type": "object",
+          "required": ["enabled", "response_schema_id", "stability_retries", "unstable_refusal_code", "head_mismatch_refusal_code"],
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "response_schema_id": {"type": "string", "minLength": 1},
+            "stability_retries": {"type": "integer", "minimum": 1},
+            "unstable_refusal_code": {"type": "string", "minLength": 1},
+            "head_mismatch_refusal_code": {"type": "string", "minLength": 1}
+          }
+        },
+        "export": {
+          "type": "object",
+          "required": ["enabled", "formats", "default_format", "response_schema_id", "jsonld_context"],
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "formats": {"type": "array", "minItems": 1, "items": {"enum": ["json", "jsonld"]}},
+            "default_format": {"enum": ["json", "jsonld"]},
+            "response_schema_id": {"type": "string", "minLength": 1},
+            "jsonld_context": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "string", "minLength": 1}}
+          }
+        }
+      }
+    },
+    "guidance": {
+      "type": "object",
+      "required": ["schema_id", "emission_order", "engine_derived_fields", "fields"],
+      "additionalProperties": false,
+      "properties": {
+        "schema_id": {"type": "string", "minLength": 1},
+        "emission_order": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "requested_echo": {"type": "string"},
+        "engine_derived_fields": {"type": "object", "minProperties": 1},
+        "fields": {"type": "object", "minProperties": 1}
+      }
+    },
+    "tools": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["name", "description", "class", "feature", "annotations", "inputSchema"],
+        "additionalProperties": false,
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "description": {"type": "string", "minLength": 1},
+          "class": {"enum": ["guidance", "core", "feature"]},
+          "feature": {"type": ["string", "null"]},
+          "annotations": {
+            "type": "object",
+            "required": ["readOnlyHint", "destructiveHint", "idempotentHint"],
+            "additionalProperties": false,
+            "properties": {
+              "readOnlyHint": {"type": "boolean"},
+              "destructiveHint": {"const": false},
+              "idempotentHint": {"type": "boolean"}
+            }
+          },
+          "inputSchema": {"type": "object"}
+        }
+      }
+    }
+  }
+}

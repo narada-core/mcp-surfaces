@@ -1,0 +1,16 @@
+{
+  "schema": "narada.epistemic.sequence.claim.v1",
+  "sequence_id": "seq-e5d0e73ffcc66299af64876b",
+  "sequence_name": "fixture-ledger-entry",
+  "value": 40,
+  "claim_id": "seqclaim-6f23b8eadfea83bb2cfb14af",
+  "previous_claim_hash": null,
+  "actor": "fixture",
+  "authority_basis": {
+    "kind": "fixture"
+  },
+  "idempotency_key": "fixture-c1",
+  "request_digest": "2373574ef6867e384067daec65d778d79a7e7fa57925f3469610fe780c2c7d44",
+  "claimed_at": "2026-08-18T20:06:01.9062433Z",
+  "claim_hash": "988bdc67a135b483a4b58419db373ffdb7788117e78f345573197dd4570988af"
+}

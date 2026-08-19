@@ -23,3 +23,4 @@ yaml_serde = "0.10.4"
 jsonschema = { version = "0.49.9", default-features = false }
 wait-timeout = "0.2"
 narada-mcp-lifecycle = { path = "../../mcp-lifecycle-native/native" }
+narada-mcp-event-ledger = { path = "../../event-ledger-native/native" }

@@ -1,0 +1,18 @@
+[package]
+name = "narada-ledger-domain"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "narada-ledger-domain"
+path = "src/main.rs"
+
+[dependencies]
+fs2 = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+uuid = { version = "1", features = ["v4"] }
+jsonschema = { version = "0.49.9", default-features = false }
+narada-mcp-event-ledger = { path = "../../shared/event-ledger-native/native" }

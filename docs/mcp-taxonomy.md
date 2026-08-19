@@ -13,7 +13,8 @@ This repository mixes reusable substrate surfaces with Narada-specific control-p
 - `@narada-core/local-filesystem-mcp`
 - `@narada-core/structured-command-mcp`
 - `@narada-core/git-mcp`
-- `epistemic-graph` (Rust-native projection hosted by `@narada-core/mcp-surfaces-native`)
+- `epistemic-graph` (descriptor-driven surface hosted by the `@narada-core/ledger-domain-mcp` engine with the static domain descriptor `@narada-core/ledger-domain-epistemic`)
+- `event-ledger-native` (Rust-only shared crate `narada-mcp-event-ledger`; event-ledger regime machinery consumed by `@narada-core/mcp-surfaces-native` and `@narada-core/ledger-domain-mcp`)
 
 `epistemic-graph` preserves attributed problems, conjectures, criticisms, tests,
 sources, and relations. It does not certify truth, embed a literature provider,

@@ -1,4 +1,4 @@
-import { existsSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -7,7 +7,21 @@ import { publishImmutableNativeArtifacts, resolveNativeArtifact } from '@narada-
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const nativeRoot = join(packageRoot, 'native');
 const executableName = `narada-mcp-registrar${process.platform === 'win32' ? '.exe' : ''}`;
-const source = join(nativeRoot, 'target', 'release', executableName);
+// narada-mcp-registrar is a cargo workspace member, so the release binary is
+// emitted into the workspace-root target directory, not native/target.
+function workspaceTargetRoot(start: string): string {
+  let current = start;
+  for (;;) {
+    const manifest = join(current, 'Cargo.toml');
+    if (existsSync(manifest) && readFileSync(manifest, 'utf8').includes('[workspace]')) {
+      return join(current, 'target', 'release');
+    }
+    const parent = dirname(current);
+    if (parent === current) throw new Error('mcp_registrar_workspace_root_unresolved');
+    current = parent;
+  }
+}
+const source = join(workspaceTargetRoot(nativeRoot), executableName);
 if (!['win32', 'linux', 'darwin'].includes(process.platform)) process.exit(0);
 // TypeScript incremental builds do not remove outputs for deleted sources.
 // The registrar no longer has a JavaScript runtime, so never leave its retired

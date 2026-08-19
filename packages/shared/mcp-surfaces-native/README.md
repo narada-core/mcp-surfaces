@@ -5,19 +5,25 @@ invoked with `--surface-id <id>` and keeps the MCP protocol boundary in Rust;
 surface implementations are added as explicit modules rather than launching a
 JavaScript runtime.
 
-It also hosts the generic `epistemic-graph` surface. That surface keeps
-immutable, hash-linked proposal-admission events beneath the Site's tracked
-`.narada/epistemic/ledger` authority and rebuilds its SQLite query projection
-beneath ignored `.narada/.ai/epistemic-graph` state.
+It also hosts the `surface-feedback` surface. The generic `epistemic-graph`
+surface moved to the `ledger-domain-mcp` engine (`narada-ledger-domain`),
+which loads the static domain descriptor in
+`packages/shared/ledger-domain-epistemic` (`domain.json`). Its tracked
+`.narada/epistemic/ledger` authority and disposable SQLite projection are
+unchanged.
 
-The initial entity kinds are `problem`, `conjecture`, `claim`, `criticism`,
-`test`, and `source`. Admission means a contribution satisfies structural and provenance
-policy; it never means that a conjecture is true. External search remains
-outside the surface. JSON-LD export maps scholarly and provenance concepts to
-FaBiO, CiTO, and PROV-O without making those vocabularies storage authority.
+The ledger machinery behind `surface-feedback` (and the `ledger-domain-mcp`
+engine) is the
+shared Rust crate `narada-mcp-event-ledger`
+(`packages/shared/event-ledger-native`), consumed as a Cargo path dependency;
+its regime is specified in
+[docs/event-ledger-format.md](../../../docs/event-ledger-format.md).
 
-The complete tool workflow, authority boundary, snapshot pagination contract,
-and failure posture are documented in [docs/epistemic-graph.md](docs/epistemic-graph.md).
+The `epistemic-graph` tool workflow, authority boundary, snapshot pagination
+contract, and failure posture are documented in
+[docs/epistemic-graph.md](docs/epistemic-graph.md); the descriptor format is
+specified in
+[docs/ledger-domain-descriptor.md](../../../docs/ledger-domain-descriptor.md).
 
 ## Boundary
 

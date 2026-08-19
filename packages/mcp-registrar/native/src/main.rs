@@ -342,13 +342,13 @@ fn extend_epistemic_catalog(contract: &mut Value) {
         })
         .collect::<Vec<_>>();
     let projection = json!({
-        "id":"default","transport":{"kind":"stdio","command":"narada-mcp-surfaces","args":["--surface-id","epistemic-graph","--site-root","{site_root}"],"env":[]},
+        "id":"default","transport":{"kind":"stdio","command":"narada-ledger-domain","args":["--domain","{mcp_surfaces_root}/shared/ledger-domain-epistemic/domain.json","--site-root","{site_root}"],"env":[]},
         "injection_scope":"local_site","default_injection":"enabled","runtime_requirements":[],"authority_requirements":["scope.local_site"],
         "lifecycle":{"mode":"replayable","reason":"Canonical events are immutable and the query projection is rebuildable."}
     });
     let descriptor = json!({
         "schema_version":"2.0","source":"native","surface_id":"epistemic-graph","surface_version":"0.1.0",
-        "package":"@narada-core/mcp-surfaces-native","guidance_tool":"epistemic_graph_guidance","tools":descriptor_tools,
+        "package":"@narada-core/ledger-domain-mcp","guidance_tool":"epistemic_graph_guidance","tools":descriptor_tools,
         "projections":[projection.clone()],"metadata":{"authority":"tracked_event_ledger","truth_certification":false}
     });
     let descriptor_digest = sha256_text(&canonical_json(&descriptor));
@@ -358,9 +358,9 @@ fn extend_epistemic_catalog(contract: &mut Value) {
         .map(|(name, _)| json!(name))
         .collect::<Vec<_>>();
     let item = json!({
-        "id":"epistemic-graph","package":"mcp-surfaces-native","entrypoint":"{mcp_surfaces_root}/shared/mcp-surfaces-native/dist/native/narada-mcp-surfaces.exe",
-        "kind":"mcp_surface","args":["--surface-id","epistemic-graph","--site-root","{site_root}"],"tools":names,
-        "projections":[{"id":"default","injection_scope":"local_site","execution":{"adapter":"stdio","tenancy":"session_isolated","replacement":"manual"},"restart_owner":"local_site","runtime_requirements":[],"env_vars":[],"command":"narada-mcp-surfaces","entrypoint":"{mcp_surfaces_root}/shared/mcp-surfaces-native/dist/native/narada-mcp-surfaces.exe","args":["--surface-id","epistemic-graph","--site-root","{site_root}"]}],
+        "id":"epistemic-graph","package":"ledger-domain-mcp","entrypoint":"{mcp_surfaces_root}/ledger-domain-mcp/dist/native/narada-ledger-domain.exe",
+        "kind":"mcp_surface","args":["--domain","{mcp_surfaces_root}/shared/ledger-domain-epistemic/domain.json","--site-root","{site_root}"],"tools":names,
+        "projections":[{"id":"default","injection_scope":"local_site","execution":{"adapter":"stdio","tenancy":"session_isolated","replacement":"manual"},"restart_owner":"local_site","runtime_requirements":[],"env_vars":[],"command":"narada-ledger-domain","entrypoint":"{mcp_surfaces_root}/ledger-domain-mcp/dist/native/narada-ledger-domain.exe","args":["--domain","{mcp_surfaces_root}/shared/ledger-domain-epistemic/domain.json","--site-root","{site_root}"]}],
         "injection_scope":"local_site","restart_owner":"local_site","env_vars":[],"descriptor_source":"native","descriptor_digest":descriptor_digest,"tool_contract_digest":tool_contract_digest,"descriptor":descriptor,
         "authority_locus":{"kind":"local_site"},"mutation_locus":{"kind":"local_site"},
         "narada_scope":{"injection_scope":"local_site","authority_locus":{"kind":"local_site"},"mutation_locus":{"kind":"local_site"},"restart_owner":"local_site","scope_source":"registrar_surface_catalog"}
@@ -4257,7 +4257,6 @@ fn site_launch(
         "site-lifecycle",
         "site-registry",
         "project-state",
-        "epistemic-graph",
         "runtime-introspection",
         "site-coherence",
         "launcher",
@@ -4309,6 +4308,12 @@ fn site_launch(
             let path =
                 native_artifact_entrypoint("agent-context-mcp", "narada-agent-context-mcp.exe")
                     .ok_or("registrar_native_agent_context_missing")?;
+            effective_command = path.clone();
+            effective_entrypoint = path;
+            invocation = Some("native_entrypoint");
+        } else if surface_id == "epistemic-graph" {
+            let path = native_artifact_entrypoint("ledger-domain-mcp", "narada-ledger-domain.exe")
+                .ok_or("registrar_native_ledger_domain_missing")?;
             effective_command = path.clone();
             effective_entrypoint = path;
             invocation = Some("native_entrypoint");
@@ -4896,6 +4901,7 @@ fn native_surface_artifact(
         "agent-context" if projection_id == "default" => {
             return Some(("agent-context-mcp", "narada-agent-context-mcp.exe"))
         }
+        "epistemic-graph" => return Some(("ledger-domain-mcp", "narada-ledger-domain.exe")),
         "mcp-registrar" => return Some(("mcp-registrar", "narada-mcp-registrar.exe")),
         _ => {}
     }
@@ -4906,7 +4912,6 @@ fn native_surface_artifact(
         "site-lifecycle",
         "site-registry",
         "project-state",
-        "epistemic-graph",
         "runtime-introspection",
         "site-coherence",
         "launcher",
@@ -5432,7 +5437,7 @@ mod tests {
             ("task-lifecycle", "stdio", "narada-task-lifecycle-mcp.exe"),
             ("mcp-registrar", "default", "narada-mcp-registrar.exe"),
             ("surface-feedback", "default", "narada-mcp-surfaces.exe"),
-            ("epistemic-graph", "default", "narada-mcp-surfaces.exe"),
+            ("epistemic-graph", "default", "narada-ledger-domain.exe"),
         ] {
             let (_, artifact) = native_surface_artifact(surface_id, projection_id)
                 .unwrap_or_else(|| panic!("missing native mapping for {surface_id}"));

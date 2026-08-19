@@ -1,0 +1,31 @@
+{
+  "schema": "narada.epistemic.proposal.v1",
+  "proposal_id": "ep_8d52729d-9e53-4685-ba1b-fd5cfbc0eacb",
+  "status": "submitted",
+  "actor": "fixture",
+  "authority_basis": {
+    "kind": "fixture",
+    "summary": "Golden event-ledger fixture."
+  },
+  "idempotency_key": "fixture-p1",
+  "expected_ledger_head": null,
+  "created_at": "2026-08-18T20:06:01.7443061Z",
+  "content_fingerprint": "3a44def89ea85d38b4d0b2f7ffc1bcb28575904e1a887daa462c2effdcc6037b",
+  "operations": [
+    {
+      "op": "entity.declare",
+      "entity_id": "problem:fixture",
+      "kind": "problem",
+      "title": "Fixture problem"
+    },
+    {
+      "op": "entity.declare",
+      "entity_id": "source:fixture",
+      "kind": "source",
+      "title": "Fixture source",
+      "version": "1",
+      "locator": "docs/fixture.md"
+    }
+  ],
+  "digest": "4c358ade897d0bc435e3103c4af5185ea6407136253e214286dd2056f346b9cf"
+}

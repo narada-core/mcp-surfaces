@@ -1,0 +1,484 @@
+{
+  "schema": "narada.ledger-domain.v1",
+  "identity": {
+    "domain_id": "epistemic-graph",
+    "tool_prefix": "epistemic_graph",
+    "schema_namespace": "narada.epistemic",
+    "error_schema_id": "narada.epistemic.error.v1",
+    "implementation": "rust-native"
+  },
+  "storage": {
+    "control_root_subdir": "epistemic",
+    "runtime_subdir": ".ai/epistemic-graph",
+    "ledger_file_prefix": "ev",
+    "event_schema_id": "narada.epistemic.event.v1",
+    "event_hash_field": "event_hash",
+    "subdirs": {
+      "ledger": "ledger",
+      "proposals": "proposals",
+      "sequences": "sequences"
+    }
+  },
+  "entities": {
+    "core_kinds": ["problem", "conjecture", "claim", "criticism", "test", "source"],
+    "required_fields": {
+      "always": ["kind", "title"],
+      "conditional": [
+        {"when_kind": "source", "requires": ["version", "locator"]}
+      ]
+    },
+    "extension_rule": {
+      "must_contain": ":",
+      "pattern": "<namespace>:<kind>",
+      "examples": ["cintamani:experiment", "cintamani:equipment_type"],
+      "refusal_code": "invalid_entity_kind"
+    }
+  },
+  "relations": {
+    "core": ["addresses", "criticizes", "tests", "depends_on", "derived_from", "transforms", "supersedes"],
+    "extension_pattern": "^[A-Za-z][A-Za-z0-9_.-]*:[A-Za-z][A-Za-z0-9_.-]*$",
+    "extension_rule": {
+      "must_contain": ":",
+      "pattern": "<namespace>:<relation>",
+      "examples": ["marici:refines", "marici:generalizes"],
+      "refusal_code": "invalid_relation_type"
+    }
+  },
+  "operations": {
+    "kinds": ["entity.declare", "relation.declare", "assessment.record", "test_outcome.record", "sweep.record"],
+    "count": {"min": 1, "max": 200},
+    "additional_properties": true,
+    "required_fields": {
+      "entity.declare": ["op", "entity_id", "kind", "title"],
+      "relation.declare": ["op", "relation_id", "relation_type", "source_id", "target_id"],
+      "assessment.record": ["op", "assessment_id", "subject_id", "judgment", "actor", "reason"],
+      "test_outcome.record": ["op", "outcome_id", "test_id", "actor", "outcome"],
+      "sweep.record": ["op", "sweep_id", "interval_start", "interval_end", "method", "result"]
+    },
+    "evidence_entry": {
+      "type": "object",
+      "properties": {
+        "source_id": {"type": "string", "minLength": 1},
+        "locator": {"type": "string", "minLength": 1},
+        "paraphrase": {"type": "string", "minLength": 1}
+      },
+      "required": ["source_id", "locator", "paraphrase"],
+      "additionalProperties": false
+    },
+    "evidence_required_at_review": ["assessment.record", "test_outcome.record"],
+    "reference_bindings": [
+      {"operation": "relation.declare", "fields": ["source_id", "target_id"]},
+      {"operation": "assessment.record", "fields": ["subject_id"]},
+      {"operation": "test_outcome.record", "fields": ["test_id"]},
+      {"operation": "*", "fields": ["evidence[].source_id"]}
+    ],
+    "reference_resolution_scope": ["projection_entities", "intra_proposal_entity_declares"],
+    "schema": {
+      "oneOf": [
+        {"title": "Declare entity", "type": "object", "properties": {"op": {"const": "entity.declare"}, "entity_id": {"type": "string", "minLength": 1, "description": "Optional override; omit for deterministic identity from kind, title, version, and locator."}, "local_ref": {"type": "string", "minLength": 1, "description": "Optional proposal-local name for relation source_ref/target_ref."}, "kind": {"type": "string", "description": "Core entity kind (problem, conjecture, claim, criticism, test, source) or a namespaced extension kind such as cintamani:experiment."}, "title": {"type": "string", "minLength": 1}, "version": {"type": "string", "minLength": 1}, "locator": {"type": "string", "minLength": 1}}, "required": ["op", "kind", "title"], "allOf": [{"if": {"properties": {"kind": {"const": "source"}}, "required": ["kind"]}, "then": {"required": ["version", "locator"]}}], "additionalProperties": true},
+        {"title": "Declare relation", "type": "object", "properties": {"op": {"const": "relation.declare"}, "relation_id": {"type": "string", "minLength": 1, "description": "Optional override. Omit to derive a deterministic id from relation_type, source_id, and target_id."}, "relation_type": {"oneOf": [{"type": "string", "enum": ["addresses", "criticizes", "tests", "depends_on", "derived_from", "transforms", "supersedes"]}, {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_.-]*:[A-Za-z][A-Za-z0-9_.-]*$"}], "description": "Use a listed core relation, or namespace an extension such as marici:refines."}, "source_id": {"type": "string", "minLength": 1}, "target_id": {"type": "string", "minLength": 1}, "source_ref": {"type": "string", "minLength": 1}, "target_ref": {"type": "string", "minLength": 1}}, "required": ["op", "relation_type"], "allOf": [{"anyOf": [{"required": ["source_id"]}, {"required": ["source_ref"]}]}, {"anyOf": [{"required": ["target_id"]}, {"required": ["target_ref"]}]}], "additionalProperties": true},
+        {"title": "Record assessment", "type": "object", "properties": {"op": {"const": "assessment.record"}, "assessment_id": {"type": "string", "minLength": 1}, "subject_id": {"type": "string", "minLength": 1}, "judgment": {"type": "string", "minLength": 1}, "actor": {"type": "string", "minLength": 1}, "reason": {"type": "string", "minLength": 1}, "evidence": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {"source_id": {"type": "string", "minLength": 1}, "locator": {"type": "string", "minLength": 1}, "paraphrase": {"type": "string", "minLength": 1}}, "required": ["source_id", "locator", "paraphrase"], "additionalProperties": false}}}, "required": ["op", "assessment_id", "subject_id", "judgment", "actor", "reason", "evidence"], "additionalProperties": true},
+        {"title": "Record test outcome", "type": "object", "properties": {"op": {"const": "test_outcome.record"}, "outcome_id": {"type": "string", "minLength": 1}, "test_id": {"type": "string", "minLength": 1}, "actor": {"type": "string", "minLength": 1}, "outcome": {"type": "string", "minLength": 1}, "evidence": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {"source_id": {"type": "string", "minLength": 1}, "locator": {"type": "string", "minLength": 1}, "paraphrase": {"type": "string", "minLength": 1}}, "required": ["source_id", "locator", "paraphrase"], "additionalProperties": false}}}, "required": ["op", "outcome_id", "test_id", "actor", "outcome", "evidence"], "additionalProperties": true},
+        {"title": "Record bounded search sweep", "type": "object", "properties": {"op": {"const": "sweep.record"}, "sweep_id": {"type": "string", "minLength": 1}, "interval_start": {"type": "string", "minLength": 1}, "interval_end": {"type": "string", "minLength": 1}, "method": {"type": "string", "minLength": 1}, "result": {"type": "string", "minLength": 1}}, "required": ["op", "sweep_id", "interval_start", "interval_end", "method", "result"], "additionalProperties": true}
+      ]
+    }
+  },
+  "id_derivation": {
+    "digest_rule": "hex sha256 of the compact serde_json::to_vec encoding; insertion-order dependent by design (docs/event-ledger-format.md)",
+    "safe_name_rule": "ASCII alphanumerics, '-', '_'; bounded to 120 characters",
+    "entity": {
+      "applies_to": "entity.declare",
+      "when": "entity_id absent and kind and title non-empty",
+      "template": "{safe_name(kind)}:{digest[..20]}",
+      "digest_input_fields": ["kind", "title", "version", "locator"],
+      "digest_input_note": "version and locator are JSON null when absent (always null for non-source kinds)"
+    },
+    "relation": {
+      "applies_to": "relation.declare",
+      "when": "relation_id absent and relation_type, source_id, target_id non-empty",
+      "template": "rel:{safe_name(relation_type)}-{sha256[..16]}",
+      "hash_input": "{relation_type}\\0{source_id}\\0{target_id}"
+    },
+    "local_ref_wiring": {
+      "declare_field": "local_ref",
+      "uniqueness": "proposal",
+      "duplicate_refusal_code": "duplicate_local_ref",
+      "reference_fields": {"source_ref": "source_id", "target_ref": "target_id"},
+      "unresolved_refusal_code": "local_ref_not_found"
+    },
+    "operation_identity_prefixes": {
+      "entity.declare": {"prefix": "entity", "id_field": "entity_id"},
+      "relation.declare": {"prefix": "relation", "id_field": "relation_id"},
+      "assessment.record": {"prefix": "assessment", "id_field": "assessment_id"},
+      "test_outcome.record": {"prefix": "test_outcome", "id_field": "outcome_id"},
+      "sweep.record": {"prefix": "sweep", "id_field": "sweep_id"}
+    },
+    "derived_idempotency_keys": {
+      "proposal": {"template": "auto-proposal-{sha256[..24]}", "input_fields": ["actor", "authority_basis", "operations"]},
+      "admission": {"template": "auto-admission-{sha256[..24]}", "input_fields": ["proposal_id", "proposal_digest"]}
+    },
+    "generated_ids": {
+      "proposal_id": "ep_{uuid_v4}",
+      "sequence_id": "seq-{sha256(sequence_name)[..24]}",
+      "claim_id": "seqclaim-{sha256(sequence_name\\0idempotency_key)[..24]}"
+    }
+  },
+  "projection": {
+    "ddl": "pragma journal_mode=delete; create table entities(entity_id text primary key,kind text not null,payload_json text not null,event_id text not null); create table relations(relation_id text primary key,relation_type text not null,source_id text not null,target_id text not null,payload_json text not null,event_id text not null); create table records(record_id text primary key,record_kind text not null,payload_json text not null,event_id text not null);",
+    "fold": [
+      {"operation": "entity.declare", "table": "entities", "key_field": "entity_id", "columns": {"kind": "kind"}},
+      {"operation": "relation.declare", "table": "relations", "key_field": "relation_id", "columns": {"relation_type": "relation_type", "source_id": "source_id", "target_id": "target_id"}},
+      {"operation": "assessment.record", "table": "records", "key_field": "assessment_id", "columns": {"record_kind": "assessment.record"}},
+      {"operation": "test_outcome.record", "table": "records", "key_field": "outcome_id", "columns": {"record_kind": "test_outcome.record"}},
+      {"operation": "sweep.record", "table": "records", "key_field": "sweep_id", "columns": {"record_kind": "sweep.record"}}
+    ],
+    "write_mode": "insert or replace",
+    "payload_column": "payload_json (full operation object)",
+    "event_column": "event_id (admitting event)"
+  },
+  "query": {
+    "record_kind_enum": ["assessment.record", "test_outcome.record", "sweep.record"],
+    "entity_compact_projection": ["entity_id", "kind", "title", "event_id"],
+    "entity_full_projection": ["entity_id", "kind", "payload", "event_id"],
+    "record_compact_projection": ["record_id", "record_kind", "subject_id", "judgment", "status", "event_id"],
+    "record_full_projection": ["record_id", "record_kind", "payload", "event_id"],
+    "text_filter": "payload_json LIKE '%text%' (case-sensitive substring)",
+    "neighborhood_relation_fields": ["relation_id", "relation_type", "source_id", "target_id", "payload"],
+    "neighborhood_record_match_fields": ["subject_id", "test_id"],
+    "neighborhood_record_fields": ["record_id", "record_kind", "payload", "event_id"]
+  },
+  "caps": {
+    "operations_per_proposal": {"min": 1, "max": 200},
+    "query_limit": {"min": 1, "max": 100, "default": 50},
+    "proposal_read_limit": {"min": 1, "max": 100, "default": 20},
+    "query_batch": {"min_queries": 1, "max_queries": 20, "limit_per_query_min": 1, "limit_per_query_max": 20, "limit_per_query_default": 5},
+    "neighborhood_limit": {"min": 1, "max": 100, "default": 50},
+    "snapshot_limit": {"min": 1, "max": 1000, "default": 500},
+    "export": {"entities": 100, "relations": 1000, "records": 1000},
+    "source_inspect": {"paths_min": 1, "paths_max": 20, "sections_min": 1, "sections_max": 50, "sections_default": 20, "chars_min": 100, "chars_max": 4000, "chars_default": 1200, "file_bytes_max": 1048576},
+    "sequence_name_chars": {"min": 1, "max": 120},
+    "sequence_page_limit": {"min": 1, "max": 100, "default": 100},
+    "authority_basis_properties": {"min": 1, "max": 32},
+    "authority_basis_bytes": 8192,
+    "resubmit": {"drop_operation_ids_max": 200, "replacements_max": 200, "resulting_min": 1, "resulting_max": 200},
+    "capture_sources": {"sources_min": 1, "sources_max": 100, "operations_max": 199, "combined_max": 200},
+    "actor_chars": 256,
+    "idempotency_key_chars": {"min": 1, "max": 256},
+    "guidance_routing_hint_chars": 256
+  },
+  "features": {
+    "proposals": {
+      "enabled": true,
+      "proposal_schema_id": "narada.epistemic.proposal.v1",
+      "submission_receipt_schema_id": "narada.epistemic.proposal_submission.v1",
+      "review_schema_id": "narada.epistemic.proposal_review.v1",
+      "admission_receipt_schema_id": "narada.epistemic.proposal_admission.v1",
+      "rejection_schema_id": "narada.epistemic.proposal_rejection.v1",
+      "resubmission_schema_id": "narada.epistemic.proposal_resubmission.v1",
+      "source_capture_schema_id": "narada.epistemic.source_capture.v1",
+      "compound_schema_id": "narada.epistemic.submit_review_admit.v1",
+      "read_schema_id": "narada.epistemic.proposal_read.v1",
+      "event_kind": "proposal_admitted",
+      "compound": true,
+      "review_gate_preserved": true,
+      "certifies_truth": false,
+      "capture_sources": {
+        "sources_field_only": true,
+        "source_item_fields": ["source_id", "title", "version", "locator"],
+        "reports_existing_identities": true,
+        "admission_requires_explicit_call": true
+      },
+      "resubmit": {
+        "drop_identity_format": "{operation_identity_prefix}:{id}",
+        "drop_max": 200,
+        "replacements_max": 200,
+        "missing_drop_refusal_code": "proposal_operation_not_found"
+      }
+    },
+    "sequences": {
+      "enabled": true,
+      "manifest_schema_id": "narada.epistemic.sequence.v1",
+      "claim_schema_id": "narada.epistemic.sequence.claim.v1",
+      "claim_receipt_schema_id": "narada.epistemic.sequence.claim.receipt.v1",
+      "status_schema_id": "narada.epistemic.sequence.status.v1",
+      "list_schema_id": "narada.epistemic.sequence.list.v1",
+      "claims_schema_id": "narada.epistemic.sequence.claims.v1",
+      "idempotency_schema_id": "narada.epistemic.sequence.idempotency.v1",
+      "step": 1,
+      "start_at_min": 1,
+      "claim_file_pattern": "claims/claim-{value:020}.json",
+      "manifest_hash_field": "creation_hash",
+      "claim_hash_field": "claim_hash",
+      "claim_chain_field": "previous_claim_hash"
+    },
+    "source_inspect": {
+      "enabled": true,
+      "keywords": ["record", "status", "epistemic boundary", "decision", "verdict", "scope", "next", "subsequent", "forward", "correction", "update"],
+      "keyword_match": "case-insensitive substring of heading",
+      "response_schema_id": "narada.epistemic.source_inspection.v1",
+      "containment": "paths must canonicalize inside the site root",
+      "outside_refusal_code": "source_outside_site",
+      "too_large_refusal_code": "source_too_large"
+    },
+    "snapshot": {
+      "enabled": true,
+      "response_schema_id": "narada.epistemic.graph_snapshot.v1",
+      "stability_retries": 3,
+      "unstable_refusal_code": "ledger_snapshot_unstable",
+      "head_mismatch_refusal_code": "ledger_head_mismatch"
+    },
+    "export": {
+      "enabled": true,
+      "formats": ["json", "jsonld"],
+      "default_format": "json",
+      "response_schema_id": "narada.epistemic.export.v1",
+      "jsonld_context": {
+        "prov": "http://www.w3.org/ns/prov#",
+        "cito": "http://purl.org/spar/cito/",
+        "fabio": "http://purl.org/spar/fabio/",
+        "narada": "https://narada.local/epistemic/"
+      }
+    }
+  },
+  "guidance": {
+    "schema_id": "narada.epistemic.guidance.v2",
+    "emission_order": ["schema", "purpose", "workflow", "sequence_workflow", "sequence_semantics", "entity_kinds", "core_relations", "extension_relation_rule", "extension_entity_kind_rule", "identity_rule", "revision_pattern", "operation_kinds", "provenance_choices", "minimal_example", "concurrency_rule", "admission_meaning", "search_boundary", "problem_policy"],
+    "requested_echo": "the emitted object also carries requested:{workflow,tool} echoing the caller's routing hints (null when absent)",
+    "engine_derived_fields": {
+      "entity_kinds": {"source": "entities.core_kinds"},
+      "core_relations": {"source": "relations.core"},
+      "operation_kinds": {"source": "operations.kinds"},
+      "extension_relation_rule": {"source": "relations.extension_rule", "text": "Any relation outside core_relations must be namespaced, for example marici:refines or marici:generalizes."},
+      "extension_entity_kind_rule": {"source": "entities.extension_rule", "text": "Any entity kind outside entity_kinds must be namespaced, for example cintamani:experiment or cintamani:equipment_type. Extension kinds carry their full structured record in additional payload fields; the version/locator requirement applies only to the source kind."}
+    },
+    "fields": {
+      "purpose": "Preserve evolving problem situations, not certify truth.",
+      "workflow": [
+        {"step": 1, "tool": "epistemic_graph_submit_review_admit", "preferred": true, "why": "Perform the ordinary submit, preserved policy review, and admission workflow atomically. Omit expected_ledger_head to snapshot the current head and omit idempotency_key for deterministic retry safety."},
+        {"step": 2, "tool": "epistemic_graph_capture_sources", "alternative": true, "why": "Create a reviewable source proposal when manual review before admission is intended; operations may be empty for pure source capture."},
+        {"step": 3, "tool": "epistemic_graph_proposal_submit", "alternative": true, "why": "Persist a reviewable proposal without source batching."},
+        {"step": 4, "tools": ["epistemic_graph_proposal_review", "epistemic_graph_proposal_admit"], "manual_only": true, "why": "Use separate calls only when the operator wants an explicit pause between proposal, review, and admission."},
+        {"step": 5, "tool": "epistemic_graph_neighborhood", "why": "Verify the admitted problem situation and its relations."}
+      ],
+      "sequence_workflow": [
+        {"step": 1, "tool": "epistemic_graph_sequence_create", "why": "Create a named Site-owned numeric authority once; start_at defaults to 1."},
+        {"step": 2, "tool": "epistemic_graph_sequence_claim_next", "why": "Claim one permanent number using a unique idempotency key for the claim intent."},
+        {"step": 3, "tools": ["epistemic_graph_sequence_status", "epistemic_graph_sequence_claims"], "why": "Verify current allocation state or audit bounded immutable claims."}
+      ],
+      "sequence_semantics": {"authority": "Separate immutable coordination records under .narada/epistemic/sequences; not epistemic assertions or graph events.", "claim": "Permanent, monotonic, increment-by-one, never released or reused.", "formatting": "The authority returns unsigned integers; callers own prefixes, padding, and display formatting."},
+      "identity_rule": {"relations": "Omit relation_id to derive it deterministically from relation_type, source_id, and target_id. Supply an override only when parallel duplicate relations are intentional.", "idempotency": "Omit idempotency_key for deterministic content-hash retry identity; supply one only to name a wider caller-defined retry scope."},
+      "revision_pattern": {"entity_title_correction": "Declare a successor entity with the corrected title and connect it to the prior entity using supersedes. Keep the prior identity as immutable history.", "discovery": "Query or inspect the predecessor neighborhood before declaring the successor.", "reason": "The graph is append-only; revision is explicit explanation, not silent record mutation."},
+      "provenance_choices": [
+        "Represent a document as a versioned source entity and connect claims with derived_from.",
+        "For an assessment or test outcome, include evidence entries with source_id, locator, and paraphrase.",
+        "Do not manufacture an assessment merely to attach provenance; conjecture plus derived_from is valid."
+      ],
+      "minimal_example": {
+        "tool": "epistemic_graph_submit_review_admit",
+        "arguments": {"actor": "agent-id", "authority_basis": {"kind": "operator_request", "summary": "Capture one bounded source claim."}, "operations": [
+          {"op": "entity.declare", "local_ref": "source", "kind": "source", "title": "Example source", "version": "1", "locator": "src/ledger/example.md"},
+          {"op": "entity.declare", "local_ref": "conjecture", "kind": "conjecture", "title": "Example explanatory conjecture"},
+          {"op": "relation.declare", "relation_type": "derived_from", "source_ref": "conjecture", "target_ref": "source"}
+        ]}
+      },
+      "concurrency_rule": "Omit expected_ledger_head to snapshot the live head during submission while retaining CAS protection through admission. Supply a concrete status.ledger_head only when an external read must be the concurrency boundary. If review reports stale, query again and submit a new proposal; do not rewrite the immutable proposal.",
+      "admission_meaning": "policy-valid contribution; never truth certification",
+      "search_boundary": "Use external providers for discovery. Record a sweep only when it explains coverage or changes the graph.",
+      "problem_policy": "Transform apparent solutions into successor problems; record closure only as an attributed assessment."
+    }
+  },
+  "tools": [
+    {
+      "name": "epistemic_graph_guidance",
+      "description": "Explain the problem-situation graph workflow.",
+      "class": "guidance",
+      "feature": null,
+      "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true},
+      "inputSchema": {"type": "object", "properties": {"workflow": {"type": "string", "maxLength": 256}, "tool": {"type": "string", "maxLength": 256}}, "additionalProperties": false}
+    },
+    {
+      "name": "epistemic_graph_status",
+      "description": "Inspect ledger and projection readiness.",
+      "class": "core",
+      "feature": null,
+      "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true},
+      "inputSchema": {"type": "object", "required": [], "additionalProperties": false}
+    },
+    {
+      "name": "epistemic_graph_query",
+      "description": "List bounded entities, or set record_kind to read assessments, test outcomes, or sweeps.",
+      "class": "core",
+      "feature": null,
+      "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true},
+      "inputSchema": {"type": "object", "properties": {"kind": {"type": "string", "description": "Entity kind filter; core kinds or namespaced extension kinds such as cintamani:experiment."}, "record_kind": {"type": "string", "enum": ["assessment.record", "test_outcome.record", "sweep.record"], "description": "When present, query durable non-entity records instead of entities."}, "text": {"type": "string"}, "compact": {"type": "boolean", "default": false, "description": "Return identity and summary fields without full stored payloads."}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}, "offset": {"type": "integer", "minimum": 0}}, "additionalProperties": false}
+    },
+    {
+      "name": "epistemic_graph_query_batch",
+      "description": "Run several compact bounded graph queries in one call.",
+      "class": "core",
+      "feature": null,
+      "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true},
+      "inputSchema": {"type": "object", "properties": {"queries": {"type": "array", "minItems": 1, "maxItems": 20, "items": {"type": "object", "properties": {"text": {"type": "string"}, "kind": {"type": "string", "description": "Core entity kind (problem, conjecture, claim, criticism, test, source) or a namespaced extension kind such as cintamani:experiment."}, "record_kind": {"type": "string", "enum": ["assessment.record", "test_outcome.record", "sweep.record"]}}, "additionalProperties": false}}, "limit_per_query": {"type": "integer", "minimum": 1, "maximum": 20}}, "required": ["queries"], "additionalProperties": false}
+    },
+    {
+      "name": "epistemic_graph_source_inspect",
+      "description": "Inspect epistemically relevant Markdown sections in bounded site-local source files.",
+      "class": "feature",
+      "feature": "source_inspect",
+      "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true},
+      "inputSchema": {"type": "object", "properties": {"paths": {"type": "array", "minItems": 1, "maxItems": 20, "items": {"type": "string", "minLength": 1}}, "max_sections_per_file": {"type": "integer", "minimum": 1, "maximum": 50}, "max_chars_per_section": {"type": "integer", "minimum": 100, "maximum": 4000}}, "required": ["paths"], "additionalProperties": false}
+    },
+    {
+      "name": "epistemic_graph_neighborhood",
+      "description": "Read a bounded one-hop neighborhood.",
+      "class": "core",
+      "feature": null,
+      "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true},
+      "inputSchema": {"type": "object", "properties": {"entity_id": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}}, "required": ["entity_id"], "additionalProperties": false}
+    },
+    {
+      "name": "epistemic_graph_snapshot",
+      "description": "Read a ledger-head-bound, independently paged node and edge snapshot for operator visualization.",
+      "class": "feature",
+      "feature": "snapshot",
+      "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true},
+      "inputSchema": {"type": "object", "properties": {"entity_offset": {"type": "integer", "minimum": 0}, "relation_offset": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 1000}, "expected_ledger_head": {"type": ["string", "null"]}}, "additionalProperties": false}
+    },
+    {
+      "name": "epistemic_graph_sequence_create",
+      "description": "Create an immutable Site-owned numeric sequence.",
+      "class": "feature",
+      "feature": "sequences",
+      "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false},
+      "inputSchema": {"type": "object", "properties": {"sequence_name": {"type": "string", "minLength": 1, "maxLength": 120, "description": "Stable Site-owned sequence name; surrounding whitespace and control characters are refused."}, "actor": {"type": "string", "minLength": 1, "maxLength": 256}, "authority_basis": {"type": "object", "minProperties": 1, "maxProperties": 32, "description": "Why this actor may mutate the Site-owned sequence authority; the encoded object may not exceed 8192 bytes."}, "start_at": {"type": "integer", "minimum": 1, "default": 1}, "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 256}}, "required": ["sequence_name", "actor", "authority_basis"], "additionalProperties": false}
+    },
+    {
+      "name": "epistemic_graph_sequence_status",
+      "description": "Inspect one sequence and verify its immutable claim chain.",
+      "class": "feature",
+      "feature": "sequences",
+      "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true},
+      "inputSchema": {"type": "object", "properties": {"sequence_name": {"type": "string", "minLength": 1, "maxLength": 120, "description": "Stable Site-owned sequence name; surrounding whitespace and control characters are refused."}}, "required": ["sequence_name"], "additionalProperties": false}
+    },
+    {
+      "name": "epistemic_graph_sequence_list",
+      "description": "List Site-owned sequences with bounded pagination.",
+      "class": "feature",
+      "feature": "sequences",
+      "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true},
+      "inputSchema": {"type": "object", "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 100}, "offset": {"type": "integer", "minimum": 0, "default": 0}}, "additionalProperties": false}
+    },
+    {
+      "name": "epistemic_graph_sequence_claim_next",
+      "description": "Atomically and permanently claim the next number in a Site-owned sequence.",
+      "class": "feature",
+      "feature": "sequences",
+      "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false},
+      "inputSchema": {"type": "object", "properties": {"sequence_name": {"type": "string", "minLength": 1, "maxLength": 120, "description": "Stable Site-owned sequence name; surrounding whitespace and control characters are refused."}, "actor": {"type": "string", "minLength": 1, "maxLength": 256}, "authority_basis": {"type": "object", "minProperties": 1, "maxProperties": 32, "description": "Why this actor may mutate the Site-owned sequence authority; the encoded object may not exceed 8192 bytes."}, "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 256, "description": "Required unique claim intent. Exact retries return the original number; incompatible reuse is refused."}}, "required": ["sequence_name", "actor", "authority_basis", "idempotency_key"], "additionalProperties": false}
+    },
+    {
+      "name": "epistemic_graph_sequence_claims",
+      "description": "Read bounded immutable claim history for one sequence.",
+      "class": "feature",
+      "feature": "sequences",
+      "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true},
+      "inputSchema": {"type": "object", "properties": {"sequence_name": {"type": "string", "minLength": 1, "maxLength": 120, "description": "Stable Site-owned sequence name; surrounding whitespace and control characters are refused."}, "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 100}, "offset": {"type": "integer", "minimum": 0, "default": 0}}, "required": ["sequence_name"], "additionalProperties": false}
+    },
+    {
+      "name": "epistemic_graph_proposal_submit",
+      "description": "Persist an immutable atomic proposal of typed graph operations. Use guidance for a complete copyable example.",
+      "class": "core",
+      "feature": "proposals",
+      "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false},
+      "inputSchema": {"type": "object", "properties": {"actor": {"type": "string", "minLength": 1}, "authority_basis": {"type": "object", "description": "Why this actor may propose the contribution.", "minProperties": 1}, "idempotency_key": {"type": "string", "minLength": 1, "description": "Optional override; omitted values use deterministic content-hash idempotency."}, "expected_ledger_head": {"type": ["string", "null"], "description": "Optional explicit CAS boundary; omitted means the current head. Use null only for an empty graph."}, "operations": {"type": "array", "minItems": 1, "maxItems": 200, "items": {"oneOf": [
+        {"title": "Declare entity", "type": "object", "properties": {"op": {"const": "entity.declare"}, "entity_id": {"type": "string", "minLength": 1, "description": "Optional override; omit for deterministic identity from kind, title, version, and locator."}, "local_ref": {"type": "string", "minLength": 1, "description": "Optional proposal-local name for relation source_ref/target_ref."}, "kind": {"type": "string", "description": "Core entity kind (problem, conjecture, claim, criticism, test, source) or a namespaced extension kind such as cintamani:experiment."}, "title": {"type": "string", "minLength": 1}, "version": {"type": "string", "minLength": 1}, "locator": {"type": "string", "minLength": 1}}, "required": ["op", "kind", "title"], "allOf": [{"if": {"properties": {"kind": {"const": "source"}}, "required": ["kind"]}, "then": {"required": ["version", "locator"]}}], "additionalProperties": true},
+        {"title": "Declare relation", "type": "object", "properties": {"op": {"const": "relation.declare"}, "relation_id": {"type": "string", "minLength": 1, "description": "Optional override. Omit to derive a deterministic id from relation_type, source_id, and target_id."}, "relation_type": {"oneOf": [{"type": "string", "enum": ["addresses", "criticizes", "tests", "depends_on", "derived_from", "transforms", "supersedes"]}, {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_.-]*:[A-Za-z][A-Za-z0-9_.-]*$"}], "description": "Use a listed core relation, or namespace an extension such as marici:refines."}, "source_id": {"type": "string", "minLength": 1}, "target_id": {"type": "string", "minLength": 1}, "source_ref": {"type": "string", "minLength": 1}, "target_ref": {"type": "string", "minLength": 1}}, "required": ["op", "relation_type"], "allOf": [{"anyOf": [{"required": ["source_id"]}, {"required": ["source_ref"]}]}, {"anyOf": [{"required": ["target_id"]}, {"required": ["target_ref"]}]}], "additionalProperties": true},
+        {"title": "Record assessment", "type": "object", "properties": {"op": {"const": "assessment.record"}, "assessment_id": {"type": "string", "minLength": 1}, "subject_id": {"type": "string", "minLength": 1}, "judgment": {"type": "string", "minLength": 1}, "actor": {"type": "string", "minLength": 1}, "reason": {"type": "string", "minLength": 1}, "evidence": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {"source_id": {"type": "string", "minLength": 1}, "locator": {"type": "string", "minLength": 1}, "paraphrase": {"type": "string", "minLength": 1}}, "required": ["source_id", "locator", "paraphrase"], "additionalProperties": false}}}, "required": ["op", "assessment_id", "subject_id", "judgment", "actor", "reason", "evidence"], "additionalProperties": true},
+        {"title": "Record test outcome", "type": "object", "properties": {"op": {"const": "test_outcome.record"}, "outcome_id": {"type": "string", "minLength": 1}, "test_id": {"type": "string", "minLength": 1}, "actor": {"type": "string", "minLength": 1}, "outcome": {"type": "string", "minLength": 1}, "evidence": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {"source_id": {"type": "string", "minLength": 1}, "locator": {"type": "string", "minLength": 1}, "paraphrase": {"type": "string", "minLength": 1}}, "required": ["source_id", "locator", "paraphrase"], "additionalProperties": false}}}, "required": ["op", "outcome_id", "test_id", "actor", "outcome", "evidence"], "additionalProperties": true},
+        {"title": "Record bounded search sweep", "type": "object", "properties": {"op": {"const": "sweep.record"}, "sweep_id": {"type": "string", "minLength": 1}, "interval_start": {"type": "string", "minLength": 1}, "interval_end": {"type": "string", "minLength": 1}, "method": {"type": "string", "minLength": 1}, "result": {"type": "string", "minLength": 1}}, "required": ["op", "sweep_id", "interval_start", "interval_end", "method", "result"], "additionalProperties": true}
+      ]}}}, "required": ["actor", "authority_basis", "operations"], "additionalProperties": false}
+    },
+    {
+      "name": "epistemic_graph_submit_review_admit",
+      "description": "Submit, policy-review, and admit one atomic contribution while preserving the immutable proposal and review gate.",
+      "class": "feature",
+      "feature": "proposals",
+      "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false},
+      "inputSchema": {"type": "object", "properties": {"actor": {"type": "string", "minLength": 1}, "authority_basis": {"type": "object", "description": "Why this actor may propose the contribution.", "minProperties": 1}, "idempotency_key": {"type": "string", "minLength": 1, "description": "Optional override; omitted values use deterministic content-hash idempotency."}, "expected_ledger_head": {"type": ["string", "null"], "description": "Optional explicit CAS boundary; omitted means the current head. Use null only for an empty graph."}, "operations": {"type": "array", "minItems": 1, "maxItems": 200, "items": {"oneOf": [
+        {"title": "Declare entity", "type": "object", "properties": {"op": {"const": "entity.declare"}, "entity_id": {"type": "string", "minLength": 1, "description": "Optional override; omit for deterministic identity from kind, title, version, and locator."}, "local_ref": {"type": "string", "minLength": 1, "description": "Optional proposal-local name for relation source_ref/target_ref."}, "kind": {"type": "string", "description": "Core entity kind (problem, conjecture, claim, criticism, test, source) or a namespaced extension kind such as cintamani:experiment."}, "title": {"type": "string", "minLength": 1}, "version": {"type": "string", "minLength": 1}, "locator": {"type": "string", "minLength": 1}}, "required": ["op", "kind", "title"], "allOf": [{"if": {"properties": {"kind": {"const": "source"}}, "required": ["kind"]}, "then": {"required": ["version", "locator"]}}], "additionalProperties": true},
+        {"title": "Declare relation", "type": "object", "properties": {"op": {"const": "relation.declare"}, "relation_id": {"type": "string", "minLength": 1, "description": "Optional override. Omit to derive a deterministic id from relation_type, source_id, and target_id."}, "relation_type": {"oneOf": [{"type": "string", "enum": ["addresses", "criticizes", "tests", "depends_on", "derived_from", "transforms", "supersedes"]}, {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_.-]*:[A-Za-z][A-Za-z0-9_.-]*$"}], "description": "Use a listed core relation, or namespace an extension such as marici:refines."}, "source_id": {"type": "string", "minLength": 1}, "target_id": {"type": "string", "minLength": 1}, "source_ref": {"type": "string", "minLength": 1}, "target_ref": {"type": "string", "minLength": 1}}, "required": ["op", "relation_type"], "allOf": [{"anyOf": [{"required": ["source_id"]}, {"required": ["source_ref"]}]}, {"anyOf": [{"required": ["target_id"]}, {"required": ["target_ref"]}]}], "additionalProperties": true},
+        {"title": "Record assessment", "type": "object", "properties": {"op": {"const": "assessment.record"}, "assessment_id": {"type": "string", "minLength": 1}, "subject_id": {"type": "string", "minLength": 1}, "judgment": {"type": "string", "minLength": 1}, "actor": {"type": "string", "minLength": 1}, "reason": {"type": "string", "minLength": 1}, "evidence": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {"source_id": {"type": "string", "minLength": 1}, "locator": {"type": "string", "minLength": 1}, "paraphrase": {"type": "string", "minLength": 1}}, "required": ["source_id", "locator", "paraphrase"], "additionalProperties": false}}}, "required": ["op", "assessment_id", "subject_id", "judgment", "actor", "reason", "evidence"], "additionalProperties": true},
+        {"title": "Record test outcome", "type": "object", "properties": {"op": {"const": "test_outcome.record"}, "outcome_id": {"type": "string", "minLength": 1}, "test_id": {"type": "string", "minLength": 1}, "actor": {"type": "string", "minLength": 1}, "outcome": {"type": "string", "minLength": 1}, "evidence": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {"source_id": {"type": "string", "minLength": 1}, "locator": {"type": "string", "minLength": 1}, "paraphrase": {"type": "string", "minLength": 1}}, "required": ["source_id", "locator", "paraphrase"], "additionalProperties": false}}}, "required": ["op", "outcome_id", "test_id", "actor", "outcome", "evidence"], "additionalProperties": true},
+        {"title": "Record bounded search sweep", "type": "object", "properties": {"op": {"const": "sweep.record"}, "sweep_id": {"type": "string", "minLength": 1}, "interval_start": {"type": "string", "minLength": 1}, "interval_end": {"type": "string", "minLength": 1}, "method": {"type": "string", "minLength": 1}, "result": {"type": "string", "minLength": 1}}, "required": ["op", "sweep_id", "interval_start", "interval_end", "method", "result"], "additionalProperties": true}
+      ]}}}, "required": ["actor", "authority_basis", "operations"], "additionalProperties": false}
+    },
+    {
+      "name": "epistemic_graph_capture_sources",
+      "description": "Create one bounded proposal from concise source descriptors plus optional typed non-source operations; reports existing identities before explicit review and admission.",
+      "class": "feature",
+      "feature": "proposals",
+      "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false},
+      "inputSchema": {"type": "object", "properties": {"actor": {"type": "string", "minLength": 1}, "authority_basis": {"type": "object", "description": "Why this actor may propose the contribution.", "minProperties": 1}, "idempotency_key": {"type": "string", "minLength": 1, "description": "Optional override; omitted values use deterministic content-hash idempotency."}, "expected_ledger_head": {"type": ["string", "null"], "description": "Optional explicit CAS boundary; omitted means the current head. Use null only for an empty graph."}, "sources": {"type": "array", "minItems": 1, "maxItems": 100, "items": {"type": "object", "properties": {"source_id": {"type": "string", "minLength": 1}, "title": {"type": "string", "minLength": 1}, "version": {"type": "string", "minLength": 1}, "locator": {"type": "string", "minLength": 1}}, "required": ["source_id", "title", "version", "locator"], "additionalProperties": false}}, "operations": {"type": "array", "maxItems": 199, "default": [], "items": {"oneOf": [
+        {"title": "Declare entity", "type": "object", "properties": {"op": {"const": "entity.declare"}, "entity_id": {"type": "string", "minLength": 1, "description": "Optional override; omit for deterministic identity from kind, title, version, and locator."}, "local_ref": {"type": "string", "minLength": 1, "description": "Optional proposal-local name for relation source_ref/target_ref."}, "kind": {"type": "string", "description": "Core entity kind (problem, conjecture, claim, criticism, test, source) or a namespaced extension kind such as cintamani:experiment."}, "title": {"type": "string", "minLength": 1}, "version": {"type": "string", "minLength": 1}, "locator": {"type": "string", "minLength": 1}}, "required": ["op", "kind", "title"], "allOf": [{"if": {"properties": {"kind": {"const": "source"}}, "required": ["kind"]}, "then": {"required": ["version", "locator"]}}], "additionalProperties": true},
+        {"title": "Declare relation", "type": "object", "properties": {"op": {"const": "relation.declare"}, "relation_id": {"type": "string", "minLength": 1, "description": "Optional override. Omit to derive a deterministic id from relation_type, source_id, and target_id."}, "relation_type": {"oneOf": [{"type": "string", "enum": ["addresses", "criticizes", "tests", "depends_on", "derived_from", "transforms", "supersedes"]}, {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_.-]*:[A-Za-z][A-Za-z0-9_.-]*$"}], "description": "Use a listed core relation, or namespace an extension such as marici:refines."}, "source_id": {"type": "string", "minLength": 1}, "target_id": {"type": "string", "minLength": 1}, "source_ref": {"type": "string", "minLength": 1}, "target_ref": {"type": "string", "minLength": 1}}, "required": ["op", "relation_type"], "allOf": [{"anyOf": [{"required": ["source_id"]}, {"required": ["source_ref"]}]}, {"anyOf": [{"required": ["target_id"]}, {"required": ["target_ref"]}]}], "additionalProperties": true},
+        {"title": "Record assessment", "type": "object", "properties": {"op": {"const": "assessment.record"}, "assessment_id": {"type": "string", "minLength": 1}, "subject_id": {"type": "string", "minLength": 1}, "judgment": {"type": "string", "minLength": 1}, "actor": {"type": "string", "minLength": 1}, "reason": {"type": "string", "minLength": 1}, "evidence": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {"source_id": {"type": "string", "minLength": 1}, "locator": {"type": "string", "minLength": 1}, "paraphrase": {"type": "string", "minLength": 1}}, "required": ["source_id", "locator", "paraphrase"], "additionalProperties": false}}}, "required": ["op", "assessment_id", "subject_id", "judgment", "actor", "reason", "evidence"], "additionalProperties": true},
+        {"title": "Record test outcome", "type": "object", "properties": {"op": {"const": "test_outcome.record"}, "outcome_id": {"type": "string", "minLength": 1}, "test_id": {"type": "string", "minLength": 1}, "actor": {"type": "string", "minLength": 1}, "outcome": {"type": "string", "minLength": 1}, "evidence": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {"source_id": {"type": "string", "minLength": 1}, "locator": {"type": "string", "minLength": 1}, "paraphrase": {"type": "string", "minLength": 1}}, "required": ["source_id", "locator", "paraphrase"], "additionalProperties": false}}}, "required": ["op", "outcome_id", "test_id", "actor", "outcome", "evidence"], "additionalProperties": true},
+        {"title": "Record bounded search sweep", "type": "object", "properties": {"op": {"const": "sweep.record"}, "sweep_id": {"type": "string", "minLength": 1}, "interval_start": {"type": "string", "minLength": 1}, "interval_end": {"type": "string", "minLength": 1}, "method": {"type": "string", "minLength": 1}, "result": {"type": "string", "minLength": 1}}, "required": ["op", "sweep_id", "interval_start", "interval_end", "method", "result"], "additionalProperties": true}
+      ]}}}, "required": ["actor", "authority_basis", "sources"], "additionalProperties": false}
+    },
+    {
+      "name": "epistemic_graph_proposal_read",
+      "description": "Read immutable proposal metadata and a bounded page of operations.",
+      "class": "core",
+      "feature": "proposals",
+      "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true},
+      "inputSchema": {"type": "object", "properties": {"proposal_id": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}, "offset": {"type": "integer", "minimum": 0}}, "required": ["proposal_id"], "additionalProperties": false}
+    },
+    {
+      "name": "epistemic_graph_proposal_resubmit",
+      "description": "Create a new immutable proposal by dropping and replacing explicitly identified operations from an earlier proposal.",
+      "class": "core",
+      "feature": "proposals",
+      "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false},
+      "inputSchema": {"type": "object", "properties": {"source_proposal_id": {"type": "string", "minLength": 1}, "actor": {"type": "string", "minLength": 1}, "authority_basis": {"type": "object", "minProperties": 1}, "idempotency_key": {"type": "string", "minLength": 1, "description": "Optional override; omitted values use deterministic content-hash idempotency."}, "expected_ledger_head": {"type": ["string", "null"], "description": "Optional explicit CAS boundary; omitted means the current head."}, "drop_operation_ids": {"type": "array", "maxItems": 200, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}, "replacements": {"type": "array", "maxItems": 200, "items": {"oneOf": [
+        {"title": "Declare entity", "type": "object", "properties": {"op": {"const": "entity.declare"}, "entity_id": {"type": "string", "minLength": 1, "description": "Optional override; omit for deterministic identity from kind, title, version, and locator."}, "local_ref": {"type": "string", "minLength": 1, "description": "Optional proposal-local name for relation source_ref/target_ref."}, "kind": {"type": "string", "description": "Core entity kind (problem, conjecture, claim, criticism, test, source) or a namespaced extension kind such as cintamani:experiment."}, "title": {"type": "string", "minLength": 1}, "version": {"type": "string", "minLength": 1}, "locator": {"type": "string", "minLength": 1}}, "required": ["op", "kind", "title"], "allOf": [{"if": {"properties": {"kind": {"const": "source"}}, "required": ["kind"]}, "then": {"required": ["version", "locator"]}}], "additionalProperties": true},
+        {"title": "Declare relation", "type": "object", "properties": {"op": {"const": "relation.declare"}, "relation_id": {"type": "string", "minLength": 1, "description": "Optional override. Omit to derive a deterministic id from relation_type, source_id, and target_id."}, "relation_type": {"oneOf": [{"type": "string", "enum": ["addresses", "criticizes", "tests", "depends_on", "derived_from", "transforms", "supersedes"]}, {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_.-]*:[A-Za-z][A-Za-z0-9_.-]*$"}], "description": "Use a listed core relation, or namespace an extension such as marici:refines."}, "source_id": {"type": "string", "minLength": 1}, "target_id": {"type": "string", "minLength": 1}, "source_ref": {"type": "string", "minLength": 1}, "target_ref": {"type": "string", "minLength": 1}}, "required": ["op", "relation_type"], "allOf": [{"anyOf": [{"required": ["source_id"]}, {"required": ["source_ref"]}]}, {"anyOf": [{"required": ["target_id"]}, {"required": ["target_ref"]}]}], "additionalProperties": true},
+        {"title": "Record assessment", "type": "object", "properties": {"op": {"const": "assessment.record"}, "assessment_id": {"type": "string", "minLength": 1}, "subject_id": {"type": "string", "minLength": 1}, "judgment": {"type": "string", "minLength": 1}, "actor": {"type": "string", "minLength": 1}, "reason": {"type": "string", "minLength": 1}, "evidence": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {"source_id": {"type": "string", "minLength": 1}, "locator": {"type": "string", "minLength": 1}, "paraphrase": {"type": "string", "minLength": 1}}, "required": ["source_id", "locator", "paraphrase"], "additionalProperties": false}}}, "required": ["op", "assessment_id", "subject_id", "judgment", "actor", "reason", "evidence"], "additionalProperties": true},
+        {"title": "Record test outcome", "type": "object", "properties": {"op": {"const": "test_outcome.record"}, "outcome_id": {"type": "string", "minLength": 1}, "test_id": {"type": "string", "minLength": 1}, "actor": {"type": "string", "minLength": 1}, "outcome": {"type": "string", "minLength": 1}, "evidence": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {"source_id": {"type": "string", "minLength": 1}, "locator": {"type": "string", "minLength": 1}, "paraphrase": {"type": "string", "minLength": 1}}, "required": ["source_id", "locator", "paraphrase"], "additionalProperties": false}}}, "required": ["op", "outcome_id", "test_id", "actor", "outcome", "evidence"], "additionalProperties": true},
+        {"title": "Record bounded search sweep", "type": "object", "properties": {"op": {"const": "sweep.record"}, "sweep_id": {"type": "string", "minLength": 1}, "interval_start": {"type": "string", "minLength": 1}, "interval_end": {"type": "string", "minLength": 1}, "method": {"type": "string", "minLength": 1}, "result": {"type": "string", "minLength": 1}}, "required": ["op", "sweep_id", "interval_start", "interval_end", "method", "result"], "additionalProperties": true}
+      ]}}}, "required": ["source_proposal_id", "actor", "authority_basis"], "additionalProperties": false}
+    },
+    {
+      "name": "epistemic_graph_proposal_review",
+      "description": "Validate an immutable proposal without asserting truth.",
+      "class": "core",
+      "feature": "proposals",
+      "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false},
+      "inputSchema": {"type": "object", "properties": {"proposal_id": {"type": "string"}}, "required": ["proposal_id"], "additionalProperties": false}
+    },
+    {
+      "name": "epistemic_graph_proposal_admit",
+      "description": "Append a policy-valid proposal to canonical history.",
+      "class": "core",
+      "feature": "proposals",
+      "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false},
+      "inputSchema": {"type": "object", "properties": {"proposal_id": {"type": "string"}, "actor": {"type": "string"}, "authority_basis": {"type": "object"}, "expected_ledger_head": {"type": ["string", "null"], "description": "Optional explicit CAS boundary; omitted means the current head."}, "idempotency_key": {"type": "string", "description": "Optional override; omitted values use deterministic proposal admission identity."}}, "required": ["proposal_id", "actor", "authority_basis"], "additionalProperties": false}
+    },
+    {
+      "name": "epistemic_graph_proposal_reject",
+      "description": "Reject a proposal with criticism or rationale.",
+      "class": "core",
+      "feature": "proposals",
+      "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false},
+      "inputSchema": {"type": "object", "properties": {"proposal_id": {"type": "string"}, "actor": {"type": "string"}, "reason": {"type": "string"}}, "required": ["proposal_id", "actor", "reason"], "additionalProperties": false}
+    },
+    {
+      "name": "epistemic_graph_export",
+      "description": "Export a deterministic JSON or JSON-LD projection.",
+      "class": "feature",
+      "feature": "export",
+      "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true},
+      "inputSchema": {"type": "object", "properties": {"format": {"type": "string", "enum": ["json", "jsonld"]}}, "additionalProperties": false}
+    }
+  ]
+}

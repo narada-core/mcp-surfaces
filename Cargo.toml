@@ -3,9 +3,11 @@ resolver = "2"
 members = [
   "native-distribution",
   "packages/agent-context-mcp/native",
+  "packages/ledger-domain-mcp/native",
   "packages/mcp-loader-mcp/native",
   "packages/media-operations-mcp/native",
   "packages/mcp-registrar/native",
+  "packages/shared/event-ledger-native/native",
   "packages/shared/mcp-fabric-contracts/native",
   "packages/shared/mcp-lifecycle-native/native",
   "packages/shared/mcp-materialization-contract-native/native",

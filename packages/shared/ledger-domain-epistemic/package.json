@@ -1,0 +1,29 @@
+{
+  "name": "@narada-core/ledger-domain-epistemic",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "description": "Static narada.ledger-domain.v1 descriptor for the epistemic-graph domain.",
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty false",
+    "test": "pnpm run test:bun",
+    "test:bun": "pnpm build && bun dist/test/domain.test.js",
+    "test:node": "pnpm build && node --disable-warning=ExperimentalWarning dist/test/domain.test.js"
+  },
+  "exports": {
+    "./domain.json": "./domain.json",
+    "./domain.schema.json": "./domain.schema.json"
+  },
+  "files": [
+    "domain.json",
+    "domain.schema.json",
+    "README.md"
+  ],
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "ajv": "^8.20.0",
+    "typescript": "^5.8.3"
+  }
+}

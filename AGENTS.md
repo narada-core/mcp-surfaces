@@ -23,6 +23,8 @@ Current packages:
 - `@narada-core/mcp-fabric-contracts`: shared versioned MCP descriptor, manifest, carrier projection, observation, and reconciliation contracts.
 - `@narada-core/mcp-fabric-compiler`: pure manifest and Codex/Kimi/OpenCode carrier projection compiler with strict Moonshot schema validation.
 - `@narada-core/execution-contract`: shared typed execution binding and request fingerprint contract.
+- `@narada-core/ledger-domain-epistemic`: static `narada.ledger-domain.v1` descriptor for the epistemic-graph domain (data only; behavior lives in the engine).
+- `@narada-core/ledger-domain-mcp`: generic `narada.ledger-domain.v1` engine; hosts one static domain descriptor as a complete event-ledger MCP surface.
 - `@narada-core/provider-registry`: shared typed, policy-neutral provider/model capability registry loading and resolution.
 - `@narada-core/local-filesystem-mcp`: governed filesystem MCP surface.
 - `@narada-core/structured-command-mcp`: policy-gated structured command MCP surface.
@@ -54,6 +56,7 @@ Current packages:
 - `@narada-core/nars-session-mcp`: governed input and bounded readback for existing NARS sessions.
 - `@narada-core/quota-meter-mcp`: host-level quota-meter glide status and desktop overlay lifecycle surface.
 - `@narada-core/browser-control-mcp`: bounded host-level browser-control surface for authenticated UX verification.
+- `event-ledger-native`: shared Rust-only crate (`narada-mcp-event-ledger`) hosting the event-ledger regime machinery; consumed via path dependency by `@narada-core/mcp-surfaces-native` and `@narada-core/ledger-domain-mcp`.
 
 SOP execution and scheduler activation are separate authorities: `@narada-core/sop-mcp` owns procedure runs and `@narada-core/scheduler-mcp` owns activation.
 
@@ -62,7 +65,7 @@ workspace is the canonical Site root, `.narada` is the control root, and
 `.narada/site.json` is a generated local marker ignored by Git.
 
 - @narada-core/operator-console-overlay-mcp: host-level dedicated MCP surface for the Narada Operator Console overlay; canonical overlay mechanics remain owned by Narada proper.
-- `epistemic-graph`: generic Rust-native problem-situation surface hosted by `@narada-core/mcp-surfaces-native`; tracked events are authoritative and its SQLite projection is disposable.
+- `epistemic-graph`: generic Rust-native problem-situation domain descriptor (`ledger-domain-epistemic`) hosted by the `ledger-domain-mcp` engine; tracked events are authoritative and its SQLite projection is disposable. Its ledger machinery is the shared `event-ledger-native` crate (`docs/event-ledger-format.md`).
 
 ## Getting Started
 
@@ -113,9 +116,9 @@ Agents can submit feedback about any MCP surface via `@narada-core/surface-feedb
 - `surface_feedback_show` — show one feedback entry within an explicit read scope.
 - `surface_feedback_stats` — aggregated counts by surface, kind, and status within an explicit read scope.
 
-Read calls must pass `scope` explicitly. `all_authorized` requires the canonical feedback store and server-bound User Site authority; `authority_visible`, `owned_surfaces`, and `authority_site_submissions` are narrower server-bound views. Submitter-site visibility compares server-bound authority to declared metadata and is not authenticated provenance; `submitter_site_id_filter` is declarative metadata filtering only and never establishes provenance or authorization.
+Read calls must pass `scope` explicitly. `all_authorized` and `store_reconciliation` require the canonical feedback store (`feedback_global_read_requires_canonical_store` otherwise); `authority_visible` and `authority_site_submissions` are server-bound submitter-Site views; `owned_surfaces` requires server-bound owned surfaces. Submitter-site visibility compares server-bound authority to declared metadata and is not authenticated provenance; `submitter_site_id_filter` is declarative metadata filtering only and never establishes provenance or authorization.
 
-The canonical feedback server automatically materializes repository/Site-local stores discovered from registrar-generated `.narada/allowed-roots.json` or repeated `--feedback-discovery-root`/`NARADA_FEEDBACK_DISCOVERY_ROOTS` configuration. Discovery is read-only and bounded to each root, its immediate child directories, and the fixed feedback DB locations; it does not infer cross-Site authority from filesystem reachability. Inspect `surface_feedback_doctor.federation` for source provenance and conflicts.
+The native authority is an append-only event ledger under `<feedback_root>/ledger/` (`narada.event-ledger.v1`; see `docs/event-ledger-format.md`). The SQLite state under `<feedback_root>/.ai/feedback/projection.sqlite` is a disposable fold projection rebuilt from the ledger on every read. A legacy `.feedback/surface-feedback.db` store is migrated once automatically into the ledger and never written again. The TypeScript implementation in `packages/surface-feedback-mcp` is frozen legacy/rollback and reads only pre-migration state.
 
 Kinds:
 
@@ -166,6 +169,8 @@ pnpm test:mcp-runtime-observation
 pnpm test:mcp-e2e-harness
 pnpm test:mcp-fabric-contracts
 pnpm test:mcp-fabric-compiler
+pnpm test:ledger-domain-epistemic
+pnpm test:ledger-domain
 pnpm test:provider-registry
 pnpm test:local-filesystem
 pnpm test:structured-command
@@ -251,6 +256,9 @@ Do all of the following in the same change:
 - `project-state-mcp` owns only the read-only Local Site projection of a site's virtual project-state CLI. It must not own the site's SQL authority, mutate generated outputs, or imply fabrication, metrology, external evidence, qualification, or flight credit.
 - `mcp-loader-mcp` owns runtime attachment/proxying for allowed MCP surfaces; it does not own the surfaces it attaches to and must not become a general orchestration layer. It honors explicit `surface_projection.runtime_requirements`: omitted runtime context selects only neutral projections, and runtime-affined projections require a matching `runtime_kind`.
 - `mcp-transport` owns reusable payload/output reference mechanics.
+- `event-ledger-native` owns the shared event-ledger regime machinery: hash-chained immutable JSON event ledger, authority locks, head-CAS admission, idempotency, and the disposable SQLite projection shell. It carries no domain concepts and must preserve the insertion-order digest convention (`docs/event-ledger-format.md`).
+- `ledger-domain-epistemic` owns only the static epistemic domain descriptor (`domain.json` + `narada.ledger-domain.v1` schema); all behavior lives in the engine (`narada-ledger-domain`). It must stay byte-identical to the serving implementation's external contract.
+- `ledger-domain-mcp` owns the generic descriptor-driven engine (`narada-ledger-domain`): it loads one static `narada.ledger-domain.v1` descriptor per process and serves the surface that descriptor defines. It must not acquire domain behavior — domains are static `narada.ledger-domain.v1` packages such as `ledger-domain-epistemic`.
 - `mcp-telemetry` owns optional site-policy-gated telemetry helpers; it must not replace mandatory audit logs or persist raw args/results by default.
 - `mcp-affordances` owns UI-neutral MCP affordance document types, builders, and validation helpers. It must not encode renderer-specific components or bypass MCP tool schemas and policy checks.
 - `mcp-runtime-proxy` owns carrier-facing startup diagnostics and transport-neutral generation replacement for eligible stdio and Streamable HTTP surfaces. It must not authorize tools, mutate policy, interpret surface domain behavior, or hot-replace `restart_required` surfaces.

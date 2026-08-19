@@ -1,10 +1,25 @@
 # Epistemic Graph MCP
 
+> **Hosting note**: `epistemic-graph` is served by the generic ledger-domain
+> engine in `packages/ledger-domain-mcp` (`narada-ledger-domain`), which loads
+> the static domain descriptor at
+> `packages/shared/ledger-domain-epistemic/domain.json`. The descriptor format
+> is specified in
+> [docs/ledger-domain-descriptor.md](../../../../docs/ledger-domain-descriptor.md).
+> It was previously a module of `@narada-core/mcp-surfaces-native`. The
+> behavioral contract below is unchanged.
+
 The `epistemic-graph` surface is the protocol adapter for a Site-owned problem-situation graph. The mechanism is generic; the selected Site supplies the root and therefore the authority, ledger, and projection locations.
 
 ## Authority boundary
 
 The immutable, hash-linked ledger under `.narada/epistemic/ledger` is authoritative. SQLite under `.narada/.ai/epistemic-graph` is a disposable read projection and may always be rebuilt from the ledger.
+
+The ledger machinery is the shared Rust crate `narada-mcp-event-ledger`
+(`packages/shared/event-ledger-native`); the regime — event envelope, hash
+chain, authority locks, head-CAS admission, idempotency, and the disposable
+projection — is specified in
+[docs/event-ledger-format.md](../../../../docs/event-ledger-format.md).
 
 Site-owned numeric sequences are a separate coordination authority under
 `.narada/epistemic/sequences`; they are not graph assertions and never enter the
