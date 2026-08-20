@@ -1351,14 +1351,31 @@ impl Engine {
                 json!({"schema":self.schema_id("query.v1"),"status":"ok","result_kind":"records","record_kind":record_kind,"compact":compact,"items":items,"offset":offset,"limit":limit,"returned":items.len(),"bounded":true}),
             );
         }
-        let sql = format!("select entity_id,kind,payload_json,event_id from {} where (?1='' or kind=?1) and (?2='' or payload_json like ?3) order by entity_id limit ?4 offset ?5", self.entity_table);
+        let mut accepted_kinds = Vec::new();
+        if !kind.is_empty() {
+            accepted_kinds.push(kind);
+            if let Some(aliases) = self.domain.query.kind_aliases.get(kind) {
+                accepted_kinds.extend(aliases.iter().map(String::as_str));
+            }
+        }
+        let kind_predicate = if accepted_kinds.is_empty() {
+            "1=1".to_string()
+        } else {
+            let literals = accepted_kinds
+                .iter()
+                .map(|value| format!("'{}'", value.replace('\'', "''")))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("kind in ({literals})")
+        };
+        let sql = format!("select entity_id,kind,payload_json,event_id from {} where {kind_predicate} and (?1='' or payload_json like ?2) order by entity_id limit ?3 offset ?4", self.entity_table);
         let mut stmt = db.prepare(&sql).map_err(self.db_error("projection_query_prepare_failed"))?;
         let projection = if compact {
             &self.domain.query.entity_compact_projection
         } else {
             &self.domain.query.entity_full_projection
         };
-        let rows = stmt.query_map(params![kind,text,like,limit,offset], |row| {
+        let rows = stmt.query_map(params![text,like,limit,offset], |row| {
             let payload = serde_json::from_str::<Value>(&row.get::<_,String>(2)?).unwrap_or(Value::Null);
             let mut row_values = Map::new();
             row_values.insert("entity_id".into(), json!(row.get::<_,String>(0)?));
@@ -1370,7 +1387,7 @@ impl Engine {
             .collect::<Result<Vec<_>, _>>()
             .map_err(self.db_error("projection_query_row_failed"))?;
         Ok(
-            json!({"schema":self.schema_id("query.v1"),"status":"ok","result_kind":"entities","compact":compact,"items":items,"offset":offset,"limit":limit,"returned":items.len(),"bounded":true}),
+            json!({"schema":self.schema_id("query.v1"),"status":"ok","result_kind":"entities","kind":kind,"expanded_kinds":accepted_kinds,"compact":compact,"items":items,"offset":offset,"limit":limit,"returned":items.len(),"bounded":true}),
         )
     }
 
@@ -2678,6 +2695,85 @@ mod tests {
             guidance.pointer("/communication_model/rule"),
             Some(&json!("Communication records provenance and argumentative causality, but does not become epistemic evidence unless a separate reviewed promotes_to_evidence relation is admitted."))
         );
+    }
+
+    #[test]
+    fn canonical_communication_query_includes_namespaced_legacy_kind() {
+        let engine = engine();
+        let root = std::env::temp_dir().join(format!(
+            "epistemic-communication-alias-test-{}",
+            Uuid::new_v4()
+        ));
+        let proposal = engine
+            .proposal_submit(
+                &root,
+                &Map::from_iter([
+                    ("actor".into(), json!("tester")),
+                    ("authority_basis".into(), json!({"kind":"test"})),
+                    ("idempotency_key".into(), json!("communication-alias-proposal")),
+                    ("expected_ledger_head".into(), Value::Null),
+                    ("operations".into(), json!([
+                        {
+                            "op":"entity.declare",
+                            "kind":"communication",
+                            "title":"Core message",
+                            "sender":"marici.Nima",
+                            "recipient":"marici.Benincasa",
+                            "body":"core body",
+                            "intent":"reply",
+                            "sent_at":"2026-08-20T00:00:00Z"
+                        },
+                        {
+                            "op":"entity.declare",
+                            "kind":"marici:communication",
+                            "title":"Legacy namespaced message",
+                            "sender":"marici.Nima",
+                            "recipient":"marici.Benincasa",
+                            "body":"legacy body",
+                            "intent":"reply",
+                            "sent_at":"2026-08-20T00:01:00Z"
+                        }
+                    ])),
+                ]),
+            )
+            .expect("proposal");
+        engine
+            .proposal_admit(
+                &root,
+                &Map::from_iter([
+                    ("proposal_id".into(), proposal["proposal_id"].clone()),
+                    ("actor".into(), json!("tester")),
+                    ("authority_basis".into(), json!({"kind":"test"})),
+                    ("expected_ledger_head".into(), Value::Null),
+                    ("idempotency_key".into(), json!("communication-alias-admission")),
+                ]),
+            )
+            .expect("admit");
+
+        let canonical = engine
+            .query(
+                &root,
+                &Map::from_iter([("kind".into(), json!("communication"))]),
+            )
+            .expect("canonical query");
+        assert_eq!(canonical["returned"], 2);
+        assert_eq!(
+            canonical["expanded_kinds"],
+            json!(["communication", "marici:communication"])
+        );
+
+        let exact_legacy = engine
+            .query(
+                &root,
+                &Map::from_iter([("kind".into(), json!("marici:communication"))]),
+            )
+            .expect("exact legacy query");
+        assert_eq!(exact_legacy["returned"], 1);
+        assert_eq!(
+            exact_legacy["items"][0]["kind"],
+            "marici:communication"
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

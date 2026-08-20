@@ -206,6 +206,8 @@ pub struct FoldEntry {
 #[derive(Clone, Debug, Deserialize)]
 pub struct QueryConfig {
     pub record_kind_enum: Vec<String>,
+    #[serde(default)]
+    pub kind_aliases: BTreeMap<String, Vec<String>>,
     pub entity_compact_projection: Vec<String>,
     pub entity_full_projection: Vec<String>,
     pub record_compact_projection: Vec<String>,

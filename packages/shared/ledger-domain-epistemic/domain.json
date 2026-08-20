@@ -139,6 +139,9 @@
   },
   "query": {
     "record_kind_enum": ["assessment.record", "test_outcome.record", "sweep.record"],
+    "kind_aliases": {
+      "communication": ["marici:communication"]
+    },
     "entity_compact_projection": ["entity_id", "kind", "title", "event_id"],
     "entity_full_projection": ["entity_id", "kind", "payload", "event_id"],
     "record_compact_projection": ["record_id", "record_kind", "subject_id", "judgment", "status", "event_id"],

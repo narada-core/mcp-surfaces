@@ -242,6 +242,15 @@
       "additionalProperties": false,
       "properties": {
         "record_kind_enum": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "kind_aliases": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {"type": "string", "minLength": 1}
+          }
+        },
         "entity_compact_projection": {"type": "array", "minItems": 1, "items": {"type": "string"}},
         "entity_full_projection": {"type": "array", "minItems": 1, "items": {"type": "string"}},
         "record_compact_projection": {"type": "array", "minItems": 1, "items": {"type": "string"}},
