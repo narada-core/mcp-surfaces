@@ -2730,7 +2730,7 @@ impl Engine {
             let value_json = serde_json::to_string(value).map_err(|error| {
                 self.error(
                     "projection_datom_value_encode_failed",
-                    error.to_string(),
+                    &error.to_string(),
                     Value::Null,
                 )
             })?;
