@@ -251,6 +251,30 @@
             "items": {"type": "string", "minLength": 1}
           }
         },
+        "max_clauses": {"type": "integer", "minimum": 1, "maximum": 256},
+        "max_reach_depth": {"type": "integer", "minimum": 1, "maximum": 64},
+        "max_one_of_values": {"type": "integer", "minimum": 1, "maximum": 256},
+        "max_predicate_depth": {"type": "integer", "minimum": 1, "maximum": 64},
+        "reply_state_attribute": {"type": "string", "minLength": 1},
+        "relation_inverses": {
+          "type": "object",
+          "additionalProperties": {"type": "string", "minLength": 1}
+        },
+        "read_receipt_kind": {"type": "string", "minLength": 1},
+        "read_receipt_kind_attribute": {"type": "string", "minLength": 1},
+        "read_receipt_message_attribute": {"type": "string", "minLength": 1},
+        "read_receipt_reader_attribute": {"type": "string", "minLength": 1},
+        "named_queries": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["mode"],
+            "properties": {
+              "mode": {"enum": ["inbox", "thread"]}
+            },
+            "additionalProperties": true
+          }
+        },
         "entity_compact_projection": {"type": "array", "minItems": 1, "items": {"type": "string"}},
         "entity_full_projection": {"type": "array", "minItems": 1, "items": {"type": "string"}},
         "record_compact_projection": {"type": "array", "minItems": 1, "items": {"type": "string"}},
@@ -261,7 +285,22 @@
         "neighborhood_record_fields": {"type": "array", "minItems": 1, "items": {"type": "string"}}
       }
     },
-    "caps": {"type": "object", "minProperties": 1},
+    "caps": {
+      "type": "object",
+      "required": ["query_execution"],
+      "properties": {
+        "query_execution": {
+          "type": "object",
+          "required": ["max_datoms_scanned", "max_traversal_edges", "max_output_bytes"],
+          "additionalProperties": false,
+          "properties": {
+            "max_datoms_scanned": {"type": "integer", "minimum": 1},
+            "max_traversal_edges": {"type": "integer", "minimum": 1},
+            "max_output_bytes": {"type": "integer", "minimum": 1}
+          }
+        }
+      }
+    },
     "features": {
       "type": "object",
       "additionalProperties": false,

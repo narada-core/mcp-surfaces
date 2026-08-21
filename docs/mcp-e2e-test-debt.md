@@ -6,11 +6,42 @@ files and task records may link here, but they do not replace this inventory.
 
 ## Review metadata
 
-Last reviewed: 2026-08-08
-Review revision: eeb464249eda123f844997481aaaf26d3b7a5880
+Last reviewed: 2026-08-20
+Review revision: 658afe512bc35e2f05b432a1041c3fde54b2322c plus current uncommitted worktree
 Evidence manifest: `docs/mcp-e2e-evidence/20260712-non-pc-host-batch.json`
-Evidence generated at: 2026-07-13
-Evidence freshness: historical, not a current pass
+Evidence generated at: 2026-08-20 for the ledger-domain A0 pass; older rows remain historical
+Evidence freshness: current for the recorded ledger-domain A0 pass; historical for older rows
+
+## Current Checkout Note (2026-08-20)
+
+The current checkout adds a real native protocol matrix for
+`ledger-domain-mcp`: query Datalog and named inbox/thread templates, aliases,
+direction and `since_event`, pulls and reply state, durable read marking and
+idempotent replay, unread/replied predicates through the composable `match`
+surface, opaque query-scoped cursor continuation and stale-head refusal,
+process-level projection rebuild contention, earlier-event tamper refusal,
+sequence-list dispatch, and modern Content-Length transport.
+The current pass also covers the flat `query_batch.v2` envelope, relation and
+record pulls through normalized `record/id` datoms, binding-aware clause
+planning, typed pull-target disambiguation, legacy response-byte enforcement,
+recursive raw-schema validation, and descriptor-owned scan/traversal/output
+budgets.
+The package's ordinary test command now invokes that native suite. The
+registrar/loader fabric test also exercises the same query and thread path
+before and after loader restart. These commands were run successfully on
+2026-08-20 local time (2026-08-21 UTC) in the current working tree: `pnpm --filter @narada-core/ledger-domain-mcp test:node` and
+`pnpm --filter @narada-core/mcp-loader-mcp test:native:fabric`. The fabric result is
+recorded at
+`packages/mcp-loader-mcp/.tmp-tests/e2e-results/epistemic-graph-fabric-e2e.json`
+with SHA-256
+`6feb96c0023de9a82a1469d8a3edbd58d0c2108a60ad68ad99acb2af790049a0`; its
+status is `passed`, its authority is `A0`, its boundaries are `B1`-`B3`, and
+cleanup reports both child closure and temporary-root removal. The native
+protocol run reported 35 native unit tests plus 8 live child-process tests passed;
+the shared event-ledger evaluator reported 27 tests passed, and the package
+Node smoke path passed as well. The native artifact rebuild used
+build fingerprint
+`c39f9791c1e43171400fe74dfb2e8240f4ff242e72e4bce8ec3b2c18898c2724`.
 
 External Narada and PC Site references in this register are governed by the
 [cross-repository contract register](cross-repository-contracts.md#contract-register);
@@ -131,13 +162,13 @@ without hidden operator state.
 ## Debt Closure
 
 The objective is zero outstanding non-PC-host implementation debt, not an
-untruthful claim that unavailable authorities were exercised. The current
-register has 22 non-PC-host rows with `Debt status: complete`, including six
-external-authority rows whose `Authority result` is honestly `not_run`. The
+untruthful claim that unavailable authorities were exercised. The historical
+register has 22 prior non-PC-host rows with `Debt status: complete`, including
+six external-authority rows whose `Authority result` is honestly `not_run`.
+The `ledger-domain-mcp` row is now complete for its A0 native and registrar/
+loader fabric boundaries, with current structured evidence recorded above. The
 launcher and Scheduler PC-host boundaries are separately proven; the remaining
-PC-host authority rows remain explicitly excluded. Therefore implementation
-debt is zero while external and remaining PC-host authority gaps remain visible
-and non-passing.
+PC-host authority rows remain explicitly excluded.
 
 ## PC-host Scope Exclusions
 
@@ -183,6 +214,7 @@ live external-provider authority.
 | P0 | `task-lifecycle-mcp` | Site-bound carrier lifecycle | [`test/site-fabric-lifecycle-e2e.test.ts`](../packages/task-lifecycle-mcp/test/site-fabric-lifecycle-e2e.test.ts) launches the actual child, claims/finishes/reviews a controlled task, and verifies SQLite plus Markdown closure evidence | complete | passed |
 | P0 | `mcp-registrar` | Registry-to-live-surface conformance | [`test/site-fabric-loader-e2e.test.ts`](../packages/mcp-registrar/test/site-fabric-loader-e2e.test.ts), [`test/site-fabric-catalog-e2e.test.ts`](../packages/mcp-registrar/test/site-fabric-catalog-e2e.test.ts), and `test/mcp-registrar.test.ts` prove live child handoff, the complete 26-entry catalog sweep, and drift checks | complete | passed |
 | P0 | `mcp-loader-mcp` | Runtime attachment workflow | [`test/site-fabric-loader-e2e.test.ts`](../packages/mcp-registrar/test/site-fabric-loader-e2e.test.ts) plus `test/mcp-loader-mcp.test.ts` attach/call/status/detach and replace/drift behavior through real children | complete | passed |
+| P0 | `ledger-domain-mcp` | Native ledger/query/projection boundary | [`native/tests/epistemic_graph_protocol.rs`](../packages/ledger-domain-mcp/native/tests/epistemic_graph_protocol.rs) crosses the built child over JSONL and Content-Length MCP; [`test/epistemic-sequence-fabric.e2e.test.ts`](../packages/mcp-loader-mcp/test/epistemic-sequence-fabric.e2e.test.ts) crosses registrar/loader binding, query/thread reads, and restart persistence | complete | passed |
 | P0 | `launcher-mcp` | Launcher-to-carrier inheritance | [`test/pc-host-launcher-lifecycle-e2e.test.ts`](../packages/launcher-mcp/test/pc-host-launcher-lifecycle-e2e.test.ts) starts the canonical launcher twice with explicit launch-session bindings, drives each session through `nars-session-mcp`, verifies Site-local MCP tool inheritance, runtime/MCP ownership evidence, hidden child posture, restart isolation, and descendant teardown; run only with `NARADA_E2E_PC_HOST_AUTHORITY=1` | complete | passed |
 | P0 | `delegated-task` | Native Rust delegated-task authority | [`native/src/delegated_task.rs`](../packages/shared/mcp-surfaces-native/native/src/delegated_task.rs) contains bounded validation, persistence, lifecycle, and worker-handoff tests; real external-provider authority is not asserted here | native unit/protocol coverage | not_run |
 | P0 | `worker-delegation` | Native Rust worker authority | [`native/src/worker_delegation.rs`](../packages/shared/mcp-surfaces-native/native/src/worker_delegation.rs) contains bounded policy, cognition, run, and result tests; real external-provider authority is not asserted here | native unit/protocol coverage | not_run |
@@ -231,6 +263,18 @@ the fixture recorded started and completed timestamps, and cleanup proved task
 absence, fixture-process exit, Scheduler MCP exit, command-file removal, and
 temporary-root removal. The default invocation produced an explicit `not_run`
 artifact with `cleanup.status=not_required`.
+
+The earlier ledger-domain A0 verification passed on 2026-08-20 and remains
+historical evidence. The native suite
+reported 31 unit tests and 6 live child-process protocol tests passed, including
+JSONL and Content-Length transport, query/thread/cursor behavior, tamper
+refusal, concurrent claims, and projection rebuild serialization. The
+registrar/loader fabric result is
+`packages/mcp-loader-mcp/.tmp-tests/e2e-results/epistemic-graph-fabric-e2e.json`
+(generated output is ignored), with `status=passed`, `authority=A0`,
+`boundaries=[B1,B2,B3]`, and cleanup proving child closure and temporary-root
+removal. Its result SHA-256 is
+`d0597de6f55729143fdb157a8ccb03239de35010b9adf2a86537fc643f48875a`.
 
 ## Required Test Artifacts
 

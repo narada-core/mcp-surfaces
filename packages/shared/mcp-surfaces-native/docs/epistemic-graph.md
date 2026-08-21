@@ -42,10 +42,11 @@ Entity kinds are not limited to the six core kinds (`problem`, `conjecture`, `cl
 ## Read workflow
 
 1. Call `epistemic_graph_status` and retain `ledger_head`.
-2. Use `epistemic_graph_query`, `epistemic_graph_query_batch`, or `epistemic_graph_neighborhood` for bounded inspection.
-3. Use `epistemic_graph_snapshot` for visualization. Page entities and relations independently and pass `expected_ledger_head` on every later page.
-4. If a page refuses a mismatched head, discard the partial snapshot and restart from offset zero. Never merge pages from different ledger heads.
-5. Use `epistemic_graph_source_inspect` only for bounded Site-local source inspection and `epistemic_graph_export` for JSON-LD export.
+2. Use `epistemic_graph_query`, `epistemic_graph_query_batch`, or `epistemic_graph_neighborhood` for bounded inspection. For addressed communications, use the descriptor-owned `epistemic:inbox` template with canonical `participant` (the legacy `recipient` alias is accepted). Incoming queries match the recipient side; outgoing queries match the sender side and can add `to` for the target or `from`/`sender` for the sender. Use `after_sequence` (`since_event` is a compatibility alias) and `kinds` for bounded filtering, plus `match` predicates such as `read_state` or `reply_state`; use `epistemic_graph_message_mark_read` for a durable idempotent read receipt. For reply traversal, use `epistemic:thread` with `root`.
+3. For open-ended joins, pass the constrained Datalog-like `query` form to `epistemic_graph_query`. It operates on normalized namespaced datoms, not payload text or caller SQL; use `order_by` and the returned opaque, query-scoped `next_cursor` for paging. Ordinary triple, comparison, and reachability clauses are planned after their dependencies are available, while correlated nested predicates are planned by their bindings; impossible dependencies still refuse explicitly. Raw pulls can hydrate entities, relations, and records; add pull `target_kind` when an id may be shared across projections, because untyped collisions are refused. `one_of` terms and nested predicates are descriptor-bounded, as are raw inputs, clauses, finds, order terms, pull fields, and named kind filters. Malformed shapes and typed named filters are refused, and scan, traversal, payload, and response-byte budgets are enforced. Batch items include a bounded request summary for result correlation.
+4. Use `epistemic_graph_snapshot` for visualization. Page entities and relations independently and pass `expected_ledger_head` on every later page.
+5. If a page refuses a mismatched head, discard the partial snapshot and restart from offset zero. Never merge pages from different ledger heads.
+6. Use `epistemic_graph_source_inspect` only for bounded Site-local source inspection and `epistemic_graph_export` for JSON-LD export.
 
 ## Mutation workflow
 

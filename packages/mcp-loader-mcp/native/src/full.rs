@@ -4716,6 +4716,7 @@ fn site_tool_inventory(
     )?);
     ensure_site_root_allowed(&site_root, &state.policy)?;
     let bundle = read_site_fabric(&site_root)?;
+    let site_id = bundle.fabric.get("site_id").and_then(Value::as_str);
     let servers = bundle
         .fabric
         .get("mcpServers")
@@ -4744,6 +4745,16 @@ fn site_tool_inventory(
             findings.push(json!({"surface_id":surface_id,"status":"surface_not_declared","declared_tools":[],"observed_tools":[]}));
             continue;
         };
+        let resolved_surface_id = server
+            .get("surface_id")
+            .and_then(Value::as_str)
+            .unwrap_or(surface_id)
+            .to_string();
+        let binding_id = canonical_binding_id(
+            site_id,
+            &resolved_surface_id,
+            server.get("binding_id").and_then(Value::as_str),
+        );
         let raw_declared: Vec<String> = server
             .get("tools")
             .and_then(Value::as_array)
@@ -4763,7 +4774,7 @@ fn site_tool_inventory(
         }
         let mut connection_id: Option<String> = None;
         let probe = attach_surface(
-            &json_object!({"site_root":site_root.clone(),"surface_id":surface_id.clone(),"runtime_kind":runtime_kind.clone()}),
+            &json_object!({"site_root":site_root.clone(),"binding_id":binding_id,"surface_id":resolved_surface_id,"runtime_kind":runtime_kind.clone()}),
             state,
         );
         match probe {

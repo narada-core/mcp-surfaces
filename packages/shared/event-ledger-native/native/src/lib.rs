@@ -16,6 +16,7 @@ pub mod io;
 pub mod ledger;
 pub mod lock;
 pub mod projection;
+pub mod query;
 
 pub use error::ErrorSchema;
 

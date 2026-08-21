@@ -24,7 +24,7 @@ root (`.narada`):
     idem-<safe_name>.txt  # admission idempotency markers (disposable index)
 <runtime_root>/
   projection.sqlite       # disposable derived projection
-  projection.sqlite.next  # rebuild scratch, atomically renamed into place
+  .projection.sqlite.next-<uuid>  # unique rebuild scratch, renamed into place
   locks/                  # fs2 exclusive authority locks
 ```
 
@@ -95,16 +95,43 @@ different content refuses with `<domain>_idempotency_conflict`.
 
 ## Projection
 
-- The projection is rebuilt **from scratch on every read path**: verify
-  the ledger, apply every event into `projection.sqlite.next` inside one
-  transaction, then remove the old file and atomically rename `.next`
-  into place.
-- The projection schema (DDL) and the per-event fold (applier callback)
-  are owned by the consuming surface. The core owns only the
-  verify → build → swap shell.
+- A projection is disposable and is rebuilt from the authoritative ledger
+  whenever its recorded ledger head is absent or stale. A small projection
+  metadata row records the head and terminal sequence; a matching head reuses
+  the existing projection without replaying the ledger.
+- The stable-read gate verifies the authoritative hash chain before comparing
+  projection metadata, so an unchanged terminal head cannot hide tampering in
+  an earlier event.
+- Rebuilds use a unique temporary filename, one transaction, and a guarded
+  replacement. This prevents concurrent refreshes from sharing a fixed
+  `.next` database and turning a race into duplicate-table or file-lock
+  failures.
+- Stable reads acquire the ledger lock and then the projection lock, rebuild
+  if necessary, and keep both locks through the read. This makes the returned
+  page and its `ledger_head` one coherent snapshot.
+- The projection schema (DDL) and the per-event fold (applier callback) are
+  owned by the consuming surface. The core owns only the
+  verify → build → swap shell and the rebuild lifecycle.
 - Because the fold is defined over the full event stream, "current
   state" (latest status, current attribution) is derived, never stored
   authoritatively. Revisions are modeled as new events, never mutation.
+
+## Normalized datoms and bounded queries
+
+Domains that expose the shared query surface may add a disposable `datoms`
+table to their projection. Each row is a normalized fact:
+
+```text
+(origin_id, subject, attribute, value, event_sequence, event_id)
+```
+
+Attributes are domain-defined namespaced strings; recipient names, roots, and
+other concrete values remain query parameters. The shared evaluator accepts a
+small JSON Datalog-like AST: triple joins, scalar comparisons, bounded
+reachability, existential/non-existential predicates, deterministic ordering,
+and keyset cursors. It does not inspect arbitrary payload JSON or execute
+caller SQL. Opaque cursors are valid only against the ledger head and query
+shape that produced them.
 
 ## Error envelope
 
@@ -119,8 +146,8 @@ regime: an event append either completes durably or the call fails.
 
 ## Non-goals (current version)
 
-- No incremental or checkpointed projection; full rebuild per read is
-  the accepted cost model at current ledger scales.
+- No incremental fold or partial replay; the current implementation either
+  reuses a head-matching projection or rebuilds it completely.
 - No cross-surface or cross-site ledger replication; federation with
   foreign stores happens through explicit import/snapshot events.
 - No lease or expiry semantics; time-dependent state must be modeled as

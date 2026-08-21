@@ -16,8 +16,10 @@ storage layout, ledger bytes) must be reproduced exactly by an engine loading
 that descriptor.
 
 A descriptor is a single JSON object with `"schema": "narada.ledger-domain.v1"`
-and the top-level sections below. The machine-readable schema is
-`packages/shared/ledger-domain-epistemic/domain.schema.json`.
+and the top-level sections below. The generic structural schema is
+`packages/shared/ledger-domain-mcp/domain.schema.json`; the epistemic package's
+`domain.schema.json` remains the stricter domain-specific contract used by its
+Node boundary tests.
 
 ## `identity`
 
@@ -48,7 +50,7 @@ Resulting layout for epistemic-graph:
 <control>/epistemic/ledger/        # authoritative hash-chained events + idem-*.txt markers
 <control>/epistemic/proposals/     # immutable proposals, *.review.json, *.rejection.json, idem-*.txt
 <control>/epistemic/sequences/     # per-sequence manifest, claims/, idempotency/
-<control>/.ai/epistemic-graph/     # projection.sqlite, projection.sqlite.next, locks/
+<control>/.ai/epistemic-graph/     # projection.sqlite, unique rebuild scratch, locks/
 ```
 
 ## `entities`
@@ -113,14 +115,18 @@ to 120 characters.
 
 ## `projection`
 
-Disposable SQLite fold projection, rebuilt from the ledger on every read path.
-The exact DDL:
+Disposable SQLite fold projection. The engine verifies the authoritative chain
+before reusing a head-matching projection; otherwise it folds the full ledger
+into a uniquely named temporary database before replacement. The epistemic
+descriptor's table DDL is:
 
 ```sql
 pragma journal_mode=delete;
-create table entities(entity_id text primary key,kind text not null,payload_json text not null,event_id text not null);
-create table relations(relation_id text primary key,relation_type text not null,source_id text not null,target_id text not null,payload_json text not null,event_id text not null);
-create table records(record_id text primary key,record_kind text not null,payload_json text not null,event_id text not null);
+create table entities(entity_id text primary key,kind text not null,payload_json text not null,event_id text not null,event_sequence integer not null default 0);
+create table relations(relation_id text primary key,relation_type text not null,source_id text not null,target_id text not null,payload_json text not null,event_id text not null,event_sequence integer not null default 0);
+create table records(record_id text primary key,record_kind text not null,payload_json text not null,event_id text not null,event_sequence integer not null default 0);
+create table datoms(datom_id text primary key,origin_id text not null,subject text not null,attribute text not null,value_json text not null,value_kind text not null,event_sequence integer not null,event_id text not null);
+create table projection_meta(meta_id text primary key,ledger_head text,ledger_sequence integer not null,updated_event_id text);
 ```
 
 Op → (table, key-field) fold map (`insert or replace`; `payload_json` is the
@@ -134,6 +140,14 @@ full operation object; `event_id` is the admitting event):
 | `test_outcome.record` | `records` | `outcome_id` | `record_kind` ← op name |
 | `sweep.record` | `records` | `sweep_id` | `record_kind` ← op name |
 
+The `datoms` table is the normalized read surface for the shared query
+evaluator. Each fact is `(origin_id, subject, attribute, value_json,
+event_sequence, event_id)`; the evaluator never executes caller SQL or
+searches arbitrary payload text. For `relation.declare`, relation identity and
+event metadata use the relation id as subject; the source/target edge and its
+inverse retain their graph subjects. This keeps a relation admission from
+appearing as a second event for the source entity.
+
 ## `query`
 
 | Field | Value |
@@ -144,6 +158,64 @@ full operation object; `event_id` is the admitting event):
 | `text_filter` | Case-sensitive `payload_json LIKE '%text%'` substring filter on both entity and record queries. |
 | `neighborhood_relation_fields` | Relations where `source_id = entity_id OR target_id = entity_id`; emitted as `{relation_id, relation_type, source_id, target_id, payload}`. |
 | `neighborhood_record_fields` | Records where payload `subject_id` or `test_id` equals `entity_id`; emitted as `{record_id, record_kind, payload, event_id}`. |
+| `named_queries` | Descriptor-owned query templates. The epistemic descriptor exposes `epistemic:inbox` and `epistemic:thread`; concrete recipients, viewers, roots, and message predicates are runtime inputs, not shard or projection configuration. |
+| `reply_state_attribute` | `narada.epistemic:replies_to`; used to derive `reply_state.status`, `reply_state.reply_count`, `reply_state.has_replies`, and `reply_state.is_reply` from graph facts. |
+| `read_receipt_kind` / `read_receipt_*_attribute` | Durable read state is represented by an admitted namespaced receipt entity (`narada.epistemic:message_read`) carrying message id, reader, and read timestamp. |
+| `relation_inverses` | Descriptor-owned inverse relation vocabulary used when normalizing relation edges; the epistemic descriptor maps `replies_to` to `replied_by`. |
+
+The `epistemic_graph_query` tool keeps its legacy filters and adds a bounded
+Datalog-like form through `query`, or a descriptor-owned `template`. The
+shared form supports triple joins, `=`, `!=`, `<`, `<=`, `>`, `>=`, bounded
+reachability, `exists`/`not_exists` predicates, deterministic `order_by`, and
+head-pinned keyset cursors. Ordinary message reads use the descriptor-owned
+`template: "inbox"` with a composable `match` object, for example
+`{"participant":"marici.Grothendieck","match":{"read_state":"unread","reply_state":"unreplied","sender":"marici.Benincasa"}}`;
+callers do not need to know normalized attribute names. `participant` is the
+canonical identity filter; `recipient` remains a compatibility alias for it.
+`direction: "incoming"` matches the recipient side, while `direction:
+"outgoing"` matches the sender side; use `to` for an explicit outgoing target
+and `from`/`sender` for an explicit sender. `after_sequence` is canonical;
+`since_event` is a compatibility alias and both mean a strict `>` event-sequence
+boundary. Named `kinds` expand configured canonical/legacy aliases in either
+direction. A named filter requires `template`; raw `query` and `template` are
+mutually exclusive, and raw Datalog cannot be mixed with legacy filters. Legacy
+queries use offset pagination; cursor pagination requires raw `query` or a named
+`template`. Batch queries accept the same legacy, named, and raw forms; legacy items remain
+compact by default, while named/raw items preserve hydrated pulls. Each batch
+item also carries a bounded `request` summary (mode, canonical template, and
+the caller's distinguishing filters) so result pages remain attributable after
+the input array is transformed. The
+`narada.epistemic.query_batch.v2` response has one flat page envelope per item
+and does not repeat the same page under a nested `result`; batch limits and total
+response bytes are bounded. Raw pulls can target entities, relations, or records;
+records are identified by `narada.ledger:record/id` and typed by
+`narada.ledger:record/kind`. A pull is expressed as a `find` item such as
+`{"pull":{"var":"?object","fields":["*"]}}`; `*` requests all canonical
+fields, while an explicit field list keeps the response narrow. When an id could
+exist in more than one projection, add `target_kind` (`entity`, `relation`, or
+`record`); an untyped collision is refused instead of being resolved by table
+order. The evaluator
+plans ordinary triple, comparison, and reachability clauses after their
+dependencies are bound, including inside correlated `exists`/`not_exists`
+predicates. Raw `inputs`, `order_by`, `find`, and pull-field lists are bounded
+by `query.max_clauses`; nested predicates share that combined clause budget,
+while `one_of` terms, nested predicate depth, and named/legacy kind alias
+expansion have their own descriptor-owned caps. Malformed nested query shapes
+and typed named filters are refused.
+
+Query results expose `message_state` (`read`, `unread`, or `unknown`) and
+`reply_state` (`replied` or `unreplied`). These compatibility top-level fields
+never overwrite a payload field; `_narada_query` is the collision-safe source
+of derived state and query metadata. `count` is the number returned on the
+current page (`count_semantics: "returned_page"`), not a hidden total. Responses
+also identify whether the result came from `query_origin: "raw"` or
+`query_origin: "named_template"`. Cursors
+are opaque domain-namespaced tokens; a cursor from another ledger head or query
+shape is refused rather than silently mixing pages. Durable read receipts are
+hidden from default graph-facing entity queries, snapshots, exports, and status
+counts, but remain retrievable with their explicit kind for audit. The
+`epistemic_graph_message_mark_read` operation admits an idempotent read receipt
+through the normal proposal/review/admission path.
 
 ## `caps`
 
@@ -153,6 +225,13 @@ All numeric bounds (descriptor values are exact current behavior):
 | --- | --- | --- | --- |
 | `operations_per_proposal` | 1–200 | — | Violations refuse with `invalid_proposal`. |
 | `query_limit` | 1–100 | 50 | Also bounds `proposal_read` (default 20) and `neighborhood` (default 50). |
+| `query.max_clauses` | 1–256 | 64 | Descriptor-owned maximum combined top-level and nested clauses, raw input/order/find/pull-field terms, and named kind filters. |
+| `query.max_reach_depth` | 1–64 | 8 | Descriptor-owned maximum raw reachability depth. |
+| `query.max_one_of_values` | 1–256 | 64 | Maximum literal alternatives in one raw `one_of` term and expanded named/legacy kind filter. |
+| `query.max_predicate_depth` | 1–64 | 8 | Maximum nested `exists`/`not_exists` predicate depth. |
+| `query_execution.max_datoms_scanned` | 200,000 | — | Total normalized-datom load/evaluation budget; `query_datom_scan_limit` on overflow. |
+| `query_execution.max_traversal_edges` | 50,000 | — | Reachability-edge budget; `query_traversal_limit` on overflow. |
+| `query_execution.max_output_bytes` | 4,194,304 (4 MiB) | — | Legacy, raw, named, and batch query response/pull payload budget; `query_output_limit` or `query_payload_limit` on overflow. |
 | `query_batch` | 1–20 queries | — | `invalid_batch_query` outside. |
 | `query_batch_limit_per_query` | 1–20 | 5 | |
 | `neighborhood_limit` | 1–100 | 50 | |
@@ -334,24 +413,25 @@ a feature module, with the module named).
 | 1 | `epistemic_graph_guidance` | guidance | yes | — |
 | 2 | `epistemic_graph_status` | core | yes | — |
 | 3 | `epistemic_graph_query` | core | yes | — |
-| 4 | `epistemic_graph_query_batch` | core | yes | — |
-| 5 | `epistemic_graph_neighborhood` | core | yes | — |
-| 6 | `epistemic_graph_proposal_submit` | core | no | proposals |
-| 7 | `epistemic_graph_proposal_read` | core | yes | proposals |
-| 8 | `epistemic_graph_proposal_review` | core | no | proposals |
-| 9 | `epistemic_graph_proposal_admit` | core | no | proposals |
-| 10 | `epistemic_graph_proposal_reject` | core | no | proposals |
-| 11 | `epistemic_graph_proposal_resubmit` | core | no | proposals |
-| 12 | `epistemic_graph_submit_review_admit` | feature | no | proposals |
-| 13 | `epistemic_graph_capture_sources` | feature | no | proposals |
-| 14 | `epistemic_graph_sequence_create` | feature | no | sequences |
-| 15 | `epistemic_graph_sequence_status` | feature | yes | sequences |
-| 16 | `epistemic_graph_sequence_list` | feature | yes | sequences |
-| 17 | `epistemic_graph_sequence_claim_next` | feature | no | sequences |
-| 18 | `epistemic_graph_sequence_claims` | feature | yes | sequences |
-| 19 | `epistemic_graph_source_inspect` | feature | yes | source_inspect |
-| 20 | `epistemic_graph_snapshot` | feature | yes | snapshot |
-| 21 | `epistemic_graph_export` | feature | yes | export |
+| 4 | `epistemic_graph_message_mark_read` | core | no | — |
+| 5 | `epistemic_graph_query_batch` | core | yes | — |
+| 6 | `epistemic_graph_source_inspect` | feature | yes | source_inspect |
+| 7 | `epistemic_graph_neighborhood` | core | yes | — |
+| 8 | `epistemic_graph_snapshot` | feature | yes | snapshot |
+| 9 | `epistemic_graph_sequence_create` | feature | no | sequences |
+| 10 | `epistemic_graph_sequence_status` | feature | yes | sequences |
+| 11 | `epistemic_graph_sequence_list` | feature | yes | sequences |
+| 12 | `epistemic_graph_sequence_claim_next` | feature | no | sequences |
+| 13 | `epistemic_graph_sequence_claims` | feature | yes | sequences |
+| 14 | `epistemic_graph_proposal_submit` | core | no | — |
+| 15 | `epistemic_graph_submit_review_admit` | feature | no | proposals |
+| 16 | `epistemic_graph_capture_sources` | feature | no | proposals |
+| 17 | `epistemic_graph_proposal_read` | core | yes | — |
+| 18 | `epistemic_graph_proposal_resubmit` | core | no | — |
+| 19 | `epistemic_graph_proposal_review` | core | no | — |
+| 20 | `epistemic_graph_proposal_admit` | core | no | — |
+| 21 | `epistemic_graph_proposal_reject` | core | no | — |
+| 22 | `epistemic_graph_export` | feature | yes | export |
 
 The exact `inputSchema` JSON for each tool is recorded in
 `packages/shared/ledger-domain-epistemic/domain.json` (`tools[].inputSchema`)

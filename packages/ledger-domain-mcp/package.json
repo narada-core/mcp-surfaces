@@ -11,8 +11,8 @@
     "build:native": "tsx scripts/build-native.ts",
     "test:native": "cargo test --locked --manifest-path native/Cargo.toml",
     "test": "pnpm run test:bun",
-    "test:bun": "pnpm run build:native && pnpm --filter @narada-core/mcp-e2e-harness build && pnpm build && bun dist/test/protocol-smoke.test.js",
-    "test:node": "pnpm run build:native && pnpm --filter @narada-core/mcp-e2e-harness build && pnpm build && node --disable-warning=ExperimentalWarning dist/test/protocol-smoke.test.js"
+    "test:bun": "pnpm run test:native && pnpm run build:native && pnpm --filter @narada-core/mcp-e2e-harness build && pnpm build && bun dist/test/protocol-smoke.test.js",
+    "test:node": "pnpm run test:native && pnpm run build:native && pnpm --filter @narada-core/mcp-e2e-harness build && pnpm build && node --disable-warning=ExperimentalWarning dist/test/protocol-smoke.test.js"
   },
   "devDependencies": {
     "@narada-core/mcp-e2e-harness": "workspace:*",

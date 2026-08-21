@@ -170,6 +170,7 @@ pnpm test:mcp-fabric-contracts
 pnpm test:mcp-fabric-compiler
 pnpm test:ledger-domain-epistemic
 pnpm test:ledger-domain
+pnpm test:ledger-domain:native
 pnpm test:provider-registry
 pnpm test:local-filesystem
 pnpm test:structured-command
@@ -192,6 +193,7 @@ pnpm test:registrar:kimi-contract
 pnpm test:surface-feedback
 pnpm test:launcher
 pnpm test:mcp-loader
+pnpm test:mcp-loader:e2e
 pnpm test:operator-routing
 pnpm test:runtime-introspection
 pnpm test:speech

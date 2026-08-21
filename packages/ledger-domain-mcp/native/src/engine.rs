@@ -14,9 +14,9 @@ use narada_mcp_event_ledger::digest::{now, safe_name, sha256};
 use narada_mcp_event_ledger::ledger::LedgerLayout;
 use narada_mcp_event_ledger::{
     args as ledger_args, chain, io as ledger_io, ledger as event_ledger, lock,
-    projection as ledger_projection, ErrorSchema,
+    projection as ledger_projection, query as ledger_query, ErrorSchema,
 };
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, types::ToSql, Connection, OptionalExtension, Transaction};
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 use std::fs;
@@ -31,6 +31,125 @@ struct TableSpec {
     primary_key: String,
 }
 
+#[derive(Default)]
+struct QuerySeedPlan {
+    attribute_values: Vec<(String, Value)>,
+    subject_attributes: Vec<(String, String)>,
+    attributes: Vec<String>,
+    unindexable: bool,
+}
+
+impl QuerySeedPlan {
+    fn push_attribute(&mut self, attribute: &str) {
+        if !self.attributes.iter().any(|value| value == attribute) {
+            self.attributes.push(attribute.to_string());
+        }
+    }
+
+    fn push_attribute_value(&mut self, attribute: &str, value: Value) {
+        if !self
+            .attribute_values
+            .iter()
+            .any(|(candidate, existing)| candidate == attribute && existing == &value)
+        {
+            self.attribute_values.push((attribute.to_string(), value));
+        }
+    }
+
+    fn push_subject_attribute(&mut self, subject: &str, attribute: &str) {
+        let candidate = (subject.to_string(), attribute.to_string());
+        if !self.subject_attributes.contains(&candidate) {
+            self.subject_attributes.push(candidate);
+        }
+    }
+}
+
+fn query_term_values(
+    term: &ledger_query::Term,
+    inputs: &Map<String, Value>,
+) -> Option<Vec<Value>> {
+    match term {
+        ledger_query::Term::Value(value) => Some(vec![value.clone()]),
+        ledger_query::Term::OneOf(values) => Some(values.clone()),
+        ledger_query::Term::Variable(variable) => {
+            let key = variable.trim_start_matches('?');
+            inputs
+                .get(key)
+                .or_else(|| inputs.get(variable))
+                .cloned()
+                .map(|value| vec![value])
+        }
+    }
+}
+
+fn query_attribute_values(
+    term: &ledger_query::Term,
+    inputs: &Map<String, Value>,
+) -> Option<Vec<String>> {
+    query_term_values(term, inputs).map(|values| {
+        values
+            .into_iter()
+            .filter_map(|value| value.as_str().map(str::to_string))
+            .collect()
+    })
+}
+
+fn collect_query_seed_clauses(
+    clauses: &[ledger_query::Clause],
+    inputs: &Map<String, Value>,
+    plan: &mut QuerySeedPlan,
+) {
+    for clause in clauses {
+        match clause {
+            ledger_query::Clause::Triple {
+                subject,
+                attribute,
+                object,
+            } => {
+                let Some(attributes) = query_attribute_values(attribute, inputs) else {
+                    plan.unindexable = true;
+                    continue;
+                };
+                let subject_values = query_term_values(subject, inputs).map(|values| {
+                    values
+                        .into_iter()
+                        .filter_map(|value| value.as_str().map(str::to_string))
+                        .collect::<Vec<_>>()
+                });
+                let object_values = query_term_values(object, inputs);
+                for attribute in attributes {
+                    if let Some(values) = object_values.as_ref() {
+                        for value in values {
+                            plan.push_attribute_value(&attribute, value.clone());
+                        }
+                    } else if let Some(values) = subject_values.as_ref() {
+                        for subject in values {
+                            plan.push_subject_attribute(subject, &attribute);
+                        }
+                    } else {
+                        plan.push_attribute(&attribute);
+                    }
+                }
+            }
+            ledger_query::Clause::Reachable {
+                from, attribute, ..
+            } => {
+                plan.push_attribute(attribute);
+                if let Some(values) = query_term_values(from, inputs) {
+                    for subject in values.into_iter().filter_map(|value| value.as_str().map(str::to_string)) {
+                        plan.push_subject_attribute(&subject, attribute);
+                    }
+                }
+            }
+            ledger_query::Clause::Exists { clauses }
+            | ledger_query::Clause::NotExists { clauses } => {
+                collect_query_seed_clauses(clauses, inputs, plan);
+            }
+            ledger_query::Clause::Compare { .. } => {}
+        }
+    }
+}
+
 /// A loaded domain: the descriptor plus derived parse products.
 pub struct Engine {
     pub domain: Descriptor,
@@ -40,6 +159,8 @@ pub struct Engine {
     entity_table: String,
     relation_table: String,
     records_table: String,
+    datoms_table: Option<String>,
+    projection_meta_table: Option<String>,
 }
 
 /// Parse the `[..N]` truncation out of an id-recipe template.
@@ -60,6 +181,67 @@ fn template_prefix(template: &str) -> &str {
     match template.find('{') {
         Some(index) => &template[..index],
         None => template,
+    }
+}
+
+/// Cursor tokens are opaque to callers while remaining self-contained and
+/// portable across MCP transports. The payload is deliberately JSON so the
+/// engine can keep accepting the pre-token object form during migration.
+fn encode_cursor_token(value: &Value) -> String {
+    let bytes = serde_json::to_vec(value).expect("cursor payload is serializable");
+    let mut encoded = String::with_capacity(bytes.len() * 2 + 3);
+    encoded.push_str("v1.");
+    for byte in bytes {
+        encoded.push_str(&format!("{byte:02x}"));
+    }
+    encoded
+}
+
+fn decode_cursor_token(value: &Value, expected_schema: &str) -> Result<Value, ()> {
+    let Some(token) = value.as_str() else {
+        return Ok(value.clone());
+    };
+    let Some(hex) = token.strip_prefix("v1.") else {
+        return Err(());
+    };
+    if hex.is_empty() || hex.len() % 2 != 0 {
+        return Err(());
+    }
+    let mut bytes = Vec::with_capacity(hex.len() / 2);
+    let mut index = 0;
+    while index < hex.len() {
+        let byte = u8::from_str_radix(&hex[index..index + 2], 16).map_err(|_| ())?;
+        bytes.push(byte);
+        index += 2;
+    }
+    let decoded: Value = serde_json::from_slice(&bytes).map_err(|_| ())?;
+    let valid = decoded
+        .as_object()
+        .map(|object| {
+            object.get("schema").and_then(Value::as_str)
+                == Some(expected_schema)
+                && object.get("head").and_then(Value::as_str).is_some()
+                && object.get("values").and_then(Value::as_object).is_some()
+        })
+        .unwrap_or(false);
+    valid.then_some(decoded).ok_or(())
+}
+
+fn canonical_json(value: &Value) -> Value {
+    match value {
+        Value::Object(object) => {
+            let mut keys = object.keys().cloned().collect::<Vec<_>>();
+            keys.sort();
+            let mut canonical = Map::new();
+            for key in keys {
+                if let Some(value) = object.get(&key) {
+                    canonical.insert(key, canonical_json(value));
+                }
+            }
+            Value::Object(canonical)
+        }
+        Value::Array(values) => Value::Array(values.iter().map(canonical_json).collect()),
+        other => other.clone(),
     }
 }
 
@@ -127,6 +309,14 @@ impl Engine {
             .find(|entry| entry.table != entity_table && entry.table != relation_table)
             .map(|entry| entry.table.clone())
             .ok_or_else(|| "domain_invalid:projection_fold_missing_records".to_string())?;
+        let datoms_table = tables
+            .iter()
+            .find(|spec| spec.name == "datoms")
+            .map(|spec| spec.name.clone());
+        let projection_meta_table = tables
+            .iter()
+            .find(|spec| spec.name == "projection_meta")
+            .map(|spec| spec.name.clone());
         for table in [&entity_table, &relation_table, &records_table] {
             if !tables.iter().any(|spec| &spec.name == table) {
                 return Err(format!("domain_invalid:projection_fold_unknown_table:{table}"));
@@ -144,6 +334,8 @@ impl Engine {
             entity_table,
             relation_table,
             records_table,
+            datoms_table,
+            projection_meta_table,
         })
     }
 
@@ -162,6 +354,7 @@ impl Engine {
         &self.domain.id_derivation.relation.applies_to
     }
 
+    #[cfg(test)]
     fn max_operations(&self) -> usize {
         self.domain.caps.operations_per_proposal.max as usize
     }
@@ -171,9 +364,342 @@ impl Engine {
         format!("{}.{}", self.domain.identity.schema_namespace, name)
     }
 
+    fn finalize_bounded_output(&self, response: &mut Value) -> Result<u64, Value> {
+        let max_output_bytes = self.domain.caps.query_execution.max_output_bytes;
+        let mut output_bytes = 0u64;
+        for _ in 0..4 {
+            response["output_bytes"] = json!(output_bytes);
+            output_bytes = serde_json::to_vec(response)
+                .map_err(|_| self.error("query_output_limit", "query response could not be serialized", Value::Null))?
+                .len() as u64;
+        }
+        response["output_bytes"] = json!(output_bytes);
+        let actual_output_bytes = serde_json::to_vec(response)
+            .map_err(|_| self.error("query_output_limit", "query response could not be serialized", Value::Null))?
+            .len() as u64;
+        if actual_output_bytes > max_output_bytes {
+            return Err(self.error(
+                "query_output_limit",
+                "query response exceeded the descriptor output-byte budget",
+                json!({"output_bytes":actual_output_bytes,"max_output_bytes":max_output_bytes}),
+            ));
+        }
+        if actual_output_bytes != output_bytes {
+            response["output_bytes"] = json!(actual_output_bytes);
+        }
+        Ok(actual_output_bytes)
+    }
+
     /// Tool name derived from the tool prefix: `<prefix>_<verb>`.
     fn tool_name(&self, verb: &str) -> String {
         format!("{}_{}", self.domain.identity.tool_prefix, verb)
+    }
+
+    fn expand_kind_values(&self, kinds: Vec<Value>) -> Result<Vec<Value>, Value> {
+        let mut expanded = Vec::new();
+        for kind in kinds {
+            if !expanded.iter().any(|candidate| candidate == &kind) {
+                expanded.push(kind);
+            }
+        }
+        for (canonical, aliases) in &self.domain.query.kind_aliases {
+            let matched = expanded.iter().any(|kind| {
+                kind.as_str() == Some(canonical.as_str())
+                    || aliases
+                        .iter()
+                        .any(|alias| kind.as_str() == Some(alias.as_str()))
+            });
+            if !matched {
+                continue;
+            }
+            let canonical = Value::String(canonical.clone());
+            if !expanded.iter().any(|kind| kind == &canonical) {
+                expanded.push(canonical);
+            }
+            for alias in aliases {
+                let alias = Value::String(alias.clone());
+                if !expanded.iter().any(|kind| kind == &alias) {
+                    expanded.push(alias);
+                }
+            }
+        }
+        let max_values = self.domain.query.max_one_of_values.unwrap_or(64).max(1);
+        if expanded.len() > max_values {
+            return Err(self.error(
+                "query_kind_limit",
+                "named kind aliases expand beyond the descriptor one_of budget",
+                json!({"count":expanded.len(),"max":max_values}),
+            ));
+        }
+        Ok(expanded)
+    }
+
+    fn expand_legacy_kind_value(&self, kind: &str) -> Result<Vec<Value>, Value> {
+        let mut expanded = vec![Value::String(kind.to_string())];
+        if let Some(aliases) = self.domain.query.kind_aliases.get(kind) {
+            expanded.extend(aliases.iter().map(|alias| Value::String(alias.clone())));
+        }
+        let max_values = self.domain.query.max_one_of_values.unwrap_or(64).max(1);
+        if expanded.len() > max_values {
+            return Err(self.error(
+                "query_kind_limit",
+                "legacy kind aliases expand beyond the descriptor one_of budget",
+                json!({"count":expanded.len(),"max":max_values}),
+            ));
+        }
+        Ok(expanded)
+    }
+
+    fn configured_message_kinds(&self) -> HashSet<String> {
+        let mut kinds = HashSet::new();
+        for config in self.domain.query.named_queries.values() {
+            if config.get("mode").and_then(Value::as_str) != Some("inbox") {
+                continue;
+            }
+            let Some(canonical) = config.get("kind_key").and_then(Value::as_str) else {
+                continue;
+            };
+            kinds.insert(canonical.to_string());
+            if let Some(aliases) = self.domain.query.kind_aliases.get(canonical) {
+                kinds.extend(aliases.iter().cloned());
+            }
+        }
+        kinds
+    }
+
+    fn is_configured_message_kind(&self, kind: &str) -> bool {
+        self.configured_message_kinds().contains(kind)
+    }
+
+    fn sql_quote(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "''"))
+    }
+
+    fn visible_entity_predicate(&self) -> String {
+        self.domain
+            .query
+            .read_receipt_kind
+            .as_deref()
+            .map(|kind| format!("kind <> {}", Self::sql_quote(kind)))
+            .unwrap_or_else(|| "1=1".to_string())
+    }
+
+    fn validate_named_filter_conflicts(&self, args: &Map<String, Value>) -> Result<(), Value> {
+        let Some(matched) = args.get("match").and_then(Value::as_object) else {
+            return Ok(());
+        };
+        for key in [
+            "participant",
+            "recipient",
+            "sender",
+            "from",
+            "to",
+            "direction",
+            "viewer",
+            "kinds",
+            "since_event",
+            "after_sequence",
+            "intent",
+            "read_state",
+            "reply_state",
+            "include_body",
+            "limit",
+        ] {
+            if let (Some(flat), Some(nested)) = (args.get(key), matched.get(key)) {
+                if flat != nested {
+                    return Err(self.error(
+                        "query_filter_conflict",
+                        "flat and match query filters must agree when both are supplied",
+                        json!({"field":key,"flat":flat,"match":nested}),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_named_filter_types(&self, args: &Map<String, Value>, mode: &str) -> Result<(), Value> {
+        let validate_value = |field: &str, value: &Value| {
+            let valid = match field {
+                "participant" | "recipient" | "sender" | "from" | "to" | "direction"
+                | "viewer" | "intent" | "read_state" | "reply_state" | "root" | "template" => {
+                    value
+                        .as_str()
+                        .is_some_and(|text| !text.trim().is_empty())
+                }
+                "expected_ledger_head" => {
+                    value.is_null()
+                        || value
+                            .as_str()
+                            .is_some_and(|text| !text.trim().is_empty())
+                }
+                "kinds" => value.as_array().is_some_and(|values| {
+                    !values.is_empty()
+                        && values.len()
+                            <= self.domain.query.max_one_of_values.unwrap_or(64).max(1)
+                        && values
+                            .iter()
+                            .all(|item| item.as_str().is_some_and(|text| !text.trim().is_empty()))
+                }),
+                "since_event" | "after_sequence" | "max_depth" => {
+                    value.as_u64().is_some()
+                }
+                "include_body" => value.is_boolean(),
+                "limit" => value.as_u64().is_some_and(|limit| limit > 0),
+                "cursor" => value.is_null() || value.is_string() || value.is_object(),
+                _ => true,
+            };
+            if valid {
+                Ok(())
+            } else {
+                Err(self.error(
+                    "query_filter_type_invalid",
+                    "named query filter has an invalid type or value",
+                    json!({"template":mode,"field":field}),
+                ))
+            }
+        };
+
+        for (field, value) in args {
+            if field == "match" {
+                if !value.is_object() {
+                    return Err(self.error(
+                        "query_filter_type_invalid",
+                        "named query match must be an object",
+                        json!({"template":mode,"field":field}),
+                    ));
+                }
+            } else {
+                validate_value(field, value)?;
+            }
+        }
+        if let Some(matched) = args.get("match").and_then(Value::as_object) {
+            for (field, value) in matched {
+                validate_value(field, value)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_named_query_fields(&self, args: &Map<String, Value>, mode: &str) -> Result<(), Value> {
+        let allowed = match mode {
+            "inbox" => [
+                "template", "recipient", "participant", "sender", "from", "to", "kinds",
+                "since_event", "after_sequence", "include_body", "direction", "viewer", "intent",
+                "read_state", "reply_state", "match", "limit", "cursor", "expected_ledger_head",
+            ]
+            .as_slice(),
+            "thread" => ["template", "root", "max_depth", "viewer", "limit", "cursor", "match", "expected_ledger_head"].as_slice(),
+            _ => [].as_slice(),
+        };
+        for key in args.keys() {
+            if !allowed.contains(&key.as_str()) {
+                return Err(self.error(
+                    "query_filter_unsupported",
+                    "the named query does not accept this argument",
+                    json!({"template":mode,"field":key}),
+                ));
+            }
+        }
+        if let Some(matched) = args.get("match").and_then(Value::as_object) {
+            let allowed_match = match mode {
+                "inbox" => [
+                    "recipient", "participant", "sender", "from", "to", "kinds", "since_event",
+                    "after_sequence", "include_body", "direction", "viewer", "intent", "read_state",
+                    "reply_state", "limit",
+                ]
+                .as_slice(),
+                "thread" => ["viewer", "limit"].as_slice(),
+                _ => [].as_slice(),
+            };
+            for key in matched.keys() {
+                if !allowed_match.contains(&key.as_str()) {
+                    return Err(self.error(
+                        "query_filter_unsupported",
+                        "the named query match object contains an unsupported field",
+                        json!({"template":mode,"field":key}),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_raw_query_arguments(&self, args: &Map<String, Value>) -> Result<(), Value> {
+        let allowed = ["query", "limit", "cursor", "expected_ledger_head"];
+        for key in args.keys() {
+            if !allowed.contains(&key.as_str()) {
+                return Err(self.error(
+                    "query_mode_mixed",
+                    "raw Datalog query accepts only query, limit, cursor, and expected_ledger_head",
+                    json!({"field":key}),
+                ));
+            }
+        }
+        if let Some(limit) = args.get("limit") {
+            if !limit.as_u64().is_some_and(|value| value > 0) {
+                return Err(self.error(
+                    "query_control_type_invalid",
+                    "raw query limit must be a positive integer",
+                    json!({"field":"limit"}),
+                ));
+            }
+        }
+        if let Some(cursor) = args.get("cursor") {
+            if !(cursor.is_null() || cursor.is_string() || cursor.is_object()) {
+                return Err(self.error(
+                    "query_control_type_invalid",
+                    "raw query cursor must be a string, object, or null",
+                    json!({"field":"cursor"}),
+                ));
+            }
+        }
+        if let Some(expected) = args.get("expected_ledger_head") {
+            if !(expected.is_null()
+                || expected
+                    .as_str()
+                    .is_some_and(|value| !value.trim().is_empty()))
+            {
+                return Err(self.error(
+                    "query_control_type_invalid",
+                    "expected_ledger_head must be a non-empty string or null",
+                    json!({"field":"expected_ledger_head"}),
+                ));
+            }
+        }
+        let Some(query) = args.get("query").and_then(Value::as_object) else {
+            return Ok(());
+        };
+        for key in ["limit", "cursor"] {
+            if let (Some(nested), Some(top_level)) = (query.get(key), args.get(key)) {
+                if nested != top_level {
+                    return Err(self.error(
+                        "query_override_conflict",
+                        "top-level query controls must agree with the same control nested in query",
+                        json!({"field":key,"nested":nested,"top_level":top_level}),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn canonical_named_template(&self, template: &str) -> String {
+        if self.domain.query.named_queries.contains_key(template) {
+            return template.to_string();
+        }
+        let namespaced = format!("{}:{template}", self.domain.identity.schema_namespace);
+        if self.domain.query.named_queries.contains_key(&namespaced) {
+            return namespaced;
+        }
+        let suffix = format!(":{template}");
+        self.domain
+            .query
+            .named_queries
+            .keys()
+            .find(|candidate| candidate.ends_with(&suffix))
+            .cloned()
+            .unwrap_or_else(|| template.to_string())
     }
 
     pub fn list_tools(&self) -> Vec<Value> {
@@ -209,6 +735,17 @@ impl Engine {
         let Some(verb) = name.strip_prefix(&prefix) else {
             return unknown();
         };
+        let advertised = self.domain.tools.iter().any(|tool| {
+            tool.name == name
+                && tool
+                    .feature
+                    .as_deref()
+                    .map(|feature| self.domain.features.enabled(feature))
+                    .unwrap_or(true)
+        });
+        if !advertised {
+            return unknown();
+        }
         // Feature-owned verbs dispatch only when the feature is enabled.
         let feature = match verb {
             "source_inspect" => Some("source_inspect"),
@@ -230,7 +767,55 @@ impl Engine {
         match verb {
             "guidance" => Ok(self.guidance_with_request(args)),
             "status" => self.status(site_root),
-            "query" => self.query(site_root, args),
+            "query" => {
+                let has_raw_query = args.contains_key("query");
+                let has_template = args.contains_key("template");
+                let named_fields = [
+                    "recipient", "participant", "sender", "from", "to", "kinds", "since_event",
+                    "after_sequence", "include_body", "direction", "viewer", "intent", "read_state",
+                    "reply_state", "match", "root", "max_depth",
+                ];
+                let legacy_fields = ["kind", "record_kind", "text", "compact", "offset"];
+                let has_named_fields = named_fields.iter().any(|field| args.contains_key(*field));
+                let has_legacy_fields = legacy_fields.iter().any(|field| args.contains_key(*field));
+                let has_cursor = args
+                    .get("cursor")
+                    .map(|value| !value.is_null())
+                    .unwrap_or(false);
+                if has_raw_query && has_template {
+                    Err(self.error(
+                        "query_mode_ambiguous",
+                        "query and template are mutually exclusive",
+                        Value::Null,
+                    ))
+                } else if !has_raw_query && !has_template && has_cursor {
+                    Err(self.error(
+                        "query_cursor_unsupported",
+                        "legacy queries use offset pagination; cursor requires query or template",
+                        Value::Null,
+                    ))
+                } else if has_raw_query && (has_named_fields || has_legacy_fields) {
+                    Err(self.error(
+                        "query_mode_mixed",
+                        "raw Datalog query cannot be combined with named-query filters",
+                        json!({"fields":named_fields.iter().chain(legacy_fields.iter()).filter(|field| args.contains_key(**field)).collect::<Vec<_>>() }),
+                    ))
+                } else if has_raw_query || has_template {
+                    if has_raw_query {
+                        self.validate_raw_query_arguments(args)?;
+                    }
+                    self.generic_query(site_root, args)
+                } else if has_named_fields {
+                    Err(self.error(
+                        "query_template_missing",
+                        "template is required when named-query filters are supplied",
+                        Value::Null,
+                    ))
+                } else {
+                    self.query(site_root, args)
+                }
+            }
+            "message_mark_read" => self.message_mark_read(site_root, args),
             "query_batch" => self.query_batch(site_root, args),
             "source_inspect" => self.source_inspect(site_root, args),
             "neighborhood" => self.neighborhood(site_root, args),
@@ -836,7 +1421,6 @@ impl Engine {
 
     fn capture_sources(&self, root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
         self.prepare(root)?;
-        self.rebuild_projection(root)?;
         let caps = &self.domain.caps.capture_sources;
         let sources = args
             .get("sources")
@@ -889,7 +1473,9 @@ impl Engine {
                 json!({"source_count":sources.len(),"operation_count":supplied.len(),"combined_count":operations.len()}),
             ));
         }
-        let existing_identities = self.existing_operation_identities(root, &operations)?;
+        let existing_identities = self.with_stable_projection(root, || {
+            self.existing_operation_identities(root, &operations)
+        })?;
         let mut proposal_args = args.clone();
         proposal_args.remove("sources");
         proposal_args.insert("operations".into(), json!(operations));
@@ -1271,12 +1857,21 @@ impl Engine {
     }
 
     fn status(&self, root: &Path) -> Result<Value, Value> {
-        self.prepare(root)?;
-        self.rebuild_projection(root)?;
+        self.with_stable_projection(root, || self.status_locked(root))
+    }
+
+    fn status_locked(&self, root: &Path) -> Result<Value, Value> {
         let db = Connection::open(self.projection_path(root))
             .map_err(self.db_error("projection_open_failed"))?;
-        let entities: i64 = db
+        let stored_entities: i64 = db
             .query_row(&format!("select count(*) from {}", self.entity_table), [], |r| r.get(0))
+            .map_err(self.db_error("projection_count_failed"))?;
+        let visible_entities: i64 = db
+            .query_row(
+                &format!("select count(*) from {} where {}", self.entity_table, self.visible_entity_predicate()),
+                [],
+                |r| r.get(0),
+            )
             .map_err(self.db_error("projection_count_failed"))?;
         let relations: i64 = db
             .query_row(&format!("select count(*) from {}", self.relation_table), [], |r| r.get(0))
@@ -1285,7 +1880,7 @@ impl Engine {
             .query_row(&format!("select count(*) from {}", self.records_table), [], |r| r.get(0))
             .map_err(self.db_error("projection_count_failed"))?;
         Ok(
-            json!({"schema":self.schema_id("status.v1"),"status":"ok","implementation":self.domain.identity.implementation,"canonical_store":self.ledger(root).to_string_lossy(),"projection":self.projection_path(root).to_string_lossy(),"ledger_head":self.ledger_head(root)?,"event_count":self.ledger_files(root)?.len(),"entity_count":entities,"relation_count":relations,"record_count":records,"projection_rebuildable":true,"truth_certification":false}),
+            json!({"schema":self.schema_id("status.v1"),"status":"ok","implementation":self.domain.identity.implementation,"canonical_store":self.ledger(root).to_string_lossy(),"projection":self.projection_path(root).to_string_lossy(),"ledger_head":self.ledger_head(root)?,"event_count":self.ledger_files(root)?.len(),"entity_count":visible_entities,"entity_count_semantics":"graph_visible","stored_entity_count":stored_entities,"internal_entity_count":stored_entities - visible_entities,"relation_count":relations,"record_count":records,"projection_rebuildable":true,"truth_certification":false}),
         )
     }
 
@@ -1311,15 +1906,1278 @@ impl Engine {
         Value::Object(out)
     }
 
+    fn message_mark_read(&self, root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
+        let read_receipt_kind = self.domain.query.read_receipt_kind.clone().ok_or_else(|| {
+            self.error(
+                "message_state_unavailable",
+                "this domain does not configure durable message read receipts",
+                Value::Null,
+            )
+        })?;
+        let message_id = self.required(args, "message_id")?;
+        let reader = self.required(args, "reader")?;
+        let actor = self.required(args, "actor")?;
+        let authority_basis = self.required_object(args, "authority_basis")?;
+        let receipt_id = format!(
+            "{}:{}",
+            safe_name(&read_receipt_kind),
+            &sha256(format!("{message_id}\0{reader}").as_bytes())[..24]
+        );
+        let (message_target, existing_receipt) = self.with_stable_projection(root, || {
+            let db = Connection::open(self.projection_path(root))
+                .map_err(self.db_error("projection_open_failed"))?;
+            let entity_pk = self.table(&self.entity_table).primary_key.clone();
+            let message_target = db
+                .query_row(
+                    &format!("select kind,payload_json from {} where {}=?1", self.entity_table, entity_pk),
+                    params![message_id],
+                    |row| {
+                        let kind = row.get::<_, String>(0)?;
+                        let payload = row.get::<_, String>(1)?;
+                        Ok((kind, serde_json::from_str::<Value>(&payload).unwrap_or(Value::Null)))
+                    },
+                )
+                .optional()
+                .map_err(self.db_error("message_read_target_lookup_failed"))?;
+            let existing_receipt = db
+                .query_row(
+                    &format!("select kind,payload_json,event_id from {} where {}=?1", self.entity_table, entity_pk),
+                    params![receipt_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
+                )
+                .optional()
+                .map_err(self.db_error("message_read_receipt_lookup_failed"))?;
+            Ok((message_target, existing_receipt))
+        })?;
+        let Some((message_kind, message_payload)) = message_target else {
+            return Err(self.error(
+                "message_not_found",
+                "message_id must identify an existing entity",
+                json!({"message_id":message_id}),
+            ));
+        };
+        if !self.is_configured_message_kind(&message_kind) {
+            return Err(self.error(
+                "message_kind_invalid",
+                "message_id must identify a configured communication kind",
+                json!({"message_id":message_id,"kind":message_kind}),
+            ));
+        }
+        let sender = message_payload.get("sender").and_then(Value::as_str);
+        let recipient = message_payload.get("recipient").and_then(Value::as_str);
+        if ![sender, recipient]
+            .into_iter()
+            .flatten()
+            .any(|participant| participant == reader)
+        {
+            return Err(self.error(
+                "message_reader_not_participant",
+                "reader must be the sender or recipient of the message",
+                json!({"message_id":message_id,"reader":reader}),
+            ));
+        }
+        if let Some((existing_kind, receipt_payload_json, event_id)) = existing_receipt {
+            if existing_kind != read_receipt_kind {
+                return Err(self.error(
+                    "message_read_receipt_conflict",
+                    "the deterministic read-receipt identity is already occupied by another entity kind",
+                    json!({"receipt_id":receipt_id,"existing_kind":existing_kind,"expected_kind":read_receipt_kind}),
+                ));
+            }
+            let receipt_payload = serde_json::from_str::<Value>(&receipt_payload_json).map_err(|_| {
+                self.error(
+                    "message_read_receipt_corrupt",
+                    "existing message read receipt payload is invalid",
+                    json!({"receipt_id":receipt_id}),
+                )
+            })?;
+            if receipt_payload.get("message_id").and_then(Value::as_str) != Some(message_id.as_str())
+                || receipt_payload.get("reader").and_then(Value::as_str) != Some(reader.as_str())
+            {
+                return Err(self.error(
+                    "message_read_receipt_conflict",
+                    "the existing read receipt does not match the requested message and reader",
+                    json!({"receipt_id":receipt_id,"message_id":message_id,"reader":reader}),
+                ));
+            }
+            let event = self.read_json(&self.ledger(root).join(format!("{event_id}.json")))?;
+            let mut admission = self.admission_receipt(&event);
+            if let Some(status) = admission.as_object_mut() {
+                status.insert("status".into(), Value::String("already_admitted".to_string()));
+            }
+            return Ok(json!({
+                "schema":self.schema_id("message_read.v1"),
+                "status":"read",
+                "replayed":true,
+                "message_id":message_id,
+                "reader":reader,
+                "receipt_id":receipt_id,
+                "read_at":receipt_payload.get("read_at"),
+                "admission":admission
+            }));
+        }
+        let read_at = args
+            .get("read_at")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(now);
+        let idempotency_key = args
+            .get("idempotency_key")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                format!(
+                    "message-read-{}",
+                    &sha256(format!("{message_id}\0{reader}").as_bytes())[..48]
+                )
+            });
+        let operation = json!({
+            "op":self.entity_op(),
+            "entity_id":receipt_id,
+            "kind":read_receipt_kind,
+            "title":format!("Read receipt for {message_id}"),
+            "message_id":message_id,
+            "reader":reader,
+            "read_at":read_at
+        });
+        let admission = self.submit_review_admit(
+            root,
+            &Map::from_iter([
+                ("actor".into(), json!(actor)),
+                ("authority_basis".into(), authority_basis),
+                ("idempotency_key".into(), json!(idempotency_key)),
+                ("operations".into(), json!([operation])),
+            ]),
+        )?;
+        Ok(json!({
+            "schema":self.schema_id("message_read.v1"),
+            "status":"read",
+            "message_id":message_id,
+            "reader":reader,
+            "receipt_id":receipt_id,
+            "read_at":read_at,
+            "admission":admission
+        }))
+    }
+
+    fn generic_query(&self, root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
+        self.with_stable_projection(root, || self.generic_query_locked(root, args))
+    }
+
+    fn generic_query_locked(&self, root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
+            let Some(datoms_table) = &self.datoms_table else {
+                return Err(self.error(
+                    "query_unavailable",
+                    "this domain does not expose a normalized datom projection",
+                    Value::Null,
+                ));
+            };
+            let head = self.ledger_head(root)?;
+            if let Some(expected) = args.get("expected_ledger_head").and_then(Value::as_str) {
+                if Some(expected) != head.as_deref() {
+                    return Err(self.error(
+                        "ledger_head_mismatch",
+                        "query expected_ledger_head does not match the current ledger head",
+                        json!({"expected_ledger_head":expected,"actual_ledger_head":head}),
+                    ));
+                }
+            }
+            let mut query_value = if let Some(query) = args.get("query") {
+                query.clone()
+            } else {
+                self.named_query(args)?
+            };
+            let raw_cursor = args
+                .get("cursor")
+                .cloned()
+                .or_else(|| query_value.get("cursor").cloned())
+                .unwrap_or(Value::Null);
+            let cursor_schema = self.schema_id("cursor.v1");
+            let cursor_value = if raw_cursor.is_null() {
+                Value::Null
+            } else {
+                decode_cursor_token(&raw_cursor, &cursor_schema).map_err(|_| {
+                    self.error(
+                        "query_cursor_invalid",
+                        "cursor must be a valid v1 opaque cursor token or legacy cursor object",
+                        json!({"cursor_schema":cursor_schema}),
+                    )
+                })?
+            };
+            if let Some(query_object) = query_value.as_object_mut() {
+                query_object.insert("cursor".into(), cursor_value.clone());
+                if !query_object.contains_key("limit") {
+                    if let Some(limit) = args.get("limit") {
+                        query_object.insert("limit".into(), limit.clone());
+                    }
+                }
+            }
+            let query_scope = {
+                let mut scope = query_value.clone();
+                if let Some(scope_object) = scope.as_object_mut() {
+                    scope_object.remove("cursor");
+                    scope_object.remove("limit");
+                    if let Some(find) = scope_object.get_mut("find").and_then(Value::as_array_mut) {
+                        for term in find {
+                            if let Some(pull) = term
+                                .as_object_mut()
+                                .and_then(|object| object.get_mut("pull"))
+                                .and_then(Value::as_object_mut)
+                            {
+                                // Projection fields are presentation, not
+                                // result identity; callers may add/remove a
+                                // body pull while continuing the same page.
+                                pull.remove("fields");
+                            }
+                        }
+                    }
+                }
+                sha256(&serde_json::to_vec(&canonical_json(&scope)).unwrap_or_default())
+            };
+            let cursor_ref = (!cursor_value.is_null()).then_some(&cursor_value);
+            let cursor_head = cursor_ref
+                .and_then(|cursor| cursor.get("head"))
+                .and_then(Value::as_str);
+            let cursor_has_values = cursor_ref
+                .and_then(|cursor| cursor.get("values"))
+                .and_then(Value::as_object)
+                .map(|values| !values.is_empty())
+                .unwrap_or(false);
+            if cursor_has_values && cursor_head.is_none() {
+                return Err(self.error(
+                    "query_cursor_unpinned",
+                    "cursor pagination requires the ledger head returned with the previous page",
+                    Value::Null,
+                ));
+            }
+            if let Some(cursor_head) = cursor_head {
+                if Some(cursor_head) != head.as_deref() {
+                    return Err(self.error(
+                        "query_cursor_stale",
+                        "query cursor belongs to a different ledger head",
+                        json!({"cursor_head":cursor_head,"actual_ledger_head":head}),
+                    ));
+                }
+            }
+            if let Some(cursor_scope) = cursor_ref
+                .and_then(|cursor| cursor.get("query"))
+                .and_then(Value::as_str)
+            {
+                if cursor_scope != query_scope {
+                    return Err(self.error(
+                        "query_cursor_scope_mismatch",
+                        "query cursor belongs to a different query shape",
+                        json!({"cursor_query":cursor_scope,"actual_query":query_scope}),
+                    ));
+                }
+            }
+            let limits = ledger_query::QueryLimits {
+                max_clauses: self.domain.query.max_clauses.unwrap_or(64).max(1),
+                max_results: self.domain.caps.query_limit.max as usize,
+                max_reach_depth: self.domain.query.max_reach_depth.unwrap_or(8).max(1),
+                max_one_of_values: self.domain.query.max_one_of_values.unwrap_or(64).max(1),
+                max_predicate_depth: self.domain.query.max_predicate_depth.unwrap_or(8).max(1),
+                max_datoms_scanned: self.domain.caps.query_execution.max_datoms_scanned as usize,
+                max_traversal_edges: self.domain.caps.query_execution.max_traversal_edges as usize,
+            };
+            let default_limit = self.domain.caps.query_limit.default as usize;
+            let spec = ledger_query::parse(&query_value, default_limit, &limits)
+                .map_err(|failure| self.error(failure.code, &failure.message, failure.details))?;
+            let db = Connection::open(self.projection_path(root))
+                .map_err(self.db_error("projection_open_failed"))?;
+            let datoms = self.load_datoms_for_query(&db, datoms_table, &spec)?;
+            let execution = ledger_query::execute(&spec, &datoms)
+                .map_err(|failure| self.error(failure.code, &failure.message, failure.details))?;
+            if execution.has_more && spec.order_by.is_empty() {
+                return Err(self.error(
+                    "query_pagination_requires_order",
+                    "a query that exceeds its limit must declare order_by for continuation",
+                    json!({"limit":spec.limit}),
+                ));
+            }
+            let items = execution
+                .bindings
+                .iter()
+                .map(|binding| self.render_query_binding(&db, binding, &spec, &datoms))
+                .collect::<Result<Vec<_>, _>>()?;
+            let next_cursor = execution.bindings.last().and_then(|binding| {
+                if !execution.has_more {
+                    return None;
+                }
+                let mut values = Map::new();
+                for order in &spec.order_by {
+                    if let Some(variable) = order.term.as_variable_name() {
+                        if let Some(value) = binding.get(variable) {
+                            values.insert(variable.to_string(), value.clone());
+                        }
+                    }
+                }
+                Some(Value::String(encode_cursor_token(&json!({
+                    "schema":cursor_schema,
+                    "head":head,
+                    "query":query_scope,
+                    "values":values
+                }))))
+            });
+            let response_template = args
+                .get("template")
+                .and_then(Value::as_str)
+                .map(|template| Value::String(self.canonical_named_template(template)))
+                .unwrap_or(Value::Null);
+            let query_origin = if args.contains_key("query") {
+                "raw"
+            } else {
+                "named_template"
+            };
+            let mut response = json!({
+                "schema":self.schema_id("query.v2"),
+                "query_mode":"datalog",
+                "query_origin":query_origin,
+                "template":response_template,
+                "ledger_head":head,
+                "items":items,
+                "count":execution.bindings.len(),
+                "returned_count":execution.bindings.len(),
+                "count_semantics":"returned_page",
+                "limit":spec.limit,
+                "output_bytes":0,
+                "max_output_bytes":self.domain.caps.query_execution.max_output_bytes,
+                "has_more":execution.has_more,
+                "next_cursor":next_cursor
+            });
+            self.finalize_bounded_output(&mut response)?;
+            Ok(response)
+    }
+
+    fn named_query(&self, args: &Map<String, Value>) -> Result<Value, Value> {
+        let template = match args.get("template") {
+            None => {
+                return Err(self.error(
+                    "query_template_missing",
+                    "template is required when query is omitted",
+                    Value::Null,
+                ));
+            }
+            Some(value) => value.as_str().ok_or_else(|| {
+                self.error(
+                    "query_filter_type_invalid",
+                    "template must be a non-empty string",
+                    json!({"field":"template"}),
+                )
+            })?,
+        };
+        let canonical_template = self.canonical_named_template(template);
+        let config = self
+            .domain
+            .query
+            .named_queries
+            .get(&canonical_template)
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                self.error(
+                    "query_template_unknown",
+                    "unknown named query template",
+                    json!({"template":template,"canonical_template":canonical_template}),
+                )
+            })?;
+        let mode = config
+            .get("mode")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                self.error(
+                    "query_template_invalid",
+                    "named query template lacks mode",
+                    json!({"template":canonical_template}),
+                )
+            })?;
+        self.validate_named_filter_conflicts(args)?;
+        self.validate_named_query_fields(args, mode)?;
+        self.validate_named_filter_types(args, mode)?;
+        let config_string = |key: &str| {
+            config
+                .get(key)
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    self.error(
+                        "query_template_invalid",
+                        "named query template lacks required string configuration",
+                        json!({"template":canonical_template,"field":key}),
+                    )
+                })
+        };
+        let config_fields = || {
+            config
+                .get("fields")
+                .and_then(Value::as_array)
+                .ok_or_else(|| {
+                    self.error(
+                        "query_template_invalid",
+                        "named query template lacks fields",
+                        json!({"template":canonical_template}),
+                    )
+                })
+        };
+        let match_value = |key: &str| {
+            args.get(key).or_else(|| {
+                args.get("match")
+                    .and_then(Value::as_object)
+                    .and_then(|matched| matched.get(key))
+            })
+        };
+        let limit = match_value("limit")
+            .cloned()
+            .unwrap_or_else(|| json!(self.domain.caps.query_limit.default));
+        let cursor = args.get("cursor").cloned().unwrap_or(Value::Null);
+        match mode {
+            "inbox" => {
+                let canonical_participant = match_value("participant")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty());
+                let legacy_participant = match_value("recipient")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty());
+                let participant = match (canonical_participant, legacy_participant) {
+                    (Some(canonical), Some(legacy)) if canonical != legacy => {
+                        return Err(self.error(
+                            "query_participant_conflict",
+                            "participant and legacy recipient must agree when both are supplied",
+                            json!({"participant":canonical,"recipient":legacy}),
+                        ));
+                    }
+                    (Some(value), _) | (_, Some(value)) => value,
+                    (None, None) => {
+                        return Err(self.error(
+                            "query_recipient_missing",
+                            "inbox requires participant (or legacy recipient)",
+                            Value::Null,
+                        ));
+                    }
+                };
+                let direction = match_value("direction")
+                    .and_then(Value::as_str)
+                    .unwrap_or("incoming");
+                let participant_attribute = config
+                    .get("participant_attributes")
+                    .and_then(Value::as_object)
+                    .and_then(|attributes| attributes.get(direction))
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        self.error(
+                            "query_direction_invalid",
+                            "direction is not supported by this inbox template",
+                            json!({"template":canonical_template,"direction":direction}),
+                        )
+                    })?;
+                let kind_key = config_string("kind_key")?;
+                let kinds = match_value("kinds")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_else(|| vec![Value::String(kind_key.to_string())]);
+                let kinds = self.expand_kind_values(kinds)?;
+                let since_event = match_value("since_event").and_then(Value::as_u64);
+                let after_sequence = match_value("after_sequence").and_then(Value::as_u64);
+                if let (Some(since_event), Some(after_sequence)) = (since_event, after_sequence) {
+                    if since_event != after_sequence {
+                        return Err(self.error(
+                            "query_sequence_filter_conflict",
+                            "since_event and after_sequence must agree when both are supplied",
+                            json!({"since_event":since_event,"after_sequence":after_sequence}),
+                        ));
+                    }
+                }
+                let since = after_sequence.or(since_event).unwrap_or(0);
+                let body_field = config.get("body_field").and_then(Value::as_str);
+                let include_body = match_value("include_body")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
+                let fields = config_fields()?
+                    .iter()
+                    .filter_map(|field| field.as_str())
+                    .filter(|field| include_body || Some(*field) != body_field)
+                    .map(Value::from)
+                    .collect::<Vec<_>>();
+                let ledger_kind = config_string("kind_attribute")?;
+                let ledger_sequence = config_string("sequence_attribute")?;
+                let ledger_event_id = config_string("event_id_attribute")?;
+                let viewer = match_value("viewer")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or(participant);
+                let sender_alias = match_value("sender").and_then(Value::as_str);
+                let from_alias = match_value("from").and_then(Value::as_str);
+                if let (Some(sender), Some(from)) = (sender_alias, from_alias) {
+                    if sender != from {
+                        return Err(self.error(
+                            "query_sender_conflict",
+                            "sender and legacy from must agree when both are supplied",
+                            json!({"sender":sender,"from":from}),
+                        ));
+                    }
+                }
+                let mut inputs = json!({
+                    "participant":participant,
+                    "viewer":viewer,
+                    "after_sequence":since
+                });
+                let mut where_clauses = vec![
+                    json!({"triple":{"subject":"?message","attribute":ledger_kind,"object":{"one_of":kinds}}}),
+                    json!({"triple":{"subject":"?message","attribute":participant_attribute,"object":{"input":"participant"}}}),
+                    json!({"triple":{"subject":"?message","attribute":ledger_sequence,"object":"?sequence"}}),
+                    json!({"triple":{"subject":"?message","attribute":ledger_event_id,"object":"?event_id"}}),
+                    json!({"compare":{"op":">","left":"?sequence","right":{"input":"after_sequence"}}})
+                ];
+                let sender_value = match_value("sender")
+                    .or_else(|| match_value("from"));
+                if let Some(sender) = sender_value.and_then(Value::as_str) {
+                    inputs["sender"] = json!(sender);
+                    let sender_attribute = config
+                        .get("participant_attributes")
+                        .and_then(Value::as_object)
+                        .and_then(|attributes| attributes.get("outgoing"))
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            self.error(
+                                "query_template_invalid",
+                                "inbox template lacks an outgoing participant attribute",
+                                json!({"template":canonical_template}),
+                            )
+                        })?;
+                    where_clauses.push(json!({"triple":{"subject":"?message","attribute":sender_attribute,"object":{"input":"sender"}}}));
+                }
+                if let Some(recipient) = match_value("to").and_then(Value::as_str) {
+                    let recipient_attribute = config
+                        .get("participant_attributes")
+                        .and_then(Value::as_object)
+                        .and_then(|attributes| attributes.get("incoming"))
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            self.error(
+                                "query_template_invalid",
+                                "inbox template lacks an incoming participant attribute",
+                                json!({"template":canonical_template}),
+                            )
+                        })?;
+                    inputs["to"] = json!(recipient);
+                    where_clauses.push(json!({"triple":{"subject":"?message","attribute":recipient_attribute,"object":{"input":"to"}}}));
+                }
+                if let Some(intent) = match_value("intent").and_then(Value::as_str) {
+                    let intent_attribute = config_string("intent_attribute")?;
+                    inputs["intent"] = json!(intent);
+                    where_clauses.push(json!({"triple":{"subject":"?message","attribute":intent_attribute,"object":{"input":"intent"}}}));
+                }
+                let read_state = match_value("read_state")
+                    .and_then(Value::as_str)
+                    .unwrap_or("all");
+                if !matches!(read_state, "all" | "read" | "unread") {
+                    return Err(self.error(
+                        "query_read_state_invalid",
+                        "read_state must be all, read, or unread",
+                        json!({"read_state":read_state}),
+                    ));
+                }
+                if read_state != "all" {
+                    let receipt_kind = self.domain.query.read_receipt_kind.as_deref();
+                    let receipt_kind_attribute = self
+                        .domain
+                        .query
+                        .read_receipt_kind_attribute
+                        .as_deref()
+                        .unwrap_or(ledger_kind);
+                    let receipt_message_attribute = self.domain.query.read_receipt_message_attribute.as_deref();
+                    let receipt_reader_attribute = self.domain.query.read_receipt_reader_attribute.as_deref();
+                    let (Some(receipt_kind), Some(receipt_message_attribute), Some(receipt_reader_attribute)) =
+                        (receipt_kind, receipt_message_attribute, receipt_reader_attribute)
+                    else {
+                        return Err(self.error(
+                            "message_state_unavailable",
+                            "this domain does not configure durable message read receipts",
+                            Value::Null,
+                        ));
+                    };
+                    let receipt_where = json!({"where":[
+                        {"triple":{"subject":"?receipt","attribute":receipt_kind_attribute,"object":receipt_kind}},
+                        {"triple":{"subject":"?receipt","attribute":receipt_message_attribute,"object":"?message"}},
+                        {"triple":{"subject":"?receipt","attribute":receipt_reader_attribute,"object":{"input":"viewer"}}}
+                    ]});
+                    where_clauses.push(if read_state == "read" {
+                        json!({"exists":receipt_where})
+                    } else {
+                        json!({"not_exists":receipt_where})
+                    });
+                }
+                let reply_state = match_value("reply_state")
+                    .and_then(Value::as_str)
+                    .unwrap_or("all");
+                if !matches!(reply_state, "all" | "replied" | "unreplied") {
+                    return Err(self.error(
+                        "query_reply_state_invalid",
+                        "reply_state must be all, replied, or unreplied",
+                        json!({"reply_state":reply_state}),
+                    ));
+                }
+                if reply_state != "all" {
+                    let reply_attribute = self.domain.query.reply_state_attribute.as_deref().ok_or_else(|| {
+                        self.error(
+                            "reply_state_unavailable",
+                            "this domain does not configure reply relations",
+                            Value::Null,
+                        )
+                    })?;
+                    let reply_where = json!({"where":[
+                        {"triple":{"subject":"?reply","attribute":reply_attribute,"object":"?message"}}
+                    ]});
+                    where_clauses.push(if reply_state == "replied" {
+                        json!({"exists":reply_where})
+                    } else {
+                        json!({"not_exists":reply_where})
+                    });
+                }
+                Ok(json!({
+                    "find":[{"pull":{"var":"?message","fields":fields}}],
+                    "inputs":inputs,
+                    "where":where_clauses,
+                    "order_by":[{"term":"?sequence","direction":"asc"},{"term":"?event_id","direction":"asc"}],
+                    "limit":limit,
+                    "cursor":cursor
+                }))
+            }
+            "thread" => {
+                let root_id = args
+                    .get("root")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| {
+                        self.error(
+                            "query_root_missing",
+                            "thread requires root",
+                            Value::Null,
+                        )
+                    })?;
+                let fields = config_fields()?
+                    .iter()
+                    .filter_map(|field| field.as_str())
+                    .map(Value::from)
+                    .collect::<Vec<_>>();
+                let relation_attribute = config_string("relation_attribute")?;
+                let ledger_sequence = config_string("sequence_attribute")?;
+                let ledger_event_id = config_string("event_id_attribute")?;
+                let viewer = match_value("viewer")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or("");
+                let configured_depth = config
+                    .get("max_depth")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(8);
+                let max_depth = args
+                    .get("max_depth")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(configured_depth);
+                Ok(json!({
+                    "find":[{"pull":{"var":"?message","fields":fields}}],
+                    "inputs":{"root":root_id,"viewer":viewer},
+                    "where":[
+                        {"reachable":{"from":{"input":"root"},"attribute":relation_attribute,"to":"?message","max_depth":max_depth}},
+                        {"triple":{"subject":"?message","attribute":ledger_sequence,"object":"?sequence"}},
+                        {"triple":{"subject":"?message","attribute":ledger_event_id,"object":"?event_id"}}
+                    ],
+                    "order_by":[{"term":"?sequence","direction":"asc"},{"term":"?event_id","direction":"asc"}],
+                    "limit":limit,
+                    "cursor":cursor
+                }))
+            }
+            _ => Err(self.error(
+                "query_template_invalid",
+                "named query template mode is unsupported",
+                json!({"template":canonical_template,"mode":mode}),
+            )),
+        }
+    }
+
+
+    fn datom_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ledger_query::Datom> {
+        let value_json: String = row.get(3)?;
+        Ok(ledger_query::Datom {
+            origin_id: row.get(0)?,
+            subject: row.get(1)?,
+            attribute: row.get(2)?,
+            value: serde_json::from_str(&value_json).unwrap_or(Value::String(value_json)),
+            event_sequence: row.get::<_, i64>(4)? as u64,
+            event_id: row.get(5)?,
+        })
+    }
+
+    fn load_datoms_sql(
+        &self,
+        db: &Connection,
+        sql: &str,
+        parameters: &[&dyn ToSql],
+    ) -> Result<Vec<ledger_query::Datom>, Value> {
+        let mut statement = db
+            .prepare(sql)
+            .map_err(self.db_error("projection_datom_prepare_failed"))?;
+        let rows = statement
+            .query_map(
+                rusqlite::params_from_iter(parameters.iter().copied()),
+                |row| Self::datom_from_row(row),
+            )
+            .map_err(self.db_error("projection_datom_query_failed"))?;
+        rows.map(|row| row.map_err(self.db_error("projection_datom_row_failed")))
+            .collect::<Result<Vec<_>, _>>()
+    }
+
+    fn append_datoms(
+        &self,
+        db: &Connection,
+        sql: &str,
+        parameters: &[&dyn ToSql],
+        datoms: &mut Vec<ledger_query::Datom>,
+        seen: &mut HashSet<String>,
+        max_datoms: u64,
+    ) -> Result<(), Value> {
+        for datom in self.load_datoms_sql(db, sql, parameters)? {
+            let key = format!(
+                "{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}",
+                datom.origin_id,
+                datom.subject,
+                datom.attribute,
+                serde_json::to_string(&datom.value).unwrap_or_default(),
+                datom.event_sequence,
+                datom.event_id,
+            );
+            if seen.insert(key) {
+                datoms.push(datom);
+                if datoms.len() as u64 > max_datoms {
+                    return Err(self.error(
+                        "query_datom_scan_limit",
+                        "normalized datom projection exceeds the descriptor scan budget",
+                        json!({"max_datoms_scanned":max_datoms}),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn load_datoms(
+        &self,
+        db: &Connection,
+        table: &str,
+        max_datoms: u64,
+    ) -> Result<Vec<ledger_query::Datom>, Value> {
+        let row_limit = max_datoms.saturating_add(1) as i64;
+        let sql = format!(
+            "select origin_id,subject,attribute,value_json,event_sequence,event_id from {table} limit ?1"
+        );
+        let parameters: [&dyn ToSql; 1] = [&row_limit];
+        let datoms = self.load_datoms_sql(db, &sql, &parameters)?;
+        if datoms.len() as u64 > max_datoms {
+            return Err(self.error(
+                "query_datom_scan_limit",
+                "normalized datom projection exceeds the descriptor scan budget",
+                json!({"max_datoms_scanned":max_datoms}),
+            ));
+        }
+        Ok(datoms)
+    }
+
+    fn load_datoms_for_query(
+        &self,
+        db: &Connection,
+        table: &str,
+        spec: &ledger_query::QuerySpec,
+    ) -> Result<Vec<ledger_query::Datom>, Value> {
+        let max_datoms = spec.limits.max_datoms_scanned as u64;
+        let mut plan = QuerySeedPlan::default();
+        collect_query_seed_clauses(&spec.clauses, &spec.inputs, &mut plan);
+
+        // Pull decoration derives durable read/reply state from normalized
+        // datoms too. Load those narrow attributes alongside the selected
+        // subjects without making their subjects seed a second expansion.
+        if !spec.pulls.is_empty() {
+            for attribute in [
+                self.domain.query.reply_state_attribute.as_deref(),
+                self.domain.query.read_receipt_kind_attribute.as_deref(),
+                self.domain.query.read_receipt_message_attribute.as_deref(),
+                self.domain.query.read_receipt_reader_attribute.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                plan.push_attribute(attribute);
+            }
+        }
+
+        // A variable attribute cannot be safely narrowed by the available
+        // indexes. Preserve complete query semantics for that shape by using
+        // the bounded full-scan path.
+        if plan.unindexable
+            || (plan.attribute_values.is_empty()
+                && plan.subject_attributes.is_empty()
+                && plan.attributes.is_empty())
+        {
+            return self.load_datoms(db, table, max_datoms);
+        }
+
+        let mut datoms = Vec::new();
+        let mut seen = HashSet::new();
+        let mut candidate_subjects = HashSet::new();
+        let row_limit = max_datoms.saturating_add(1) as i64;
+
+        for (attribute, value) in &plan.attribute_values {
+            let value_json = serde_json::to_string(value).map_err(|error| {
+                self.error(
+                    "projection_datom_value_encode_failed",
+                    error.to_string(),
+                    Value::Null,
+                )
+            })?;
+            let parameters: [&dyn ToSql; 3] = [attribute, &value_json, &row_limit];
+            let before = datoms.len();
+            self.append_datoms(
+                db,
+                &format!(
+                    "select origin_id,subject,attribute,value_json,event_sequence,event_id from {table} where attribute=?1 and value_json=?2 limit ?3"
+                ),
+                &parameters,
+                &mut datoms,
+                &mut seen,
+                max_datoms,
+            )?;
+            for datom in datoms[before..].iter() {
+                candidate_subjects.insert(datom.subject.clone());
+            }
+        }
+
+        for (subject, attribute) in &plan.subject_attributes {
+            let parameters: [&dyn ToSql; 3] = [subject, attribute, &row_limit];
+            let before = datoms.len();
+            self.append_datoms(
+                db,
+                &format!(
+                    "select origin_id,subject,attribute,value_json,event_sequence,event_id from {table} where subject=?1 and attribute=?2 limit ?3"
+                ),
+                &parameters,
+                &mut datoms,
+                &mut seen,
+                max_datoms,
+            )?;
+            for datom in datoms[before..].iter() {
+                candidate_subjects.insert(datom.subject.clone());
+            }
+        }
+
+        // Once a selective indexed predicate has identified subjects, load
+        // their complete normalized records so joins, comparisons, and pull
+        // decoration see the same subject-local facts as a full scan.
+        for subject in candidate_subjects {
+            let parameters: [&dyn ToSql; 2] = [&subject, &row_limit];
+            self.append_datoms(
+                db,
+                &format!(
+                    "select origin_id,subject,attribute,value_json,event_sequence,event_id from {table} where subject=?1 limit ?2"
+                ),
+                &parameters,
+                &mut datoms,
+                &mut seen,
+                max_datoms,
+            )?;
+        }
+
+        // Broad attributes are still needed for joins, correlated predicates,
+        // reachability, and durable message-state decoration. They remain
+        // bounded but do not themselves trigger subject expansion.
+        for attribute in &plan.attributes {
+            let parameters: [&dyn ToSql; 2] = [attribute, &row_limit];
+            self.append_datoms(
+                db,
+                &format!(
+                    "select origin_id,subject,attribute,value_json,event_sequence,event_id from {table} where attribute=?1 limit ?2"
+                ),
+                &parameters,
+                &mut datoms,
+                &mut seen,
+                max_datoms,
+            )?;
+        }
+        Ok(datoms)
+    }
+    fn entity_kind(&self, db: &Connection, entity_id: &str) -> Result<String, Value> {
+        db.query_row(
+            &format!("select kind from {} where entity_id=?1", self.entity_table),
+            params![entity_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(self.db_error("query_entity_kind_failed"))?
+        .ok_or_else(|| {
+            self.error(
+                "query_entity_not_found",
+                "pull target entity was not found",
+                json!({"entity_id":entity_id}),
+            )
+        })
+    }
+
+    fn decorate_query_entity(
+        &self,
+        db: &Connection,
+        id: &str,
+        value: &mut Value,
+        binding: &Map<String, Value>,
+        datoms: &[ledger_query::Datom],
+    ) -> Result<(), Value> {
+        let kind = self.entity_kind(db, id)?;
+        if !self.is_configured_message_kind(&kind) {
+            return Ok(());
+        }
+        let Some(object) = value.as_object_mut() else {
+            return Ok(());
+        };
+        let viewer = binding
+            .get("?viewer")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty());
+        let message_state = self.message_read_state(id, viewer, datoms);
+        let reply_state_attribute = self
+            .domain
+            .query
+            .reply_state_attribute
+            .as_deref()
+            .unwrap_or("");
+        let reply_count = if reply_state_attribute.is_empty() {
+            0
+        } else {
+            datoms
+                .iter()
+                .filter(|datom| {
+                    datom.attribute == reply_state_attribute
+                        && datom.value.as_str() == Some(id)
+                })
+                .count()
+        };
+        let is_reply = !reply_state_attribute.is_empty()
+            && datoms.iter().any(|datom| {
+                datom.attribute == reply_state_attribute && datom.subject == id
+            });
+        let reply_state = json!({
+            "status":if reply_count > 0 { "replied" } else { "unreplied" },
+            "has_replies":reply_count > 0,
+            "reply_count":reply_count,
+            "is_reply":is_reply
+        });
+        let query_meta = json!({
+            "message_state":message_state,
+            "reply_state":reply_state,
+            "kind":kind,
+            "viewer":viewer
+        });
+        // Preserve legacy top-level fields for callers, but never overwrite a
+        // domain payload field. `_narada_query` is the collision-free source
+        // of truth for new callers.
+        if !object.contains_key("message_state") {
+            object.insert("message_state".into(), message_state.clone());
+        }
+        if !object.contains_key("reply_state") {
+            object.insert("reply_state".into(), reply_state.clone());
+        }
+        object.insert("_narada_query".into(), query_meta);
+        Ok(())
+    }
+
+    fn render_query_binding(
+        &self,
+        db: &Connection,
+        binding: &Map<String, Value>,
+        spec: &ledger_query::QuerySpec,
+        datoms: &[ledger_query::Datom],
+    ) -> Result<Value, Value> {
+        if spec.pulls.len() == 1 && spec.finds.len() == 1 {
+            let pull = &spec.pulls[0];
+            let id = binding
+                .get(&pull.variable)
+                .and_then(Value::as_str)
+                .ok_or_else(|| self.error("query_pull_target_invalid", "pull target is not a string entity, relation, or record id", json!({"variable":pull.variable})))?;
+            let (mut value, is_entity) = self.pull_target(db, id, &pull.fields, pull.target_kind.as_deref())?;
+            if is_entity {
+                self.decorate_query_entity(db, id, &mut value, binding, datoms)?;
+            }
+            return Ok(value);
+        }
+        let mut output = Map::new();
+        for find in &spec.finds {
+            let Some(name) = find.as_variable_name() else {
+                continue;
+            };
+            let value = binding.get(name).ok_or_else(|| {
+                self.error(
+                    "query_find_unbound",
+                    "find variable is not bound in the result",
+                    json!({"variable":name}),
+                )
+            })?;
+            output.insert(name.trim_start_matches('?').to_string(), value.clone());
+        }
+        for pull in &spec.pulls {
+            let id = binding
+                .get(&pull.variable)
+                .and_then(Value::as_str)
+                .ok_or_else(|| self.error("query_pull_target_invalid", "pull target is not a string entity, relation, or record id", json!({"variable":pull.variable})))?;
+            let (mut value, is_entity) = self.pull_target(db, id, &pull.fields, pull.target_kind.as_deref())?;
+            if is_entity {
+                self.decorate_query_entity(db, id, &mut value, binding, datoms)?;
+            }
+            output.insert(pull.variable.trim_start_matches('?').to_string(), value);
+        }
+        Ok(Value::Object(output))
+    }
+
+    fn message_read_state(
+        &self,
+        message_id: &str,
+        viewer: Option<&str>,
+        datoms: &[ledger_query::Datom],
+    ) -> Value {
+        let read = match (
+            viewer,
+            self.domain.query.read_receipt_kind.as_deref(),
+            self.domain.query.read_receipt_kind_attribute.as_deref(),
+            self.domain.query.read_receipt_message_attribute.as_deref(),
+            self.domain.query.read_receipt_reader_attribute.as_deref(),
+        ) {
+            (Some(viewer), Some(receipt_kind), Some(kind_attribute), Some(message_attribute), Some(reader_attribute)) => {
+                let receipt_ids = datoms
+                    .iter()
+                    .filter(|datom| {
+                        datom.attribute == kind_attribute
+                            && datom.value.as_str() == Some(receipt_kind)
+                    })
+                    .map(|datom| datom.subject.as_str())
+                    .collect::<HashSet<_>>();
+                Some(datoms.iter().any(|datom| {
+                    receipt_ids.contains(datom.subject.as_str())
+                        && datom.attribute == message_attribute
+                        && datom.value.as_str() == Some(message_id)
+                        && datoms.iter().any(|reader_datom| {
+                            reader_datom.subject == datom.subject
+                                && reader_datom.attribute == reader_attribute
+                                && reader_datom.value.as_str() == Some(viewer)
+                        })
+                }))
+            }
+            _ => None,
+        };
+        let status = match read {
+            Some(true) => "read",
+            Some(false) => "unread",
+            None => "unknown",
+        };
+        json!({
+            "status":status,
+            "read":read,
+            "unread":read.map(|value| !value),
+            "viewer":viewer
+        })
+    }
+
+    fn render_pull_fields(
+        &self,
+        fields: &[String],
+        base: &Map<String, Value>,
+        payload: &Value,
+    ) -> Value {
+        let mut output = Map::new();
+        let full = fields.iter().any(|field| field == "*");
+        for field in fields {
+            if field == "*" {
+                continue;
+            }
+            let value = base
+                .get(field)
+                .cloned()
+                .or_else(|| payload.get(field).cloned())
+                .unwrap_or(Value::Null);
+            output.insert(field.clone(), value);
+        }
+        if full {
+            for (field, value) in base {
+                output.insert(field.clone(), value.clone());
+            }
+            output.insert("payload".into(), payload.clone());
+        }
+        Value::Object(output)
+    }
+
+    fn parse_pull_payload(&self, target_id: &str, payload_json: &str) -> Result<Value, Value> {
+        if payload_json.len() as u64 > self.domain.caps.query_execution.max_output_bytes {
+            return Err(self.error(
+                "query_payload_limit",
+                "pull target payload exceeds the descriptor response-byte budget",
+                json!({"target_id":target_id,"payload_bytes":payload_json.len(),"max_output_bytes":self.domain.caps.query_execution.max_output_bytes}),
+            ));
+        }
+        serde_json::from_str::<Value>(payload_json).map_err(|_| {
+            self.error(
+                "query_pull_payload_invalid",
+                "pull target payload is not valid JSON",
+                json!({"target_id":target_id}),
+            )
+        })
+    }
+
+    fn pull_target(
+        &self,
+        db: &Connection,
+        target_id: &str,
+        fields: &[String],
+        target_kind: Option<&str>,
+    ) -> Result<(Value, bool), Value> {
+        if let Some(target_kind) = target_kind {
+            if !matches!(target_kind, "entity" | "relation" | "record") {
+                return Err(self.error(
+                    "query_pull_target_invalid",
+                    "pull target_kind must be entity, relation, or record",
+                    json!({"target_id":target_id,"target_kind":target_kind}),
+                ));
+            }
+        }
+        let mut matches: Vec<(&str, Value, bool)> = Vec::new();
+        if target_kind.is_none() || target_kind == Some("entity") {
+            let entity = db
+                .query_row(
+                    &format!("select entity_id,kind,payload_json,event_id,event_sequence from {} where entity_id=?1", self.entity_table),
+                    params![target_id],
+                    |row| {
+                        let payload_json: String = row.get(2)?;
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            payload_json,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, i64>(4)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(self.db_error("projection_pull_query_failed"))?;
+            if let Some((entity_id, kind, payload_json, event_id, event_sequence)) = entity {
+                let payload = self.parse_pull_payload(target_id, &payload_json)?;
+                let base = Map::from_iter([
+                    ("entity_id".into(), json!(entity_id)),
+                    ("kind".into(), json!(kind)),
+                    ("event_id".into(), json!(event_id)),
+                    ("event_sequence".into(), json!(event_sequence)),
+                    ("payload".into(), payload.clone()),
+                ]);
+                matches.push(("entity", self.render_pull_fields(fields, &base, &payload), true));
+            }
+        }
+        if target_kind.is_none() || target_kind == Some("relation") {
+            let relation = db
+                .query_row(
+                    &format!("select relation_id,relation_type,source_id,target_id,payload_json,event_id,event_sequence from {} where relation_id=?1", self.relation_table),
+                    params![target_id],
+                    |row| {
+                        let payload_json: String = row.get(4)?;
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            payload_json,
+                            row.get::<_, String>(5)?,
+                            row.get::<_, i64>(6)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(self.db_error("projection_pull_query_failed"))?;
+            if let Some((relation_id, relation_type, source_id, relation_target_id, payload_json, event_id, event_sequence)) = relation {
+                let payload = self.parse_pull_payload(target_id, &payload_json)?;
+                let base = Map::from_iter([
+                    ("relation_id".into(), json!(relation_id)),
+                    ("relation_type".into(), json!(relation_type)),
+                    ("source_id".into(), json!(source_id)),
+                    ("target_id".into(), json!(relation_target_id)),
+                    ("event_id".into(), json!(event_id)),
+                    ("event_sequence".into(), json!(event_sequence)),
+                    ("payload".into(), payload.clone()),
+                ]);
+                matches.push(("relation", self.render_pull_fields(fields, &base, &payload), false));
+            }
+        }
+        if target_kind.is_none() || target_kind == Some("record") {
+            let record = db
+                .query_row(
+                    &format!("select record_id,record_kind,payload_json,event_id,event_sequence from {} where record_id=?1", self.records_table),
+                    params![target_id],
+                    |row| {
+                        let payload_json: String = row.get(2)?;
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            payload_json,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, i64>(4)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(self.db_error("projection_pull_query_failed"))?;
+            if let Some((record_id, record_kind, payload_json, event_id, event_sequence)) = record {
+                let payload = self.parse_pull_payload(target_id, &payload_json)?;
+                let base = Map::from_iter([
+                    ("record_id".into(), json!(record_id)),
+                    ("record_kind".into(), json!(record_kind)),
+                    ("event_id".into(), json!(event_id)),
+                    ("event_sequence".into(), json!(event_sequence)),
+                    ("payload".into(), payload.clone()),
+                ]);
+                matches.push(("record", self.render_pull_fields(fields, &base, &payload), false));
+            }
+        }
+        if matches.len() > 1 {
+            let target_kinds = matches.iter().map(|(kind, _, _)| *kind).collect::<Vec<_>>();
+            return Err(self.error(
+                "query_pull_target_ambiguous",
+                "pull target id exists in more than one projection; specify target_kind",
+                json!({"target_id":target_id,"target_kinds":target_kinds}),
+            ));
+        }
+        if let Some((_, value, is_entity)) = matches.pop() {
+            return Ok((value, is_entity));
+        }
+        Err(self.error(
+            "query_pull_target_not_found",
+            "pull target was not found in the requested entity, relation, or record projection",
+            json!({"target_id":target_id,"target_kind":target_kind,"target_kinds":["entity","relation","record"]}),
+        ))
+    }
+
     fn query(&self, root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
-        self.rebuild_projection(root)?;
+        self.with_stable_projection(root, || self.query_locked(root, args))
+    }
+
+    fn query_locked(&self, root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
+        let ledger_head = self.ledger_head(root)?;
+        if let Some(expected) = args.get("expected_ledger_head").and_then(Value::as_str) {
+            if Some(expected) != ledger_head.as_deref() {
+                return Err(self.error(
+                    "ledger_head_mismatch",
+                    "query expected_ledger_head does not match the current ledger head",
+                    json!({"expected_ledger_head":expected,"actual_ledger_head":ledger_head}),
+                ));
+            }
+        }
         let db = Connection::open(self.projection_path(root))
             .map_err(self.db_error("projection_open_failed"))?;
         let limit = args
             .get("limit")
             .and_then(Value::as_u64)
             .unwrap_or(self.domain.caps.query_limit.default)
-            .min(self.domain.caps.query_limit.max);
+            .clamp(self.domain.caps.query_limit.min, self.domain.caps.query_limit.max);
         let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0);
         let kind = args.get("kind").and_then(Value::as_str).unwrap_or("");
         let compact = args
@@ -1347,23 +3205,26 @@ impl Engine {
             let items = rows
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(self.db_error("projection_record_query_row_failed"))?;
-            return Ok(
-                json!({"schema":self.schema_id("query.v1"),"status":"ok","result_kind":"records","record_kind":record_kind,"compact":compact,"items":items,"offset":offset,"limit":limit,"returned":items.len(),"bounded":true}),
-            );
+            let mut response = json!({"schema":self.schema_id("query.v1"),"status":"ok","result_kind":"records","record_kind":record_kind,"compact":compact,"ledger_head":ledger_head,"items":items,"offset":offset,"limit":limit,"returned":items.len(),"bounded":true,"max_output_bytes":self.domain.caps.query_execution.max_output_bytes});
+            self.finalize_bounded_output(&mut response)?;
+            return Ok(response);
         }
-        let mut accepted_kinds = Vec::new();
-        if !kind.is_empty() {
-            accepted_kinds.push(kind);
-            if let Some(aliases) = self.domain.query.kind_aliases.get(kind) {
-                accepted_kinds.extend(aliases.iter().map(String::as_str));
-            }
-        }
+        let accepted_kind_values = if kind.is_empty() {
+            Vec::new()
+        } else {
+            self.expand_legacy_kind_value(kind)?
+        };
+        let accepted_kinds = accepted_kind_values
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect::<Vec<_>>();
         let kind_predicate = if accepted_kinds.is_empty() {
-            "1=1".to_string()
+            self.visible_entity_predicate()
         } else {
             let literals = accepted_kinds
                 .iter()
-                .map(|value| format!("'{}'", value.replace('\'', "''")))
+                .map(|value| Self::sql_quote(value))
                 .collect::<Vec<_>>()
                 .join(",");
             format!("kind in ({literals})")
@@ -1386,36 +3247,20 @@ impl Engine {
         let items = rows
             .collect::<Result<Vec<_>, _>>()
             .map_err(self.db_error("projection_query_row_failed"))?;
-        Ok(
-            json!({"schema":self.schema_id("query.v1"),"status":"ok","result_kind":"entities","kind":kind,"expanded_kinds":accepted_kinds,"compact":compact,"items":items,"offset":offset,"limit":limit,"returned":items.len(),"bounded":true}),
-        )
+        let mut response = json!({"schema":self.schema_id("query.v1"),"status":"ok","result_kind":"entities","kind":kind,"expanded_kinds":accepted_kinds,"compact":compact,"ledger_head":ledger_head,"items":items,"offset":offset,"limit":limit,"returned":items.len(),"bounded":true,"max_output_bytes":self.domain.caps.query_execution.max_output_bytes});
+        self.finalize_bounded_output(&mut response)?;
+        Ok(response)
     }
 
     fn snapshot(&self, root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
+        self.with_stable_projection(root, || self.snapshot_locked(root, args))
+    }
+
+    fn snapshot_locked(&self, root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
         let feature = &self.domain.features.snapshot;
-        let mut snapshot_head = None;
-        let mut stable = false;
-        for _ in 0..feature.stability_retries {
-            let before = self.ledger_head(root)?;
-            self.rebuild_projection(root)?;
-            let after = self.ledger_head(root)?;
-            if before == after {
-                snapshot_head = after;
-                stable = true;
-                break;
-            }
-        }
-        let ledger_head = snapshot_head;
-        if !stable {
-            return Err(self.error(
-                &feature.unstable_refusal_code,
-                "The graph changed repeatedly while the query projection was rebuilt.",
-                Value::Null,
-            ));
-        }
-        if let Some(expected) = args.get("expected_ledger_head") {
-            let expected = expected.as_str();
-            if expected != ledger_head.as_deref() {
+        let ledger_head = self.ledger_head(root)?;
+        if let Some(expected) = args.get("expected_ledger_head").and_then(Value::as_str) {
+            if Some(expected) != ledger_head.as_deref() {
                 return Err(self.error(
                     &feature.head_mismatch_refusal_code,
                     "The graph changed after the requested snapshot began.",
@@ -1439,15 +3284,16 @@ impl Engine {
             .unwrap_or(0);
         let db = Connection::open(self.projection_path(root))
             .map_err(self.db_error("projection_open_failed"))?;
+        let visible_entities = self.visible_entity_predicate();
         let entity_count: i64 = db
-            .query_row(&format!("select count(*) from {}", self.entity_table), [], |row| row.get(0))
+            .query_row(&format!("select count(*) from {} where {visible_entities}", self.entity_table), [], |row| row.get(0))
             .map_err(self.db_error("projection_count_failed"))?;
         let relation_count: i64 = db
             .query_row(&format!("select count(*) from {}", self.relation_table), [], |row| row.get(0))
             .map_err(self.db_error("projection_count_failed"))?;
 
         let mut entity_statement = db
-            .prepare(&format!("select entity_id,kind,payload_json,event_id from {} order by entity_id limit ?1 offset ?2", self.entity_table))
+            .prepare(&format!("select entity_id,kind,payload_json,event_id from {} where {visible_entities} order by entity_id limit ?1 offset ?2", self.entity_table))
             .map_err(self.db_error("projection_snapshot_entities_prepare_failed"))?;
         let entities = entity_statement
             .query_map(params![limit, entity_offset], |row| {
@@ -1505,7 +3351,20 @@ impl Engine {
     }
 
     fn query_batch(&self, root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
+        self.with_stable_projection(root, || self.query_batch_locked(root, args))
+    }
+
+    fn query_batch_locked(&self, root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
         let caps = &self.domain.caps.query_batch;
+        for key in args.keys() {
+            if !["queries", "limit_per_query", "expected_ledger_head"].contains(&key.as_str()) {
+                return Err(self.error(
+                    "invalid_batch_query",
+                    "batch query accepts only queries, limit_per_query, and expected_ledger_head",
+                    json!({"field":key}),
+                ));
+            }
+        }
         let queries = args
             .get("queries")
             .and_then(Value::as_array)
@@ -1526,11 +3385,34 @@ impl Engine {
                 json!({"count":queries.len()}),
             ));
         }
-        let limit = args
+        if let Some(limit) = args.get("limit_per_query") {
+            if !limit.as_u64().is_some_and(|value| value > 0) {
+                return Err(self.error(
+                    "invalid_batch_query",
+                    "limit_per_query must be a positive integer",
+                    json!({"field":"limit_per_query"}),
+                ));
+            }
+        }
+        let expected_ledger_head = args.get("expected_ledger_head").cloned();
+        if let Some(expected) = &expected_ledger_head {
+            if !(expected.is_null()
+                || expected
+                    .as_str()
+                    .is_some_and(|value| !value.trim().is_empty()))
+            {
+                return Err(self.error(
+                    "invalid_batch_query",
+                    "expected_ledger_head must be a non-empty string or null",
+                    json!({"field":"expected_ledger_head"}),
+                ));
+            }
+        }
+        let batch_limit = args
             .get("limit_per_query")
             .and_then(Value::as_u64)
             .unwrap_or(caps.limit_per_query_default)
-            .min(caps.limit_per_query_max);
+            .clamp(caps.limit_per_query_min, caps.limit_per_query_max);
         let mut results = Vec::with_capacity(queries.len());
         for (index, item) in queries.iter().enumerate() {
             let item = item.as_object().ok_or_else(|| {
@@ -1540,28 +3422,167 @@ impl Engine {
                     json!({"index":index}),
                 )
             })?;
+            if let Some(limit) = item.get("limit") {
+                if !limit.as_u64().is_some_and(|value| value > 0) {
+                    return Err(self.error(
+                        "invalid_batch_query",
+                        "query item limit must be a positive integer",
+                        json!({"index":index,"field":"limit"}),
+                    ));
+                }
+            }
+            if let Some(cursor) = item.get("cursor") {
+                if !(cursor.is_null() || cursor.is_string() || cursor.is_object()) {
+                    return Err(self.error(
+                        "invalid_batch_query",
+                        "query item cursor must be a string, object, or null",
+                        json!({"index":index,"field":"cursor"}),
+                    ));
+                }
+            }
+            if let Some(item_expected) = item.get("expected_ledger_head") {
+                if !(item_expected.is_null()
+                    || item_expected
+                        .as_str()
+                        .is_some_and(|value| !value.trim().is_empty()))
+                {
+                    return Err(self.error(
+                        "invalid_batch_query",
+                        "query item expected_ledger_head must be a non-empty string or null",
+                        json!({"index":index,"field":"expected_ledger_head"}),
+                    ));
+                }
+            }
             let mut query_args = item.clone();
-            query_args.insert("compact".into(), json!(true));
-            query_args.insert("limit".into(), json!(limit));
-            query_args.insert("offset".into(), json!(0));
-            let result = self.query(root, &query_args)?;
+            if let Some(expected) = &expected_ledger_head {
+                if let Some(item_expected) = item.get("expected_ledger_head") {
+                    if !item_expected.is_null() && item_expected != expected {
+                        return Err(self.error(
+                            "query_expected_head_conflict",
+                            "batch expected_ledger_head cannot be overridden by an item",
+                            json!({"index":index,"batch":expected,"item":item_expected}),
+                        ));
+                    }
+                }
+                query_args.insert("expected_ledger_head".into(), expected.clone());
+            }
+            let generic = query_args.contains_key("query") || query_args.contains_key("template");
+            let named_fields = [
+                "recipient", "participant", "sender", "from", "to", "kinds", "since_event",
+                "after_sequence", "include_body", "direction", "viewer", "intent", "read_state",
+                "reply_state", "match", "root", "max_depth",
+            ];
+            let has_cursor = query_args
+                .get("cursor")
+                .map(|value| !value.is_null())
+                .unwrap_or(false);
+            if !generic && has_cursor {
+                return Err(self.error(
+                    "query_cursor_unsupported",
+                    "legacy batch queries use offset pagination; cursor requires query or template",
+                    json!({"index":index}),
+                ));
+            }
+            if !generic && named_fields.iter().any(|field| query_args.contains_key(*field)) {
+                return Err(self.error(
+                    "query_template_missing",
+                    "template is required when named-query filters are supplied in a batch item",
+                    json!({"index":index}),
+                ));
+            }
+            if generic {
+                if query_args.contains_key("query") {
+                    self.validate_raw_query_arguments(&query_args)?;
+                } else {
+                    self.validate_named_filter_conflicts(&query_args)?;
+                }
+            }
+            let requested_limit = query_args
+                .get("limit")
+                .and_then(Value::as_u64)
+                .or_else(|| {
+                    query_args
+                        .get("query")
+                        .and_then(Value::as_object)
+                        .and_then(|query| query.get("limit"))
+                        .and_then(Value::as_u64)
+                })
+                .or_else(|| {
+                    query_args
+                        .get("match")
+                        .and_then(Value::as_object)
+                        .and_then(|matched| matched.get("limit"))
+                        .and_then(Value::as_u64)
+                })
+                .unwrap_or(batch_limit);
+            let effective_limit = requested_limit.clamp(caps.limit_per_query_min, batch_limit);
+            if generic {
+                if let Some(query) = query_args.get_mut("query").and_then(Value::as_object_mut) {
+                    query.insert("limit".into(), json!(effective_limit));
+                }
+                if let Some(matched) = query_args.get_mut("match").and_then(Value::as_object_mut) {
+                    if matched.contains_key("limit") {
+                        matched.insert("limit".into(), json!(effective_limit));
+                    }
+                }
+                query_args.insert("limit".into(), json!(effective_limit));
+            } else {
+                query_args.entry("compact").or_insert(json!(true));
+                query_args.insert("limit".into(), json!(effective_limit));
+                query_args.insert("offset".into(), json!(0));
+            }
+            let result = if generic {
+                self.generic_query_locked(root, &query_args)?
+            } else {
+                self.query_locked(root, &query_args)?
+            };
+            let returned = result
+                .get("returned")
+                .cloned()
+                .or_else(|| result.get("count").cloned())
+                .unwrap_or(Value::Null);
+            let query_origin = result
+                .get("query_origin")
+                .cloned()
+                .unwrap_or_else(|| json!("legacy"));
             results.push(json!({
                 "index":index,
+                "mode":if generic { "datalog" } else { "legacy" },
+                "query_origin":query_origin.clone(),
+                "request":{
+                    "mode":if item.contains_key("query") { "raw" } else if item.contains_key("template") { "named_template" } else { "legacy" },
+                    "template":result.get("template").cloned().unwrap_or(Value::Null),
+                    "match":item.get("match").cloned().unwrap_or(Value::Null),
+                    "kind":item.get("kind").cloned().unwrap_or(Value::Null),
+                    "record_kind":item.get("record_kind").cloned().unwrap_or(Value::Null),
+                    "text":item.get("text").cloned().unwrap_or(Value::Null)
+                },
+                "result_schema":result.get("schema").cloned().unwrap_or(Value::Null),
+                "ledger_head":result.get("ledger_head").cloned().unwrap_or(Value::Null),
                 "text":item.get("text"),
                 "kind":item.get("kind"),
                 "record_kind":item.get("record_kind"),
-                "returned":result["returned"],
-                "items":result["items"]
+                "returned":returned,
+                "count":result.get("count").cloned().unwrap_or(returned.clone()),
+                "count_semantics":result.get("count_semantics").cloned().unwrap_or_else(|| json!("returned_page")),
+                "limit":result.get("limit").cloned().unwrap_or_else(|| json!(effective_limit)),
+                "items":result.get("items").cloned().unwrap_or_else(|| json!([])),
+                "has_more":result.get("has_more").cloned().unwrap_or_else(|| json!(false)),
+                "next_cursor":result.get("next_cursor").cloned().unwrap_or(Value::Null)
             }));
         }
-        Ok(json!({
-            "schema":self.schema_id("query_batch.v1"),
+        let mut response = json!({
+            "schema":self.schema_id("query_batch.v2"),
             "status":"ok",
             "query_count":queries.len(),
-            "limit_per_query":limit,
+            "limit_per_query":batch_limit,
             "results":results,
-            "bounded":true
-        }))
+            "bounded":true,
+            "output_bytes":0,
+            "max_output_bytes":self.domain.caps.query_execution.max_output_bytes
+        });
+        self.finalize_bounded_output(&mut response)?;
+        Ok(response)
     }
 
     fn source_inspect(&self, root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
@@ -1689,7 +3710,10 @@ impl Engine {
     }
 
     fn neighborhood(&self, root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
-        self.rebuild_projection(root)?;
+        self.with_stable_projection(root, || self.neighborhood_locked(root, args))
+    }
+
+    fn neighborhood_locked(&self, root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
         let id = self.required(args, "entity_id")?;
         let limit = args
             .get("limit")
@@ -1753,14 +3777,17 @@ impl Engine {
     }
 
     fn export(&self, root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
+        self.with_stable_projection(root, || self.export_locked(root, args))
+    }
+
+    fn export_locked(&self, root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
         let feature = &self.domain.features.export;
         let caps = &self.domain.caps.export;
         let format = args
             .get("format")
             .and_then(Value::as_str)
             .unwrap_or(&feature.default_format);
-        let entities = self.query(root, &Map::from_iter([("limit".into(), json!(caps.entities))]))?["items"].clone();
-        self.rebuild_projection(root)?;
+        let entities = self.query_locked(root, &Map::from_iter([("limit".into(), json!(caps.entities))]))?["items"].clone();
         let db = Connection::open(self.projection_path(root))
             .map_err(self.db_error("projection_open_failed"))?;
         let mut stmt = db
@@ -1795,6 +3822,77 @@ impl Engine {
 
     fn rebuild_projection(&self, root: &Path) -> Result<(), Value> {
         self.prepare(root)?;
+        self.with_authority_lock(root, "projection", || {
+            self.rebuild_projection_locked(root)
+        })
+    }
+
+    fn with_stable_projection<T>(
+        &self,
+        root: &Path,
+        action: impl FnOnce() -> Result<T, Value>,
+    ) -> Result<T, Value> {
+        self.prepare(root)?;
+        // Ledger first, projection second: proposal admission already holds
+        // the ledger lock while refreshing the projection, so every stable
+        // read uses the same lock order and cannot observe a moving head.
+        self.with_authority_lock(root, "ledger", || {
+            self.with_authority_lock(root, "projection", || {
+                self.rebuild_projection_locked(root)?;
+                action()
+            })
+        })
+    }
+
+    fn projection_is_current(
+        &self,
+        root: &Path,
+        ledger_head: &Option<String>,
+        ledger_sequence: u64,
+    ) -> Result<bool, Value> {
+        let Some(table) = &self.projection_meta_table else {
+            return Ok(false);
+        };
+        let path = self.projection_path(root);
+        if !path.exists() {
+            return Ok(false);
+        }
+        let db = Connection::open(path).map_err(self.db_error("projection_open_failed"))?;
+        let stored = db
+            .query_row(
+                &format!(
+                    "select ledger_head,ledger_sequence from {table} where meta_id='current'"
+                ),
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, i64>(1)?,
+                    ))
+                },
+            )
+            .optional();
+        let Ok(Some((stored_head, stored_sequence))) = stored else {
+            // A projection built by an older descriptor is disposable. A
+            // missing metadata table/row therefore means rebuild, not a
+            // surfaced corruption error.
+            return Ok(false);
+        };
+        Ok(stored_head.as_deref() == ledger_head.as_deref()
+            && stored_sequence == ledger_sequence as i64)
+    }
+
+    fn rebuild_projection_locked(&self, root: &Path) -> Result<(), Value> {
+        event_ledger::verify(
+            self.error,
+            &self.ledger_layout(root),
+            self.event_hash_field,
+        )?;
+        let ledger_head = self.ledger_head(root)?;
+        let ledger_sequence = self.ledger_files(root)?.len() as u64;
+        if self.projection_is_current(root, &ledger_head, ledger_sequence)? {
+            return Ok(());
+        }
         let ddl = self.domain.projection.ddl.clone();
         let hash_field = self.event_hash_field;
         ledger_projection::rebuild_projection(
@@ -1835,6 +3933,8 @@ impl Engine {
                             op.to_string()
                         } else if column == "event_id" {
                             event_id.to_string()
+                        } else if column == "event_sequence" {
+                            event["sequence"].as_u64().unwrap_or_default().to_string()
                         } else {
                             let mapping = fold
                                 .columns
@@ -1857,10 +3957,183 @@ impl Engine {
                     };
                     tx.execute(&sql, rusqlite::params_from_iter(values))
                         .map_err(self.db_error(code))?;
+                    self.emit_datoms(tx, op, event, event_id, op_kind)?;
+                }
+                if let Some(table) = &self.projection_meta_table {
+                    tx.execute(
+                        &format!(
+                            "insert or replace into {table}(meta_id,ledger_head,ledger_sequence,updated_event_id) values('current',?1,?2,?3)"
+                        ),
+                        params![
+                            event.get(hash_field).and_then(Value::as_str),
+                            event["sequence"].as_u64().unwrap_or_default() as i64,
+                            event_id,
+                        ],
+                    )
+                    .map_err(self.db_error("projection_metadata_write_failed"))?;
                 }
                 Ok(())
             },
         )
+    }
+
+    fn emit_datoms(
+        &self,
+        tx: &Transaction<'_>,
+        operation: &Value,
+        event: &Value,
+        event_id: &str,
+        operation_kind: &str,
+    ) -> Result<(), Value> {
+        let Some(table) = &self.datoms_table else {
+            return Ok(());
+        };
+        let (origin_id, subject) = if operation_kind == self.entity_op() {
+            let id = operation
+                .get("entity_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| self.error("projection_datom_invalid", "entity operation lacks entity_id", operation.clone()))?;
+            (id.to_string(), id.to_string())
+        } else if operation_kind == self.relation_op() {
+            let origin = operation
+                .get("relation_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| self.error("projection_datom_invalid", "relation operation lacks relation_id", operation.clone()))?;
+            let subject = operation
+                .get("source_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| self.error("projection_datom_invalid", "relation operation lacks source_id", operation.clone()))?;
+            (origin.to_string(), subject.to_string())
+        } else {
+            let fold = self
+                .domain
+                .projection
+                .fold
+                .iter()
+                .find(|entry| entry.operation == operation_kind)
+                .ok_or_else(|| self.error("projection_datom_invalid", "operation has no fold descriptor", json!({"operation":operation_kind})))?;
+            let id = operation
+                .get(&fold.key_field)
+                .and_then(Value::as_str)
+                .ok_or_else(|| self.error("projection_datom_invalid", "record operation lacks its identity field", json!({"operation":operation_kind,"field":fold.key_field})))?;
+            (id.to_string(), id.to_string())
+        };
+        let identity_field = if operation_kind == self.entity_op() {
+            "entity_id".to_string()
+        } else if operation_kind == self.relation_op() {
+            "relation_id".to_string()
+        } else {
+            self.domain
+                .projection
+                .fold
+                .iter()
+                .find(|entry| entry.operation == operation_kind)
+                .map(|entry| entry.key_field.clone())
+                .unwrap_or_default()
+        };
+        tx.execute(
+            &format!("delete from {table} where origin_id=?1"),
+            params![origin_id],
+        )
+        .map_err(self.db_error("projection_datom_delete_failed"))?;
+
+        let sequence = event["sequence"].as_u64().unwrap_or_default();
+        let metadata_subject = if operation_kind == self.relation_op() {
+            origin_id.clone()
+        } else {
+            subject.clone()
+        };
+        let identity_attribute = if operation_kind == self.entity_op() {
+            "narada.ledger:entity/id"
+        } else if operation_kind == self.relation_op() {
+            "narada.ledger:relation/id"
+        } else {
+            "narada.ledger:record/id"
+        };
+        self.write_datom(tx, table, &origin_id, &metadata_subject, identity_attribute, &Value::String(origin_id.clone()), sequence, event_id)?;
+        self.write_datom(tx, table, &origin_id, &metadata_subject, "narada.ledger:event/id", &Value::String(event_id.to_string()), sequence, event_id)?;
+        self.write_datom(tx, table, &origin_id, &metadata_subject, "narada.ledger:event/sequence", &json!(sequence), sequence, event_id)?;
+
+        if operation_kind == self.entity_op() {
+            if let Some(kind) = operation.get("kind") {
+                self.write_datom(tx, table, &origin_id, &metadata_subject, "narada.ledger:entity/kind", kind, sequence, event_id)?;
+            }
+        } else if operation_kind == self.relation_op() {
+            if let Some(relation_type) = operation.get("relation_type").and_then(Value::as_str) {
+                self.write_datom(tx, table, &origin_id, &metadata_subject, "narada.ledger:relation/type", &Value::String(relation_type.to_string()), sequence, event_id)?;
+                if let Some(target) = operation.get("target_id") {
+                    let attribute = format!("{}:{relation_type}", self.domain.identity.schema_namespace);
+                    self.write_datom(tx, table, &origin_id, &subject, &attribute, target, sequence, event_id)?;
+                    if let Some(inverse_type) = self.domain.query.relation_inverses.get(relation_type) {
+                        let inverse = format!("{}:{inverse_type}", self.domain.identity.schema_namespace);
+                        self.write_datom(tx, table, &origin_id, target.as_str().unwrap_or_default(), &inverse, &Value::String(subject.clone()), sequence, event_id)?;
+                    }
+                }
+            }
+        } else if let Some(record_kind) = self
+            .domain
+            .projection
+            .fold
+            .iter()
+            .find(|entry| entry.operation == operation_kind)
+            .and_then(|entry| entry.columns.get("record_kind"))
+            .and_then(Value::as_str)
+        {
+            self.write_datom(
+                tx,
+                table,
+                &origin_id,
+                &metadata_subject,
+                "narada.ledger:record/kind",
+                &Value::String(record_kind.to_string()),
+                sequence,
+                event_id,
+            )?;
+        }
+
+        if let Some(object) = operation.as_object() {
+            for (field, value) in object {
+                if field == "op"
+                    || field == &identity_field
+                    || field == "relation_type"
+                    || field == "kind"
+                {
+                    continue;
+                }
+                let attribute = format!("{}:{field}", self.domain.identity.schema_namespace);
+                self.write_datom(tx, table, &origin_id, &metadata_subject, &attribute, value, sequence, event_id)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn write_datom(
+        &self,
+        tx: &Transaction<'_>,
+        table: &str,
+        origin_id: &str,
+        subject: &str,
+        attribute: &str,
+        value: &Value,
+        sequence: u64,
+        event_id: &str,
+    ) -> Result<(), Value> {
+        let value_json = value.to_string();
+        let value_kind = match value {
+            Value::Null => "null",
+            Value::Bool(_) => "boolean",
+            Value::Number(_) => "number",
+            Value::String(_) => "string",
+            Value::Array(_) | Value::Object(_) => "json",
+        };
+        let datom_id =
+            sha256(format!("{origin_id}\0{subject}\0{attribute}\0{value_json}").as_bytes());
+        tx.execute(
+            &format!("insert or replace into {table}(datom_id,origin_id,subject,attribute,value_json,value_kind,event_sequence,event_id) values(?1,?2,?3,?4,?5,?6,?7,?8)"),
+            params![datom_id, origin_id, subject, attribute, value_json, value_kind, sequence as i64, event_id],
+        )
+        .map_err(self.db_error("projection_datom_write_failed"))?;
+        Ok(())
     }
 
     #[cfg(test)]
@@ -2777,6 +5050,50 @@ mod tests {
     }
 
     #[test]
+    fn named_query_filter_types_are_refused_instead_of_defaulted() {
+        let engine = engine();
+        for arguments in [
+            json!({"template":"inbox","participant":"marici.Benincasa","include_body":"false"}),
+            json!({"template":"inbox","participant":"marici.Benincasa","direction":false}),
+            json!({"template":"inbox","participant":"marici.Benincasa","match":[]}),
+            json!({"template":"inbox","participant":"marici.Benincasa","expected_ledger_head":true}),
+        ] {
+            let failure = engine
+                .named_query(arguments.as_object().expect("query arguments"))
+                .expect_err("malformed named filter must refuse");
+            assert_eq!(failure["code"], "query_filter_type_invalid");
+        }
+    }
+
+    #[test]
+    fn named_and_legacy_kind_aliases_share_the_one_of_budget() {
+        let mut engine = engine();
+        engine.domain.query.max_one_of_values = Some(2);
+        engine.domain.query.kind_aliases.insert(
+            "communication".to_string(),
+            vec!["marici:communication".to_string(), "communication.v2".to_string()],
+        );
+
+        let legacy = engine
+            .expand_legacy_kind_value("communication")
+            .expect_err("legacy aliases must be bounded");
+        assert_eq!(legacy["code"], "query_kind_limit");
+
+        let named = engine
+            .named_query(
+                json!({
+                    "template":"inbox",
+                    "participant":"marici.Benincasa",
+                    "kinds":["communication"]
+                })
+                .as_object()
+                .expect("named query arguments"),
+            )
+            .expect_err("named aliases must be bounded");
+        assert_eq!(named["code"], "query_kind_limit");
+    }
+
+    #[test]
     fn source_inspection_returns_all_relevant_sections_with_line_ranges() {
         let engine = engine();
         let root = std::env::temp_dir().join(format!("epistemic-source-test-{}", Uuid::new_v4()));
@@ -2870,6 +5187,182 @@ mod tests {
         assert_eq!(result["query_count"], 2);
         assert_eq!(result["results"][0]["returned"], 1);
         assert_eq!(result["results"][1]["returned"], 1);
+
+        let hydrated = engine
+            .query_batch(
+                &root,
+                &Map::from_iter([
+                    (
+                        "queries".into(),
+                        json!([{
+                            "query":{
+                                "find":[{"pull":{"var":"?claim","fields":["entity_id","payload"]}}],
+                                "where":[{"triple":{"subject":"?claim","attribute":"narada.ledger:entity/kind","object":"claim"}}],
+                                "order_by":[{"term":"?claim"}],
+                                "limit":1
+                            }
+                        }]),
+                    ),
+                    ("limit_per_query".into(), json!(1)),
+                ]),
+            )
+            .expect("hydrated batch query");
+        assert_eq!(hydrated["results"][0]["mode"], "datalog");
+        assert_eq!(hydrated["results"][0]["query_origin"], "raw");
+        assert_eq!(hydrated["results"][0]["returned"], 1);
+        assert_eq!(hydrated["results"][0]["items"][0]["payload"]["title"], "Keep alpha");
+        assert!(hydrated["results"][0].get("result").is_none());
+        assert_eq!(hydrated["results"][0]["result_schema"], "narada.epistemic.query.v2");
+        assert_eq!(
+            hydrated["output_bytes"],
+            serde_json::to_vec(&hydrated)
+                .expect("batch response serializes")
+                .len() as u64
+        );
+        let head_conflict = engine
+            .query_batch(
+                &root,
+                &Map::from_iter([
+                    ("expected_ledger_head".into(), json!("sha256:batch")),
+                    (
+                        "queries".into(),
+                        json!([{
+                            "expected_ledger_head":"sha256:item",
+                            "text":"alpha"
+                        }]),
+                    ),
+                ]),
+            )
+            .expect_err("batch head pin must not be overridden by an item");
+        assert_eq!(head_conflict["code"], "query_expected_head_conflict");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn generic_pull_hydrates_entity_relation_and_record_bindings() {
+        let engine = engine();
+        let root = std::env::temp_dir().join(format!("epistemic-generic-pull-test-{}", Uuid::new_v4()));
+        let proposal = engine
+            .proposal_submit(
+                &root,
+                &Map::from_iter([
+                    ("actor".into(), json!("tester")),
+                    ("authority_basis".into(), json!({"kind":"test"})),
+                    ("idempotency_key".into(), json!("generic-pull-p1")),
+                    ("expected_ledger_head".into(), Value::Null),
+                    ("operations".into(), json!([
+                        {"op":"entity.declare","entity_id":"claim:pull","kind":"claim","title":"Pull claim"},
+                        {"op":"entity.declare","entity_id":"test:pull","kind":"test","title":"Pull test"},
+                        {"op":"entity.declare","entity_id":"shared:pull","kind":"claim","title":"Shared pull identity"},
+                        {"op":"relation.declare","relation_id":"relation:pull","relation_type":"tests","source_id":"test:pull","target_id":"claim:pull"},
+                        {"op":"relation.declare","relation_id":"shared:pull","relation_type":"tests","source_id":"test:pull","target_id":"claim:pull"},
+                        {"op":"assessment.record","assessment_id":"assessment:pull","subject_id":"test:pull","judgment":"conditional","actor":"tester","reason":"Pull record","evidence":[{"source_id":"claim:pull","locator":"Current status","paraphrase":"The claim is conditional."}]}
+                    ])),
+                ]),
+            )
+            .expect("proposal");
+        engine
+            .proposal_admit(
+                &root,
+                &Map::from_iter([
+                    ("proposal_id".into(), proposal["proposal_id"].clone()),
+                    ("actor".into(), json!("tester")),
+                    ("authority_basis".into(), json!({"kind":"test"})),
+                    ("expected_ledger_head".into(), Value::Null),
+                    ("idempotency_key".into(), json!("generic-pull-a1")),
+                ]),
+            )
+            .expect("admit");
+
+        let relation = engine
+            .generic_query(
+                &root,
+                &Map::from_iter([(
+                    "query".into(),
+                    json!({
+                        "find":[{"pull":{"var":"?relation","fields":["*"]}}],
+                        "where":[{"triple":{"subject":"?relation","attribute":"narada.ledger:relation/id","object":"relation:pull"}}],
+                        "order_by":[{"term":"?relation"}],
+                        "limit":10
+                    }),
+                )]),
+            )
+            .expect("relation pull");
+        assert_eq!(relation["count"], 1);
+        assert_eq!(relation["items"][0]["relation_id"], "relation:pull");
+        assert_eq!(relation["items"][0]["relation_type"], "tests");
+        assert_eq!(relation["items"][0]["source_id"], "test:pull");
+        assert!(relation["items"][0].get("*").is_none());
+
+        let record = engine
+            .generic_query(
+                &root,
+                &Map::from_iter([(
+                    "query".into(),
+                    json!({
+                        "find":[{"pull":{"var":"?record","fields":["record_id","record_kind","payload"]}}],
+                        "where":[{"triple":{"subject":"?record","attribute":"narada.ledger:record/id","object":"?record"}}],
+                        "order_by":[{"term":"?record"}],
+                        "limit":10
+                    }),
+                )]),
+            )
+            .expect("record pull");
+        assert_eq!(record["count"], 1);
+        assert_eq!(record["items"][0]["record_id"], "assessment:pull");
+        assert_eq!(record["items"][0]["record_kind"], "assessment.record");
+        assert_eq!(record["items"][0]["payload"]["judgment"], "conditional");
+
+        let ambiguous = engine
+            .generic_query(
+                &root,
+                &Map::from_iter([(
+                    "query".into(),
+                    json!({
+                        "find":[{"pull":{"var":"?object","fields":["*"]}}],
+                        "inputs":{"object":"shared:pull"},
+                        "where":[{"triple":{"subject":{"input":"object"},"attribute":"narada.ledger:event/id","object":"?event"}}],
+                        "order_by":[{"term":"?event"}],
+                        "limit":10
+                    }),
+                )]),
+            )
+            .expect_err("untyped colliding pull identity must refuse");
+        assert_eq!(ambiguous["code"], "query_pull_target_ambiguous");
+
+        let typed_entity = engine
+            .generic_query(
+                &root,
+                &Map::from_iter([(
+                    "query".into(),
+                    json!({
+                        "find":[{"pull":{"var":"?object","target_kind":"entity","fields":["*"]}}],
+                        "inputs":{"object":"shared:pull"},
+                        "where":[{"triple":{"subject":{"input":"object"},"attribute":"narada.ledger:event/id","object":"?event"}}],
+                        "order_by":[{"term":"?event"}],
+                        "limit":10
+                    }),
+                )]),
+            )
+            .expect("typed entity pull");
+        assert_eq!(typed_entity["items"][0]["entity_id"], "shared:pull");
+
+        let typed_relation = engine
+            .generic_query(
+                &root,
+                &Map::from_iter([(
+                    "query".into(),
+                    json!({
+                        "find":[{"pull":{"var":"?object","target_kind":"relation","fields":["*"]}}],
+                        "inputs":{"object":"shared:pull"},
+                        "where":[{"triple":{"subject":{"input":"object"},"attribute":"narada.ledger:event/id","object":"?event"}}],
+                        "order_by":[{"term":"?event"}],
+                        "limit":10
+                    }),
+                )]),
+            )
+            .expect("typed relation pull");
+        assert_eq!(typed_relation["items"][0]["relation_id"], "shared:pull");
         let _ = fs::remove_dir_all(root);
     }
 

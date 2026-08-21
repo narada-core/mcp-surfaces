@@ -1,8 +1,9 @@
 //! Typed `narada.ledger-domain.v1` descriptor loading and validation.
 //!
-//! A descriptor is validated at startup against the compiled-in JSON Schema
-//! (`packages/shared/ledger-domain-epistemic/domain.schema.json`) and then
-//! deserialized into typed structs for every section. Every refusal carries
+//! A descriptor is validated at startup against the compiled-in generic
+//! descriptor schema (`packages/shared/ledger-domain-mcp/domain.schema.json`)
+//! and then deserialized into typed structs for every engine section. Domain
+//! vocabularies and tool schemas remain descriptor data. Every refusal carries
 //! the `domain_invalid:<detail>` shape; startup fails hard on any violation.
 
 use serde::Deserialize;
@@ -11,7 +12,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 const DESCRIPTOR_SCHEMA_JSON: &str =
-    include_str!("../../../shared/ledger-domain-epistemic/domain.schema.json");
+    include_str!("../../../shared/ledger-domain-mcp/domain.schema.json");
 
 pub const DESCRIPTOR_SCHEMA_ID: &str = "narada.ledger-domain.v1";
 
@@ -208,6 +209,28 @@ pub struct QueryConfig {
     pub record_kind_enum: Vec<String>,
     #[serde(default)]
     pub kind_aliases: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub max_clauses: Option<usize>,
+    #[serde(default)]
+    pub max_reach_depth: Option<usize>,
+    #[serde(default)]
+    pub max_one_of_values: Option<usize>,
+    #[serde(default)]
+    pub max_predicate_depth: Option<usize>,
+    #[serde(default)]
+    pub named_queries: BTreeMap<String, Value>,
+    #[serde(default)]
+    pub reply_state_attribute: Option<String>,
+    #[serde(default)]
+    pub relation_inverses: BTreeMap<String, String>,
+    #[serde(default)]
+    pub read_receipt_kind: Option<String>,
+    #[serde(default)]
+    pub read_receipt_kind_attribute: Option<String>,
+    #[serde(default)]
+    pub read_receipt_message_attribute: Option<String>,
+    #[serde(default)]
+    pub read_receipt_reader_attribute: Option<String>,
     pub entity_compact_projection: Vec<String>,
     pub entity_full_projection: Vec<String>,
     pub record_compact_projection: Vec<String>,
@@ -225,6 +248,7 @@ pub struct Caps {
     pub query_limit: CappedLimit,
     pub proposal_read_limit: CappedLimit,
     pub query_batch: QueryBatchCaps,
+    pub query_execution: QueryExecutionCaps,
     pub neighborhood_limit: CappedLimit,
     pub snapshot_limit: CappedLimit,
     pub export: ExportCaps,
@@ -238,6 +262,13 @@ pub struct Caps {
     pub actor_chars: u64,
     pub idempotency_key_chars: Bound,
     pub guidance_routing_hint_chars: u64,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct QueryExecutionCaps {
+    pub max_datoms_scanned: u64,
+    pub max_traversal_edges: u64,
+    pub max_output_bytes: u64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -486,7 +517,7 @@ mod tests {
             Descriptor::load(&epistemic_descriptor_path()).expect("epistemic descriptor loads");
         assert_eq!(descriptor.schema, DESCRIPTOR_SCHEMA_ID);
         assert_eq!(descriptor.identity.tool_prefix, "epistemic_graph");
-        assert_eq!(descriptor.tools.len(), 21);
+        assert_eq!(descriptor.tools.len(), 22);
         assert_eq!(descriptor.entities.core_kinds.len(), 8);
         assert_eq!(descriptor.relations.core.len(), 14);
         assert_eq!(descriptor.operations.kinds.len(), 5);
@@ -525,5 +556,20 @@ mod tests {
         let failure =
             Descriptor::from_value(value).expect_err("unknown sections are refused by the schema");
         assert!(failure.starts_with("domain_invalid:"), "{failure}");
+    }
+
+    #[test]
+    fn descriptor_schema_does_not_hardcode_epistemic_identity() {
+        let mut value: Value = serde_json::from_str(
+            &std::fs::read_to_string(epistemic_descriptor_path()).expect("descriptor text"),
+        )
+        .expect("descriptor json");
+        value["identity"]["domain_id"] = Value::from("other-domain");
+        value["identity"]["tool_prefix"] = Value::from("other_graph");
+        value["identity"]["schema_namespace"] = Value::from("other.graph");
+        value["identity"]["error_schema_id"] = Value::from("other.graph.error.v1");
+        let descriptor = Descriptor::from_value(value).expect("generic descriptor identity loads");
+        assert_eq!(descriptor.identity.tool_prefix, "other_graph");
+        assert_eq!(descriptor.identity.schema_namespace, "other.graph");
     }
 }

@@ -374,11 +374,17 @@ fn call_tool(server: &Server, params: &Map<String, Value>) -> Result<Value, Valu
             Value::Null,
         )
     })?;
-    let args = params
-        .get("arguments")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
+    let args = match params.get("arguments") {
+        None => Map::new(),
+        Some(Value::Object(arguments)) => arguments.clone(),
+        Some(arguments) => {
+            return Err(diagnostic(
+                "invalid_request",
+                "tools/call arguments must be an object",
+                json!({"arguments_type":value_type(arguments)}),
+            ));
+        }
+    };
     let tool = list_tools(&server.engine)
         .into_iter()
         .find(|tool| tool.get("name").and_then(Value::as_str) == Some(name))
@@ -427,4 +433,15 @@ fn diagnostic(code: &str, message: &str, details: Value) -> Value {
         object.insert("details".to_string(), details);
     }
     Value::Object(object)
+}
+
+fn value_type(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }

@@ -109,13 +109,19 @@ Dynamic attachment in a governed carrier session is exact-binding activation, no
 
 ## Verification
 
-The native gate includes a hermetic full-fabric sequence test: a temporary Site
-is registered, Registrar materializes its epistemic-graph binding, Loader calls
-the real native surface, and a replacement Loader process verifies persisted
-sequence state.
+The native gate includes a hermetic full-fabric epistemic-graph test: a
+temporary Site is registered, Registrar materializes its binding, Loader calls
+the real native surface for sequence allocation plus inbox/thread queries, and
+a replacement Loader process verifies persisted sequence and query state.
 
 ```powershell
 pnpm --filter @narada-core/mcp-loader-mcp test:native
+```
+
+The repository alias for the focused registrar/loader fabric proof is:
+
+```powershell
+pnpm test:mcp-loader:e2e
 ```
 
 ```powershell

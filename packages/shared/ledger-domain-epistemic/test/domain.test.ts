@@ -19,14 +19,63 @@ assert.equal(domain.identity.tool_prefix, 'epistemic_graph');
 assert.equal(domain.identity.error_schema_id, 'narada.epistemic.error.v1');
 
 // Every tool name carries the domain tool prefix, and the tool list is the
-// engine's generation target: 21 tools, exactly one guidance tool.
-assert.equal(domain.tools.length, 21);
+// engine's generation target: 22 tools, exactly one guidance tool.
+assert.equal(domain.tools.length, 22);
 for (const tool of domain.tools) {
   assert.ok(tool.name.startsWith(domain.identity.tool_prefix + '_'), `tool name lacks prefix: ${tool.name}`);
   assert.equal(tool.annotations.destructiveHint, false, `${tool.name} destructiveHint`);
-  assert.equal(tool.annotations.readOnlyHint, tool.annotations.idempotentHint, `${tool.name} read/idempotent annotation mismatch`);
+  if (tool.annotations.readOnlyHint) {
+    assert.equal(tool.annotations.idempotentHint, true, `${tool.name} read-only tools must be idempotent`);
+  }
 }
 assert.equal(domain.tools.filter((tool: any) => tool.class === 'guidance').length, 1);
+
+const queryTool = domain.tools.find((tool: any) => tool.name === 'epistemic_graph_query');
+const queryShape = queryTool.inputSchema.properties.query;
+const queryFind = queryShape.properties.find;
+assert.equal(queryFind.maxItems, 64);
+assert.equal(queryShape.properties.inputs.maxProperties, 64);
+assert.equal(queryShape.properties.order_by.maxItems, 64);
+assert.equal(queryShape.properties.order_by.items.properties.direction.enum.join(','), 'asc,desc');
+assert.equal(queryTool.inputSchema.properties.kinds.maxItems, 64);
+assert.equal(queryTool.inputSchema.properties.kinds.minItems, 1);
+assert.equal(queryTool.inputSchema.properties.match.properties.kinds.maxItems, 64);
+assert.equal(queryTool.inputSchema.properties.match.properties.kinds.minItems, 1);
+assert.deepEqual(queryShape.properties.where.items.$ref, '#/properties/query/$defs/clause');
+assert.ok(queryFind.items.oneOf.some((branch: any) => branch.properties?.pull), 'raw pull form is discoverable');
+assert.ok(queryFind.items.oneOf.some((branch: any) => branch.properties?.one_of), 'raw one_of term form is discoverable');
+assert.deepEqual(queryFind.items.oneOf.find((branch: any) => branch.properties?.pull).properties.pull.properties.target_kind.enum, ['entity', 'relation', 'record']);
+const batchTool = domain.tools.find((tool: any) => tool.name === 'epistemic_graph_query_batch');
+const batchShape = batchTool.inputSchema.properties.queries.items.properties.query;
+const batchFind = batchShape.properties.find;
+assert.ok(batchFind.items.oneOf.some((branch: any) => branch.properties?.pull), 'batch raw pull form is discoverable');
+assert.ok(batchFind.items.oneOf.some((branch: any) => branch.properties?.one_of), 'batch raw one_of term form is discoverable');
+assert.equal(batchShape.properties.inputs.maxProperties, 64);
+assert.equal(batchShape.properties.order_by.maxItems, 64);
+assert.equal(batchTool.inputSchema.properties.queries.items.properties.kinds.maxItems, 64);
+assert.equal(batchTool.inputSchema.properties.queries.items.properties.kinds.minItems, 1);
+assert.equal(batchTool.inputSchema.properties.queries.items.properties.match.properties.kinds.maxItems, 64);
+assert.equal(batchTool.inputSchema.properties.queries.items.properties.match.properties.kinds.minItems, 1);
+assert.ok(batchTool.inputSchema.properties.queries.items.properties.match.properties.participant, 'batch match participant is discoverable');
+assert.deepEqual(batchShape.properties.where.items.$ref, '#/properties/queries/items/properties/query/$defs/clause');
+const validRawQuery = {
+  find: ['?message'],
+  where: [{ triple: { subject: '?message', attribute: 'kind', object: 'claim' } }],
+};
+const validateQueryInput = ajv.compile(queryTool.inputSchema);
+assert.equal(validateQueryInput({ query: validRawQuery, template: 'inbox' }), true);
+assert.equal(validateQueryInput({ template: 'inbox' }), true);
+assert.equal(validateQueryInput({ template: 'inbox', match: { participant: 'marici.Nima' } }), true);
+assert.equal(validateQueryInput({ template: 'thread', root: 'communication:root' }), true);
+assert.equal(validateQueryInput({ template: 'thread' }), true);
+const validateBatchInput = ajv.compile(batchTool.inputSchema);
+assert.equal(validateBatchInput({ queries: [{ query: validRawQuery, template: 'inbox' }] }), true);
+assert.equal(
+  validateBatchInput({ queries: [{ template: 'inbox', match: { participant: 'marici.Nima' } }] }),
+  true,
+);
+assert.equal(domain.query.max_one_of_values, 64);
+assert.equal(domain.query.max_predicate_depth, 8);
 
 // The operation vocabulary is closed: five operation kinds, and the embedded
 // operation oneOf schema covers exactly those kinds.
