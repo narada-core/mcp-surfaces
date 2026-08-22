@@ -1857,33 +1857,67 @@ impl Engine {
     }
 
     fn status(&self, root: &Path) -> Result<Value, Value> {
-        self.with_stable_projection(root, || self.status_locked(root))
+        self.prepare(root)?;
+        event_ledger::verify(
+            self.error,
+            &self.ledger_layout(root),
+            self.event_hash_field,
+        )?;
+        let ledger_head = self.ledger_head(root)?;
+        let event_count = self.ledger_files(root)?.len();
+        let projection_path = self.projection_path(root);
+        let projection_exists = projection_path.exists();
+        let projection_current = projection_exists
+            && self.projection_is_current(root, &ledger_head, event_count as u64)?;
+        let projection_status = if projection_current {
+            "current"
+        } else if projection_exists {
+            "stale"
+        } else {
+            "missing"
+        };
+        let (stored_entities, visible_entities, relations, records) = if projection_exists {
+            let db = Connection::open_with_flags(
+                &projection_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            ).map_err(self.db_error("projection_open_failed"))?;
+            let stored_entities: i64 = db
+                .query_row(&format!("select count(*) from {}", self.entity_table), [], |r| r.get(0))
+                .map_err(self.db_error("projection_count_failed"))?;
+            let visible_entities: i64 = db
+                .query_row(
+                    &format!("select count(*) from {} where {}", self.entity_table, self.visible_entity_predicate()),
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(self.db_error("projection_count_failed"))?;
+            let relations: i64 = db
+                .query_row(&format!("select count(*) from {}", self.relation_table), [], |r| r.get(0))
+                .map_err(self.db_error("projection_count_failed"))?;
+            let records: i64 = db
+                .query_row(&format!("select count(*) from {}", self.records_table), [], |r| r.get(0))
+                .map_err(self.db_error("projection_count_failed"))?;
+            (stored_entities, visible_entities, relations, records)
+        } else {
+            (0, 0, 0, 0)
+        };
+        Ok(json!({
+            "schema":self.schema_id("status.v1"),"status":"ok",
+            "implementation":self.domain.identity.implementation,
+            "canonical_store":self.ledger(root).to_string_lossy(),
+            "projection":projection_path.to_string_lossy(),
+            "ledger_head":ledger_head,"event_count":event_count,
+            "entity_count":visible_entities,"entity_count_semantics":"graph_visible",
+            "stored_entity_count":stored_entities,
+            "internal_entity_count":stored_entities - visible_entities,
+            "relation_count":relations,"record_count":records,
+            "projection_status":projection_status,
+            "projection_current":projection_current,
+            "projection_rebuildable":true,
+            "status_rebuilds_projection":false,
+            "truth_certification":false
+        }))
     }
-
-    fn status_locked(&self, root: &Path) -> Result<Value, Value> {
-        let db = Connection::open(self.projection_path(root))
-            .map_err(self.db_error("projection_open_failed"))?;
-        let stored_entities: i64 = db
-            .query_row(&format!("select count(*) from {}", self.entity_table), [], |r| r.get(0))
-            .map_err(self.db_error("projection_count_failed"))?;
-        let visible_entities: i64 = db
-            .query_row(
-                &format!("select count(*) from {} where {}", self.entity_table, self.visible_entity_predicate()),
-                [],
-                |r| r.get(0),
-            )
-            .map_err(self.db_error("projection_count_failed"))?;
-        let relations: i64 = db
-            .query_row(&format!("select count(*) from {}", self.relation_table), [], |r| r.get(0))
-            .map_err(self.db_error("projection_count_failed"))?;
-        let records: i64 = db
-            .query_row(&format!("select count(*) from {}", self.records_table), [], |r| r.get(0))
-            .map_err(self.db_error("projection_count_failed"))?;
-        Ok(
-            json!({"schema":self.schema_id("status.v1"),"status":"ok","implementation":self.domain.identity.implementation,"canonical_store":self.ledger(root).to_string_lossy(),"projection":self.projection_path(root).to_string_lossy(),"ledger_head":self.ledger_head(root)?,"event_count":self.ledger_files(root)?.len(),"entity_count":visible_entities,"entity_count_semantics":"graph_visible","stored_entity_count":stored_entities,"internal_entity_count":stored_entities - visible_entities,"relation_count":relations,"record_count":records,"projection_rebuildable":true,"truth_certification":false}),
-        )
-    }
-
     /// Project one query row into the descriptor-listed field order. Row
     /// columns win, `"payload"` selects the full payload, anything else is
     /// looked up inside the payload (missing yields null, as before).
@@ -3857,7 +3891,8 @@ impl Engine {
         if !path.exists() {
             return Ok(false);
         }
-        let db = Connection::open(path).map_err(self.db_error("projection_open_failed"))?;
+        let db = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(self.db_error("projection_open_failed"))?;
         let stored = db
             .query_row(
                 &format!(
@@ -6378,6 +6413,42 @@ mod tests {
         for (claim, hash) in claims.iter().zip(expected_hashes.iter()) {
             assert_eq!(&claim["claim_hash"], hash);
         }
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn status_reports_stale_projection_without_rebuilding_it() {
+        let engine = engine();
+        let root = std::env::temp_dir().join(format!("epistemic-status-stale-{}", Uuid::new_v4()));
+        engine.rebuild_projection(&root).expect("initial projection");
+        let table = engine.projection_meta_table.as_ref().expect("projection metadata table");
+        let projection = engine.projection_path(&root);
+        let db = Connection::open(&projection).expect("open projection");
+        db.execute(
+            &format!("update {table} set ledger_sequence = 99 where meta_id = 'current'"),
+            [],
+        ).expect("make projection metadata stale");
+        drop(db);
+
+        let status = engine.status(&root).expect("bounded status");
+        assert_eq!(status["status"], "ok");
+        assert_eq!(status["projection_status"], "stale");
+        assert_eq!(status["projection_current"], false);
+        assert_eq!(status["status_rebuilds_projection"], false);
+
+        let db = Connection::open(&projection).expect("reopen projection");
+        let stored_sequence: i64 = db.query_row(
+            &format!("select ledger_sequence from {table} where meta_id = 'current'"),
+            [],
+            |row| row.get(0),
+        ).expect("read unchanged stale metadata");
+        assert_eq!(stored_sequence, 99);
+        drop(db);
+        let runtime = projection.parent().expect("projection parent");
+        assert!(fs::read_dir(runtime)
+            .expect("read projection runtime")
+            .all(|entry| !entry.expect("runtime entry").file_name()
+                .to_string_lossy().contains(".next-")),
+            "status must not create a scratch projection");
         let _ = fs::remove_dir_all(root);
     }
 }
