@@ -3923,93 +3923,145 @@ impl Engine {
             &self.ledger_layout(root),
             self.event_hash_field,
         )?;
+        let ledger_files = self.ledger_files(root)?;
         let ledger_head = self.ledger_head(root)?;
-        let ledger_sequence = self.ledger_files(root)?.len() as u64;
+        let ledger_sequence = ledger_files.len() as u64;
         if self.projection_is_current(root, &ledger_head, ledger_sequence)? {
             return Ok(());
         }
+        if self.catch_up_projection_locked(root, &ledger_files)? {
+            return Ok(());
+        }
         let ddl = self.domain.projection.ddl.clone();
-        let hash_field = self.event_hash_field;
         ledger_projection::rebuild_projection(
             self.error,
             &self.ledger_layout(root),
-            hash_field,
+            self.event_hash_field,
             &self.projection_path(root),
             &ddl,
-            |tx, event, event_id| {
-                for op in event["operations"].as_array().into_iter().flatten() {
-                    let op_kind = op["op"].as_str().unwrap_or_default();
-                    let Some(fold) = self
-                        .domain
-                        .projection
-                        .fold
-                        .iter()
-                        .find(|entry| entry.operation == op_kind)
-                    else {
-                        continue;
-                    };
-                    let table = self.table(&fold.table);
-                    let placeholders = (1..=table.columns.len())
-                        .map(|index| format!("?{index}"))
-                        .collect::<Vec<_>>()
-                        .join(",");
-                    let sql = format!(
-                        "{} into {} values({})",
-                        self.domain.projection.write_mode, table.name, placeholders
-                    );
-                    let mut values = Vec::with_capacity(table.columns.len());
-                    for column in &table.columns {
-                        let value = if *column == table.primary_key {
-                            op.get(&fold.key_field)
-                                .and_then(Value::as_str)
-                                .unwrap()
-                                .to_string()
-                        } else if column == "payload_json" {
-                            op.to_string()
-                        } else if column == "event_id" {
-                            event_id.to_string()
-                        } else if column == "event_sequence" {
-                            event["sequence"].as_u64().unwrap_or_default().to_string()
-                        } else {
-                            let mapping = fold
-                                .columns
-                                .get(column)
-                                .and_then(Value::as_str)
-                                .unwrap_or_default();
-                            op.get(mapping)
-                                .and_then(Value::as_str)
-                                .unwrap_or(mapping)
-                                .to_string()
-                        };
-                        values.push(value);
-                    }
-                    let code = if table.name == self.entity_table {
-                        "projection_entity_write_failed"
-                    } else if table.name == self.relation_table {
-                        "projection_relation_write_failed"
-                    } else {
-                        "projection_assessment_write_failed"
-                    };
-                    tx.execute(&sql, rusqlite::params_from_iter(values))
-                        .map_err(self.db_error(code))?;
-                    self.emit_datoms(tx, op, event, event_id, op_kind)?;
-                }
-                if let Some(table) = &self.projection_meta_table {
-                    tx.execute(
-                        &format!(
-                            "insert or replace into {table}(meta_id,ledger_head,ledger_sequence,updated_event_id) values('current',?1,?2,?3)"
-                        ),
-                        params![
-                            event.get(hash_field).and_then(Value::as_str),
-                            event["sequence"].as_u64().unwrap_or_default() as i64,
-                            event_id,
-                        ],
-                    )
-                    .map_err(self.db_error("projection_metadata_write_failed"))?;
-                }
-                Ok(())
-            },
+            |tx, event, event_id| self.fold_projection_event(tx, event, event_id),
         )
+    }
+
+    fn catch_up_projection_locked(
+        &self,
+        root: &Path,
+        ledger_files: &[PathBuf],
+    ) -> Result<bool, Value> {
+        let Some(meta_table) = &self.projection_meta_table else {
+            return Ok(false);
+        };
+        let projection_path = self.projection_path(root);
+        if !projection_path.exists() {
+            return Ok(false);
+        }
+        let mut db = Connection::open(&projection_path)
+            .map_err(self.db_error("projection_open_failed"))?;
+        let stored = db.query_row(
+            &format!(
+                "select ledger_head,ledger_sequence from {meta_table} where meta_id='current'"
+            ),
+            [],
+            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?)),
+        ).optional();
+        let Ok(Some((stored_head, stored_sequence))) = stored else {
+            return Ok(false);
+        };
+        if stored_sequence < 0 || stored_sequence as usize > ledger_files.len() {
+            return Ok(false);
+        }
+        let prefix_head = if stored_sequence == 0 {
+            None
+        } else {
+            let event = self.read_json(&ledger_files[stored_sequence as usize - 1])?;
+            event.get(self.event_hash_field).and_then(Value::as_str).map(str::to_string)
+        };
+        if prefix_head != stored_head {
+            return Ok(false);
+        }
+
+        let tx = db.transaction()
+            .map_err(self.db_error("projection_increment_begin_failed"))?;
+        for path in ledger_files.iter().skip(stored_sequence as usize) {
+            let event = self.read_json(path)?;
+            let event_id = event["event_id"].as_str().ok_or_else(|| {
+                self.error(
+                    "projection_event_invalid",
+                    "ledger event lacks event_id",
+                    json!({"path":path}),
+                )
+            })?;
+            self.fold_projection_event(&tx, &event, event_id)?;
+        }
+        tx.commit()
+            .map_err(self.db_error("projection_increment_commit_failed"))?;
+        Ok(true)
+    }
+
+    fn fold_projection_event(
+        &self,
+        tx: &Transaction<'_>,
+        event: &Value,
+        event_id: &str,
+    ) -> Result<(), Value> {
+        for op in event["operations"].as_array().into_iter().flatten() {
+            let op_kind = op["op"].as_str().unwrap_or_default();
+            let Some(fold) = self.domain.projection.fold.iter()
+                .find(|entry| entry.operation == op_kind)
+            else {
+                continue;
+            };
+            let table = self.table(&fold.table);
+            let placeholders = (1..=table.columns.len())
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "{} into {} values({})",
+                self.domain.projection.write_mode, table.name, placeholders
+            );
+            let mut values = Vec::with_capacity(table.columns.len());
+            for column in &table.columns {
+                let value = if *column == table.primary_key {
+                    op.get(&fold.key_field).and_then(Value::as_str).unwrap().to_string()
+                } else if column == "payload_json" {
+                    op.to_string()
+                } else if column == "event_id" {
+                    event_id.to_string()
+                } else if column == "event_sequence" {
+                    event["sequence"].as_u64().unwrap_or_default().to_string()
+                } else {
+                    let mapping = fold.columns.get(column)
+                        .and_then(Value::as_str).unwrap_or_default();
+                    op.get(mapping).and_then(Value::as_str)
+                        .unwrap_or(mapping).to_string()
+                };
+                values.push(value);
+            }
+            let code = if table.name == self.entity_table {
+                "projection_entity_write_failed"
+            } else if table.name == self.relation_table {
+                "projection_relation_write_failed"
+            } else {
+                "projection_assessment_write_failed"
+            };
+            tx.execute(&sql, rusqlite::params_from_iter(values))
+                .map_err(self.db_error(code))?;
+            self.emit_datoms(tx, op, event, event_id, op_kind)?;
+        }
+        if let Some(table) = &self.projection_meta_table {
+            tx.execute(
+                &format!(
+                    "insert or replace into {table}(meta_id,ledger_head,ledger_sequence,updated_event_id) values('current',?1,?2,?3)"
+                ),
+                params![
+                    event.get(self.event_hash_field).and_then(Value::as_str),
+                    event["sequence"].as_u64().unwrap_or_default() as i64,
+                    event_id,
+                ],
+            ).map_err(self.db_error("projection_metadata_write_failed"))?;
+        }
+        Ok(())
     }
 
     fn emit_datoms(
@@ -6449,6 +6501,65 @@ mod tests {
             .all(|entry| !entry.expect("runtime entry").file_name()
                 .to_string_lossy().contains(".next-")),
             "status must not create a scratch projection");
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn query_incrementally_catches_up_multiple_missing_events() {
+        let engine = engine();
+        let root = std::env::temp_dir().join(format!("epistemic-query-catch-up-{}", Uuid::new_v4()));
+        engine.rebuild_projection(&root).expect("initial projection");
+
+        for (entity_id, title) in [
+            ("claim:increment-one", "Incremental precursor"),
+            ("claim:increment-target", "Exact incremental target"),
+        ] {
+            event_ledger::append_event(
+                engine.error,
+                &engine.ledger_layout(&root),
+                engine.event_hash_field,
+                None,
+                None,
+                |ctx| json!({
+                    "schema":engine.domain.storage.event_schema_id,
+                    "sequence":ctx.sequence,
+                    "event_id":ctx.event_id,
+                    "previous_hash":ctx.previous_hash,
+                    "operations":[{
+                        "op":"entity.declare",
+                        "entity_id":entity_id,
+                        "kind":"claim",
+                        "title":title
+                    }],
+                    "actor":"incremental-test"
+                }),
+            ).expect("append canonical event without projection refresh");
+        }
+
+        let stale = engine.status(&root).expect("stale status");
+        assert_eq!(stale["projection_status"], "stale");
+        assert_eq!(stale["event_count"], 2);
+
+        let result = engine.query(
+            &root,
+            &Map::from_iter([
+                ("kind".into(), json!("claim")),
+                ("text".into(), json!("Exact incremental target")),
+                ("limit".into(), json!(10)),
+            ]),
+        ).expect("incremental exact-title query");
+        assert_eq!(result["returned"], 1);
+        assert_eq!(result["items"][0]["entity_id"], "claim:increment-target");
+
+        let current = engine.status(&root).expect("current status");
+        assert_eq!(current["projection_status"], "current");
+        assert_eq!(current["projection_current"], true);
+        let runtime = engine.projection_path(&root);
+        let runtime = runtime.parent().expect("projection parent");
+        assert!(fs::read_dir(runtime)
+            .expect("read projection runtime")
+            .all(|entry| !entry.expect("runtime entry").file_name()
+                .to_string_lossy().contains(".next-")),
+            "incremental catch-up must not create a scratch projection");
         let _ = fs::remove_dir_all(root);
     }
 }
