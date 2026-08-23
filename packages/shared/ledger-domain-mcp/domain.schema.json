@@ -15,7 +15,7 @@
     "operations": {"type": "object", "required": ["kinds", "count", "additional_properties", "required_fields", "evidence_entry", "evidence_required_at_review", "reference_bindings", "reference_resolution_scope", "schema"]},
     "id_derivation": {"type": "object", "required": ["digest_rule", "safe_name_rule", "entity", "relation", "local_ref_wiring", "operation_identity_prefixes", "derived_idempotency_keys", "generated_ids"]},
     "projection": {"type": "object", "required": ["ddl", "fold", "write_mode"]},
-    "query": {"type": "object", "required": ["record_kind_enum", "entity_compact_projection", "entity_full_projection", "record_compact_projection", "record_full_projection", "neighborhood_relation_fields", "neighborhood_record_match_fields", "neighborhood_record_fields"]},
+    "query": {"type": "object", "required": ["communication", "record_kind_enum", "entity_compact_projection", "entity_full_projection", "record_compact_projection", "record_full_projection", "neighborhood_relation_fields", "neighborhood_record_match_fields", "neighborhood_record_fields"]},
     "caps": {
       "type": "object",
       "required": ["query_execution"],

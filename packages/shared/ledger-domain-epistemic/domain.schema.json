@@ -238,7 +238,7 @@
     },
     "query": {
       "type": "object",
-      "required": ["record_kind_enum", "entity_compact_projection", "entity_full_projection", "record_compact_projection", "record_full_projection", "text_filter", "neighborhood_relation_fields", "neighborhood_record_match_fields", "neighborhood_record_fields"],
+      "required": ["record_kind_enum", "communication", "entity_compact_projection", "entity_full_projection", "record_compact_projection", "record_full_projection", "text_filter", "neighborhood_relation_fields", "neighborhood_record_match_fields", "neighborhood_record_fields"],
       "additionalProperties": false,
       "properties": {
         "record_kind_enum": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
@@ -249,6 +249,23 @@
             "minItems": 1,
             "uniqueItems": true,
             "items": {"type": "string", "minLength": 1}
+          }
+        },
+        "communication": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["canonical_kind", "legacy_read_aliases", "legacy_read_policy", "legacy_write_policy", "contract_version", "canonicalization_operation", "legacy_write_refusal_code", "collision_refusal_code", "required_fields", "content_any_of"],
+          "properties": {
+            "canonical_kind": {"type": "string", "minLength": 1},
+            "legacy_read_aliases": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+            "legacy_read_policy": {"const": "normalize_and_disclose"},
+            "legacy_write_policy": {"const": "reject_with_replacement"},
+            "contract_version": {"type": "integer", "minimum": 1},
+            "canonicalization_operation": {"type": "string", "minLength": 1},
+            "legacy_write_refusal_code": {"type": "string", "minLength": 1},
+            "collision_refusal_code": {"type": "string", "minLength": 1},
+            "required_fields": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+            "content_any_of": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
           }
         },
         "max_clauses": {"type": "integer", "minimum": 1, "maximum": 256},

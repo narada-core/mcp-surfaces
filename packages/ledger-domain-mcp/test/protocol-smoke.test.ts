@@ -16,9 +16,11 @@ const server = spawnJsonlMcpServer(executable, ['--domain', domainPath, '--site-
 
 try {
   const protocol = await runMcpProtocolSmoke(server.client, { expectedServerName: 'epistemic-graph-mcp' });
-  assert.equal(protocol.toolNames.length, 22);
+  assert.equal(protocol.toolNames.length, 24);
   assert.deepEqual([...protocol.toolNames].sort(), [
     'epistemic_graph_capture_sources',
+    'epistemic_graph_communication_migrate',
+    'epistemic_graph_communication_migration_preflight',
     'epistemic_graph_export',
     'epistemic_graph_guidance',
     'epistemic_graph_message_mark_read',

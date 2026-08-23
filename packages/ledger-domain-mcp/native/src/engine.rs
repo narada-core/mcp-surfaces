@@ -18,7 +18,7 @@ use narada_mcp_event_ledger::{
 };
 use rusqlite::{params, types::ToSql, Connection, OptionalExtension, Transaction};
 use serde_json::{json, Map, Value};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -437,8 +437,15 @@ impl Engine {
 
     fn expand_legacy_kind_value(&self, kind: &str) -> Result<Vec<Value>, Value> {
         let mut expanded = vec![Value::String(kind.to_string())];
-        if let Some(aliases) = self.domain.query.kind_aliases.get(kind) {
-            expanded.extend(aliases.iter().map(|alias| Value::String(alias.clone())));
+        for (canonical, aliases) in &self.domain.query.kind_aliases {
+            if canonical == kind || aliases.iter().any(|alias| alias == kind) {
+                for candidate in std::iter::once(canonical).chain(aliases.iter()) {
+                    let candidate = Value::String(candidate.clone());
+                    if !expanded.iter().any(|value| value == &candidate) {
+                        expanded.push(candidate);
+                    }
+                }
+            }
         }
         let max_values = self.domain.query.max_one_of_values.unwrap_or(64).max(1);
         if expanded.len() > max_values {
@@ -778,6 +785,8 @@ impl Engine {
         match verb {
             "guidance" => Ok(self.guidance_with_request(args)),
             "status" => self.status(site_root),
+            "communication_migration_preflight" => self.communication_migration_preflight(site_root, args),
+            "communication_migrate" => self.communication_migrate(site_root, args),
             "query" => {
                 let has_raw_query = args.contains_key("query");
                 let has_template = args.contains_key("template");
@@ -847,6 +856,102 @@ impl Engine {
             "export" => self.export(site_root, args),
             _ => unknown(),
         }
+    }
+
+    fn communication_migration_preflight(&self, root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
+        self.prepare(root)?;
+        let requested = args.get("limit").and_then(Value::as_u64).unwrap_or(50);
+        let limit = requested.clamp(1, self.domain.caps.operations_per_proposal.max) as usize;
+        let head = self.status(root)?.get("ledger_head").cloned().unwrap_or(Value::Null);
+        let communication = &self.domain.query.communication;
+        let cursor_schema = self.schema_id("communication_migration_cursor.v1");
+        let query_digest = sha256(
+            &serde_json::to_vec(&json!({
+                "canonical_kind": communication.canonical_kind,
+                "legacy_read_aliases": communication.legacy_read_aliases,
+                "contract_version": communication.contract_version
+            }))
+            .unwrap_or_default(),
+        );
+        let cursor = if let Some(raw_cursor) = args.get("cursor") {
+            let decoded = decode_cursor_token(raw_cursor, &cursor_schema).map_err(|_| {
+                self.error(
+                    "communication_migration_cursor_invalid",
+                    "migration cursor is malformed or belongs to another operation",
+                    json!({}),
+                )
+            })?;
+            if decoded.get("ledger_head") != Some(&head)
+                || decoded.get("query_digest").and_then(Value::as_str) != Some(query_digest.as_str())
+            {
+                return Err(self.error(
+                    "communication_migration_cursor_stale",
+                    "migration cursor is not bound to the current ledger head and descriptor query",
+                    json!({"cursor_ledger_head":decoded.get("ledger_head"),"actual_ledger_head":head}),
+                ));
+            }
+            decoded.get("entity_id").and_then(Value::as_str).unwrap_or_default().to_string()
+        } else {
+            String::new()
+        };
+        let db = Connection::open(self.projection_path(root)).map_err(self.db_error("projection_open_failed"))?;
+        let placeholders = (0..communication.legacy_read_aliases.len())
+            .map(|index| format!("?{}", index + 2))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!("select entity_id,kind,payload_json,event_id,event_sequence from {} where entity_id>?1 and kind in ({placeholders}) order by entity_id limit {}", self.entity_table, limit + 1);
+        let mut parameters = Vec::<String>::new();
+        parameters.push(cursor);
+        parameters.extend(communication.legacy_read_aliases.iter().cloned());
+        let mut statement = db.prepare(&sql).map_err(self.db_error("communication_migration_prepare_failed"))?;
+        let rows = statement.query_map(rusqlite::params_from_iter(parameters.iter()), |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, u64>(4)?)))
+            .map_err(self.db_error("communication_migration_query_failed"))?;
+        let mut candidates = rows.collect::<Result<Vec<_>, _>>().map_err(self.db_error("communication_migration_row_failed"))?;
+        let has_more = candidates.len() > limit;
+        candidates.truncate(limit);
+        let mut by_kind = BTreeMap::<String, u64>::new();
+        let mut by_sender = BTreeMap::<String, u64>::new();
+        let mut by_recipient = BTreeMap::<String, u64>::new();
+        let mut operations = Vec::new();
+        let mut census = Vec::new();
+        for (entity_id, kind, payload_json, event_id, event_sequence) in candidates {
+            let payload: Value = serde_json::from_str(&payload_json).map_err(|error| self.error("communication_migration_payload_invalid", &error.to_string(), json!({"entity_id":entity_id})))?;
+            let sender = payload.get("sender").and_then(Value::as_str).unwrap_or_default().to_string();
+            let recipient = payload.get("recipient").and_then(Value::as_str).unwrap_or_default().to_string();
+            *by_kind.entry(kind.clone()).or_default() += 1;
+            *by_sender.entry(sender.clone()).or_default() += 1;
+            *by_recipient.entry(recipient.clone()).or_default() += 1;
+            let thread_member: bool = db.query_row(&format!("select exists(select 1 from {} where relation_type='replies_to' and (source_id=?1 or target_id=?1))", self.relation_table), params![entity_id], |row| row.get(0)).map_err(self.db_error("communication_migration_thread_census_failed"))?;
+            let payload_sha256 = sha256(payload_json.as_bytes());
+            operations.push(json!({"op":communication.canonicalization_operation,"entity_id":entity_id,"legacy_kind":kind,"canonical_kind":communication.canonical_kind,"equivalence_evidence":{"payload_sha256":payload_sha256,"originating_event_id":event_id}}));
+            census.push(json!({"entity_id":entity_id,"kind":kind,"sender":sender,"recipient":recipient,"thread_member":thread_member,"event_id":event_id,"event_sequence":event_sequence,"payload_sha256":payload_sha256}));
+        }
+        let next_cursor = if has_more {
+            census.last().and_then(|item| item.get("entity_id")).and_then(Value::as_str).map(|entity_id| {
+                encode_cursor_token(&json!({"schema":cursor_schema,"ledger_head":head,"query_digest":query_digest,"entity_id":entity_id}))
+            })
+        } else {
+            None
+        };
+        Ok(json!({"schema":self.schema_id("communication_migration_preflight.v1"),"status":"ok","ledger_head":head,"query_digest":query_digest,"canonical_kind":communication.canonical_kind,"contract_version":communication.contract_version,"bounded":{"limit":limit,"returned":census.len(),"has_more":has_more,"next_cursor":next_cursor},"census":{"scope":"page","by_kind":by_kind,"by_sender":by_sender,"by_recipient":by_recipient,"messages":census},"proposed_operations":operations}))
+    }
+
+    fn communication_migrate(&self, root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
+        let actor = self.required(args, "actor")?;
+        let authority_basis = self.required_object(args, "authority_basis")?;
+        let preflight = self.communication_migration_preflight(root, args)?;
+        let operations = preflight.get("proposed_operations").and_then(Value::as_array).cloned().unwrap_or_default();
+        if operations.is_empty() {
+            return Ok(json!({"schema":self.schema_id("communication_migration.v1"),"status":"complete","migrated":0,"preflight":preflight}));
+        }
+        let mut submit = Map::new();
+        submit.insert("actor".into(), Value::String(actor));
+        submit.insert("authority_basis".into(), authority_basis);
+        submit.insert("operations".into(), Value::Array(operations.clone()));
+        submit.insert("expected_ledger_head".into(), preflight.get("ledger_head").cloned().unwrap_or(Value::Null));
+        submit.insert("idempotency_key".into(), Value::String(format!("communication-migration-{}", &sha256(&serde_json::to_vec(&operations).unwrap_or_default())[..24])));
+        let admission = self.submit_review_admit(root, &submit)?;
+        Ok(json!({"schema":self.schema_id("communication_migration.v1"),"status":"migrated","migrated":operations.len(),"preflight":preflight,"admission":admission}))
     }
 
     fn sequence_create(&self, root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
@@ -2281,11 +2386,16 @@ impl Engine {
                     json!({"limit":spec.limit}),
                 ));
             }
-            let items = execution
+            let mut items = execution
                 .bindings
                 .iter()
                 .map(|binding| self.render_query_binding(&db, binding, &spec, &datoms))
                 .collect::<Result<Vec<_>, _>>()?;
+            let normalized_legacy_count = items
+                .iter_mut()
+                .map(|item| self.normalize_communication_result(item))
+                .filter(|count| *count > 0)
+                .count();
             let next_cursor = execution.bindings.last().and_then(|binding| {
                 if !execution.has_more {
                     return None;
@@ -2330,10 +2440,32 @@ impl Engine {
                 "max_output_bytes":self.domain.caps.query_execution.max_output_bytes,
                 "has_more":execution.has_more,
                 "next_cursor":next_cursor,
+                "normalization":{"applied":normalized_legacy_count > 0,"normalized_count":normalized_legacy_count,"canonical_kind":self.domain.query.communication.canonical_kind,"legacy_read_policy":self.domain.query.communication.legacy_read_policy,"contract_version":self.domain.query.communication.contract_version},
                 "query_cost":{"planner_mode":if subject_local_sequence.is_some() {"indexed_subject_suffix"} else {"bounded_clause_plan"},"subject_local_attribute":subject_local_sequence.map(|(attribute, _)| attribute),"datoms_loaded":datoms.len(),"max_datoms":effective_max_datoms,"max_results":effective_max_results,"timeout_ms":effective_timeout_ms,"elapsed_ms":started.elapsed().as_millis() as u64,"hard_caps":{"max_datoms":hard_max_datoms,"max_results":hard_max_results,"timeout_ms":hard_timeout_ms}}
             });
             self.finalize_bounded_output(&mut response)?;
             Ok(response)
+    }
+
+    fn normalize_communication_result(&self, value: &mut Value) -> usize {
+        let communication = &self.domain.query.communication;
+        match value {
+            Value::Object(object) => {
+                let mut count = 0;
+                if let Some(kind) = object.get("kind").and_then(Value::as_str) {
+                    if communication.legacy_read_aliases.iter().any(|legacy| legacy == kind) {
+                        object.insert("kind".into(), Value::String(communication.canonical_kind.clone()));
+                        count += 1;
+                    }
+                }
+                for child in object.values_mut() {
+                    count += self.normalize_communication_result(child);
+                }
+                count
+            }
+            Value::Array(values) => values.iter_mut().map(|child| self.normalize_communication_result(child)).sum(),
+            _ => 0,
+        }
     }
 
     fn named_query(&self, args: &Map<String, Value>) -> Result<Value, Value> {
@@ -4128,6 +4260,28 @@ impl Engine {
     ) -> Result<(), Value> {
         for op in event["operations"].as_array().into_iter().flatten() {
             let op_kind = op["op"].as_str().unwrap_or_default();
+            if op_kind == self.domain.query.communication.canonicalization_operation {
+                let entity_id = op.get("entity_id").and_then(Value::as_str).unwrap_or_default();
+                let canonical_kind = op.get("canonical_kind").and_then(Value::as_str).unwrap_or_default();
+                let changed = tx.execute(
+                    &format!("update {} set kind=?1 where entity_id=?2", self.entity_table),
+                    params![canonical_kind, entity_id],
+                ).map_err(self.db_error("projection_entity_canonicalization_failed"))?;
+                if changed != 1 {
+                    return Err(self.error("projection_entity_canonicalization_missing", "canonicalization target is absent from the projection", json!({"entity_id":entity_id})));
+                }
+                if let Some(table) = &self.datoms_table {
+                    tx.execute(
+                        &format!("delete from {table} where origin_id=?1 and attribute='narada.ledger:entity/kind'"),
+                        params![entity_id],
+                    ).map_err(self.db_error("projection_datom_delete_failed"))?;
+                    let sequence = event["sequence"].as_u64().unwrap_or_default();
+                    self.write_datom(tx, table, entity_id, entity_id, "narada.ledger:entity/kind", &Value::String(canonical_kind.to_string()), sequence, event_id)?;
+                    self.write_datom(tx, table, entity_id, entity_id, "narada.ledger:entity/kind_canonicalized_from", op.get("legacy_kind").unwrap_or(&Value::Null), sequence, event_id)?;
+                    self.write_datom(tx, table, entity_id, entity_id, "narada.ledger:entity/kind_canonicalization_event", &Value::String(event_id.to_string()), sequence, event_id)?;
+                }
+                continue;
+            }
             let Some(fold) = self.domain.projection.fold.iter()
                 .find(|entry| entry.operation == op_kind)
             else {
@@ -4415,6 +4569,34 @@ impl Engine {
             .unwrap_or_default();
         for operation in operations {
             let op_kind = operation["op"].as_str().unwrap_or_default();
+            if op_kind == self.domain.query.communication.canonicalization_operation {
+                let entity_id = operation.get("entity_id").and_then(Value::as_str).unwrap_or_default();
+                let legacy_kind = operation.get("legacy_kind").and_then(Value::as_str).unwrap_or_default();
+                let evidence = operation.get("equivalence_evidence").and_then(Value::as_object).ok_or_else(|| self.error(
+                    "communication_canonicalization_evidence_required",
+                    "canonicalization evidence is missing",
+                    json!({"entity_id":entity_id}),
+                ))?;
+                let expected_digest = evidence.get("payload_sha256").and_then(Value::as_str).unwrap_or_default();
+                let expected_event = evidence.get("originating_event_id").and_then(Value::as_str).unwrap_or_default();
+                let db = Connection::open(self.projection_path(root)).map_err(self.db_error("projection_open_failed"))?;
+                let current = db.query_row(
+                    &format!("select kind,payload_json,event_id from {} where entity_id=?1", self.entity_table),
+                    params![entity_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
+                ).optional().map_err(self.db_error("communication_canonicalization_lookup_failed"))?;
+                let Some((current_kind, payload_json, originating_event_id)) = current else {
+                    return Err(self.error("dangling_reference", "canonicalization references an unknown entity", json!({"entity_id":entity_id})));
+                };
+                let actual_digest = sha256(payload_json.as_bytes());
+                if current_kind != legacy_kind || actual_digest != expected_digest || originating_event_id != expected_event {
+                    return Err(self.error(
+                        &self.domain.query.communication.collision_refusal_code,
+                        "canonicalization evidence does not prove identity and payload provenance equivalence",
+                        json!({"entity_id":entity_id,"expected":{"kind":legacy_kind,"payload_sha256":expected_digest,"originating_event_id":expected_event},"actual":{"kind":current_kind,"payload_sha256":actual_digest,"originating_event_id":originating_event_id}}),
+                    ));
+                }
+            }
             for binding in &self.domain.operations.reference_bindings {
                 if binding.operation == "*" {
                     for field in &binding.fields {
@@ -4481,6 +4663,14 @@ impl Engine {
                 }
                 let value = self.required(obj, &field)?;
                 if field == "kind" && kind == self.entity_op() {
+                    let communication = &self.domain.query.communication;
+                    if communication.legacy_read_aliases.iter().any(|legacy| legacy == &value) {
+                        return Err(self.error(
+                            &communication.legacy_write_refusal_code,
+                            "legacy communication kinds are read aliases and cannot authorize writes",
+                            json!({"supplied_kind":value,"canonical_replacement":communication.canonical_kind,"contract_version":communication.contract_version,"remediation":"resubmit the declaration with canonical_replacement"}),
+                        ));
+                    }
                     let rule = &self.domain.entities.extension_rule;
                     if !self.domain.entities.core_kinds.contains(&value)
                         && !value.contains(&rule.must_contain)
@@ -4511,6 +4701,37 @@ impl Engine {
                 }
             }
             if kind == self.entity_op() {
+                let communication = &self.domain.query.communication;
+                let entity_kind = obj.get("kind").and_then(Value::as_str).unwrap_or_default();
+                if communication
+                    .legacy_read_aliases
+                    .iter()
+                    .any(|legacy| legacy == entity_kind)
+                {
+                    return Err(self.error(
+                        &communication.legacy_write_refusal_code,
+                        "legacy communication kinds are read aliases and cannot authorize writes",
+                        json!({"supplied_kind":entity_kind,"canonical_replacement":communication.canonical_kind,"contract_version":communication.contract_version,"remediation":"resubmit the declaration with canonical_replacement"}),
+                    ));
+                }
+                if entity_kind == communication.canonical_kind {
+                    for field in &communication.required_fields {
+                        self.required(obj, field)?;
+                    }
+                    if !communication.content_any_of.iter().any(|field| {
+                        obj.get(field)
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .map(|value| !value.is_empty())
+                            .unwrap_or(false)
+                    }) {
+                        return Err(self.error(
+                            "communication_content_required",
+                            "canonical communication requires at least one declared content field",
+                            json!({"canonical_kind":communication.canonical_kind,"content_any_of":communication.content_any_of}),
+                        ));
+                    }
+                }
                 for conditional in &self.domain.entities.required_fields.conditional {
                     if obj.get("kind").and_then(Value::as_str)
                         == Some(conditional.when_kind.as_str())
@@ -4519,6 +4740,28 @@ impl Engine {
                             self.required(obj, field)?;
                         }
                     }
+                }
+            }
+            if kind == self.domain.query.communication.canonicalization_operation {
+                let communication = &self.domain.query.communication;
+                let legacy_kind = obj.get("legacy_kind").and_then(Value::as_str).unwrap_or_default();
+                let canonical_kind = obj.get("canonical_kind").and_then(Value::as_str).unwrap_or_default();
+                if !communication.legacy_read_aliases.iter().any(|legacy| legacy == legacy_kind)
+                    || canonical_kind != communication.canonical_kind
+                {
+                    return Err(self.error(
+                        "communication_canonicalization_contract_mismatch",
+                        "canonicalization must use a declared legacy alias and the descriptor canonical kind",
+                        json!({"legacy_kind":legacy_kind,"canonical_kind":canonical_kind,"canonical_replacement":communication.canonical_kind,"legacy_read_aliases":communication.legacy_read_aliases}),
+                    ));
+                }
+                let evidence = obj.get("equivalence_evidence").and_then(Value::as_object).ok_or_else(|| self.error(
+                    "communication_canonicalization_evidence_required",
+                    "canonicalization requires payload digest and originating event evidence",
+                    json!({"entity_id":obj.get("entity_id")}),
+                ))?;
+                for field in ["payload_sha256", "originating_event_id"] {
+                    self.required(evidence, field)?;
                 }
             }
             if require_evidence
@@ -5140,7 +5383,7 @@ mod tests {
         let complete = json!({
             "op":"entity.declare",
             "entity_id":"communication:caroline-to-benincasa-1",
-            "kind":"communication",
+            "kind":"narada.epistemic:communication",
             "title":"Flavor result handoff",
             "sender":"marici.Caroline",
             "recipient":"marici.Benincasa",
@@ -5155,23 +5398,27 @@ mod tests {
         let incomplete = json!({
             "op":"entity.declare",
             "entity_id":"communication:incomplete",
-            "kind":"communication",
+            "kind":"narada.epistemic:communication",
             "title":"Incomplete message",
-            "sender":"marici.Caroline",
             "recipient":"marici.Benincasa",
             "intent":"result",
             "sent_at":"2026-08-19T19:00:00Z"
         });
         let failure = engine
             .validate_operations(&[incomplete], false)
-            .expect_err("communication without body must refuse");
+            .expect_err("communication without sender must refuse");
         assert_eq!(failure["code"], "required_argument_missing");
-        assert_eq!(failure["details"]["field"], "body");
+        assert_eq!(failure["details"]["field"], "sender");
+
+        let legacy = json!({"op":"entity.declare","entity_id":"communication:legacy","kind":"communication","title":"Legacy","sender":"a","recipient":"b","intent":"result","sent_at":"2026-08-19T19:00:00Z"});
+        let failure = engine.validate_operations(&[legacy], false).expect_err("legacy write must refuse");
+        assert_eq!(failure["code"], "legacy_communication_kind_write_refused");
+        assert_eq!(failure["details"]["canonical_replacement"], "narada.epistemic:communication");
 
         let guidance = engine.guidance();
         assert_eq!(
             guidance.pointer("/communication_model/entity_kind"),
-            Some(&json!("communication"))
+            Some(&json!("narada.epistemic:communication"))
         );
         assert_eq!(
             guidance.pointer("/communication_model/rule"),
@@ -5186,6 +5433,15 @@ mod tests {
             "epistemic-communication-alias-test-{}",
             Uuid::new_v4()
         ));
+        engine.rebuild_projection(&root).expect("initial projection");
+        event_ledger::append_event(
+            engine.error,
+            &engine.ledger_layout(&root),
+            engine.event_hash_field,
+            None,
+            None,
+            |ctx| json!({"schema":engine.domain.storage.event_schema_id,"sequence":ctx.sequence,"event_id":ctx.event_id,"previous_hash":ctx.previous_hash,"operations":[{"op":"entity.declare","entity_id":"communication:legacy","kind":"communication","title":"Legacy message","sender":"marici.Nima","recipient":"marici.Benincasa","body":"legacy body","intent":"reply","sent_at":"2026-08-20T00:00:00Z"}],"actor":"historical-fixture"}),
+        ).expect("append historical legacy event");
         let proposal = engine
             .proposal_submit(
                 &root,
@@ -5193,25 +5449,15 @@ mod tests {
                     ("actor".into(), json!("tester")),
                     ("authority_basis".into(), json!({"kind":"test"})),
                     ("idempotency_key".into(), json!("communication-alias-proposal")),
-                    ("expected_ledger_head".into(), Value::Null),
                     ("operations".into(), json!([
                         {
                             "op":"entity.declare",
-                            "kind":"communication",
-                            "title":"Core message",
+                            "entity_id":"communication:canonical",
+                            "kind":"narada.epistemic:communication",
+                            "title":"Canonical message",
                             "sender":"marici.Nima",
                             "recipient":"marici.Benincasa",
-                            "body":"core body",
-                            "intent":"reply",
-                            "sent_at":"2026-08-20T00:00:00Z"
-                        },
-                        {
-                            "op":"entity.declare",
-                            "kind":"marici:communication",
-                            "title":"Legacy namespaced message",
-                            "sender":"marici.Nima",
-                            "recipient":"marici.Benincasa",
-                            "body":"legacy body",
+                            "body":"canonical body",
                             "intent":"reply",
                             "sent_at":"2026-08-20T00:01:00Z"
                         }
@@ -5226,35 +5472,65 @@ mod tests {
                     ("proposal_id".into(), proposal["proposal_id"].clone()),
                     ("actor".into(), json!("tester")),
                     ("authority_basis".into(), json!({"kind":"test"})),
-                    ("expected_ledger_head".into(), Value::Null),
                     ("idempotency_key".into(), json!("communication-alias-admission")),
                 ]),
             )
             .expect("admit");
 
-        let canonical = engine
-            .query(
-                &root,
-                &Map::from_iter([("kind".into(), json!("communication"))]),
-            )
-            .expect("canonical query");
-        assert_eq!(canonical["returned"], 2);
-        assert_eq!(
-            canonical["expanded_kinds"],
-            json!(["communication", "marici:communication"])
-        );
+        let canonical = engine.generic_query(&root, &Map::from_iter([("template".into(), json!("inbox")), ("recipient".into(), json!("marici.Benincasa")), ("limit".into(), json!(10))])).expect("canonical query");
+        assert_eq!(canonical["count"], 2);
+        assert!(canonical["items"].as_array().unwrap().iter().all(|item| item["kind"] == "narada.epistemic:communication"));
+        assert_eq!(canonical["normalization"]["applied"], true);
+        assert_eq!(canonical["normalization"]["normalized_count"], 1);
 
-        let exact_legacy = engine
-            .query(
+        let preflight = engine.communication_migration_preflight(&root, &Map::new()).expect("migration preflight");
+        assert_eq!(preflight["census"]["by_kind"]["communication"], 1);
+        assert_eq!(preflight["proposed_operations"].as_array().unwrap().len(), 1);
+        let originating_event = preflight["census"]["messages"][0]["event_id"].clone();
+        let mut collision_operation = preflight["proposed_operations"][0].clone();
+        collision_operation["equivalence_evidence"]["payload_sha256"] =
+            json!("sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+        let collision_proposal = engine
+            .proposal_submit(
                 &root,
-                &Map::from_iter([("kind".into(), json!("marici:communication"))]),
+                &Map::from_iter([
+                    ("actor".into(), json!("tester")),
+                    ("authority_basis".into(), json!({"kind":"test"})),
+                    ("idempotency_key".into(), json!("communication-collision")),
+                    ("operations".into(), json!([collision_operation])),
+                ]),
             )
-            .expect("exact legacy query");
-        assert_eq!(exact_legacy["returned"], 1);
-        assert_eq!(
-            exact_legacy["items"][0]["kind"],
-            "marici:communication"
-        );
+            .expect("collision proposal may be staged for authoritative review");
+        let collision = engine
+            .proposal_admit(
+                &root,
+                &Map::from_iter([
+                    ("proposal_id".into(), collision_proposal["proposal_id"].clone()),
+                    ("actor".into(), json!("tester")),
+                    ("authority_basis".into(), json!({"kind":"test"})),
+                    ("idempotency_key".into(), json!("communication-collision-admission")),
+                ]),
+            )
+            .expect_err("mismatched canonicalization evidence must stop at admission");
+        assert_eq!(collision["code"], "communication_kind_canonicalization_collision");
+        let migrated = engine.communication_migrate(&root, &Map::from_iter([
+            ("actor".into(), json!("operator")),
+            ("authority_basis".into(), json!({"kind":"operator_direct_instruction","summary":"Canonical communication migration test."})),
+        ])).expect("migration");
+        assert_eq!(migrated["migrated"], 1);
+        let replay = engine.communication_migrate(&root, &Map::from_iter([
+            ("actor".into(), json!("operator")),
+            ("authority_basis".into(), json!({"kind":"operator_direct_instruction","summary":"Canonical communication migration test."})),
+        ])).expect("idempotent migration replay");
+        assert_eq!(replay["migrated"], 0);
+        assert_eq!(replay["status"], "complete");
+        let db = Connection::open(engine.projection_path(&root)).expect("projection");
+        let effective: (String, String) = db.query_row("select kind,event_id from entities where entity_id='communication:legacy'", [], |row| Ok((row.get(0)?, row.get(1)?))).expect("legacy entity");
+        assert_eq!(effective.0, "narada.epistemic:communication");
+        assert_eq!(json!(effective.1), originating_event);
+        let after = engine.generic_query(&root, &Map::from_iter([("template".into(), json!("inbox")), ("recipient".into(), json!("marici.Benincasa")), ("limit".into(), json!(10))])).expect("post-migration query");
+        assert_eq!(after["count"], 2);
+        assert_eq!(after["normalization"]["applied"], false);
         let _ = fs::remove_dir_all(root);
     }
 

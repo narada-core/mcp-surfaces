@@ -207,6 +207,7 @@ pub struct FoldEntry {
 #[derive(Clone, Debug, Deserialize)]
 pub struct QueryConfig {
     pub record_kind_enum: Vec<String>,
+    pub communication: CommunicationConfig,
     #[serde(default)]
     pub kind_aliases: BTreeMap<String, Vec<String>>,
     #[serde(default)]
@@ -240,6 +241,21 @@ pub struct QueryConfig {
     pub neighborhood_relation_fields: Vec<String>,
     pub neighborhood_record_match_fields: Vec<String>,
     pub neighborhood_record_fields: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct CommunicationConfig {
+    pub canonical_kind: String,
+    #[serde(default)]
+    pub legacy_read_aliases: Vec<String>,
+    pub legacy_read_policy: String,
+    pub legacy_write_policy: String,
+    pub contract_version: u64,
+    pub canonicalization_operation: String,
+    pub legacy_write_refusal_code: String,
+    pub collision_refusal_code: String,
+    pub required_fields: Vec<String>,
+    pub content_any_of: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -518,10 +534,10 @@ mod tests {
             Descriptor::load(&epistemic_descriptor_path()).expect("epistemic descriptor loads");
         assert_eq!(descriptor.schema, DESCRIPTOR_SCHEMA_ID);
         assert_eq!(descriptor.identity.tool_prefix, "epistemic_graph");
-        assert_eq!(descriptor.tools.len(), 22);
+        assert_eq!(descriptor.tools.len(), 24);
         assert_eq!(descriptor.entities.core_kinds.len(), 8);
         assert_eq!(descriptor.relations.core.len(), 14);
-        assert_eq!(descriptor.operations.kinds.len(), 5);
+        assert_eq!(descriptor.operations.kinds.len(), 6);
         assert!(descriptor.features.proposals.enabled);
         assert!(descriptor.features.sequences.enabled);
         assert!(descriptor.features.source_inspect.enabled);

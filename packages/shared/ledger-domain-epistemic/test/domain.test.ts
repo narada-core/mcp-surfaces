@@ -19,8 +19,8 @@ assert.equal(domain.identity.tool_prefix, 'epistemic_graph');
 assert.equal(domain.identity.error_schema_id, 'narada.epistemic.error.v1');
 
 // Every tool name carries the domain tool prefix, and the tool list is the
-// engine's generation target: 22 tools, exactly one guidance tool.
-assert.equal(domain.tools.length, 22);
+// engine's generation target: 24 tools, exactly one guidance tool.
+assert.equal(domain.tools.length, 24);
 for (const tool of domain.tools) {
   assert.ok(tool.name.startsWith(domain.identity.tool_prefix + '_'), `tool name lacks prefix: ${tool.name}`);
   assert.equal(tool.annotations.destructiveHint, false, `${tool.name} destructiveHint`);
@@ -77,12 +77,17 @@ assert.equal(
 assert.equal(domain.query.max_one_of_values, 64);
 assert.equal(domain.query.max_predicate_depth, 8);
 
-// The operation vocabulary is closed: five operation kinds, and the embedded
+// The operation vocabulary is closed: six operation kinds, and the embedded
 // operation oneOf schema covers exactly those kinds.
-assert.deepEqual(domain.operations.kinds, ['entity.declare', 'relation.declare', 'assessment.record', 'test_outcome.record', 'sweep.record']);
+assert.deepEqual(domain.operations.kinds, ['entity.declare', 'entity.kind_canonicalize', 'relation.declare', 'assessment.record', 'test_outcome.record', 'sweep.record']);
 const variants = domain.operations.schema.oneOf as any[];
-assert.equal(variants.length, 5);
+assert.equal(variants.length, 6);
 assert.deepEqual(variants.map((variant) => variant.properties.op.const), domain.operations.kinds);
+assert.equal(domain.query.communication.canonical_kind, 'narada.epistemic:communication');
+assert.deepEqual(domain.query.communication.legacy_read_aliases, ['communication', 'marici:communication']);
+assert.equal(domain.query.communication.legacy_write_policy, 'reject_with_replacement');
+assert.ok(domain.tools.some((tool: any) => tool.name === 'epistemic_graph_communication_migration_preflight'));
+assert.ok(domain.tools.some((tool: any) => tool.name === 'epistemic_graph_communication_migrate'));
 
 // Guidance stays byte-identical to narada.epistemic.guidance.v2.
 assert.equal(domain.guidance.schema_id, 'narada.epistemic.guidance.v2');

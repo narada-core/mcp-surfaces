@@ -306,7 +306,7 @@ fn live_query_inbox_thread_cursor_and_error_envelopes() {
                 "query-root",
                 message(
                     "communication:root",
-                    "communication",
+                    "narada.epistemic:communication",
                     "marici.Caroline",
                     "marici.Grothendieck",
                     "root body",
@@ -318,7 +318,7 @@ fn live_query_inbox_thread_cursor_and_error_envelopes() {
                 "query-reply",
                 message(
                     "communication:reply",
-                    "communication",
+                    "narada.epistemic:communication",
                     "marici.Benincasa",
                     "marici.Grothendieck",
                     "reply body",
@@ -330,7 +330,7 @@ fn live_query_inbox_thread_cursor_and_error_envelopes() {
                 "query-outgoing",
                 message(
                     "communication:outgoing",
-                    "communication",
+                    "narada.epistemic:communication",
                     "marici.Grothendieck",
                     "marici.Caroline",
                     "outgoing body",
@@ -342,7 +342,7 @@ fn live_query_inbox_thread_cursor_and_error_envelopes() {
                 "query-legacy",
                 message(
                     "communication:legacy",
-                    "marici:communication",
+                    "narada.epistemic:communication",
                     "marici.Nima",
                     "marici.Grothendieck",
                     "legacy body",
@@ -388,7 +388,7 @@ fn live_query_inbox_thread_cursor_and_error_envelopes() {
                         "find":["?message","?sequence"],
                         "inputs":{"recipient":"marici.Grothendieck"},
                         "where":[
-                            {"triple":{"subject":"?message","attribute":"narada.ledger:entity/kind","object":{"one_of":["communication","marici:communication"]}}},
+                            {"triple":{"subject":"?message","attribute":"narada.ledger:entity/kind","object":{"one_of":["narada.epistemic:communication"]}}},
                             {"triple":{"subject":"?message","attribute":"narada.epistemic:recipient","object":{"input":"recipient"}}},
                             {"triple":{"subject":"?message","attribute":"narada.ledger:event/sequence","object":"?sequence"}},
                             {"compare":{"op":">=","left":"?sequence","right":{"value":1}}}
@@ -686,7 +686,7 @@ fn live_query_inbox_thread_cursor_and_error_envelopes() {
             "query-appended",
             message(
                 "communication:appended",
-                "communication",
+                "narada.epistemic:communication",
                 "marici.Benincasa",
                 "marici.Grothendieck",
                 "appended body",
@@ -723,7 +723,7 @@ fn live_inbox_suffix_filters_old_recipient_history_before_budgeting() {
             json!({
                 "op":"entity.declare",
                 "entity_id":format!("communication:old-{index}"),
-                "kind":"communication",
+                "kind":"narada.epistemic:communication",
                 "title":format!("old-{index}"),
                 "sender":"marici.Caroline",
                 "recipient":"marici.Nima",
@@ -756,7 +756,7 @@ fn live_inbox_suffix_filters_old_recipient_history_before_budgeting() {
                     "operations":[{
                         "op":"entity.declare",
                         "entity_id":"communication:new",
-                        "kind":"communication",
+                        "kind":"narada.epistemic:communication",
                         "title":"new",
                         "sender":"marici.Caroline",
                         "recipient":"marici.Nima",
@@ -825,7 +825,7 @@ fn live_query_modes_aliases_and_message_receipt_boundaries() {
     };
     let mut owned_message = message(
         "communication:one",
-        "communication",
+        "narada.epistemic:communication",
         "marici.Nima",
         "marici.Grothendieck",
     );
@@ -845,7 +845,7 @@ fn live_query_modes_aliases_and_message_receipt_boundaries() {
                 "query-boundary-two",
                 json!([message(
                     "communication:two",
-                    "marici:communication",
+                    "narada.epistemic:communication",
                     "marici.Benincasa",
                     "marici.Grothendieck",
                 )]),
@@ -855,7 +855,7 @@ fn live_query_modes_aliases_and_message_receipt_boundaries() {
                 "query-boundary-outgoing",
                 json!([message(
                     "communication:outgoing",
-                    "communication",
+                    "narada.epistemic:communication",
                     "marici.Grothendieck",
                     "marici.Caroline",
                 )]),
@@ -918,7 +918,7 @@ fn live_query_modes_aliases_and_message_receipt_boundaries() {
                 json!({"template":"inbox","participant":"marici.Grothendieck","direction":"outgoing","to":"marici.Caroline","kinds":["marici:communication"],"limit":10}),
             ),
             tool(3, "epistemic_graph_query", json!({"kind":"communication","limit":10})),
-            tool(4, "epistemic_graph_query", json!({"kind":"marici:communication","limit":10})),
+            tool(4, "epistemic_graph_query", json!({"kind":"narada.epistemic:communication","limit":10})),
             tool(
                 5,
                 "epistemic_graph_query",
@@ -932,7 +932,7 @@ fn live_query_modes_aliases_and_message_receipt_boundaries() {
     assert_eq!(structured(response(&named, 2))["count"], 1);
     assert_eq!(structured(response(&named, 2))["items"][0]["entity_id"], "communication:outgoing");
     assert_eq!(structured(response(&named, 3))["returned"], 3);
-    assert_eq!(structured(response(&named, 4))["returned"], 1);
+    assert_eq!(structured(response(&named, 4))["returned"], 3);
     assert_eq!(structured(response(&named, 5))["query_origin"], "raw");
 
     let head = structured(response(&named, 3))["ledger_head"].clone();
@@ -998,7 +998,7 @@ fn live_query_modes_aliases_and_message_receipt_boundaries() {
                     "find":[{"pull":{"var":"?message","fields":["entity_id","message_state","reply_state","payload"]}}],
                     "inputs":{"viewer":"marici.Grothendieck"},
                     "where":[
-                        {"triple":{"subject":"?message","attribute":"narada.ledger:entity/kind","object":{"one_of":["communication","marici:communication"]}}},
+                        {"triple":{"subject":"?message","attribute":"narada.ledger:entity/kind","object":{"one_of":["narada.epistemic:communication"]}}},
                         {"triple":{"subject":"?message","attribute":"narada.epistemic:recipient","object":"marici.Grothendieck"}}
                     ],
                     "order_by":[{"term":"?message"}],
@@ -1023,7 +1023,7 @@ fn live_query_modes_aliases_and_message_receipt_boundaries() {
                     "find":["?message","?sequence",{"pull":{"var":"?message","fields":["entity_id","payload"]}}],
                     "inputs":{"viewer":"marici.Grothendieck"},
                     "where":[
-                        {"triple":{"subject":"?message","attribute":"narada.ledger:entity/kind","object":{"one_of":["communication","marici:communication"]}}},
+                        {"triple":{"subject":"?message","attribute":"narada.ledger:entity/kind","object":{"one_of":["narada.epistemic:communication"]}}},
                         {"triple":{"subject":"?message","attribute":"narada.epistemic:recipient","object":"marici.Grothendieck"}},
                         {"triple":{"subject":"?message","attribute":"narada.ledger:event/sequence","object":"?sequence"}}
                     ],

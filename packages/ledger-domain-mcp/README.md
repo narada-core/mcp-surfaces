@@ -11,7 +11,7 @@ This package is a host/engine package, not a bound surface: bound surfaces are
 domain descriptors loaded by this engine. The first descriptor is
 `@narada-core/ledger-domain-epistemic`
 (`packages/shared/ledger-domain-epistemic/domain.json`), which re-hosts the
-epistemic-graph domain with its exact external contract (22 tools, response
+epistemic-graph domain with its exact external contract (24 tools, response
 envelopes, error codes, and byte-compatible ledgers).
 
 Boundary notes:
@@ -55,11 +55,34 @@ Derived
 message/reply state is available under `_narada_query` without overwriting
 domain payload fields.
 
+## Canonical communication kind
+
+Domain entity kinds are namespaced. Unqualified domain kinds are schema defects,
+not synonyms. The epistemic descriptor accepts
+`narada.epistemic:communication` as the only communication kind for new
+writes. Writes using `communication` or `marici:communication` fail with
+`legacy_communication_kind_write_refused`, including the canonical replacement
+and remediation in the typed error.
+
+Compatibility reads are descriptor-versioned. During contract version 2,
+queries expand both legacy kinds, expose every returned entity as the canonical
+kind, and report normalization metadata. Aliases never authorize writes.
+Compatibility may be removed only after a ledger-head-bound audit of current
+repositories and collaborating agents.
+
+Migration starts with a bounded, cursor-paged preflight census. It then appends
+an atomic `entity.kind_canonicalize` batch through the ordinary proposal and
+admission machinery, preserving entity identity, payload, thread/read metadata,
+and originating event provenance. Evidence mismatch or ambiguous identity stops
+the batch with `communication_kind_canonicalization_collision`; completed
+pages are idempotent. Fix rejected clients to emit the canonical kind rather
+than retrying a legacy write.
+
 ## Tools
 
 The tool set is descriptor-driven: `tools/list` is generated at runtime from
 the loaded domain descriptor, so this engine has no static tool list of its
-own. With the epistemic descriptor loaded, the surface exposes the 22
+own. With the epistemic descriptor loaded, the surface exposes the 24
 `epistemic_graph_*` tools (guidance, status, query/query_batch, message
 read-marking, neighborhood, snapshot, export, source_inspect, the proposal
 lifecycle, and sequences); exact names and schemas are discoverable through

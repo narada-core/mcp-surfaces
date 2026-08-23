@@ -20,12 +20,12 @@
     }
   },
   "entities": {
-    "core_kinds": ["problem", "conjecture", "claim", "criticism", "test", "source", "team_member", "communication"],
+    "core_kinds": ["problem", "conjecture", "claim", "criticism", "test", "source", "team_member", "narada.epistemic:communication"],
     "required_fields": {
       "always": ["kind", "title"],
       "conditional": [
         {"when_kind": "source", "requires": ["version", "locator"]},
-        {"when_kind": "communication", "requires": ["sender", "recipient", "body", "intent", "sent_at"]}
+        {"when_kind": "narada.epistemic:communication", "requires": ["sender", "recipient", "intent", "sent_at"]}
       ]
     },
     "extension_rule": {
@@ -46,11 +46,12 @@
     }
   },
   "operations": {
-    "kinds": ["entity.declare", "relation.declare", "assessment.record", "test_outcome.record", "sweep.record"],
+    "kinds": ["entity.declare", "entity.kind_canonicalize", "relation.declare", "assessment.record", "test_outcome.record", "sweep.record"],
     "count": {"min": 1, "max": 200},
     "additional_properties": true,
     "required_fields": {
       "entity.declare": ["op", "entity_id", "kind", "title"],
+      "entity.kind_canonicalize": ["op", "entity_id", "legacy_kind", "canonical_kind"],
       "relation.declare": ["op", "relation_id", "relation_type", "source_id", "target_id"],
       "assessment.record": ["op", "assessment_id", "subject_id", "judgment", "actor", "reason"],
       "test_outcome.record": ["op", "outcome_id", "test_id", "actor", "outcome"],
@@ -77,6 +78,7 @@
     "schema": {
       "oneOf": [
         {"title": "Declare entity", "type": "object", "properties": {"op": {"const": "entity.declare"}, "entity_id": {"type": "string", "minLength": 1, "description": "Optional override; omit for deterministic identity from kind, title, version, and locator."}, "local_ref": {"type": "string", "minLength": 1, "description": "Optional proposal-local name for relation source_ref/target_ref."}, "kind": {"type": "string", "description": "Core entity kind (problem, conjecture, claim, criticism, test, source) or a namespaced extension kind such as cintamani:experiment."}, "title": {"type": "string", "minLength": 1}, "version": {"type": "string", "minLength": 1}, "locator": {"type": "string", "minLength": 1}}, "required": ["op", "kind", "title"], "allOf": [{"if": {"properties": {"kind": {"const": "source"}}, "required": ["kind"]}, "then": {"required": ["version", "locator"]}}], "additionalProperties": true},
+        {"title": "Canonicalize entity kind", "type": "object", "properties": {"op": {"const": "entity.kind_canonicalize"}, "entity_id": {"type": "string", "minLength": 1}, "legacy_kind": {"type": "string", "enum": ["communication", "marici:communication"]}, "canonical_kind": {"const": "narada.epistemic:communication"}, "equivalence_evidence": {"type": "object", "properties": {"payload_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "originating_event_id": {"type": "string", "minLength": 1}}, "required": ["payload_sha256", "originating_event_id"], "additionalProperties": false}}, "required": ["op", "entity_id", "legacy_kind", "canonical_kind", "equivalence_evidence"], "additionalProperties": false},
         {"title": "Declare relation", "type": "object", "properties": {"op": {"const": "relation.declare"}, "relation_id": {"type": "string", "minLength": 1, "description": "Optional override. Omit to derive a deterministic id from relation_type, source_id, and target_id."}, "relation_type": {"oneOf": [{"type": "string", "enum": ["addresses", "criticizes", "tests", "depends_on", "derived_from", "transforms", "supersedes", "sent_by", "addressed_to", "replies_to", "requests", "reports", "acknowledges", "promotes_to_evidence"]}, {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_.-]*:[A-Za-z][A-Za-z0-9_.-]*$"}], "description": "Use a listed core relation, or namespace an extension such as marici:refines."}, "source_id": {"type": "string", "minLength": 1}, "target_id": {"type": "string", "minLength": 1}, "source_ref": {"type": "string", "minLength": 1}, "target_ref": {"type": "string", "minLength": 1}}, "required": ["op", "relation_type"], "allOf": [{"anyOf": [{"required": ["source_id"]}, {"required": ["source_ref"]}]}, {"anyOf": [{"required": ["target_id"]}, {"required": ["target_ref"]}]}], "additionalProperties": true},
         {"title": "Record assessment", "type": "object", "properties": {"op": {"const": "assessment.record"}, "assessment_id": {"type": "string", "minLength": 1}, "subject_id": {"type": "string", "minLength": 1}, "judgment": {"type": "string", "minLength": 1}, "actor": {"type": "string", "minLength": 1}, "reason": {"type": "string", "minLength": 1}, "evidence": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {"source_id": {"type": "string", "minLength": 1}, "locator": {"type": "string", "minLength": 1}, "paraphrase": {"type": "string", "minLength": 1}}, "required": ["source_id", "locator", "paraphrase"], "additionalProperties": false}}}, "required": ["op", "assessment_id", "subject_id", "judgment", "actor", "reason", "evidence"], "additionalProperties": true},
         {"title": "Record test outcome", "type": "object", "properties": {"op": {"const": "test_outcome.record"}, "outcome_id": {"type": "string", "minLength": 1}, "test_id": {"type": "string", "minLength": 1}, "actor": {"type": "string", "minLength": 1}, "outcome": {"type": "string", "minLength": 1}, "evidence": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {"source_id": {"type": "string", "minLength": 1}, "locator": {"type": "string", "minLength": 1}, "paraphrase": {"type": "string", "minLength": 1}}, "required": ["source_id", "locator", "paraphrase"], "additionalProperties": false}}}, "required": ["op", "outcome_id", "test_id", "actor", "outcome", "evidence"], "additionalProperties": true},
@@ -109,6 +111,7 @@
     },
     "operation_identity_prefixes": {
       "entity.declare": {"prefix": "entity", "id_field": "entity_id"},
+      "entity.kind_canonicalize": {"prefix": "entity_kind_canonicalize", "id_field": "entity_id"},
       "relation.declare": {"prefix": "relation", "id_field": "relation_id"},
       "assessment.record": {"prefix": "assessment", "id_field": "assessment_id"},
       "test_outcome.record": {"prefix": "test_outcome", "id_field": "outcome_id"},
@@ -128,6 +131,7 @@
     "ddl": "pragma journal_mode=delete; create table entities(entity_id text primary key,kind text not null,payload_json text not null,event_id text not null,event_sequence integer not null default 0); create table relations(relation_id text primary key,relation_type text not null,source_id text not null,target_id text not null,payload_json text not null,event_id text not null,event_sequence integer not null default 0); create table records(record_id text primary key,record_kind text not null,payload_json text not null,event_id text not null,event_sequence integer not null default 0); create table datoms(datom_id text primary key,origin_id text not null,subject text not null,attribute text not null,value_json text not null,value_kind text not null,event_sequence integer not null,event_id text not null); create table projection_meta(meta_id text primary key,ledger_head text,ledger_sequence integer not null,updated_event_id text); insert into projection_meta(meta_id,ledger_head,ledger_sequence,updated_event_id) values('current',null,0,null); create index datoms_subject_attribute on datoms(subject,attribute); create index datoms_attribute_value on datoms(attribute,value_json); create index datoms_sequence on datoms(event_sequence,event_id);",
     "fold": [
       {"operation": "entity.declare", "table": "entities", "key_field": "entity_id", "columns": {"kind": "kind"}},
+      {"operation": "entity.kind_canonicalize", "table": "entities", "key_field": "entity_id", "columns": {"kind": "canonical_kind"}},
       {"operation": "relation.declare", "table": "relations", "key_field": "relation_id", "columns": {"relation_type": "relation_type", "source_id": "source_id", "target_id": "target_id"}},
       {"operation": "assessment.record", "table": "records", "key_field": "assessment_id", "columns": {"record_kind": "assessment.record"}},
       {"operation": "test_outcome.record", "table": "records", "key_field": "outcome_id", "columns": {"record_kind": "test_outcome.record"}},
@@ -139,8 +143,9 @@
   },
   "query": {
     "record_kind_enum": ["assessment.record", "test_outcome.record", "sweep.record"],
+    "communication": {"canonical_kind": "narada.epistemic:communication", "legacy_read_aliases": ["communication", "marici:communication"], "legacy_read_policy": "normalize_and_disclose", "legacy_write_policy": "reject_with_replacement", "contract_version": 2, "canonicalization_operation": "entity.kind_canonicalize", "legacy_write_refusal_code": "legacy_communication_kind_write_refused", "collision_refusal_code": "communication_kind_canonicalization_collision", "required_fields": ["entity_id", "sender", "recipient", "intent", "sent_at"], "content_any_of": ["title", "body"]},
     "kind_aliases": {
-      "communication": ["marici:communication"]
+      "narada.epistemic:communication": ["communication", "marici:communication"]
     },
     "max_clauses": 64,
     "max_reach_depth": 8,
@@ -155,7 +160,7 @@
     "named_queries": {
       "epistemic:inbox": {
         "mode": "inbox",
-        "kind_key": "communication",
+        "kind_key": "narada.epistemic:communication",
         "kind_attribute": "narada.ledger:entity/kind",
         "sequence_attribute": "narada.ledger:event/sequence",
         "event_id_attribute": "narada.ledger:event/id",
@@ -297,7 +302,10 @@
         {"step": 5, "tool": "epistemic_graph_neighborhood", "why": "Verify the admitted problem situation and its relations."}
       ],
       "communication_model": {
-        "entity_kind": "communication",
+        "entity_kind": "narada.epistemic:communication",
+        "legacy_read_aliases": ["communication", "marici:communication"],
+        "legacy_write_remediation": "Use narada.epistemic:communication. Domain entity kinds must be namespaced; unqualified domain kinds are schema defects, not synonyms.",
+        "compatibility_lifetime": "normalize_and_disclose until a ledger-head-bound audit proves zero legacy entities and writers; disable only through an authorized contract-version transition",
         "participant_kind": "team_member",
         "required_fields": ["sender", "recipient", "body", "intent", "sent_at"],
         "intent_values": ["request", "handoff", "result", "notice", "objection", "reply", "acknowledgment"],
@@ -348,6 +356,22 @@
       "feature": null,
       "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true},
       "inputSchema": {"type": "object", "required": [], "additionalProperties": false}
+    },
+    {
+      "name": "epistemic_graph_communication_migration_preflight",
+      "description": "Produce a ledger-head-bound, bounded census and exact canonicalization operations without mutating canonical history.",
+      "class": "core",
+      "feature": null,
+      "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true},
+      "inputSchema": {"type": "object", "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 200}, "cursor": {"type": ["string", "null"]}}, "additionalProperties": false}
+    },
+    {
+      "name": "epistemic_graph_communication_migrate",
+      "description": "Admit one bounded, atomic and idempotent canonical communication-kind migration batch using explicit operator authority.",
+      "class": "core",
+      "feature": null,
+      "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true},
+      "inputSchema": {"type": "object", "required": ["actor", "authority_basis"], "properties": {"actor": {"type": "string", "minLength": 1}, "authority_basis": {"type": "object", "minProperties": 1}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}, "cursor": {"type": ["string", "null"]}}, "additionalProperties": false}
     },
     {
       "name": "epistemic_graph_query",
