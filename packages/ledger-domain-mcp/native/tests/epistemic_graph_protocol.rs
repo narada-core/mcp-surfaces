@@ -410,6 +410,9 @@ fn live_query_inbox_thread_cursor_and_error_envelopes() {
                     "template":"inbox",
                     "recipient":"marici.Grothendieck",
                     "since_event":2,
+                    "max_datoms":500,
+                    "max_results":20,
+                    "timeout_ms":5000,
                     "limit":10
                 }),
             ),
@@ -482,8 +485,18 @@ fn live_query_inbox_thread_cursor_and_error_envelopes() {
         response(&calls, 10)["error"]["message"],
         "inbox requires participant (or legacy recipient)"
     );
+    assert!(
+        response(&calls, 11).pointer("/result/structuredContent").is_some(),
+        "budgeted suffix query failed: {:?}",
+        response(&calls, 11)
+    );
     let legacy = structured(response(&calls, 11));
     assert_eq!(legacy["count"], 1);
+    assert_eq!(legacy["query_cost"]["max_datoms"], 500);
+    assert_eq!(legacy["query_cost"]["max_results"], 20);
+    assert_eq!(legacy["query_cost"]["timeout_ms"], 5000);
+    assert!(legacy["query_cost"]["datoms_loaded"].as_u64().unwrap() <= 500);
+    assert!(legacy["query_cost"]["hard_caps"]["max_datoms"].as_u64().unwrap() >= 500);
     assert!(legacy["max_output_bytes"].as_u64().is_some());
     assert_eq!(
         legacy["output_bytes"],
@@ -505,6 +518,58 @@ fn live_query_inbox_thread_cursor_and_error_envelopes() {
     assert_eq!(batch["results"][1]["items"][0]["relation_type"], "replies_to");
     assert_eq!(batch["results"][0]["request"]["mode"], "legacy");
     assert_eq!(batch["results"][1]["request"]["mode"], "raw");
+    let budget_controls = run(
+        &root,
+        &[
+            tool(1, "epistemic_graph_query", json!({
+                "template":"inbox",
+                "recipient":"marici.Grothendieck",
+                "max_datoms":u64::MAX,
+                "max_results":u64::MAX,
+                "timeout_ms":u64::MAX,
+                "limit":1
+            })),
+            tool(2, "epistemic_graph_query", json!({
+                "template":"inbox",
+                "recipient":"marici.Grothendieck",
+                "max_datoms":0
+            })),
+            tool(3, "epistemic_graph_query", json!({
+                "template":"inbox",
+                "recipient":"marici.Grothendieck",
+                "budget_escalation":{"role":"maintenance","evidence":"caller-authored"}
+            })),
+        ],
+    );
+    assert!(
+        response(&budget_controls, 1)
+            .pointer("/result/structuredContent")
+            .is_some(),
+        "capped query failed: {:?}",
+        response(&budget_controls, 1)
+    );
+    let capped = structured(response(&budget_controls, 1));
+    assert_eq!(
+        capped["query_cost"]["max_datoms"],
+        capped["query_cost"]["hard_caps"]["max_datoms"]
+    );
+    assert_eq!(
+        capped["query_cost"]["max_results"],
+        capped["query_cost"]["hard_caps"]["max_results"]
+    );
+    assert_eq!(
+        capped["query_cost"]["timeout_ms"],
+        capped["query_cost"]["hard_caps"]["timeout_ms"]
+    );
+    assert_eq!(
+        response(&budget_controls, 2)["error"]["data"]["code"],
+        "input_schema_validation_failed"
+    );
+    assert_eq!(
+        response(&budget_controls, 3)["error"]["data"]["code"],
+        "query_budget_escalation_unavailable"
+    );
+
 
     let page_two = run(
         &root,

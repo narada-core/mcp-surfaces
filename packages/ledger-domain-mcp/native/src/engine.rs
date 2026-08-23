@@ -21,6 +21,7 @@ use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 /// One `create table` statement parsed out of the projection DDL.
@@ -541,9 +542,8 @@ impl Engine {
                             .iter()
                             .all(|item| item.as_str().is_some_and(|text| !text.trim().is_empty()))
                 }),
-                "since_event" | "after_sequence" | "max_depth" => {
-                    value.as_u64().is_some()
-                }
+                "since_event" | "after_sequence" | "max_depth" | "max_datoms"
+                | "max_results" | "timeout_ms" => value.as_u64().is_some(),
                 "include_body" => value.is_boolean(),
                 "limit" => value.as_u64().is_some_and(|limit| limit > 0),
                 "cursor" => value.is_null() || value.is_string() || value.is_object(),
@@ -587,6 +587,7 @@ impl Engine {
                 "template", "recipient", "participant", "sender", "from", "to", "kinds",
                 "since_event", "after_sequence", "include_body", "direction", "viewer", "intent",
                 "read_state", "reply_state", "match", "limit", "cursor", "expected_ledger_head",
+                "max_datoms", "max_results", "timeout_ms", "budget_escalation",
             ]
             .as_slice(),
             "thread" => ["template", "root", "max_depth", "viewer", "limit", "cursor", "match", "expected_ledger_head"].as_slice(),
@@ -626,12 +627,12 @@ impl Engine {
     }
 
     fn validate_raw_query_arguments(&self, args: &Map<String, Value>) -> Result<(), Value> {
-        let allowed = ["query", "limit", "cursor", "expected_ledger_head"];
+        let allowed = ["query", "limit", "cursor", "expected_ledger_head", "max_datoms", "max_results", "timeout_ms", "budget_escalation"];
         for key in args.keys() {
             if !allowed.contains(&key.as_str()) {
                 return Err(self.error(
                     "query_mode_mixed",
-                    "raw Datalog query accepts only query, limit, cursor, and expected_ledger_head",
+                    "raw Datalog query accepts query, pagination, and bounded execution controls only",
                     json!({"field":key}),
                 ));
             }
@@ -644,6 +645,16 @@ impl Engine {
                     json!({"field":"limit"}),
                 ));
             }
+        }
+        for field in ["max_datoms", "max_results", "timeout_ms"] {
+            if let Some(value) = args.get(field) {
+                if !value.as_u64().is_some_and(|value| value > 0) {
+                    return Err(self.error("query_control_type_invalid", "query budget controls must be positive integers", json!({"field":field})));
+                }
+            }
+        }
+        if args.contains_key("budget_escalation") {
+            return Err(self.error("query_budget_escalation_unavailable", "this surface has no descriptor-admitted privileged query budget", json!({"required":"descriptor-owned maintenance authority with audit evidence"})));
         }
         if let Some(cursor) = args.get("cursor") {
             if !(cursor.is_null() || cursor.is_string() || cursor.is_object()) {
@@ -2101,6 +2112,13 @@ impl Engine {
     }
 
     fn generic_query_locked(&self, root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
+            if args.contains_key("budget_escalation") {
+                return Err(self.error(
+                    "query_budget_escalation_unavailable",
+                    "this surface has no descriptor-admitted privileged query budget",
+                    json!({"required":"descriptor-owned maintenance authority with audit evidence"}),
+                ));
+            }
             let Some(datoms_table) = &self.datoms_table else {
                 return Err(self.error(
                     "query_unavailable",
@@ -2207,13 +2225,20 @@ impl Engine {
                     ));
                 }
             }
+            let hard_max_datoms = self.domain.caps.query_execution.max_datoms_scanned;
+            let hard_max_results = self.domain.caps.query_limit.max;
+            let hard_timeout_ms = self.domain.caps.query_execution.max_timeout_ms;
+            let effective_max_datoms = args.get("max_datoms").and_then(Value::as_u64).unwrap_or(hard_max_datoms).min(hard_max_datoms);
+            let effective_max_results = args.get("max_results").and_then(Value::as_u64).unwrap_or(hard_max_results).min(hard_max_results);
+            let effective_timeout_ms = args.get("timeout_ms").and_then(Value::as_u64).unwrap_or(hard_timeout_ms).min(hard_timeout_ms);
+            let started = Instant::now();
             let limits = ledger_query::QueryLimits {
                 max_clauses: self.domain.query.max_clauses.unwrap_or(64).max(1),
-                max_results: self.domain.caps.query_limit.max as usize,
+                max_results: effective_max_results as usize,
                 max_reach_depth: self.domain.query.max_reach_depth.unwrap_or(8).max(1),
                 max_one_of_values: self.domain.query.max_one_of_values.unwrap_or(64).max(1),
                 max_predicate_depth: self.domain.query.max_predicate_depth.unwrap_or(8).max(1),
-                max_datoms_scanned: self.domain.caps.query_execution.max_datoms_scanned as usize,
+                max_datoms_scanned: effective_max_datoms as usize,
                 max_traversal_edges: self.domain.caps.query_execution.max_traversal_edges as usize,
             };
             let default_limit = self.domain.caps.query_limit.default as usize;
@@ -2221,9 +2246,33 @@ impl Engine {
                 .map_err(|failure| self.error(failure.code, &failure.message, failure.details))?;
             let db = Connection::open(self.projection_path(root))
                 .map_err(self.db_error("projection_open_failed"))?;
-            let datoms = self.load_datoms_for_query(&db, datoms_table, &spec)?;
+            let subject_local_sequence_attribute = args
+                .get("template")
+                .and_then(Value::as_str)
+                .filter(|_| args.contains_key("recipient") && args.contains_key("since_event"))
+                .map(|template| self.canonical_named_template(template))
+                .and_then(|template| self.domain.query.named_queries.get(&template))
+                .and_then(Value::as_object)
+                .and_then(|config| config.get("sequence_attribute"))
+                .and_then(Value::as_str);
+            let datoms = self.load_datoms_for_query(
+                &db,
+                datoms_table,
+                &spec,
+                subject_local_sequence_attribute,
+            )?;
+            if started.elapsed() > Duration::from_millis(effective_timeout_ms) {
+                return Err(self.error("query_timeout", "query exceeded its capped time budget while loading indexed datoms", json!({"timeout_ms":effective_timeout_ms,"phase":"datom_load","datoms_loaded":datoms.len()})));
+            }
             let execution = ledger_query::execute(&spec, &datoms)
                 .map_err(|failure| self.error(failure.code, &failure.message, failure.details))?;
+            if started.elapsed() > Duration::from_millis(effective_timeout_ms) {
+                return Err(self.error(
+                    "query_timeout",
+                    "query exceeded its capped time budget while evaluating datoms",
+                    json!({"timeout_ms":effective_timeout_ms,"phase":"evaluation","datoms_loaded":datoms.len()}),
+                ));
+            }
             if execution.has_more && spec.order_by.is_empty() {
                 return Err(self.error(
                     "query_pagination_requires_order",
@@ -2279,7 +2328,8 @@ impl Engine {
                 "output_bytes":0,
                 "max_output_bytes":self.domain.caps.query_execution.max_output_bytes,
                 "has_more":execution.has_more,
-                "next_cursor":next_cursor
+                "next_cursor":next_cursor,
+                "query_cost":{"planner_mode":if subject_local_sequence_attribute.is_some() {"indexed_subject_suffix"} else {"bounded_clause_plan"},"subject_local_attribute":subject_local_sequence_attribute,"datoms_loaded":datoms.len(),"max_datoms":effective_max_datoms,"max_results":effective_max_results,"timeout_ms":effective_timeout_ms,"elapsed_ms":started.elapsed().as_millis() as u64,"hard_caps":{"max_datoms":hard_max_datoms,"max_results":hard_max_results,"timeout_ms":hard_timeout_ms}}
             });
             self.finalize_bounded_output(&mut response)?;
             Ok(response)
@@ -2687,7 +2737,7 @@ impl Engine {
                     return Err(self.error(
                         "query_datom_scan_limit",
                         "normalized datom projection exceeds the descriptor scan budget",
-                        json!({"max_datoms_scanned":max_datoms}),
+                        json!({"max_datoms_scanned":max_datoms,"planner_mode":"indexed_seed_with_broad_join","cause":"an indexed clause or broad join exceeded the work budget","suggestion":"make the most selective indexed equality clause explicit and inspect broad join attributes"}),
                     ));
                 }
             }
@@ -2711,7 +2761,7 @@ impl Engine {
             return Err(self.error(
                 "query_datom_scan_limit",
                 "normalized datom projection exceeds the descriptor scan budget",
-                json!({"max_datoms_scanned":max_datoms}),
+                json!({"max_datoms_scanned":max_datoms,"planner_mode":"bounded_full_scan","cause":"query has no usable indexed seed","suggestion":"add an equality predicate on an indexed attribute before increasing the caller budget"}),
             ));
         }
         Ok(datoms)
@@ -2722,6 +2772,7 @@ impl Engine {
         db: &Connection,
         table: &str,
         spec: &ledger_query::QuerySpec,
+        subject_local_attribute: Option<&str>,
     ) -> Result<Vec<ledger_query::Datom>, Value> {
         let max_datoms = spec.limits.max_datoms_scanned as u64;
         let mut plan = QuerySeedPlan::default();
@@ -2806,8 +2857,8 @@ impl Engine {
         // Once a selective indexed predicate has identified subjects, load
         // their complete normalized records so joins, comparisons, and pull
         // decoration see the same subject-local facts as a full scan.
-        for subject in candidate_subjects {
-            let parameters: [&dyn ToSql; 2] = [&subject, &row_limit];
+        for subject in &candidate_subjects {
+            let parameters: [&dyn ToSql; 2] = [subject, &row_limit];
             self.append_datoms(
                 db,
                 &format!(
@@ -2821,9 +2872,12 @@ impl Engine {
         }
 
         // Broad attributes are still needed for joins, correlated predicates,
-        // reachability, and durable message-state decoration. They remain
-        // bounded but do not themselves trigger subject expansion.
-        for attribute in &plan.attributes {
+        // reachability, and durable message-state decoration. A named query
+        // may declare one attribute subject-local when another indexed clause
+        // has already selected the complete candidate records.
+        for attribute in plan.attributes.iter().filter(|attribute| {
+            subject_local_attribute != Some(attribute.as_str())
+        }) {
             let parameters: [&dyn ToSql; 2] = [attribute, &row_limit];
             self.append_datoms(
                 db,

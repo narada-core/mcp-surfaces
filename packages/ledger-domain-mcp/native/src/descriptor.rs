@@ -269,6 +269,7 @@ pub struct QueryExecutionCaps {
     pub max_datoms_scanned: u64,
     pub max_traversal_edges: u64,
     pub max_output_bytes: u64,
+    pub max_timeout_ms: u64,
 }
 
 #[derive(Clone, Debug, Deserialize)]

@@ -22,12 +22,13 @@
       "properties": {
         "query_execution": {
           "type": "object",
-          "required": ["max_datoms_scanned", "max_traversal_edges", "max_output_bytes"],
+          "required": ["max_datoms_scanned", "max_traversal_edges", "max_output_bytes", "max_timeout_ms"],
           "additionalProperties": false,
           "properties": {
             "max_datoms_scanned": {"type": "integer", "minimum": 1},
             "max_traversal_edges": {"type": "integer", "minimum": 1},
-            "max_output_bytes": {"type": "integer", "minimum": 1}
+            "max_output_bytes": {"type": "integer", "minimum": 1},
+            "max_timeout_ms": {"type": "integer", "minimum": 1}
           }
         }
       }
