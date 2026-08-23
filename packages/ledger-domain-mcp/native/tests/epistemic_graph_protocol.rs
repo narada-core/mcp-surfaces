@@ -771,9 +771,30 @@ fn live_inbox_suffix_filters_old_recipient_history_before_budgeting() {
                 "epistemic_graph_query",
                 json!({
                     "template":"inbox",
-                    "recipient":"marici.Nima",
-                    "since_event":1,
-                    "max_datoms":40,
+                    "participant":"marici.Nima",
+                    "viewer":"marici.Nima",
+                    "after_sequence":1,
+                    "read_state":"unread",
+                    "include_body":true,
+                    "max_datoms":500,
+                    "max_results":10,
+                    "timeout_ms":5000,
+                    "limit":10
+                }),
+            ),
+            tool(
+                4,
+                "epistemic_graph_query",
+                json!({
+                    "template":"inbox",
+                    "match":{
+                        "participant":"marici.Nima",
+                        "viewer":"marici.Nima",
+                        "after_sequence":1,
+                        "read_state":"unread",
+                        "include_body":true
+                    },
+                    "max_datoms":500,
                     "max_results":10,
                     "timeout_ms":5000,
                     "limit":10
@@ -790,7 +811,12 @@ fn live_inbox_suffix_filters_old_recipient_history_before_budgeting() {
     assert_eq!(result["count"], 1);
     assert_eq!(result["items"][0]["entity_id"], "communication:new");
     assert_eq!(result["query_cost"]["planner_mode"], "indexed_subject_suffix");
-    assert!(result["query_cost"]["datoms_loaded"].as_u64().unwrap() <= 40);
+    assert!(result["query_cost"]["datoms_loaded"].as_u64().unwrap() <= 500);
+    let nested = structured(response(&calls, 4));
+    assert_eq!(nested["count"], 1);
+    assert_eq!(nested["items"][0]["entity_id"], "communication:new");
+    assert_eq!(nested["query_cost"]["planner_mode"], "indexed_subject_suffix");
+    assert!(nested["query_cost"]["datoms_loaded"].as_u64().unwrap() <= 500);
     let _ = fs::remove_dir_all(root.as_path());
 }
 

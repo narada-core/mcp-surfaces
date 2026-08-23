@@ -99,6 +99,7 @@ fn collect_query_seed_clauses(
     clauses: &[ledger_query::Clause],
     inputs: &Map<String, Value>,
     plan: &mut QuerySeedPlan,
+    descend_nested: bool,
 ) {
     for clause in clauses {
         match clause {
@@ -144,7 +145,9 @@ fn collect_query_seed_clauses(
             }
             ledger_query::Clause::Exists { clauses }
             | ledger_query::Clause::NotExists { clauses } => {
-                collect_query_seed_clauses(clauses, inputs, plan);
+                if descend_nested {
+                    collect_query_seed_clauses(clauses, inputs, plan, true);
+                }
             }
             ledger_query::Clause::Compare { .. } => {}
         }
@@ -2351,16 +2354,30 @@ impl Engine {
                 .map_err(|failure| self.error(failure.code, &failure.message, failure.details))?;
             let db = Connection::open(self.projection_path(root))
                 .map_err(self.db_error("projection_open_failed"))?;
+            let planner_value = |key: &str| {
+                args.get(key).or_else(|| {
+                    args.get("match")
+                        .and_then(Value::as_object)
+                        .and_then(|matched| matched.get(key))
+                })
+            };
+            let has_inbox_participant = planner_value("participant")
+                .or_else(|| planner_value("recipient"))
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty());
+            let sequence_lower_bound = planner_value("after_sequence")
+                .or_else(|| planner_value("since_event"))
+                .and_then(Value::as_u64);
             let subject_local_sequence = args
                 .get("template")
                 .and_then(Value::as_str)
-                .filter(|_| args.contains_key("recipient") && args.contains_key("since_event"))
+                .filter(|_| has_inbox_participant && sequence_lower_bound.is_some())
                 .map(|template| self.canonical_named_template(template))
                 .and_then(|template| self.domain.query.named_queries.get(&template))
                 .and_then(Value::as_object)
                 .and_then(|config| config.get("sequence_attribute"))
                 .and_then(Value::as_str)
-                .zip(args.get("since_event").and_then(Value::as_u64));
+                .zip(sequence_lower_bound);
             let datoms = self.load_datoms_for_query(
                 &db,
                 datoms_table,
@@ -2909,7 +2926,17 @@ impl Engine {
     ) -> Result<Vec<ledger_query::Datom>, Value> {
         let max_datoms = spec.limits.max_datoms_scanned as u64;
         let mut plan = QuerySeedPlan::default();
-        collect_query_seed_clauses(&spec.clauses, &spec.inputs, &mut plan);
+        // A subject-local sequence suffix already provides the authoritative
+        // positive seed for inbox queries. Exists/not-exists clauses encode
+        // read/reply decoration and must be evaluated only after the selected
+        // message subjects are hydrated; treating them as global seeds
+        // defeats the suffix budget.
+        collect_query_seed_clauses(
+            &spec.clauses,
+            &spec.inputs,
+            &mut plan,
+            subject_local_sequence.is_none(),
+        );
 
         // Pull decoration derives durable read/reply state from normalized
         // datoms too. Load those narrow attributes alongside the selected
