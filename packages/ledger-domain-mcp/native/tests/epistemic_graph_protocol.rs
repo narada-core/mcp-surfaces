@@ -716,6 +716,85 @@ fn live_query_inbox_thread_cursor_and_error_envelopes() {
 }
 
 #[test]
+fn live_inbox_suffix_filters_old_recipient_history_before_budgeting() {
+    let root = std::env::temp_dir().join(format!("epistemic-query-suffix-{}", Uuid::new_v4()));
+    let old_messages = (0..100)
+        .map(|index| {
+            json!({
+                "op":"entity.declare",
+                "entity_id":format!("communication:old-{index}"),
+                "kind":"communication",
+                "title":format!("old-{index}"),
+                "sender":"marici.Caroline",
+                "recipient":"marici.Nima",
+                "body":"old body",
+                "intent":"result",
+                "sent_at":"2026-08-20T00:00:00Z"
+            })
+        })
+        .collect::<Vec<_>>();
+    let calls = run(
+        &root,
+        &[
+            tool(
+                1,
+                "epistemic_graph_submit_review_admit",
+                json!({
+                    "actor":"protocol-test",
+                    "authority_basis":{"kind":"test","summary":"Old recipient history."},
+                    "idempotency_key":"suffix-old-history",
+                    "operations":old_messages
+                }),
+            ),
+            tool(
+                2,
+                "epistemic_graph_submit_review_admit",
+                json!({
+                    "actor":"protocol-test",
+                    "authority_basis":{"kind":"test","summary":"New recipient message."},
+                    "idempotency_key":"suffix-new-message",
+                    "operations":[{
+                        "op":"entity.declare",
+                        "entity_id":"communication:new",
+                        "kind":"communication",
+                        "title":"new",
+                        "sender":"marici.Caroline",
+                        "recipient":"marici.Nima",
+                        "body":"new body",
+                        "intent":"result",
+                        "sent_at":"2026-08-21T00:00:00Z"
+                    }]
+                }),
+            ),
+            tool(
+                3,
+                "epistemic_graph_query",
+                json!({
+                    "template":"inbox",
+                    "recipient":"marici.Nima",
+                    "since_event":1,
+                    "max_datoms":40,
+                    "max_results":10,
+                    "timeout_ms":5000,
+                    "limit":10
+                }),
+            ),
+        ],
+    );
+    assert!(
+        response(&calls, 3).pointer("/result/structuredContent").is_some(),
+        "indexed suffix query failed: {:?}",
+        response(&calls, 3)
+    );
+    let result = structured(response(&calls, 3));
+    assert_eq!(result["count"], 1);
+    assert_eq!(result["items"][0]["entity_id"], "communication:new");
+    assert_eq!(result["query_cost"]["planner_mode"], "indexed_subject_suffix");
+    assert!(result["query_cost"]["datoms_loaded"].as_u64().unwrap() <= 40);
+    let _ = fs::remove_dir_all(root.as_path());
+}
+
+#[test]
 fn live_query_modes_aliases_and_message_receipt_boundaries() {
     let root = std::env::temp_dir().join(format!("epistemic-query-boundaries-{}", Uuid::new_v4()));
     let authority = json!({"kind":"test","summary":"Query boundary fixture."});

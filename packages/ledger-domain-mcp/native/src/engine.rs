@@ -2246,7 +2246,7 @@ impl Engine {
                 .map_err(|failure| self.error(failure.code, &failure.message, failure.details))?;
             let db = Connection::open(self.projection_path(root))
                 .map_err(self.db_error("projection_open_failed"))?;
-            let subject_local_sequence_attribute = args
+            let subject_local_sequence = args
                 .get("template")
                 .and_then(Value::as_str)
                 .filter(|_| args.contains_key("recipient") && args.contains_key("since_event"))
@@ -2254,12 +2254,13 @@ impl Engine {
                 .and_then(|template| self.domain.query.named_queries.get(&template))
                 .and_then(Value::as_object)
                 .and_then(|config| config.get("sequence_attribute"))
-                .and_then(Value::as_str);
+                .and_then(Value::as_str)
+                .zip(args.get("since_event").and_then(Value::as_u64));
             let datoms = self.load_datoms_for_query(
                 &db,
                 datoms_table,
                 &spec,
-                subject_local_sequence_attribute,
+                subject_local_sequence,
             )?;
             if started.elapsed() > Duration::from_millis(effective_timeout_ms) {
                 return Err(self.error("query_timeout", "query exceeded its capped time budget while loading indexed datoms", json!({"timeout_ms":effective_timeout_ms,"phase":"datom_load","datoms_loaded":datoms.len()})));
@@ -2329,7 +2330,7 @@ impl Engine {
                 "max_output_bytes":self.domain.caps.query_execution.max_output_bytes,
                 "has_more":execution.has_more,
                 "next_cursor":next_cursor,
-                "query_cost":{"planner_mode":if subject_local_sequence_attribute.is_some() {"indexed_subject_suffix"} else {"bounded_clause_plan"},"subject_local_attribute":subject_local_sequence_attribute,"datoms_loaded":datoms.len(),"max_datoms":effective_max_datoms,"max_results":effective_max_results,"timeout_ms":effective_timeout_ms,"elapsed_ms":started.elapsed().as_millis() as u64,"hard_caps":{"max_datoms":hard_max_datoms,"max_results":hard_max_results,"timeout_ms":hard_timeout_ms}}
+                "query_cost":{"planner_mode":if subject_local_sequence.is_some() {"indexed_subject_suffix"} else {"bounded_clause_plan"},"subject_local_attribute":subject_local_sequence.map(|(attribute, _)| attribute),"datoms_loaded":datoms.len(),"max_datoms":effective_max_datoms,"max_results":effective_max_results,"timeout_ms":effective_timeout_ms,"elapsed_ms":started.elapsed().as_millis() as u64,"hard_caps":{"max_datoms":hard_max_datoms,"max_results":hard_max_results,"timeout_ms":hard_timeout_ms}}
             });
             self.finalize_bounded_output(&mut response)?;
             Ok(response)
@@ -2772,7 +2773,7 @@ impl Engine {
         db: &Connection,
         table: &str,
         spec: &ledger_query::QuerySpec,
-        subject_local_attribute: Option<&str>,
+        subject_local_sequence: Option<(&str, u64)>,
     ) -> Result<Vec<ledger_query::Datom>, Value> {
         let max_datoms = spec.limits.max_datoms_scanned as u64;
         let mut plan = QuerySeedPlan::default();
@@ -2781,7 +2782,7 @@ impl Engine {
         // Pull decoration derives durable read/reply state from normalized
         // datoms too. Load those narrow attributes alongside the selected
         // subjects without making their subjects seed a second expansion.
-        if !spec.pulls.is_empty() {
+        if !spec.pulls.is_empty() && subject_local_sequence.is_none() {
             for attribute in [
                 self.domain.query.reply_state_attribute.as_deref(),
                 self.domain.query.read_receipt_kind_attribute.as_deref(),
@@ -2819,18 +2820,32 @@ impl Engine {
                     Value::Null,
                 )
             })?;
-            let parameters: [&dyn ToSql; 3] = [attribute, &value_json, &row_limit];
             let before = datoms.len();
-            self.append_datoms(
-                db,
-                &format!(
-                    "select origin_id,subject,attribute,value_json,event_sequence,event_id from {table} where attribute=?1 and value_json=?2 limit ?3"
-                ),
-                &parameters,
-                &mut datoms,
-                &mut seen,
-                max_datoms,
-            )?;
+            if let Some((sequence_attribute, since_event)) = subject_local_sequence {
+                let parameters: [&dyn ToSql; 5] = [attribute, &value_json, &sequence_attribute, &since_event, &row_limit];
+                self.append_datoms(
+                    db,
+                    &format!(
+                        "select d.origin_id,d.subject,d.attribute,d.value_json,d.event_sequence,d.event_id from {table} d where d.attribute=?1 and d.value_json=?2 and exists (select 1 from {table} suffix where suffix.subject=d.subject and suffix.attribute=?3 and cast(suffix.value_json as integer)>?4) limit ?5"
+                    ),
+                    &parameters,
+                    &mut datoms,
+                    &mut seen,
+                    max_datoms,
+                )?;
+            } else {
+                let parameters: [&dyn ToSql; 3] = [attribute, &value_json, &row_limit];
+                self.append_datoms(
+                    db,
+                    &format!(
+                        "select origin_id,subject,attribute,value_json,event_sequence,event_id from {table} where attribute=?1 and value_json=?2 limit ?3"
+                    ),
+                    &parameters,
+                    &mut datoms,
+                    &mut seen,
+                    max_datoms,
+                )?;
+            }
             for datom in datoms[before..].iter() {
                 candidate_subjects.insert(datom.subject.clone());
             }
@@ -2871,24 +2886,77 @@ impl Engine {
             )?;
         }
 
+        // Suffix-planned inbox queries must not turn pull decoration back
+        // into a global attribute scan. Resolve reply targets and read
+        // receipts by the already-selected message ids, then hydrate only
+        // those decoration subjects.
+        if !spec.pulls.is_empty() && subject_local_sequence.is_some() {
+            let mut decoration_subjects = HashSet::new();
+            for subject in &candidate_subjects {
+                let value_json = serde_json::to_string(subject).map_err(|error| {
+                    self.error(
+                        "projection_datom_value_encode_failed",
+                        &error.to_string(),
+                        Value::Null,
+                    )
+                })?;
+                for attribute in [
+                    self.domain.query.reply_state_attribute.as_deref(),
+                    self.domain.query.read_receipt_message_attribute.as_deref(),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    let parameters: [&dyn ToSql; 3] = [&attribute, &value_json, &row_limit];
+                    let before = datoms.len();
+                    self.append_datoms(
+                        db,
+                        &format!(
+                            "select origin_id,subject,attribute,value_json,event_sequence,event_id from {table} where attribute=?1 and value_json=?2 limit ?3"
+                        ),
+                        &parameters,
+                        &mut datoms,
+                        &mut seen,
+                        max_datoms,
+                    )?;
+                    for datom in datoms[before..].iter() {
+                        decoration_subjects.insert(datom.subject.clone());
+                    }
+                }
+            }
+            for subject in decoration_subjects {
+                let parameters: [&dyn ToSql; 2] = [&subject, &row_limit];
+                self.append_datoms(
+                    db,
+                    &format!(
+                        "select origin_id,subject,attribute,value_json,event_sequence,event_id from {table} where subject=?1 limit ?2"
+                    ),
+                    &parameters,
+                    &mut datoms,
+                    &mut seen,
+                    max_datoms,
+                )?;
+            }
+        }
+
         // Broad attributes are still needed for joins, correlated predicates,
         // reachability, and durable message-state decoration. A named query
         // may declare one attribute subject-local when another indexed clause
         // has already selected the complete candidate records.
-        for attribute in plan.attributes.iter().filter(|attribute| {
-            subject_local_attribute != Some(attribute.as_str())
-        }) {
-            let parameters: [&dyn ToSql; 2] = [attribute, &row_limit];
-            self.append_datoms(
-                db,
-                &format!(
-                    "select origin_id,subject,attribute,value_json,event_sequence,event_id from {table} where attribute=?1 limit ?2"
-                ),
-                &parameters,
-                &mut datoms,
-                &mut seen,
-                max_datoms,
-            )?;
+        if subject_local_sequence.is_none() {
+            for attribute in &plan.attributes {
+                let parameters: [&dyn ToSql; 2] = [attribute, &row_limit];
+                self.append_datoms(
+                    db,
+                    &format!(
+                        "select origin_id,subject,attribute,value_json,event_sequence,event_id from {table} where attribute=?1 limit ?2"
+                    ),
+                    &parameters,
+                    &mut datoms,
+                    &mut seen,
+                    max_datoms,
+                )?;
+            }
         }
         Ok(datoms)
     }
