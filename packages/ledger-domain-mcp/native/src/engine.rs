@@ -948,13 +948,13 @@ impl Engine {
                 let payload_ref = args.get("payload_ref").and_then(Value::as_str);
                 let resolved = self.resolve_payload_arguments(site_root, args)?;
                 self.proposal_submit(site_root, &resolved)
-                    .map_err(|error| self.enrich_payload_ref_refusal(error, payload_ref))
+                    .map_err(|error| self.enrich_payload_ref_refusal(error, payload_ref, name))
             }
             "submit_review_admit" => {
                 let payload_ref = args.get("payload_ref").and_then(Value::as_str);
                 let resolved = self.resolve_payload_arguments(site_root, args)?;
                 self.submit_review_admit(site_root, &resolved)
-                    .map_err(|error| self.enrich_payload_ref_refusal(error, payload_ref))
+                    .map_err(|error| self.enrich_payload_ref_refusal(error, payload_ref, name))
             }
             "capture_sources" => self.capture_sources(site_root, args),
             "proposal_read" => self.proposal_read(site_root, args),
@@ -1093,7 +1093,12 @@ impl Engine {
         Ok(payload.clone())
     }
 
-    fn enrich_payload_ref_refusal(&self, mut error: Value, payload_ref: Option<&str>) -> Value {
+    fn enrich_payload_ref_refusal(
+        &self,
+        mut error: Value,
+        payload_ref: Option<&str>,
+        retry_tool: &str,
+    ) -> Value {
         let Some(reference) = payload_ref else {
             return error;
         };
@@ -1137,7 +1142,13 @@ impl Engine {
                     "suggested_payload_ref":format!("mcp_payload:{payload_id}@v{}", revision + 1),
                     "preserve_source_revision":true,
                     "replace":{"entity.kind":{"from":supplied,"to":canonical}},
-                    "then_retry_with":{"argument":"payload_ref","tool":"the originally requested proposal submission tool"}
+                    "payload_revision_tools":{
+                        "read":"mcp_payload_show",
+                        "derive":"mcp_payload_derive",
+                        "validate":"mcp_payload_validate",
+                        "surface":"task-lifecycle"
+                    },
+                    "then_retry_with":{"argument":"payload_ref","tool":retry_tool}
                 }),
             );
         }
@@ -6336,6 +6347,14 @@ mod tests {
         assert_eq!(
             failure["details"]["recovery"]["replace"]["entity.kind"]["to"],
             "narada.epistemic:communication"
+        );
+        assert_eq!(
+            failure["details"]["recovery"]["payload_revision_tools"]["derive"],
+            "mcp_payload_derive"
+        );
+        assert_eq!(
+            failure["details"]["recovery"]["then_retry_with"]["tool"],
+            "epistemic_graph_submit_review_admit"
         );
 
         let mut record: Value =

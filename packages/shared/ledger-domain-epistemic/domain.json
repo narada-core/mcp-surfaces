@@ -314,10 +314,10 @@
         "trigger": "A payload-backed submission fails content or schema validation, including a legacy communication kind refusal.",
         "mutation_state": "Validation refusal commits no graph mutation.",
         "steps": [
-          {"step": 1, "action": "read_source_revision", "why": "Treat the rejected revision as immutable provenance."},
-          {"step": 2, "action": "create_successor_revision", "why": "Copy the payload into the next unused positive revision and change only fields identified by the typed refusal."},
-          {"step": 3, "action": "verify_successor_record", "why": "Verify ref, payload_id, revision, canonical byte_size, and sha256 before submission."},
-          {"step": 4, "action": "retry_original_tool", "why": "Call the same proposal tool with only the successor payload_ref."}
+          {"step": 1, "action": "read_source_revision", "surface": "task-lifecycle", "tool": "mcp_payload_show", "arguments": {"ref": "the rejected payload_ref"}, "why": "Treat the rejected revision as immutable provenance."},
+          {"step": 2, "action": "create_successor_revision", "surface": "task-lifecycle", "tool": "mcp_payload_derive", "arguments": {"source_ref": "the rejected payload_ref", "overlay": {"operations": "the complete operations array with only typed remediation changes applied"}}, "why": "Derive the next immutable revision. Because operations is an array, send the complete corrected operations array in overlay; never overwrite the source revision."},
+          {"step": 3, "action": "verify_successor_record", "surface": "task-lifecycle", "tool": "mcp_payload_validate", "arguments": {"ref": "the successor payload_ref"}, "why": "Verify ref, payload_id, revision, canonical byte_size, and sha256 before submission."},
+          {"step": 4, "action": "retry_original_tool", "tool": "the exact tool named by refusal.recovery.then_retry_with.tool", "arguments": {"payload_ref": "the successor payload_ref"}, "why": "Call the same proposal tool with only the successor payload_ref."}
         ],
         "legacy_communication_example": {"source_ref": "mcp_payload:example@v1", "refusal": "legacy_communication_kind_write_refused", "replacement": {"from": "marici:communication", "to": "narada.epistemic:communication"}, "successor_ref": "mcp_payload:example@v2"},
         "prohibitions": ["Do not overwrite the rejected revision.", "Do not repeatedly retry a deterministically invalid revision.", "Do not treat payload creation or staging as graph mutation authority."]
