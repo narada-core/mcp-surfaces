@@ -821,6 +821,80 @@ fn live_inbox_suffix_filters_old_recipient_history_before_budgeting() {
 }
 
 #[test]
+fn live_inbox_without_sequence_bound_keeps_decoration_subject_local() {
+    let root = std::env::temp_dir().join(format!("epistemic-query-all-history-{}", Uuid::new_v4()));
+    let mut messages = (0..100)
+        .map(|index| {
+            json!({
+                "op":"entity.declare",
+                "entity_id":format!("communication:unrelated-{index}"),
+                "kind":"narada.epistemic:communication",
+                "title":format!("unrelated-{index}"),
+                "sender":"marici.Caroline",
+                "recipient":"marici.SomeoneElse",
+                "body":"unrelated body",
+                "intent":"result",
+                "sent_at":"2026-08-20T00:00:00Z"
+            })
+        })
+        .collect::<Vec<_>>();
+    messages.push(json!({
+        "op":"entity.declare",
+        "entity_id":"communication:target",
+        "kind":"narada.epistemic:communication",
+        "title":"target",
+        "sender":"marici.Benincasa",
+        "recipient":"marici.Nima",
+        "body":"target body",
+        "intent":"result",
+        "sent_at":"2026-08-21T00:00:00Z"
+    }));
+    let calls = run(
+        &root,
+        &[
+            tool(
+                1,
+                "epistemic_graph_submit_review_admit",
+                json!({
+                    "actor":"protocol-test",
+                    "authority_basis":{"kind":"test","summary":"All-history recipient query fixture."},
+                    "idempotency_key":"all-history-recipient-query",
+                    "operations":messages
+                }),
+            ),
+            tool(
+                2,
+                "epistemic_graph_query",
+                json!({
+                    "template":"inbox",
+                    "participant":"marici.Nima",
+                    "viewer":"marici.Nima",
+                    "read_state":"all",
+                    "reply_state":"all",
+                    "include_body":true,
+                    "max_datoms":100,
+                    "max_results":10,
+                    "timeout_ms":5000,
+                    "limit":10
+                }),
+            ),
+        ],
+    );
+    assert!(
+        response(&calls, 2).pointer("/result/structuredContent").is_some(),
+        "all-history indexed inbox query failed: {:?}",
+        response(&calls, 2)
+    );
+    let result = structured(response(&calls, 2));
+    assert_eq!(result["count"], 1);
+    assert_eq!(result["items"][0]["entity_id"], "communication:target");
+    assert_eq!(result["query_cost"]["planner_mode"], "indexed_subject_suffix");
+    assert_eq!(result["query_cost"]["subject_local_attribute"], "narada.ledger:event/sequence");
+    assert!(result["query_cost"]["datoms_loaded"].as_u64().unwrap() <= 100);
+    let _ = fs::remove_dir_all(root.as_path());
+}
+
+#[test]
 fn live_query_modes_aliases_and_message_receipt_boundaries() {
     let root = std::env::temp_dir().join(format!("epistemic-query-boundaries-{}", Uuid::new_v4()));
     let authority = json!({"kind":"test","summary":"Query boundary fixture."});

@@ -2367,22 +2367,38 @@ impl Engine {
                 .is_some_and(|value| !value.trim().is_empty());
             let sequence_lower_bound = planner_value("after_sequence")
                 .or_else(|| planner_value("since_event"))
-                .and_then(Value::as_u64);
-            let subject_local_sequence = args
+                .and_then(Value::as_u64)
+                // Event sequences are positive.  For a recipient-scoped
+                // named inbox query, an omitted lower bound therefore has
+                // the same semantics as `after_sequence: 0`, while enabling
+                // subject-local hydration instead of global decoration scans.
+                .or_else(|| has_inbox_participant.then_some(0));
+            let named_query_config = args
                 .get("template")
                 .and_then(Value::as_str)
-                .filter(|_| has_inbox_participant && sequence_lower_bound.is_some())
                 .map(|template| self.canonical_named_template(template))
                 .and_then(|template| self.domain.query.named_queries.get(&template))
+                .and_then(Value::as_object);
+            let participant_direction = planner_value("direction")
+                .and_then(Value::as_str)
+                .unwrap_or("incoming");
+            let subject_seed_attribute = named_query_config
+                .and_then(|config| config.get("participant_attributes"))
                 .and_then(Value::as_object)
+                .and_then(|attributes| attributes.get(participant_direction))
+                .and_then(Value::as_str)
+                .filter(|_| has_inbox_participant);
+            let subject_local_sequence = named_query_config
                 .and_then(|config| config.get("sequence_attribute"))
                 .and_then(Value::as_str)
-                .zip(sequence_lower_bound);
+                .zip(sequence_lower_bound)
+                .filter(|_| subject_seed_attribute.is_some());
             let datoms = self.load_datoms_for_query(
                 &db,
                 datoms_table,
                 &spec,
                 subject_local_sequence,
+                subject_seed_attribute,
             )?;
             if started.elapsed() > Duration::from_millis(effective_timeout_ms) {
                 return Err(self.error("query_timeout", "query exceeded its capped time budget while loading indexed datoms", json!({"timeout_ms":effective_timeout_ms,"phase":"datom_load","datoms_loaded":datoms.len()})));
@@ -2923,6 +2939,7 @@ impl Engine {
         table: &str,
         spec: &ledger_query::QuerySpec,
         subject_local_sequence: Option<(&str, u64)>,
+        subject_seed_attribute: Option<&str>,
     ) -> Result<Vec<ledger_query::Datom>, Value> {
         let max_datoms = spec.limits.max_datoms_scanned as u64;
         let mut plan = QuerySeedPlan::default();
@@ -2972,6 +2989,16 @@ impl Engine {
         let row_limit = max_datoms.saturating_add(1) as i64;
 
         for (attribute, value) in &plan.attribute_values {
+            // Named inbox queries have a descriptor-declared participant
+            // equality.  It is the authoritative subject seed; the complete
+            // subject hydration below already supplies every other equality
+            // fact, so scanning broad kind/intent predicates would only add
+            // unrelated subjects and exhaust the work budget.
+            if subject_local_sequence.is_some()
+                && subject_seed_attribute.is_some_and(|seed| attribute != seed)
+            {
+                continue;
+            }
             let value_json = serde_json::to_string(value).map_err(|error| {
                 self.error(
                     "projection_datom_value_encode_failed",
