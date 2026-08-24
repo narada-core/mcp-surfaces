@@ -88,6 +88,15 @@ read-marking, neighborhood, snapshot, export, source_inspect, the proposal
 lifecycle, and sequences); exact names and schemas are discoverable through
 MCP `tools/list` on the running surface.
 
+For array-rich atomic contributions, `epistemic_graph_submit_review_admit`
+accepts either the ordinary inline argument object or a lone immutable
+`payload_ref` created by the Site payload surface. The native engine resolves
+`mcp_payload:<id>@v<revision>` under the same Site root, verifies revision
+metadata, canonical byte size, and SHA-256, and only then applies the unchanged
+proposal/review/admission validation. Mixing inline fields with `payload_ref`,
+recursive references, missing revisions, and integrity mismatches are typed
+refusals; payload transport never becomes graph authority.
+
 ## Verification
 
 ```powershell

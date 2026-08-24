@@ -30,6 +30,12 @@ rewrite the ledger or projection stores. Compatibility reads remain until a
 ledger-head-bound audit confirms that current repositories and collaborating
 agents no longer depend on them.
 
+`epistemic_graph_submit_review_admit` also declares a payload-backed input
+alternative for large operation arrays. A call supplies either the complete
+inline argument object or only an immutable `payload_ref`; mixed forms are
+invalid. The engine verifies and resolves transport before applying this
+descriptor's ordinary canonical mutation contract.
+
 Boundary: this package owns only static data. All behavior — descriptor
 loading, the mutation pipeline, projection, and feature modules — lives in the
 generic engine (`narada-ledger-domain`, Phase B) built on

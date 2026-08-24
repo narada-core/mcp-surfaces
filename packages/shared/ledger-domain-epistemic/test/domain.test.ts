@@ -88,6 +88,20 @@ assert.deepEqual(domain.query.communication.legacy_read_aliases, ['communication
 assert.equal(domain.query.communication.legacy_write_policy, 'reject_with_replacement');
 assert.ok(domain.tools.some((tool: any) => tool.name === 'epistemic_graph_communication_migration_preflight'));
 assert.ok(domain.tools.some((tool: any) => tool.name === 'epistemic_graph_communication_migrate'));
+const submitReviewAdmit = domain.tools.find((tool: any) => tool.name === 'epistemic_graph_submit_review_admit');
+const validateSubmitReviewAdmit = ajv.compile(submitReviewAdmit.inputSchema);
+assert.equal(validateSubmitReviewAdmit({ payload_ref: 'mcp_payload:epistemic-submit@v1' }), true);
+assert.equal(
+  validateSubmitReviewAdmit({
+    payload_ref: 'mcp_payload:epistemic-submit@v1',
+    actor: 'ambiguous',
+  }),
+  false,
+);
+assert.equal(validateSubmitReviewAdmit({ payload_ref: 'not-a-payload-ref' }), false);
+const proposalSubmit = domain.tools.find((tool: any) => tool.name === 'epistemic_graph_proposal_submit');
+const validateProposalSubmit = ajv.compile(proposalSubmit.inputSchema);
+assert.equal(validateProposalSubmit({ payload_ref: 'mcp_payload:epistemic-proposal@v1' }), true);
 
 // Guidance stays byte-identical to narada.epistemic.guidance.v2.
 assert.equal(domain.guidance.schema_id, 'narada.epistemic.guidance.v2');

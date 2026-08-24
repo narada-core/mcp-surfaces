@@ -848,8 +848,14 @@ impl Engine {
             "sequence_list" => self.sequence_list(site_root, args),
             "sequence_claim_next" => self.sequence_claim_next(site_root, args),
             "sequence_claims" => self.sequence_claims(site_root, args),
-            "proposal_submit" => self.proposal_submit(site_root, args),
-            "submit_review_admit" => self.submit_review_admit(site_root, args),
+            "proposal_submit" => {
+                let resolved = self.resolve_payload_arguments(site_root, args)?;
+                self.proposal_submit(site_root, &resolved)
+            }
+            "submit_review_admit" => {
+                let resolved = self.resolve_payload_arguments(site_root, args)?;
+                self.submit_review_admit(site_root, &resolved)
+            }
             "capture_sources" => self.capture_sources(site_root, args),
             "proposal_read" => self.proposal_read(site_root, args),
             "proposal_resubmit" => self.proposal_resubmit(site_root, args),
@@ -859,6 +865,81 @@ impl Engine {
             "export" => self.export(site_root, args),
             _ => unknown(),
         }
+    }
+
+    fn resolve_payload_arguments(
+        &self,
+        root: &Path,
+        args: &Map<String, Value>,
+    ) -> Result<Map<String, Value>, Value> {
+        let Some(reference) = args.get("payload_ref").and_then(Value::as_str) else {
+            return Ok(args.clone());
+        };
+        if args.len() != 1 {
+            return Err(self.error(
+                "payload_ref_ambiguous",
+                "payload_ref cannot be combined with inline proposal arguments",
+                json!({"payload_ref":reference}),
+            ));
+        }
+        let body = reference.strip_prefix("mcp_payload:").ok_or_else(|| {
+            self.error("payload_ref_invalid", "payload_ref must use mcp_payload:<id>@v<revision>", json!({"payload_ref":reference}))
+        })?;
+        let (payload_id, revision_text) = body.split_once("@v").ok_or_else(|| {
+            self.error("payload_ref_invalid", "payload_ref must include an immutable revision", json!({"payload_ref":reference}))
+        })?;
+        if !(3..=64).contains(&payload_id.len())
+            || !payload_id.chars().next().is_some_and(|ch| ch.is_ascii_alphanumeric())
+            || !payload_id
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+        {
+            return Err(self.error("payload_ref_invalid", "payload_ref id is invalid", json!({"payload_ref":reference})));
+        }
+        let revision = revision_text.parse::<u64>().ok().filter(|value| *value > 0).ok_or_else(|| {
+            self.error("payload_ref_invalid", "payload_ref revision must be a positive integer", json!({"payload_ref":reference}))
+        })?;
+        let path = root
+            .join(".ai")
+            .join("tmp")
+            .join("mcp-payloads")
+            .join("workspace")
+            .join(payload_id)
+            .join(format!("v{revision}.json"));
+        let metadata = fs::metadata(&path).map_err(|_| {
+            self.error("payload_ref_not_found", "immutable payload revision was not found", json!({"payload_ref":reference}))
+        })?;
+        const MAX_PAYLOAD_BYTES: u64 = 256 * 1024;
+        if metadata.len() > MAX_PAYLOAD_BYTES {
+            return Err(self.error(
+                "payload_ref_too_large",
+                "immutable payload revision exceeds the transport ceiling",
+                json!({"payload_ref":reference,"byte_size":metadata.len(),"max_bytes":MAX_PAYLOAD_BYTES}),
+            ));
+        }
+        let record = self.read_json(&path)?;
+        if record.get("schema").and_then(Value::as_str) != Some("narada.mcp_payload.revision.v1")
+            || record.get("ref").and_then(Value::as_str) != Some(reference)
+            || record.get("payload_id").and_then(Value::as_str) != Some(payload_id)
+            || record.get("revision").and_then(Value::as_u64) != Some(revision)
+        {
+            return Err(self.error("payload_ref_metadata_mismatch", "immutable payload metadata does not match its reference", json!({"payload_ref":reference})));
+        }
+        let payload = record.get("payload").and_then(Value::as_object).ok_or_else(|| {
+            self.error("payload_ref_payload_must_be_object", "proposal payload must be a JSON object", json!({"payload_ref":reference}))
+        })?;
+        if payload.contains_key("payload_ref") {
+            return Err(self.error("payload_ref_recursive", "payload-backed arguments cannot contain another payload_ref", json!({"payload_ref":reference})));
+        }
+        let canonical = serde_json::to_vec(&canonical_json(&Value::Object(payload.clone()))).unwrap_or_default();
+        if record.get("byte_size").and_then(Value::as_u64) != Some(canonical.len() as u64) {
+            return Err(self.error("payload_ref_byte_size_mismatch", "immutable payload byte size verification failed", json!({"payload_ref":reference})));
+        }
+        let actual_sha256 = sha256(&canonical);
+        if record.get("sha256").and_then(Value::as_str) != Some(actual_sha256.as_str()) {
+            return Err(self.error("payload_ref_sha256_mismatch", "immutable payload digest verification failed", json!({"payload_ref":reference})));
+        }
+        Ok(payload.clone())
     }
 
     fn communication_migration_preflight(&self, root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
@@ -5478,6 +5559,60 @@ mod tests {
             guidance.pointer("/communication_model/rule"),
             Some(&json!("Communication records provenance and argumentative causality, but does not become epistemic evidence unless a separate reviewed promotes_to_evidence relation is admitted."))
         );
+    }
+
+    #[test]
+    fn payload_backed_submit_review_admit_preserves_canonical_validation() {
+        let engine = engine();
+        let root = std::env::temp_dir().join(format!("epistemic-payload-submit-{}", Uuid::new_v4()));
+        let reference = "mcp_payload:epistemic-submit-test@v1";
+        let payload = json!({
+            "actor":"payload-test",
+            "authority_basis":{"kind":"test","summary":"Immutable payload transport fixture."},
+            "operations":[{
+                "op":"entity.declare",
+                "entity_id":"claim:payload-backed",
+                "kind":"claim",
+                "title":"Payload-backed canonical admission"
+            }]
+        });
+        let canonical = serde_json::to_vec(&canonical_json(&payload)).expect("canonical payload");
+        let path = root
+            .join(".ai/tmp/mcp-payloads/workspace/epistemic-submit-test/v1.json");
+        fs::create_dir_all(path.parent().expect("payload parent")).expect("payload directory");
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&json!({
+                "schema":"narada.mcp_payload.revision.v1",
+                "ref":reference,
+                "payload_id":"epistemic-submit-test",
+                "revision":1,
+                "payload":payload,
+                "byte_size":canonical.len(),
+                "sha256":sha256(&canonical)
+            }))
+            .expect("payload record"),
+        )
+        .expect("write payload");
+
+        let resolved = engine
+            .resolve_payload_arguments(&root, &Map::from_iter([("payload_ref".into(), json!(reference))]))
+            .expect("resolve immutable payload");
+        let admitted = engine
+            .submit_review_admit(&root, &resolved)
+            .expect("payload-backed canonical admission");
+        assert_eq!(admitted["status"], "admitted");
+
+        let mut record: Value =
+            serde_json::from_slice(&fs::read(&path).expect("read payload")).expect("payload JSON");
+        record["sha256"] = json!("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+        fs::write(&path, serde_json::to_vec_pretty(&record).expect("tampered payload"))
+            .expect("write tampered payload");
+        let failure = engine
+            .resolve_payload_arguments(&root, &Map::from_iter([("payload_ref".into(), json!(reference))]))
+            .expect_err("tampered payload must refuse");
+        assert_eq!(failure["code"], "payload_ref_sha256_mismatch");
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
