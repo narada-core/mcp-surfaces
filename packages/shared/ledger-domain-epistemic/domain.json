@@ -283,7 +283,7 @@
   },
   "guidance": {
     "schema_id": "narada.epistemic.guidance.v2",
-    "emission_order": ["schema", "purpose", "workflow", "communication_model", "sequence_workflow", "sequence_semantics", "entity_kinds", "core_relations", "extension_relation_rule", "extension_entity_kind_rule", "identity_rule", "revision_pattern", "operation_kinds", "provenance_choices", "minimal_example", "concurrency_rule", "admission_meaning", "search_boundary", "problem_policy"],
+    "emission_order": ["schema", "purpose", "workflow", "payload_transport", "immutable_payload_recovery", "communication_model", "communication_example", "sequence_workflow", "sequence_semantics", "entity_kinds", "core_relations", "extension_relation_rule", "extension_entity_kind_rule", "identity_rule", "revision_pattern", "operation_kinds", "provenance_choices", "minimal_example", "concurrency_rule", "admission_meaning", "search_boundary", "problem_policy"],
     "requested_echo": "the emitted object also carries requested:{workflow,tool} echoing the caller's routing hints (null when absent)",
     "engine_derived_fields": {
       "entity_kinds": {"source": "entities.core_kinds"},
@@ -301,17 +301,49 @@
         {"step": 4, "tools": ["epistemic_graph_proposal_review", "epistemic_graph_proposal_admit"], "manual_only": true, "why": "Use separate calls only when the operator wants an explicit pause between proposal, review, and admission."},
         {"step": 5, "tool": "epistemic_graph_neighborhood", "why": "Verify the admitted problem situation and its relations."}
       ],
+      "payload_transport": {
+        "accepted_by": ["epistemic_graph_proposal_submit", "epistemic_graph_submit_review_admit"],
+        "call_shape": {"payload_ref": "mcp_payload:<payload-id>@v<positive-revision>"},
+        "exclusive_form": "Supply payload_ref alone; do not combine it with actor, authority_basis, operations, or another inline proposal field.",
+        "payload_shape": {"actor": "agent-id", "authority_basis": {"kind": "operator_request", "summary": "Why this bounded mutation is authorized."}, "operations": []},
+        "authority_rule": "A payload reference is immutable transport, not mutation authority. The target Site binding and graph mutation boundary still validate actor, authority_basis, schema, and operations.",
+        "cross_site_behavior": "The loader may integrity-verify and stage an immutable revision from another admitted Site. Divergent records with the same ref are refused; successful loader results disclose payload_transport.",
+        "retry_rule": "The same valid immutable revision is safe to retry only when its content remains contract-valid. A validation-refused revision must not be edited in place."
+      },
+      "immutable_payload_recovery": {
+        "trigger": "A payload-backed submission fails content or schema validation, including a legacy communication kind refusal.",
+        "mutation_state": "Validation refusal commits no graph mutation.",
+        "steps": [
+          {"step": 1, "action": "read_source_revision", "why": "Treat the rejected revision as immutable provenance."},
+          {"step": 2, "action": "create_successor_revision", "why": "Copy the payload into the next unused positive revision and change only fields identified by the typed refusal."},
+          {"step": 3, "action": "verify_successor_record", "why": "Verify ref, payload_id, revision, canonical byte_size, and sha256 before submission."},
+          {"step": 4, "action": "retry_original_tool", "why": "Call the same proposal tool with only the successor payload_ref."}
+        ],
+        "legacy_communication_example": {"source_ref": "mcp_payload:example@v1", "refusal": "legacy_communication_kind_write_refused", "replacement": {"from": "marici:communication", "to": "narada.epistemic:communication"}, "successor_ref": "mcp_payload:example@v2"},
+        "prohibitions": ["Do not overwrite the rejected revision.", "Do not repeatedly retry a deterministically invalid revision.", "Do not treat payload creation or staging as graph mutation authority."]
+      },
       "communication_model": {
         "entity_kind": "narada.epistemic:communication",
         "legacy_read_aliases": ["communication", "marici:communication"],
         "legacy_write_remediation": "Use narada.epistemic:communication. Domain entity kinds must be namespaced; unqualified domain kinds are schema defects, not synonyms.",
         "compatibility_lifetime": "normalize_and_disclose until a ledger-head-bound audit proves zero legacy entities and writers; disable only through an authorized contract-version transition",
         "participant_kind": "team_member",
-        "required_fields": ["sender", "recipient", "body", "intent", "sent_at"],
+        "required_fields": ["stable entity identity via entity_id or local_ref", "sender", "recipient", "intent", "sent_at", "at least one of title or body"],
         "intent_values": ["request", "handoff", "result", "notice", "objection", "reply", "acknowledgment"],
         "relations": ["sent_by", "addressed_to", "replies_to", "requests", "reports", "acknowledges", "promotes_to_evidence"],
         "rule": "Communication records provenance and argumentative causality, but does not become epistemic evidence unless a separate reviewed promotes_to_evidence relation is admitted.",
         "delivery_boundary": "The epistemic graph is append-only communication provenance; mailbox delivery and read state remain separate. One communication has one mechanically admitted recipient; broadcasts use one record per recipient or explicit addressed_to relations."
+      },
+      "communication_example": {
+        "op": "entity.declare",
+        "local_ref": "message",
+        "kind": "narada.epistemic:communication",
+        "sender": "agent.sender",
+        "recipient": "agent.recipient",
+        "title": "Bounded result",
+        "body": "The result and its limits.",
+        "intent": "result",
+        "sent_at": "RFC3339 timestamp"
       },
       "sequence_workflow": [
         {"step": 1, "tool": "epistemic_graph_sequence_create", "why": "Create a named Site-owned numeric authority once; start_at defaults to 1."},

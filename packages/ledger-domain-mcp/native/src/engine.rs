@@ -9,7 +9,7 @@
 //! feature modules (proposals, sequences, source_inspect, snapshot, export).
 //! Digest-bearing JSON emission keeps its original field insertion order.
 
-use crate::descriptor::{Descriptor, DerivedKeyRecipe};
+use crate::descriptor::{DerivedKeyRecipe, Descriptor};
 use narada_mcp_event_ledger::digest::{now, safe_name, sha256};
 use narada_mcp_event_ledger::ledger::LedgerLayout;
 use narada_mcp_event_ledger::{
@@ -65,10 +65,7 @@ impl QuerySeedPlan {
     }
 }
 
-fn query_term_values(
-    term: &ledger_query::Term,
-    inputs: &Map<String, Value>,
-) -> Option<Vec<Value>> {
+fn query_term_values(term: &ledger_query::Term, inputs: &Map<String, Value>) -> Option<Vec<Value>> {
     match term {
         ledger_query::Term::Value(value) => Some(vec![value.clone()]),
         ledger_query::Term::OneOf(values) => Some(values.clone()),
@@ -138,7 +135,10 @@ fn collect_query_seed_clauses(
             } => {
                 plan.push_attribute(attribute);
                 if let Some(values) = query_term_values(from, inputs) {
-                    for subject in values.into_iter().filter_map(|value| value.as_str().map(str::to_string)) {
+                    for subject in values
+                        .into_iter()
+                        .filter_map(|value| value.as_str().map(str::to_string))
+                    {
                         plan.push_subject_attribute(&subject, attribute);
                     }
                 }
@@ -222,8 +222,7 @@ fn decode_cursor_token(value: &Value, expected_schema: &str) -> Result<Value, ()
     let valid = decoded
         .as_object()
         .map(|object| {
-            object.get("schema").and_then(Value::as_str)
-                == Some(expected_schema)
+            object.get("schema").and_then(Value::as_str) == Some(expected_schema)
                 && object.get("head").and_then(Value::as_str).is_some()
                 && object.get("values").and_then(Value::as_object).is_some()
         })
@@ -323,7 +322,9 @@ impl Engine {
             .map(|spec| spec.name.clone());
         for table in [&entity_table, &relation_table, &records_table] {
             if !tables.iter().any(|spec| &spec.name == table) {
-                return Err(format!("domain_invalid:projection_fold_unknown_table:{table}"));
+                return Err(format!(
+                    "domain_invalid:projection_fold_unknown_table:{table}"
+                ));
             }
         }
         let error_schema: &'static str =
@@ -374,12 +375,24 @@ impl Engine {
         for _ in 0..4 {
             response["output_bytes"] = json!(output_bytes);
             output_bytes = serde_json::to_vec(response)
-                .map_err(|_| self.error("query_output_limit", "query response could not be serialized", Value::Null))?
+                .map_err(|_| {
+                    self.error(
+                        "query_output_limit",
+                        "query response could not be serialized",
+                        Value::Null,
+                    )
+                })?
                 .len() as u64;
         }
         response["output_bytes"] = json!(output_bytes);
         let actual_output_bytes = serde_json::to_vec(response)
-            .map_err(|_| self.error("query_output_limit", "query response could not be serialized", Value::Null))?
+            .map_err(|_| {
+                self.error(
+                    "query_output_limit",
+                    "query response could not be serialized",
+                    Value::Null,
+                )
+            })?
             .len() as u64;
         if actual_output_bytes > max_output_bytes {
             return Err(self.error(
@@ -529,31 +542,29 @@ impl Engine {
         Ok(())
     }
 
-    fn validate_named_filter_types(&self, args: &Map<String, Value>, mode: &str) -> Result<(), Value> {
+    fn validate_named_filter_types(
+        &self,
+        args: &Map<String, Value>,
+        mode: &str,
+    ) -> Result<(), Value> {
         let validate_value = |field: &str, value: &Value| {
             let valid = match field {
-                "participant" | "recipient" | "sender" | "from" | "to" | "direction"
-                | "viewer" | "intent" | "read_state" | "reply_state" | "root" | "template" => {
-                    value
-                        .as_str()
-                        .is_some_and(|text| !text.trim().is_empty())
+                "participant" | "recipient" | "sender" | "from" | "to" | "direction" | "viewer"
+                | "intent" | "read_state" | "reply_state" | "root" | "template" => {
+                    value.as_str().is_some_and(|text| !text.trim().is_empty())
                 }
                 "expected_ledger_head" => {
-                    value.is_null()
-                        || value
-                            .as_str()
-                            .is_some_and(|text| !text.trim().is_empty())
+                    value.is_null() || value.as_str().is_some_and(|text| !text.trim().is_empty())
                 }
                 "kinds" => value.as_array().is_some_and(|values| {
                     !values.is_empty()
-                        && values.len()
-                            <= self.domain.query.max_one_of_values.unwrap_or(64).max(1)
+                        && values.len() <= self.domain.query.max_one_of_values.unwrap_or(64).max(1)
                         && values
                             .iter()
                             .all(|item| item.as_str().is_some_and(|text| !text.trim().is_empty()))
                 }),
-                "since_event" | "after_sequence" | "max_depth" | "max_datoms"
-                | "max_results" | "timeout_ms" => value.as_u64().is_some(),
+                "since_event" | "after_sequence" | "max_depth" | "max_datoms" | "max_results"
+                | "timeout_ms" => value.as_u64().is_some(),
                 "include_body" => value.is_boolean(),
                 "limit" => value.as_u64().is_some_and(|limit| limit > 0),
                 "cursor" => value.is_null() || value.is_string() || value.is_object(),
@@ -591,16 +602,49 @@ impl Engine {
         Ok(())
     }
 
-    fn validate_named_query_fields(&self, args: &Map<String, Value>, mode: &str) -> Result<(), Value> {
+    fn validate_named_query_fields(
+        &self,
+        args: &Map<String, Value>,
+        mode: &str,
+    ) -> Result<(), Value> {
         let allowed = match mode {
             "inbox" => [
-                "template", "recipient", "participant", "sender", "from", "to", "kinds",
-                "since_event", "after_sequence", "include_body", "direction", "viewer", "intent",
-                "read_state", "reply_state", "match", "limit", "cursor", "expected_ledger_head",
-                "max_datoms", "max_results", "timeout_ms", "budget_escalation",
+                "template",
+                "recipient",
+                "participant",
+                "sender",
+                "from",
+                "to",
+                "kinds",
+                "since_event",
+                "after_sequence",
+                "include_body",
+                "direction",
+                "viewer",
+                "intent",
+                "read_state",
+                "reply_state",
+                "match",
+                "limit",
+                "cursor",
+                "expected_ledger_head",
+                "max_datoms",
+                "max_results",
+                "timeout_ms",
+                "budget_escalation",
             ]
             .as_slice(),
-            "thread" => ["template", "root", "max_depth", "viewer", "limit", "cursor", "match", "expected_ledger_head"].as_slice(),
+            "thread" => [
+                "template",
+                "root",
+                "max_depth",
+                "viewer",
+                "limit",
+                "cursor",
+                "match",
+                "expected_ledger_head",
+            ]
+            .as_slice(),
             _ => [].as_slice(),
         };
         for key in args.keys() {
@@ -615,9 +659,21 @@ impl Engine {
         if let Some(matched) = args.get("match").and_then(Value::as_object) {
             let allowed_match = match mode {
                 "inbox" => [
-                    "recipient", "participant", "sender", "from", "to", "kinds", "since_event",
-                    "after_sequence", "include_body", "direction", "viewer", "intent", "read_state",
-                    "reply_state", "limit",
+                    "recipient",
+                    "participant",
+                    "sender",
+                    "from",
+                    "to",
+                    "kinds",
+                    "since_event",
+                    "after_sequence",
+                    "include_body",
+                    "direction",
+                    "viewer",
+                    "intent",
+                    "read_state",
+                    "reply_state",
+                    "limit",
                 ]
                 .as_slice(),
                 "thread" => ["viewer", "limit"].as_slice(),
@@ -637,7 +693,16 @@ impl Engine {
     }
 
     fn validate_raw_query_arguments(&self, args: &Map<String, Value>) -> Result<(), Value> {
-        let allowed = ["query", "limit", "cursor", "expected_ledger_head", "max_datoms", "max_results", "timeout_ms", "budget_escalation"];
+        let allowed = [
+            "query",
+            "limit",
+            "cursor",
+            "expected_ledger_head",
+            "max_datoms",
+            "max_results",
+            "timeout_ms",
+            "budget_escalation",
+        ];
         for key in args.keys() {
             if !allowed.contains(&key.as_str()) {
                 return Err(self.error(
@@ -659,12 +724,20 @@ impl Engine {
         for field in ["max_datoms", "max_results", "timeout_ms"] {
             if let Some(value) = args.get(field) {
                 if !value.as_u64().is_some_and(|value| value > 0) {
-                    return Err(self.error("query_control_type_invalid", "query budget controls must be positive integers", json!({"field":field})));
+                    return Err(self.error(
+                        "query_control_type_invalid",
+                        "query budget controls must be positive integers",
+                        json!({"field":field}),
+                    ));
                 }
             }
         }
         if args.contains_key("budget_escalation") {
-            return Err(self.error("query_budget_escalation_unavailable", "this surface has no descriptor-admitted privileged query budget", json!({"required":"descriptor-owned maintenance authority with audit evidence"})));
+            return Err(self.error(
+                "query_budget_escalation_unavailable",
+                "this surface has no descriptor-admitted privileged query budget",
+                json!({"required":"descriptor-owned maintenance authority with audit evidence"}),
+            ));
         }
         if let Some(cursor) = args.get("cursor") {
             if !(cursor.is_null() || cursor.is_string() || cursor.is_object()) {
@@ -744,15 +817,15 @@ impl Engine {
             .collect()
     }
 
-    pub fn call_tool(&self, name: &str, args: &Map<String, Value>, site_root: &Path) -> Result<Value, Value> {
+    pub fn call_tool(
+        &self,
+        name: &str,
+        args: &Map<String, Value>,
+        site_root: &Path,
+    ) -> Result<Value, Value> {
         let prefix = format!("{}_", self.domain.identity.tool_prefix);
-        let unknown = || {
-            Err(self.error(
-                "unknown_tool",
-                &format!("unknown_tool:{name}"),
-                Value::Null,
-            ))
-        };
+        let unknown =
+            || Err(self.error("unknown_tool", &format!("unknown_tool:{name}"), Value::Null));
         let Some(verb) = name.strip_prefix(&prefix) else {
             return unknown();
         };
@@ -772,12 +845,19 @@ impl Engine {
             "source_inspect" => Some("source_inspect"),
             "snapshot" => Some("snapshot"),
             "export" => Some("export"),
-            "sequence_create" | "sequence_status" | "sequence_list" | "sequence_claim_next"
+            "sequence_create"
+            | "sequence_status"
+            | "sequence_list"
+            | "sequence_claim_next"
             | "sequence_claims" => Some("sequences"),
-            "proposal_submit" | "submit_review_admit" | "capture_sources" | "proposal_read"
-            | "proposal_resubmit" | "proposal_review" | "proposal_admit" | "proposal_reject" => {
-                Some("proposals")
-            }
+            "proposal_submit"
+            | "submit_review_admit"
+            | "capture_sources"
+            | "proposal_read"
+            | "proposal_resubmit"
+            | "proposal_review"
+            | "proposal_admit"
+            | "proposal_reject" => Some("proposals"),
             _ => None,
         };
         if let Some(feature) = feature {
@@ -788,15 +868,31 @@ impl Engine {
         match verb {
             "guidance" => Ok(self.guidance_with_request(args)),
             "status" => self.status(site_root),
-            "communication_migration_preflight" => self.communication_migration_preflight(site_root, args),
+            "communication_migration_preflight" => {
+                self.communication_migration_preflight(site_root, args)
+            }
             "communication_migrate" => self.communication_migrate(site_root, args),
             "query" => {
                 let has_raw_query = args.contains_key("query");
                 let has_template = args.contains_key("template");
                 let named_fields = [
-                    "recipient", "participant", "sender", "from", "to", "kinds", "since_event",
-                    "after_sequence", "include_body", "direction", "viewer", "intent", "read_state",
-                    "reply_state", "match", "root", "max_depth",
+                    "recipient",
+                    "participant",
+                    "sender",
+                    "from",
+                    "to",
+                    "kinds",
+                    "since_event",
+                    "after_sequence",
+                    "include_body",
+                    "direction",
+                    "viewer",
+                    "intent",
+                    "read_state",
+                    "reply_state",
+                    "match",
+                    "root",
+                    "max_depth",
                 ];
                 let legacy_fields = ["kind", "record_kind", "text", "compact", "offset"];
                 let has_named_fields = named_fields.iter().any(|field| args.contains_key(*field));
@@ -849,12 +945,16 @@ impl Engine {
             "sequence_claim_next" => self.sequence_claim_next(site_root, args),
             "sequence_claims" => self.sequence_claims(site_root, args),
             "proposal_submit" => {
+                let payload_ref = args.get("payload_ref").and_then(Value::as_str);
                 let resolved = self.resolve_payload_arguments(site_root, args)?;
                 self.proposal_submit(site_root, &resolved)
+                    .map_err(|error| self.enrich_payload_ref_refusal(error, payload_ref))
             }
             "submit_review_admit" => {
+                let payload_ref = args.get("payload_ref").and_then(Value::as_str);
                 let resolved = self.resolve_payload_arguments(site_root, args)?;
                 self.submit_review_admit(site_root, &resolved)
+                    .map_err(|error| self.enrich_payload_ref_refusal(error, payload_ref))
             }
             "capture_sources" => self.capture_sources(site_root, args),
             "proposal_read" => self.proposal_read(site_root, args),
@@ -883,22 +983,45 @@ impl Engine {
             ));
         }
         let body = reference.strip_prefix("mcp_payload:").ok_or_else(|| {
-            self.error("payload_ref_invalid", "payload_ref must use mcp_payload:<id>@v<revision>", json!({"payload_ref":reference}))
+            self.error(
+                "payload_ref_invalid",
+                "payload_ref must use mcp_payload:<id>@v<revision>",
+                json!({"payload_ref":reference}),
+            )
         })?;
         let (payload_id, revision_text) = body.split_once("@v").ok_or_else(|| {
-            self.error("payload_ref_invalid", "payload_ref must include an immutable revision", json!({"payload_ref":reference}))
+            self.error(
+                "payload_ref_invalid",
+                "payload_ref must include an immutable revision",
+                json!({"payload_ref":reference}),
+            )
         })?;
         if !(3..=64).contains(&payload_id.len())
-            || !payload_id.chars().next().is_some_and(|ch| ch.is_ascii_alphanumeric())
+            || !payload_id
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_alphanumeric())
             || !payload_id
                 .chars()
                 .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
         {
-            return Err(self.error("payload_ref_invalid", "payload_ref id is invalid", json!({"payload_ref":reference})));
+            return Err(self.error(
+                "payload_ref_invalid",
+                "payload_ref id is invalid",
+                json!({"payload_ref":reference}),
+            ));
         }
-        let revision = revision_text.parse::<u64>().ok().filter(|value| *value > 0).ok_or_else(|| {
-            self.error("payload_ref_invalid", "payload_ref revision must be a positive integer", json!({"payload_ref":reference}))
-        })?;
+        let revision = revision_text
+            .parse::<u64>()
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or_else(|| {
+                self.error(
+                    "payload_ref_invalid",
+                    "payload_ref revision must be a positive integer",
+                    json!({"payload_ref":reference}),
+                )
+            })?;
         let path = root
             .join(".ai")
             .join("tmp")
@@ -907,7 +1030,11 @@ impl Engine {
             .join(payload_id)
             .join(format!("v{revision}.json"));
         let metadata = fs::metadata(&path).map_err(|_| {
-            self.error("payload_ref_not_found", "immutable payload revision was not found", json!({"payload_ref":reference}))
+            self.error(
+                "payload_ref_not_found",
+                "immutable payload revision was not found",
+                json!({"payload_ref":reference}),
+            )
         })?;
         const MAX_PAYLOAD_BYTES: u64 = 256 * 1024;
         if metadata.len() > MAX_PAYLOAD_BYTES {
@@ -923,30 +1050,113 @@ impl Engine {
             || record.get("payload_id").and_then(Value::as_str) != Some(payload_id)
             || record.get("revision").and_then(Value::as_u64) != Some(revision)
         {
-            return Err(self.error("payload_ref_metadata_mismatch", "immutable payload metadata does not match its reference", json!({"payload_ref":reference})));
+            return Err(self.error(
+                "payload_ref_metadata_mismatch",
+                "immutable payload metadata does not match its reference",
+                json!({"payload_ref":reference}),
+            ));
         }
-        let payload = record.get("payload").and_then(Value::as_object).ok_or_else(|| {
-            self.error("payload_ref_payload_must_be_object", "proposal payload must be a JSON object", json!({"payload_ref":reference}))
-        })?;
+        let payload = record
+            .get("payload")
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                self.error(
+                    "payload_ref_payload_must_be_object",
+                    "proposal payload must be a JSON object",
+                    json!({"payload_ref":reference}),
+                )
+            })?;
         if payload.contains_key("payload_ref") {
-            return Err(self.error("payload_ref_recursive", "payload-backed arguments cannot contain another payload_ref", json!({"payload_ref":reference})));
+            return Err(self.error(
+                "payload_ref_recursive",
+                "payload-backed arguments cannot contain another payload_ref",
+                json!({"payload_ref":reference}),
+            ));
         }
-        let canonical = serde_json::to_vec(&canonical_json(&Value::Object(payload.clone()))).unwrap_or_default();
+        let canonical = serde_json::to_vec(&canonical_json(&Value::Object(payload.clone())))
+            .unwrap_or_default();
         if record.get("byte_size").and_then(Value::as_u64) != Some(canonical.len() as u64) {
-            return Err(self.error("payload_ref_byte_size_mismatch", "immutable payload byte size verification failed", json!({"payload_ref":reference})));
+            return Err(self.error(
+                "payload_ref_byte_size_mismatch",
+                "immutable payload byte size verification failed",
+                json!({"payload_ref":reference}),
+            ));
         }
         let actual_sha256 = sha256(&canonical);
         if record.get("sha256").and_then(Value::as_str) != Some(actual_sha256.as_str()) {
-            return Err(self.error("payload_ref_sha256_mismatch", "immutable payload digest verification failed", json!({"payload_ref":reference})));
+            return Err(self.error(
+                "payload_ref_sha256_mismatch",
+                "immutable payload digest verification failed",
+                json!({"payload_ref":reference}),
+            ));
         }
         Ok(payload.clone())
     }
 
-    fn communication_migration_preflight(&self, root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
+    fn enrich_payload_ref_refusal(&self, mut error: Value, payload_ref: Option<&str>) -> Value {
+        let Some(reference) = payload_ref else {
+            return error;
+        };
+        if error.get("code").and_then(Value::as_str)
+            != Some(
+                self.domain
+                    .query
+                    .communication
+                    .legacy_write_refusal_code
+                    .as_str(),
+            )
+        {
+            return error;
+        }
+        let Some((payload_id, revision)) = reference
+            .strip_prefix("mcp_payload:")
+            .and_then(|body| body.rsplit_once("@v"))
+            .and_then(|(id, revision)| revision.parse::<u64>().ok().map(|value| (id, value)))
+        else {
+            return error;
+        };
+        let canonical = self.domain.query.communication.canonical_kind.clone();
+        let supplied = error
+            .pointer("/details/supplied_kind")
+            .cloned()
+            .unwrap_or(Value::Null);
+        if let Some(details) = error.get_mut("details").and_then(Value::as_object_mut) {
+            details.insert("input_transport".into(), json!("immutable_payload_ref"));
+            details.insert("payload_ref".into(), json!(reference));
+            details.insert("payload_revision_mutable".into(), json!(false));
+            details.insert("graph_mutation_committed".into(), json!(false));
+            details.insert(
+                "remediation".into(),
+                json!("Create a successor immutable payload revision with canonical communication kinds, then retry the same submission tool. Do not edit or retry the rejected revision."),
+            );
+            details.insert(
+                "recovery".into(),
+                json!({
+                    "action":"create_successor_payload_revision",
+                    "source_payload_ref":reference,
+                    "suggested_payload_ref":format!("mcp_payload:{payload_id}@v{}", revision + 1),
+                    "preserve_source_revision":true,
+                    "replace":{"entity.kind":{"from":supplied,"to":canonical}},
+                    "then_retry_with":{"argument":"payload_ref","tool":"the originally requested proposal submission tool"}
+                }),
+            );
+        }
+        error
+    }
+
+    fn communication_migration_preflight(
+        &self,
+        root: &Path,
+        args: &Map<String, Value>,
+    ) -> Result<Value, Value> {
         self.prepare(root)?;
         let requested = args.get("limit").and_then(Value::as_u64).unwrap_or(50);
         let limit = requested.clamp(1, self.domain.caps.operations_per_proposal.max) as usize;
-        let head = self.status(root)?.get("ledger_head").cloned().unwrap_or(Value::Null);
+        let head = self
+            .status(root)?
+            .get("ledger_head")
+            .cloned()
+            .unwrap_or(Value::Null);
         let communication = &self.domain.query.communication;
         let cursor_schema = self.schema_id("communication_migration_cursor.v1");
         let query_digest = sha256(
@@ -966,7 +1176,8 @@ impl Engine {
                 )
             })?;
             if decoded.get("ledger_head") != Some(&head)
-                || decoded.get("query_digest").and_then(Value::as_str) != Some(query_digest.as_str())
+                || decoded.get("query_digest").and_then(Value::as_str)
+                    != Some(query_digest.as_str())
             {
                 return Err(self.error(
                     "communication_migration_cursor_stale",
@@ -974,11 +1185,16 @@ impl Engine {
                     json!({"cursor_ledger_head":decoded.get("ledger_head"),"actual_ledger_head":head}),
                 ));
             }
-            decoded.get("entity_id").and_then(Value::as_str).unwrap_or_default().to_string()
+            decoded
+                .get("entity_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
         } else {
             String::new()
         };
-        let db = Connection::open(self.projection_path(root)).map_err(self.db_error("projection_open_failed"))?;
+        let db = Connection::open(self.projection_path(root))
+            .map_err(self.db_error("projection_open_failed"))?;
         let placeholders = (0..communication.legacy_read_aliases.len())
             .map(|index| format!("?{}", index + 2))
             .collect::<Vec<_>>()
@@ -987,10 +1203,23 @@ impl Engine {
         let mut parameters = Vec::<String>::new();
         parameters.push(cursor);
         parameters.extend(communication.legacy_read_aliases.iter().cloned());
-        let mut statement = db.prepare(&sql).map_err(self.db_error("communication_migration_prepare_failed"))?;
-        let rows = statement.query_map(rusqlite::params_from_iter(parameters.iter()), |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, u64>(4)?)))
+        let mut statement = db
+            .prepare(&sql)
+            .map_err(self.db_error("communication_migration_prepare_failed"))?;
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(parameters.iter()), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, u64>(4)?,
+                ))
+            })
             .map_err(self.db_error("communication_migration_query_failed"))?;
-        let mut candidates = rows.collect::<Result<Vec<_>, _>>().map_err(self.db_error("communication_migration_row_failed"))?;
+        let mut candidates = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(self.db_error("communication_migration_row_failed"))?;
         let has_more = candidates.len() > limit;
         candidates.truncate(limit);
         let mut by_kind = BTreeMap::<String, u64>::new();
@@ -999,9 +1228,23 @@ impl Engine {
         let mut operations = Vec::new();
         let mut census = Vec::new();
         for (entity_id, kind, payload_json, event_id, event_sequence) in candidates {
-            let payload: Value = serde_json::from_str(&payload_json).map_err(|error| self.error("communication_migration_payload_invalid", &error.to_string(), json!({"entity_id":entity_id})))?;
-            let sender = payload.get("sender").and_then(Value::as_str).unwrap_or_default().to_string();
-            let recipient = payload.get("recipient").and_then(Value::as_str).unwrap_or_default().to_string();
+            let payload: Value = serde_json::from_str(&payload_json).map_err(|error| {
+                self.error(
+                    "communication_migration_payload_invalid",
+                    &error.to_string(),
+                    json!({"entity_id":entity_id}),
+                )
+            })?;
+            let sender = payload
+                .get("sender")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let recipient = payload
+                .get("recipient")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
             *by_kind.entry(kind.clone()).or_default() += 1;
             *by_sender.entry(sender.clone()).or_default() += 1;
             *by_recipient.entry(recipient.clone()).or_default() += 1;
@@ -1017,25 +1260,48 @@ impl Engine {
         } else {
             None
         };
-        Ok(json!({"schema":self.schema_id("communication_migration_preflight.v1"),"status":"ok","ledger_head":head,"query_digest":query_digest,"canonical_kind":communication.canonical_kind,"contract_version":communication.contract_version,"bounded":{"limit":limit,"returned":census.len(),"has_more":has_more,"next_cursor":next_cursor},"census":{"scope":"page","by_kind":by_kind,"by_sender":by_sender,"by_recipient":by_recipient,"messages":census},"proposed_operations":operations}))
+        Ok(
+            json!({"schema":self.schema_id("communication_migration_preflight.v1"),"status":"ok","ledger_head":head,"query_digest":query_digest,"canonical_kind":communication.canonical_kind,"contract_version":communication.contract_version,"bounded":{"limit":limit,"returned":census.len(),"has_more":has_more,"next_cursor":next_cursor},"census":{"scope":"page","by_kind":by_kind,"by_sender":by_sender,"by_recipient":by_recipient,"messages":census},"proposed_operations":operations}),
+        )
     }
 
-    fn communication_migrate(&self, root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
+    fn communication_migrate(
+        &self,
+        root: &Path,
+        args: &Map<String, Value>,
+    ) -> Result<Value, Value> {
         let actor = self.required(args, "actor")?;
         let authority_basis = self.required_object(args, "authority_basis")?;
         let preflight = self.communication_migration_preflight(root, args)?;
-        let operations = preflight.get("proposed_operations").and_then(Value::as_array).cloned().unwrap_or_default();
+        let operations = preflight
+            .get("proposed_operations")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
         if operations.is_empty() {
-            return Ok(json!({"schema":self.schema_id("communication_migration.v1"),"status":"complete","migrated":0,"preflight":preflight}));
+            return Ok(
+                json!({"schema":self.schema_id("communication_migration.v1"),"status":"complete","migrated":0,"preflight":preflight}),
+            );
         }
         let mut submit = Map::new();
         submit.insert("actor".into(), Value::String(actor));
         submit.insert("authority_basis".into(), authority_basis);
         submit.insert("operations".into(), Value::Array(operations.clone()));
-        submit.insert("expected_ledger_head".into(), preflight.get("ledger_head").cloned().unwrap_or(Value::Null));
-        submit.insert("idempotency_key".into(), Value::String(format!("communication-migration-{}", &sha256(&serde_json::to_vec(&operations).unwrap_or_default())[..24])));
+        submit.insert(
+            "expected_ledger_head".into(),
+            preflight.get("ledger_head").cloned().unwrap_or(Value::Null),
+        );
+        submit.insert(
+            "idempotency_key".into(),
+            Value::String(format!(
+                "communication-migration-{}",
+                &sha256(&serde_json::to_vec(&operations).unwrap_or_default())[..24]
+            )),
+        );
         let admission = self.submit_review_admit(root, &submit)?;
-        Ok(json!({"schema":self.schema_id("communication_migration.v1"),"status":"migrated","migrated":operations.len(),"preflight":preflight,"admission":admission}))
+        Ok(
+            json!({"schema":self.schema_id("communication_migration.v1"),"status":"migrated","migrated":operations.len(),"preflight":preflight,"admission":admission}),
+        )
     }
 
     fn sequence_create(&self, root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
@@ -1129,8 +1395,8 @@ impl Engine {
         let offset = self.page_offset(args)?;
         let mut items = Vec::new();
         if self.sequences(root).exists() {
-            for entry in
-                fs::read_dir(self.sequences(root)).map_err(self.io_error("sequence_store_read_failed"))?
+            for entry in fs::read_dir(self.sequences(root))
+                .map_err(self.io_error("sequence_store_read_failed"))?
             {
                 let Ok(entry) = entry else { continue };
                 let manifest_path = entry.path().join("sequence.json");
@@ -1349,11 +1615,17 @@ impl Engine {
             .as_object_mut()
             .unwrap()
             .insert("digest".into(), json!(digest));
-        let idem_path = self.proposals(root).join(format!("idem-{}.txt", safe_name(&idempotency_key)));
+        let idem_path = self
+            .proposals(root)
+            .join(format!("idem-{}.txt", safe_name(&idempotency_key)));
         if idem_path.exists() {
-            let existing =
-                fs::read_to_string(&idem_path).map_err(self.io_error("proposal_idempotency_read_failed"))?;
-            let stored = self.read_json(&self.proposals(root).join(format!("{}.json", existing.trim())))?;
+            let existing = fs::read_to_string(&idem_path)
+                .map_err(self.io_error("proposal_idempotency_read_failed"))?;
+            let stored = self.read_json(
+                &self
+                    .proposals(root)
+                    .join(format!("{}.json", existing.trim())),
+            )?;
             if stored
                 .get("content_fingerprint")
                 .and_then(Value::as_str)
@@ -1388,8 +1660,11 @@ impl Engine {
         })?;
         let lifecycle = self.proposal_lifecycle(root, proposal_id)?;
         if lifecycle["status"] == "admitted" {
-            let review =
-                self.read_json(&self.proposals(root).join(format!("{}.review.json", safe_name(proposal_id))))?;
+            let review = self.read_json(
+                &self
+                    .proposals(root)
+                    .join(format!("{}.review.json", safe_name(proposal_id))),
+            )?;
             return Ok(json!({
                 "schema":proposals_feature.compound_schema_id,
                 "status":"already_admitted",
@@ -1460,7 +1735,11 @@ impl Engine {
             let mut normalized = operation.clone();
             if operation.get("op").and_then(Value::as_str) == Some(entity_op.as_str()) {
                 let object = normalized.as_object_mut().unwrap();
-                if object.get(&entity_key_field).and_then(Value::as_str).is_none() {
+                if object
+                    .get(&entity_key_field)
+                    .and_then(Value::as_str)
+                    .is_none()
+                {
                     let kind = object.get("kind").and_then(Value::as_str).unwrap_or("");
                     let title = object.get("title").and_then(Value::as_str).unwrap_or("");
                     if !kind.is_empty() && !title.is_empty() {
@@ -1586,9 +1865,16 @@ impl Engine {
             .collect()
     }
 
-    fn resolve_expected_ledger_head(&self, root: &Path, supplied: Option<&Value>) -> Result<Value, Value> {
+    fn resolve_expected_ledger_head(
+        &self,
+        root: &Path,
+        supplied: Option<&Value>,
+    ) -> Result<Value, Value> {
         if supplied.is_none() || supplied.and_then(Value::as_str) == Some("latest") {
-            return Ok(self.ledger_head(root)?.map(Value::String).unwrap_or(Value::Null));
+            return Ok(self
+                .ledger_head(root)?
+                .map(Value::String)
+                .unwrap_or(Value::Null));
         }
         Ok(supplied.cloned().unwrap_or(Value::Null))
     }
@@ -1596,7 +1882,10 @@ impl Engine {
     fn derived_idempotency_key(&self, recipe: &DerivedKeyRecipe, source: &Value) -> String {
         let mut object = Map::new();
         for field in &recipe.input_fields {
-            object.insert(field.clone(), source.get(field).cloned().unwrap_or(Value::Null));
+            object.insert(
+                field.clone(),
+                source.get(field).cloned().unwrap_or(Value::Null),
+            );
         }
         let canonical = serde_json::to_vec(&Value::Object(object)).unwrap_or_default();
         format!(
@@ -1625,7 +1914,9 @@ impl Engine {
         let sources = args
             .get("sources")
             .and_then(Value::as_array)
-            .ok_or_else(|| self.error("invalid_capture", "sources must be an array", Value::Null))?;
+            .ok_or_else(|| {
+                self.error("invalid_capture", "sources must be an array", Value::Null)
+            })?;
         let supplied = args
             .get("operations")
             .and_then(Value::as_array)
@@ -1697,8 +1988,13 @@ impl Engine {
         }))
     }
 
-    fn existing_operation_identities(&self, root: &Path, operations: &[Value]) -> Result<Vec<Value>, Value> {
-        let db = Connection::open(self.projection_path(root)).map_err(self.db_error("projection_open_failed"))?;
+    fn existing_operation_identities(
+        &self,
+        root: &Path,
+        operations: &[Value],
+    ) -> Result<Vec<Value>, Value> {
+        let db = Connection::open(self.projection_path(root))
+            .map_err(self.db_error("projection_open_failed"))?;
         let mut existing = Vec::new();
         for operation in operations {
             let Some(op_kind) = operation.get("op").and_then(Value::as_str) else {
@@ -1713,10 +2009,7 @@ impl Engine {
             else {
                 continue;
             };
-            let Some(identity) = operation
-                .get(&fold.key_field)
-                .and_then(Value::as_str)
-            else {
+            let Some(identity) = operation.get(&fold.key_field).and_then(Value::as_str) else {
                 continue;
             };
             let table = self.table(&fold.table);
@@ -1830,7 +2123,12 @@ impl Engine {
         let missing = drop_ids.difference(&known).cloned().collect::<Vec<_>>();
         if !missing.is_empty() {
             return Err(self.error(
-                &self.domain.features.proposals.resubmit.missing_drop_refusal_code,
+                &self
+                    .domain
+                    .features
+                    .proposals
+                    .resubmit
+                    .missing_drop_refusal_code,
                 "one or more drop_operation_ids do not identify source proposal operations",
                 json!({"missing":missing}),
             ));
@@ -1907,7 +2205,9 @@ impl Engine {
                 }));
             }
         }
-        let rejection_path = self.proposals(root).join(format!("{}.rejection.json", safe_name(proposal_id)));
+        let rejection_path = self
+            .proposals(root)
+            .join(format!("{}.rejection.json", safe_name(proposal_id)));
         if rejection_path.exists() {
             let rejection = self.read_json(&rejection_path)?;
             return Ok(json!({
@@ -1916,7 +2216,9 @@ impl Engine {
                 "reason":rejection["reason"]
             }));
         }
-        let review_path = self.proposals(root).join(format!("{}.review.json", safe_name(proposal_id)));
+        let review_path = self
+            .proposals(root)
+            .join(format!("{}.review.json", safe_name(proposal_id)));
         if review_path.exists() {
             let review = self.read_json(&review_path)?;
             return Ok(json!({"status":"reviewed","review_status":review["status"]}));
@@ -1940,7 +2242,10 @@ impl Engine {
         let current = self.ledger_head(root)?;
         let head_matches = expected == current.as_deref();
         let review = json!({"schema":self.domain.features.proposals.review_schema_id,"proposal_id":id,"status":if head_matches{"policy_valid"}else{"stale"},"certifies_truth":self.domain.features.proposals.certifies_truth,"checks":{"schema":true,"references":true,"evidence_locations":true,"graph_invariants":true,"ledger_head":head_matches},"expected_ledger_head":expected,"actual_ledger_head":current});
-        self.write_replace_json(&self.proposals(root).join(format!("{id}.review.json")), &review)?;
+        self.write_replace_json(
+            &self.proposals(root).join(format!("{id}.review.json")),
+            &review,
+        )?;
         Ok(review)
     }
 
@@ -1949,7 +2254,11 @@ impl Engine {
         self.with_authority_lock(root, "ledger", || self.proposal_admit_locked(root, args))
     }
 
-    fn proposal_admit_locked(&self, root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
+    fn proposal_admit_locked(
+        &self,
+        root: &Path,
+        args: &Map<String, Value>,
+    ) -> Result<Value, Value> {
         self.prepare(root)?;
         let id = self.required(args, "proposal_id")?;
         let actor = self.required(args, "actor")?;
@@ -1965,11 +2274,14 @@ impl Engine {
                     &json!({"proposal_id":id,"proposal_digest":proposal["digest"]}),
                 )
             });
-        let idem_path = self.ledger(root).join(format!("idem-{}.txt", safe_name(&idem)));
+        let idem_path = self
+            .ledger(root)
+            .join(format!("idem-{}.txt", safe_name(&idem)));
         if idem_path.exists() {
-            let event_id =
-                fs::read_to_string(&idem_path).map_err(self.io_error("ledger_idempotency_read_failed"))?;
-            let event = self.read_json(&self.ledger(root).join(format!("{}.json", event_id.trim())))?;
+            let event_id = fs::read_to_string(&idem_path)
+                .map_err(self.io_error("ledger_idempotency_read_failed"))?;
+            let event =
+                self.read_json(&self.ledger(root).join(format!("{}.json", event_id.trim())))?;
             if event.get("proposal_id") != Some(&json!(id))
                 || event.get("proposal_digest") != proposal.get("digest")
             {
@@ -1996,7 +2308,8 @@ impl Engine {
             }
             return Ok(self.admission_receipt(&event));
         }
-        let review = self.proposal_review(root, &Map::from_iter([("proposal_id".into(), json!(id))]))?;
+        let review =
+            self.proposal_review(root, &Map::from_iter([("proposal_id".into(), json!(id))]))?;
         if review["status"] != "policy_valid" {
             return Err(self.error(
                 "proposal_not_admissible",
@@ -2004,7 +2317,8 @@ impl Engine {
                 review,
             ));
         }
-        let expected_value = self.resolve_expected_ledger_head(root, args.get("expected_ledger_head"))?;
+        let expected_value =
+            self.resolve_expected_ledger_head(root, args.get("expected_ledger_head"))?;
         let expected = expected_value.as_str();
         let current = self.ledger_head(root)?;
         if expected != current.as_deref()
@@ -2023,9 +2337,7 @@ impl Engine {
             &event_hash_field,
             None,
             Some(&idem),
-            |ctx| {
-                json!({"schema":self.domain.storage.event_schema_id,"sequence":ctx.sequence,"event_id":ctx.event_id,"event_kind":self.domain.features.proposals.event_kind,"previous_hash":ctx.previous_hash,"proposal_id":id,"proposal_digest":proposal["digest"],"operations":proposal["operations"],"actor":actor,"authority_basis":args.get("authority_basis"),"idempotency_key":idem,"occurred_at":now(),"certifies_truth":self.domain.features.proposals.certifies_truth})
-            },
+            |ctx| json!({"schema":self.domain.storage.event_schema_id,"sequence":ctx.sequence,"event_id":ctx.event_id,"event_kind":self.domain.features.proposals.event_kind,"previous_hash":ctx.previous_hash,"proposal_id":id,"proposal_digest":proposal["digest"],"operations":proposal["operations"],"actor":actor,"authority_basis":args.get("authority_basis"),"idempotency_key":idem,"occurred_at":now(),"certifies_truth":self.domain.features.proposals.certifies_truth}),
         )?;
         self.rebuild_projection(root)?;
         Ok(self.admission_receipt(&outcome.event))
@@ -2058,11 +2370,7 @@ impl Engine {
 
     fn status(&self, root: &Path) -> Result<Value, Value> {
         self.prepare(root)?;
-        event_ledger::verify(
-            self.error,
-            &self.ledger_layout(root),
-            self.event_hash_field,
-        )?;
+        event_ledger::verify(self.error, &self.ledger_layout(root), self.event_hash_field)?;
         let ledger_head = self.ledger_head(root)?;
         let event_count = self.ledger_files(root)?.len();
         let projection_path = self.projection_path(root);
@@ -2080,22 +2388,39 @@ impl Engine {
             let db = Connection::open_with_flags(
                 &projection_path,
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-            ).map_err(self.db_error("projection_open_failed"))?;
+            )
+            .map_err(self.db_error("projection_open_failed"))?;
             let stored_entities: i64 = db
-                .query_row(&format!("select count(*) from {}", self.entity_table), [], |r| r.get(0))
+                .query_row(
+                    &format!("select count(*) from {}", self.entity_table),
+                    [],
+                    |r| r.get(0),
+                )
                 .map_err(self.db_error("projection_count_failed"))?;
             let visible_entities: i64 = db
                 .query_row(
-                    &format!("select count(*) from {} where {}", self.entity_table, self.visible_entity_predicate()),
+                    &format!(
+                        "select count(*) from {} where {}",
+                        self.entity_table,
+                        self.visible_entity_predicate()
+                    ),
                     [],
                     |r| r.get(0),
                 )
                 .map_err(self.db_error("projection_count_failed"))?;
             let relations: i64 = db
-                .query_row(&format!("select count(*) from {}", self.relation_table), [], |r| r.get(0))
+                .query_row(
+                    &format!("select count(*) from {}", self.relation_table),
+                    [],
+                    |r| r.get(0),
+                )
                 .map_err(self.db_error("projection_count_failed"))?;
             let records: i64 = db
-                .query_row(&format!("select count(*) from {}", self.records_table), [], |r| r.get(0))
+                .query_row(
+                    &format!("select count(*) from {}", self.records_table),
+                    [],
+                    |r| r.get(0),
+                )
                 .map_err(self.db_error("projection_count_failed"))?;
             (stored_entities, visible_entities, relations, records)
         } else {
@@ -2163,21 +2488,36 @@ impl Engine {
             let entity_pk = self.table(&self.entity_table).primary_key.clone();
             let message_target = db
                 .query_row(
-                    &format!("select kind,payload_json from {} where {}=?1", self.entity_table, entity_pk),
+                    &format!(
+                        "select kind,payload_json from {} where {}=?1",
+                        self.entity_table, entity_pk
+                    ),
                     params![message_id],
                     |row| {
                         let kind = row.get::<_, String>(0)?;
                         let payload = row.get::<_, String>(1)?;
-                        Ok((kind, serde_json::from_str::<Value>(&payload).unwrap_or(Value::Null)))
+                        Ok((
+                            kind,
+                            serde_json::from_str::<Value>(&payload).unwrap_or(Value::Null),
+                        ))
                     },
                 )
                 .optional()
                 .map_err(self.db_error("message_read_target_lookup_failed"))?;
             let existing_receipt = db
                 .query_row(
-                    &format!("select kind,payload_json,event_id from {} where {}=?1", self.entity_table, entity_pk),
+                    &format!(
+                        "select kind,payload_json,event_id from {} where {}=?1",
+                        self.entity_table, entity_pk
+                    ),
                     params![receipt_id],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
                 )
                 .optional()
                 .map_err(self.db_error("message_read_receipt_lookup_failed"))?;
@@ -2218,14 +2558,16 @@ impl Engine {
                     json!({"receipt_id":receipt_id,"existing_kind":existing_kind,"expected_kind":read_receipt_kind}),
                 ));
             }
-            let receipt_payload = serde_json::from_str::<Value>(&receipt_payload_json).map_err(|_| {
-                self.error(
-                    "message_read_receipt_corrupt",
-                    "existing message read receipt payload is invalid",
-                    json!({"receipt_id":receipt_id}),
-                )
-            })?;
-            if receipt_payload.get("message_id").and_then(Value::as_str) != Some(message_id.as_str())
+            let receipt_payload =
+                serde_json::from_str::<Value>(&receipt_payload_json).map_err(|_| {
+                    self.error(
+                        "message_read_receipt_corrupt",
+                        "existing message read receipt payload is invalid",
+                        json!({"receipt_id":receipt_id}),
+                    )
+                })?;
+            if receipt_payload.get("message_id").and_then(Value::as_str)
+                != Some(message_id.as_str())
                 || receipt_payload.get("reader").and_then(Value::as_str) != Some(reader.as_str())
             {
                 return Err(self.error(
@@ -2237,7 +2579,10 @@ impl Engine {
             let event = self.read_json(&self.ledger(root).join(format!("{event_id}.json")))?;
             let mut admission = self.admission_receipt(&event);
             if let Some(status) = admission.as_object_mut() {
-                status.insert("status".into(), Value::String("already_admitted".to_string()));
+                status.insert(
+                    "status".into(),
+                    Value::String("already_admitted".to_string()),
+                );
             }
             return Ok(json!({
                 "schema":self.schema_id("message_read.v1"),
@@ -2301,264 +2646,276 @@ impl Engine {
     }
 
     fn generic_query_locked(&self, root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
-            if args.contains_key("budget_escalation") {
+        if args.contains_key("budget_escalation") {
+            return Err(self.error(
+                "query_budget_escalation_unavailable",
+                "this surface has no descriptor-admitted privileged query budget",
+                json!({"required":"descriptor-owned maintenance authority with audit evidence"}),
+            ));
+        }
+        let Some(datoms_table) = &self.datoms_table else {
+            return Err(self.error(
+                "query_unavailable",
+                "this domain does not expose a normalized datom projection",
+                Value::Null,
+            ));
+        };
+        let head = self.ledger_head(root)?;
+        if let Some(expected) = args.get("expected_ledger_head").and_then(Value::as_str) {
+            if Some(expected) != head.as_deref() {
                 return Err(self.error(
-                    "query_budget_escalation_unavailable",
-                    "this surface has no descriptor-admitted privileged query budget",
-                    json!({"required":"descriptor-owned maintenance authority with audit evidence"}),
+                    "ledger_head_mismatch",
+                    "query expected_ledger_head does not match the current ledger head",
+                    json!({"expected_ledger_head":expected,"actual_ledger_head":head}),
                 ));
             }
-            let Some(datoms_table) = &self.datoms_table else {
-                return Err(self.error(
-                    "query_unavailable",
-                    "this domain does not expose a normalized datom projection",
-                    Value::Null,
-                ));
-            };
-            let head = self.ledger_head(root)?;
-            if let Some(expected) = args.get("expected_ledger_head").and_then(Value::as_str) {
-                if Some(expected) != head.as_deref() {
-                    return Err(self.error(
-                        "ledger_head_mismatch",
-                        "query expected_ledger_head does not match the current ledger head",
-                        json!({"expected_ledger_head":expected,"actual_ledger_head":head}),
-                    ));
+        }
+        let mut query_value = if let Some(query) = args.get("query") {
+            query.clone()
+        } else {
+            self.named_query(args)?
+        };
+        let raw_cursor = args
+            .get("cursor")
+            .cloned()
+            .or_else(|| query_value.get("cursor").cloned())
+            .unwrap_or(Value::Null);
+        let cursor_schema = self.schema_id("cursor.v1");
+        let cursor_value = if raw_cursor.is_null() {
+            Value::Null
+        } else {
+            decode_cursor_token(&raw_cursor, &cursor_schema).map_err(|_| {
+                self.error(
+                    "query_cursor_invalid",
+                    "cursor must be a valid v1 opaque cursor token or legacy cursor object",
+                    json!({"cursor_schema":cursor_schema}),
+                )
+            })?
+        };
+        if let Some(query_object) = query_value.as_object_mut() {
+            query_object.insert("cursor".into(), cursor_value.clone());
+            if !query_object.contains_key("limit") {
+                if let Some(limit) = args.get("limit") {
+                    query_object.insert("limit".into(), limit.clone());
                 }
             }
-            let mut query_value = if let Some(query) = args.get("query") {
-                query.clone()
-            } else {
-                self.named_query(args)?
-            };
-            let raw_cursor = args
-                .get("cursor")
-                .cloned()
-                .or_else(|| query_value.get("cursor").cloned())
-                .unwrap_or(Value::Null);
-            let cursor_schema = self.schema_id("cursor.v1");
-            let cursor_value = if raw_cursor.is_null() {
-                Value::Null
-            } else {
-                decode_cursor_token(&raw_cursor, &cursor_schema).map_err(|_| {
-                    self.error(
-                        "query_cursor_invalid",
-                        "cursor must be a valid v1 opaque cursor token or legacy cursor object",
-                        json!({"cursor_schema":cursor_schema}),
-                    )
-                })?
-            };
-            if let Some(query_object) = query_value.as_object_mut() {
-                query_object.insert("cursor".into(), cursor_value.clone());
-                if !query_object.contains_key("limit") {
-                    if let Some(limit) = args.get("limit") {
-                        query_object.insert("limit".into(), limit.clone());
-                    }
-                }
-            }
-            let query_scope = {
-                let mut scope = query_value.clone();
-                if let Some(scope_object) = scope.as_object_mut() {
-                    scope_object.remove("cursor");
-                    scope_object.remove("limit");
-                    if let Some(find) = scope_object.get_mut("find").and_then(Value::as_array_mut) {
-                        for term in find {
-                            if let Some(pull) = term
-                                .as_object_mut()
-                                .and_then(|object| object.get_mut("pull"))
-                                .and_then(Value::as_object_mut)
-                            {
-                                // Projection fields are presentation, not
-                                // result identity; callers may add/remove a
-                                // body pull while continuing the same page.
-                                pull.remove("fields");
-                            }
+        }
+        let query_scope = {
+            let mut scope = query_value.clone();
+            if let Some(scope_object) = scope.as_object_mut() {
+                scope_object.remove("cursor");
+                scope_object.remove("limit");
+                if let Some(find) = scope_object.get_mut("find").and_then(Value::as_array_mut) {
+                    for term in find {
+                        if let Some(pull) = term
+                            .as_object_mut()
+                            .and_then(|object| object.get_mut("pull"))
+                            .and_then(Value::as_object_mut)
+                        {
+                            // Projection fields are presentation, not
+                            // result identity; callers may add/remove a
+                            // body pull while continuing the same page.
+                            pull.remove("fields");
                         }
                     }
                 }
-                sha256(&serde_json::to_vec(&canonical_json(&scope)).unwrap_or_default())
-            };
-            let cursor_ref = (!cursor_value.is_null()).then_some(&cursor_value);
-            let cursor_head = cursor_ref
-                .and_then(|cursor| cursor.get("head"))
-                .and_then(Value::as_str);
-            let cursor_has_values = cursor_ref
-                .and_then(|cursor| cursor.get("values"))
-                .and_then(Value::as_object)
-                .map(|values| !values.is_empty())
-                .unwrap_or(false);
-            if cursor_has_values && cursor_head.is_none() {
+            }
+            sha256(&serde_json::to_vec(&canonical_json(&scope)).unwrap_or_default())
+        };
+        let cursor_ref = (!cursor_value.is_null()).then_some(&cursor_value);
+        let cursor_head = cursor_ref
+            .and_then(|cursor| cursor.get("head"))
+            .and_then(Value::as_str);
+        let cursor_has_values = cursor_ref
+            .and_then(|cursor| cursor.get("values"))
+            .and_then(Value::as_object)
+            .map(|values| !values.is_empty())
+            .unwrap_or(false);
+        if cursor_has_values && cursor_head.is_none() {
+            return Err(self.error(
+                "query_cursor_unpinned",
+                "cursor pagination requires the ledger head returned with the previous page",
+                Value::Null,
+            ));
+        }
+        if let Some(cursor_head) = cursor_head {
+            if Some(cursor_head) != head.as_deref() {
                 return Err(self.error(
-                    "query_cursor_unpinned",
-                    "cursor pagination requires the ledger head returned with the previous page",
-                    Value::Null,
+                    "query_cursor_stale",
+                    "query cursor belongs to a different ledger head",
+                    json!({"cursor_head":cursor_head,"actual_ledger_head":head}),
                 ));
             }
-            if let Some(cursor_head) = cursor_head {
-                if Some(cursor_head) != head.as_deref() {
-                    return Err(self.error(
-                        "query_cursor_stale",
-                        "query cursor belongs to a different ledger head",
-                        json!({"cursor_head":cursor_head,"actual_ledger_head":head}),
-                    ));
-                }
-            }
-            if let Some(cursor_scope) = cursor_ref
-                .and_then(|cursor| cursor.get("query"))
-                .and_then(Value::as_str)
-            {
-                if cursor_scope != query_scope {
-                    return Err(self.error(
-                        "query_cursor_scope_mismatch",
-                        "query cursor belongs to a different query shape",
-                        json!({"cursor_query":cursor_scope,"actual_query":query_scope}),
-                    ));
-                }
-            }
-            let hard_max_datoms = self.domain.caps.query_execution.max_datoms_scanned;
-            let hard_max_results = self.domain.caps.query_limit.max;
-            let hard_timeout_ms = self.domain.caps.query_execution.max_timeout_ms;
-            let effective_max_datoms = args.get("max_datoms").and_then(Value::as_u64).unwrap_or(hard_max_datoms).min(hard_max_datoms);
-            let effective_max_results = args.get("max_results").and_then(Value::as_u64).unwrap_or(hard_max_results).min(hard_max_results);
-            let effective_timeout_ms = args.get("timeout_ms").and_then(Value::as_u64).unwrap_or(hard_timeout_ms).min(hard_timeout_ms);
-            let started = Instant::now();
-            let limits = ledger_query::QueryLimits {
-                max_clauses: self.domain.query.max_clauses.unwrap_or(64).max(1),
-                max_results: effective_max_results as usize,
-                max_reach_depth: self.domain.query.max_reach_depth.unwrap_or(8).max(1),
-                max_one_of_values: self.domain.query.max_one_of_values.unwrap_or(64).max(1),
-                max_predicate_depth: self.domain.query.max_predicate_depth.unwrap_or(8).max(1),
-                max_datoms_scanned: effective_max_datoms as usize,
-                max_traversal_edges: self.domain.caps.query_execution.max_traversal_edges as usize,
-            };
-            let default_limit = self.domain.caps.query_limit.default as usize;
-            let spec = ledger_query::parse(&query_value, default_limit, &limits)
-                .map_err(|failure| self.error(failure.code, &failure.message, failure.details))?;
-            let db = Connection::open(self.projection_path(root))
-                .map_err(self.db_error("projection_open_failed"))?;
-            let planner_value = |key: &str| {
-                args.get(key).or_else(|| {
-                    args.get("match")
-                        .and_then(Value::as_object)
-                        .and_then(|matched| matched.get(key))
-                })
-            };
-            let has_inbox_participant = planner_value("participant")
-                .or_else(|| planner_value("recipient"))
-                .and_then(Value::as_str)
-                .is_some_and(|value| !value.trim().is_empty());
-            let sequence_lower_bound = planner_value("after_sequence")
-                .or_else(|| planner_value("since_event"))
-                .and_then(Value::as_u64)
-                // Event sequences are positive.  For a recipient-scoped
-                // named inbox query, an omitted lower bound therefore has
-                // the same semantics as `after_sequence: 0`, while enabling
-                // subject-local hydration instead of global decoration scans.
-                .or_else(|| has_inbox_participant.then_some(0));
-            let named_query_config = args
-                .get("template")
-                .and_then(Value::as_str)
-                .map(|template| self.canonical_named_template(template))
-                .and_then(|template| self.domain.query.named_queries.get(&template))
-                .and_then(Value::as_object);
-            let participant_direction = planner_value("direction")
-                .and_then(Value::as_str)
-                .unwrap_or("incoming");
-            let subject_seed_attribute = named_query_config
-                .and_then(|config| config.get("participant_attributes"))
-                .and_then(Value::as_object)
-                .and_then(|attributes| attributes.get(participant_direction))
-                .and_then(Value::as_str)
-                .filter(|_| has_inbox_participant);
-            let subject_local_sequence = named_query_config
-                .and_then(|config| config.get("sequence_attribute"))
-                .and_then(Value::as_str)
-                .zip(sequence_lower_bound)
-                .filter(|_| subject_seed_attribute.is_some());
-            let datoms = self.load_datoms_for_query(
-                &db,
-                datoms_table,
-                &spec,
-                subject_local_sequence,
-                subject_seed_attribute,
-            )?;
-            if started.elapsed() > Duration::from_millis(effective_timeout_ms) {
-                return Err(self.error("query_timeout", "query exceeded its capped time budget while loading indexed datoms", json!({"timeout_ms":effective_timeout_ms,"phase":"datom_load","datoms_loaded":datoms.len()})));
-            }
-            let execution = ledger_query::execute(&spec, &datoms)
-                .map_err(|failure| self.error(failure.code, &failure.message, failure.details))?;
-            if started.elapsed() > Duration::from_millis(effective_timeout_ms) {
+        }
+        if let Some(cursor_scope) = cursor_ref
+            .and_then(|cursor| cursor.get("query"))
+            .and_then(Value::as_str)
+        {
+            if cursor_scope != query_scope {
                 return Err(self.error(
+                    "query_cursor_scope_mismatch",
+                    "query cursor belongs to a different query shape",
+                    json!({"cursor_query":cursor_scope,"actual_query":query_scope}),
+                ));
+            }
+        }
+        let hard_max_datoms = self.domain.caps.query_execution.max_datoms_scanned;
+        let hard_max_results = self.domain.caps.query_limit.max;
+        let hard_timeout_ms = self.domain.caps.query_execution.max_timeout_ms;
+        let effective_max_datoms = args
+            .get("max_datoms")
+            .and_then(Value::as_u64)
+            .unwrap_or(hard_max_datoms)
+            .min(hard_max_datoms);
+        let effective_max_results = args
+            .get("max_results")
+            .and_then(Value::as_u64)
+            .unwrap_or(hard_max_results)
+            .min(hard_max_results);
+        let effective_timeout_ms = args
+            .get("timeout_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(hard_timeout_ms)
+            .min(hard_timeout_ms);
+        let started = Instant::now();
+        let limits = ledger_query::QueryLimits {
+            max_clauses: self.domain.query.max_clauses.unwrap_or(64).max(1),
+            max_results: effective_max_results as usize,
+            max_reach_depth: self.domain.query.max_reach_depth.unwrap_or(8).max(1),
+            max_one_of_values: self.domain.query.max_one_of_values.unwrap_or(64).max(1),
+            max_predicate_depth: self.domain.query.max_predicate_depth.unwrap_or(8).max(1),
+            max_datoms_scanned: effective_max_datoms as usize,
+            max_traversal_edges: self.domain.caps.query_execution.max_traversal_edges as usize,
+        };
+        let default_limit = self.domain.caps.query_limit.default as usize;
+        let spec = ledger_query::parse(&query_value, default_limit, &limits)
+            .map_err(|failure| self.error(failure.code, &failure.message, failure.details))?;
+        let db = Connection::open(self.projection_path(root))
+            .map_err(self.db_error("projection_open_failed"))?;
+        let planner_value = |key: &str| {
+            args.get(key).or_else(|| {
+                args.get("match")
+                    .and_then(Value::as_object)
+                    .and_then(|matched| matched.get(key))
+            })
+        };
+        let has_inbox_participant = planner_value("participant")
+            .or_else(|| planner_value("recipient"))
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty());
+        let sequence_lower_bound = planner_value("after_sequence")
+            .or_else(|| planner_value("since_event"))
+            .and_then(Value::as_u64)
+            // Event sequences are positive.  For a recipient-scoped
+            // named inbox query, an omitted lower bound therefore has
+            // the same semantics as `after_sequence: 0`, while enabling
+            // subject-local hydration instead of global decoration scans.
+            .or_else(|| has_inbox_participant.then_some(0));
+        let named_query_config = args
+            .get("template")
+            .and_then(Value::as_str)
+            .map(|template| self.canonical_named_template(template))
+            .and_then(|template| self.domain.query.named_queries.get(&template))
+            .and_then(Value::as_object);
+        let participant_direction = planner_value("direction")
+            .and_then(Value::as_str)
+            .unwrap_or("incoming");
+        let subject_seed_attribute = named_query_config
+            .and_then(|config| config.get("participant_attributes"))
+            .and_then(Value::as_object)
+            .and_then(|attributes| attributes.get(participant_direction))
+            .and_then(Value::as_str)
+            .filter(|_| has_inbox_participant);
+        let subject_local_sequence = named_query_config
+            .and_then(|config| config.get("sequence_attribute"))
+            .and_then(Value::as_str)
+            .zip(sequence_lower_bound)
+            .filter(|_| subject_seed_attribute.is_some());
+        let datoms = self.load_datoms_for_query(
+            &db,
+            datoms_table,
+            &spec,
+            subject_local_sequence,
+            subject_seed_attribute,
+        )?;
+        if started.elapsed() > Duration::from_millis(effective_timeout_ms) {
+            return Err(self.error("query_timeout", "query exceeded its capped time budget while loading indexed datoms", json!({"timeout_ms":effective_timeout_ms,"phase":"datom_load","datoms_loaded":datoms.len()})));
+        }
+        let execution = ledger_query::execute(&spec, &datoms)
+            .map_err(|failure| self.error(failure.code, &failure.message, failure.details))?;
+        if started.elapsed() > Duration::from_millis(effective_timeout_ms) {
+            return Err(self.error(
                     "query_timeout",
                     "query exceeded its capped time budget while evaluating datoms",
                     json!({"timeout_ms":effective_timeout_ms,"phase":"evaluation","datoms_loaded":datoms.len()}),
                 ));
+        }
+        if execution.has_more && spec.order_by.is_empty() {
+            return Err(self.error(
+                "query_pagination_requires_order",
+                "a query that exceeds its limit must declare order_by for continuation",
+                json!({"limit":spec.limit}),
+            ));
+        }
+        let mut items = execution
+            .bindings
+            .iter()
+            .map(|binding| self.render_query_binding(&db, binding, &spec, &datoms))
+            .collect::<Result<Vec<_>, _>>()?;
+        let normalized_legacy_count = items
+            .iter_mut()
+            .map(|item| self.normalize_communication_result(item))
+            .filter(|count| *count > 0)
+            .count();
+        let next_cursor = execution.bindings.last().and_then(|binding| {
+            if !execution.has_more {
+                return None;
             }
-            if execution.has_more && spec.order_by.is_empty() {
-                return Err(self.error(
-                    "query_pagination_requires_order",
-                    "a query that exceeds its limit must declare order_by for continuation",
-                    json!({"limit":spec.limit}),
-                ));
-            }
-            let mut items = execution
-                .bindings
-                .iter()
-                .map(|binding| self.render_query_binding(&db, binding, &spec, &datoms))
-                .collect::<Result<Vec<_>, _>>()?;
-            let normalized_legacy_count = items
-                .iter_mut()
-                .map(|item| self.normalize_communication_result(item))
-                .filter(|count| *count > 0)
-                .count();
-            let next_cursor = execution.bindings.last().and_then(|binding| {
-                if !execution.has_more {
-                    return None;
-                }
-                let mut values = Map::new();
-                for order in &spec.order_by {
-                    if let Some(variable) = order.term.as_variable_name() {
-                        if let Some(value) = binding.get(variable) {
-                            values.insert(variable.to_string(), value.clone());
-                        }
+            let mut values = Map::new();
+            for order in &spec.order_by {
+                if let Some(variable) = order.term.as_variable_name() {
+                    if let Some(value) = binding.get(variable) {
+                        values.insert(variable.to_string(), value.clone());
                     }
                 }
-                Some(Value::String(encode_cursor_token(&json!({
-                    "schema":cursor_schema,
-                    "head":head,
-                    "query":query_scope,
-                    "values":values
-                }))))
-            });
-            let response_template = args
-                .get("template")
-                .and_then(Value::as_str)
-                .map(|template| Value::String(self.canonical_named_template(template)))
-                .unwrap_or(Value::Null);
-            let query_origin = if args.contains_key("query") {
-                "raw"
-            } else {
-                "named_template"
-            };
-            let mut response = json!({
-                "schema":self.schema_id("query.v2"),
-                "query_mode":"datalog",
-                "query_origin":query_origin,
-                "template":response_template,
-                "ledger_head":head,
-                "items":items,
-                "count":execution.bindings.len(),
-                "returned_count":execution.bindings.len(),
-                "count_semantics":"returned_page",
-                "limit":spec.limit,
-                "output_bytes":0,
-                "max_output_bytes":self.domain.caps.query_execution.max_output_bytes,
-                "has_more":execution.has_more,
-                "next_cursor":next_cursor,
-                "normalization":{"applied":normalized_legacy_count > 0,"normalized_count":normalized_legacy_count,"canonical_kind":self.domain.query.communication.canonical_kind,"legacy_read_policy":self.domain.query.communication.legacy_read_policy,"contract_version":self.domain.query.communication.contract_version},
-                "query_cost":{"planner_mode":if subject_local_sequence.is_some() {"indexed_subject_suffix"} else {"bounded_clause_plan"},"subject_local_attribute":subject_local_sequence.map(|(attribute, _)| attribute),"datoms_loaded":datoms.len(),"max_datoms":effective_max_datoms,"max_results":effective_max_results,"timeout_ms":effective_timeout_ms,"elapsed_ms":started.elapsed().as_millis() as u64,"hard_caps":{"max_datoms":hard_max_datoms,"max_results":hard_max_results,"timeout_ms":hard_timeout_ms}}
-            });
-            self.finalize_bounded_output(&mut response)?;
-            Ok(response)
+            }
+            Some(Value::String(encode_cursor_token(&json!({
+                "schema":cursor_schema,
+                "head":head,
+                "query":query_scope,
+                "values":values
+            }))))
+        });
+        let response_template = args
+            .get("template")
+            .and_then(Value::as_str)
+            .map(|template| Value::String(self.canonical_named_template(template)))
+            .unwrap_or(Value::Null);
+        let query_origin = if args.contains_key("query") {
+            "raw"
+        } else {
+            "named_template"
+        };
+        let mut response = json!({
+            "schema":self.schema_id("query.v2"),
+            "query_mode":"datalog",
+            "query_origin":query_origin,
+            "template":response_template,
+            "ledger_head":head,
+            "items":items,
+            "count":execution.bindings.len(),
+            "returned_count":execution.bindings.len(),
+            "count_semantics":"returned_page",
+            "limit":spec.limit,
+            "output_bytes":0,
+            "max_output_bytes":self.domain.caps.query_execution.max_output_bytes,
+            "has_more":execution.has_more,
+            "next_cursor":next_cursor,
+            "normalization":{"applied":normalized_legacy_count > 0,"normalized_count":normalized_legacy_count,"canonical_kind":self.domain.query.communication.canonical_kind,"legacy_read_policy":self.domain.query.communication.legacy_read_policy,"contract_version":self.domain.query.communication.contract_version},
+            "query_cost":{"planner_mode":if subject_local_sequence.is_some() {"indexed_subject_suffix"} else {"bounded_clause_plan"},"subject_local_attribute":subject_local_sequence.map(|(attribute, _)| attribute),"datoms_loaded":datoms.len(),"max_datoms":effective_max_datoms,"max_results":effective_max_results,"timeout_ms":effective_timeout_ms,"elapsed_ms":started.elapsed().as_millis() as u64,"hard_caps":{"max_datoms":hard_max_datoms,"max_results":hard_max_results,"timeout_ms":hard_timeout_ms}}
+        });
+        self.finalize_bounded_output(&mut response)?;
+        Ok(response)
     }
 
     fn normalize_communication_result(&self, value: &mut Value) -> usize {
@@ -2567,8 +2924,15 @@ impl Engine {
             Value::Object(object) => {
                 let mut count = 0;
                 if let Some(kind) = object.get("kind").and_then(Value::as_str) {
-                    if communication.legacy_read_aliases.iter().any(|legacy| legacy == kind) {
-                        object.insert("kind".into(), Value::String(communication.canonical_kind.clone()));
+                    if communication
+                        .legacy_read_aliases
+                        .iter()
+                        .any(|legacy| legacy == kind)
+                    {
+                        object.insert(
+                            "kind".into(),
+                            Value::String(communication.canonical_kind.clone()),
+                        );
                         count += 1;
                     }
                 }
@@ -2577,7 +2941,10 @@ impl Engine {
                 }
                 count
             }
-            Value::Array(values) => values.iter_mut().map(|child| self.normalize_communication_result(child)).sum(),
+            Value::Array(values) => values
+                .iter_mut()
+                .map(|child| self.normalize_communication_result(child))
+                .sum(),
             _ => 0,
         }
     }
@@ -2613,30 +2980,24 @@ impl Engine {
                     json!({"template":template,"canonical_template":canonical_template}),
                 )
             })?;
-        let mode = config
-            .get("mode")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                self.error(
-                    "query_template_invalid",
-                    "named query template lacks mode",
-                    json!({"template":canonical_template}),
-                )
-            })?;
+        let mode = config.get("mode").and_then(Value::as_str).ok_or_else(|| {
+            self.error(
+                "query_template_invalid",
+                "named query template lacks mode",
+                json!({"template":canonical_template}),
+            )
+        })?;
         self.validate_named_filter_conflicts(args)?;
         self.validate_named_query_fields(args, mode)?;
         self.validate_named_filter_types(args, mode)?;
         let config_string = |key: &str| {
-            config
-                .get(key)
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    self.error(
-                        "query_template_invalid",
-                        "named query template lacks required string configuration",
-                        json!({"template":canonical_template,"field":key}),
-                    )
-                })
+            config.get(key).and_then(Value::as_str).ok_or_else(|| {
+                self.error(
+                    "query_template_invalid",
+                    "named query template lacks required string configuration",
+                    json!({"template":canonical_template,"field":key}),
+                )
+            })
         };
         let config_fields = || {
             config
@@ -2757,10 +3118,9 @@ impl Engine {
                     json!({"triple":{"subject":"?message","attribute":participant_attribute,"object":{"input":"participant"}}}),
                     json!({"triple":{"subject":"?message","attribute":ledger_sequence,"object":"?sequence"}}),
                     json!({"triple":{"subject":"?message","attribute":ledger_event_id,"object":"?event_id"}}),
-                    json!({"compare":{"op":">","left":"?sequence","right":{"input":"after_sequence"}}})
+                    json!({"compare":{"op":">","left":"?sequence","right":{"input":"after_sequence"}}}),
                 ];
-                let sender_value = match_value("sender")
-                    .or_else(|| match_value("from"));
+                let sender_value = match_value("sender").or_else(|| match_value("from"));
                 if let Some(sender) = sender_value.and_then(Value::as_str) {
                     inputs["sender"] = json!(sender);
                     let sender_attribute = config
@@ -2816,10 +3176,19 @@ impl Engine {
                         .read_receipt_kind_attribute
                         .as_deref()
                         .unwrap_or(ledger_kind);
-                    let receipt_message_attribute = self.domain.query.read_receipt_message_attribute.as_deref();
-                    let receipt_reader_attribute = self.domain.query.read_receipt_reader_attribute.as_deref();
-                    let (Some(receipt_kind), Some(receipt_message_attribute), Some(receipt_reader_attribute)) =
-                        (receipt_kind, receipt_message_attribute, receipt_reader_attribute)
+                    let receipt_message_attribute =
+                        self.domain.query.read_receipt_message_attribute.as_deref();
+                    let receipt_reader_attribute =
+                        self.domain.query.read_receipt_reader_attribute.as_deref();
+                    let (
+                        Some(receipt_kind),
+                        Some(receipt_message_attribute),
+                        Some(receipt_reader_attribute),
+                    ) = (
+                        receipt_kind,
+                        receipt_message_attribute,
+                        receipt_reader_attribute,
+                    )
                     else {
                         return Err(self.error(
                             "message_state_unavailable",
@@ -2849,13 +3218,18 @@ impl Engine {
                     ));
                 }
                 if reply_state != "all" {
-                    let reply_attribute = self.domain.query.reply_state_attribute.as_deref().ok_or_else(|| {
-                        self.error(
-                            "reply_state_unavailable",
-                            "this domain does not configure reply relations",
-                            Value::Null,
-                        )
-                    })?;
+                    let reply_attribute = self
+                        .domain
+                        .query
+                        .reply_state_attribute
+                        .as_deref()
+                        .ok_or_else(|| {
+                            self.error(
+                                "reply_state_unavailable",
+                                "this domain does not configure reply relations",
+                                Value::Null,
+                            )
+                        })?;
                     let reply_where = json!({"where":[
                         {"triple":{"subject":"?reply","attribute":reply_attribute,"object":"?message"}}
                     ]});
@@ -2880,11 +3254,7 @@ impl Engine {
                     .and_then(Value::as_str)
                     .filter(|value| !value.trim().is_empty())
                     .ok_or_else(|| {
-                        self.error(
-                            "query_root_missing",
-                            "thread requires root",
-                            Value::Null,
-                        )
+                        self.error("query_root_missing", "thread requires root", Value::Null)
                     })?;
                 let fields = config_fields()?
                     .iter()
@@ -2898,10 +3268,7 @@ impl Engine {
                     .and_then(Value::as_str)
                     .filter(|value| !value.trim().is_empty())
                     .unwrap_or("");
-                let configured_depth = config
-                    .get("max_depth")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(8);
+                let configured_depth = config.get("max_depth").and_then(Value::as_u64).unwrap_or(8);
                 let max_depth = args
                     .get("max_depth")
                     .and_then(Value::as_u64)
@@ -2926,7 +3293,6 @@ impl Engine {
             )),
         }
     }
-
 
     fn datom_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ledger_query::Datom> {
         let value_json: String = row.get(3)?;
@@ -3089,7 +3455,13 @@ impl Engine {
             })?;
             let before = datoms.len();
             if let Some((sequence_attribute, since_event)) = subject_local_sequence {
-                let parameters: [&dyn ToSql; 5] = [attribute, &value_json, &sequence_attribute, &since_event, &row_limit];
+                let parameters: [&dyn ToSql; 5] = [
+                    attribute,
+                    &value_json,
+                    &sequence_attribute,
+                    &since_event,
+                    &row_limit,
+                ];
                 self.append_datoms(
                     db,
                     &format!(
@@ -3276,15 +3648,14 @@ impl Engine {
             datoms
                 .iter()
                 .filter(|datom| {
-                    datom.attribute == reply_state_attribute
-                        && datom.value.as_str() == Some(id)
+                    datom.attribute == reply_state_attribute && datom.value.as_str() == Some(id)
                 })
                 .count()
         };
         let is_reply = !reply_state_attribute.is_empty()
-            && datoms.iter().any(|datom| {
-                datom.attribute == reply_state_attribute && datom.subject == id
-            });
+            && datoms
+                .iter()
+                .any(|datom| datom.attribute == reply_state_attribute && datom.subject == id);
         let reply_state = json!({
             "status":if reply_count > 0 { "replied" } else { "unreplied" },
             "has_replies":reply_count > 0,
@@ -3322,8 +3693,15 @@ impl Engine {
             let id = binding
                 .get(&pull.variable)
                 .and_then(Value::as_str)
-                .ok_or_else(|| self.error("query_pull_target_invalid", "pull target is not a string entity, relation, or record id", json!({"variable":pull.variable})))?;
-            let (mut value, is_entity) = self.pull_target(db, id, &pull.fields, pull.target_kind.as_deref())?;
+                .ok_or_else(|| {
+                    self.error(
+                        "query_pull_target_invalid",
+                        "pull target is not a string entity, relation, or record id",
+                        json!({"variable":pull.variable}),
+                    )
+                })?;
+            let (mut value, is_entity) =
+                self.pull_target(db, id, &pull.fields, pull.target_kind.as_deref())?;
             if is_entity {
                 self.decorate_query_entity(db, id, &mut value, binding, datoms)?;
             }
@@ -3347,8 +3725,15 @@ impl Engine {
             let id = binding
                 .get(&pull.variable)
                 .and_then(Value::as_str)
-                .ok_or_else(|| self.error("query_pull_target_invalid", "pull target is not a string entity, relation, or record id", json!({"variable":pull.variable})))?;
-            let (mut value, is_entity) = self.pull_target(db, id, &pull.fields, pull.target_kind.as_deref())?;
+                .ok_or_else(|| {
+                    self.error(
+                        "query_pull_target_invalid",
+                        "pull target is not a string entity, relation, or record id",
+                        json!({"variable":pull.variable}),
+                    )
+                })?;
+            let (mut value, is_entity) =
+                self.pull_target(db, id, &pull.fields, pull.target_kind.as_deref())?;
             if is_entity {
                 self.decorate_query_entity(db, id, &mut value, binding, datoms)?;
             }
@@ -3370,7 +3755,13 @@ impl Engine {
             self.domain.query.read_receipt_message_attribute.as_deref(),
             self.domain.query.read_receipt_reader_attribute.as_deref(),
         ) {
-            (Some(viewer), Some(receipt_kind), Some(kind_attribute), Some(message_attribute), Some(reader_attribute)) => {
+            (
+                Some(viewer),
+                Some(receipt_kind),
+                Some(kind_attribute),
+                Some(message_attribute),
+                Some(reader_attribute),
+            ) => {
                 let receipt_ids = datoms
                     .iter()
                     .filter(|datom| {
@@ -3494,7 +3885,11 @@ impl Engine {
                     ("event_sequence".into(), json!(event_sequence)),
                     ("payload".into(), payload.clone()),
                 ]);
-                matches.push(("entity", self.render_pull_fields(fields, &base, &payload), true));
+                matches.push((
+                    "entity",
+                    self.render_pull_fields(fields, &base, &payload),
+                    true,
+                ));
             }
         }
         if target_kind.is_none() || target_kind == Some("relation") {
@@ -3517,7 +3912,16 @@ impl Engine {
                 )
                 .optional()
                 .map_err(self.db_error("projection_pull_query_failed"))?;
-            if let Some((relation_id, relation_type, source_id, relation_target_id, payload_json, event_id, event_sequence)) = relation {
+            if let Some((
+                relation_id,
+                relation_type,
+                source_id,
+                relation_target_id,
+                payload_json,
+                event_id,
+                event_sequence,
+            )) = relation
+            {
                 let payload = self.parse_pull_payload(target_id, &payload_json)?;
                 let base = Map::from_iter([
                     ("relation_id".into(), json!(relation_id)),
@@ -3528,7 +3932,11 @@ impl Engine {
                     ("event_sequence".into(), json!(event_sequence)),
                     ("payload".into(), payload.clone()),
                 ]);
-                matches.push(("relation", self.render_pull_fields(fields, &base, &payload), false));
+                matches.push((
+                    "relation",
+                    self.render_pull_fields(fields, &base, &payload),
+                    false,
+                ));
             }
         }
         if target_kind.is_none() || target_kind == Some("record") {
@@ -3558,7 +3966,11 @@ impl Engine {
                     ("event_sequence".into(), json!(event_sequence)),
                     ("payload".into(), payload.clone()),
                 ]);
-                matches.push(("record", self.render_pull_fields(fields, &base, &payload), false));
+                matches.push((
+                    "record",
+                    self.render_pull_fields(fields, &base, &payload),
+                    false,
+                ));
             }
         }
         if matches.len() > 1 {
@@ -3600,7 +4012,10 @@ impl Engine {
             .get("limit")
             .and_then(Value::as_u64)
             .unwrap_or(self.domain.caps.query_limit.default)
-            .clamp(self.domain.caps.query_limit.min, self.domain.caps.query_limit.max);
+            .clamp(
+                self.domain.caps.query_limit.min,
+                self.domain.caps.query_limit.max,
+            );
         let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0);
         let kind = args.get("kind").and_then(Value::as_str).unwrap_or("");
         let compact = args
@@ -3611,20 +4026,25 @@ impl Engine {
         let like = format!("%{text}%");
         if let Some(record_kind) = args.get("record_kind").and_then(Value::as_str) {
             let sql = format!("select record_id,record_kind,payload_json,event_id from {} where record_kind=?1 and (?2='' or payload_json like ?3) order by record_id limit ?4 offset ?5", self.records_table);
-            let mut stmt = db.prepare(&sql).map_err(self.db_error("projection_record_query_prepare_failed"))?;
+            let mut stmt = db
+                .prepare(&sql)
+                .map_err(self.db_error("projection_record_query_prepare_failed"))?;
             let projection = if compact {
                 &self.domain.query.record_compact_projection
             } else {
                 &self.domain.query.record_full_projection
             };
-            let rows = stmt.query_map(params![record_kind,text,like,limit,offset], |row| {
-                let payload = serde_json::from_str::<Value>(&row.get::<_,String>(2)?).unwrap_or(Value::Null);
-                let mut row_values = Map::new();
-                row_values.insert("record_id".into(), json!(row.get::<_,String>(0)?));
-                row_values.insert("record_kind".into(), json!(row.get::<_,String>(1)?));
-                row_values.insert("event_id".into(), json!(row.get::<_,String>(3)?));
-                Ok(Self::project_row(&row_values, &payload, projection))
-            }).map_err(self.db_error("projection_record_query_failed"))?;
+            let rows = stmt
+                .query_map(params![record_kind, text, like, limit, offset], |row| {
+                    let payload = serde_json::from_str::<Value>(&row.get::<_, String>(2)?)
+                        .unwrap_or(Value::Null);
+                    let mut row_values = Map::new();
+                    row_values.insert("record_id".into(), json!(row.get::<_, String>(0)?));
+                    row_values.insert("record_kind".into(), json!(row.get::<_, String>(1)?));
+                    row_values.insert("event_id".into(), json!(row.get::<_, String>(3)?));
+                    Ok(Self::project_row(&row_values, &payload, projection))
+                })
+                .map_err(self.db_error("projection_record_query_failed"))?;
             let items = rows
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(self.db_error("projection_record_query_row_failed"))?;
@@ -3653,20 +4073,25 @@ impl Engine {
             format!("kind in ({literals})")
         };
         let sql = format!("select entity_id,kind,payload_json,event_id from {} where {kind_predicate} and (?1='' or payload_json like ?2) order by entity_id limit ?3 offset ?4", self.entity_table);
-        let mut stmt = db.prepare(&sql).map_err(self.db_error("projection_query_prepare_failed"))?;
+        let mut stmt = db
+            .prepare(&sql)
+            .map_err(self.db_error("projection_query_prepare_failed"))?;
         let projection = if compact {
             &self.domain.query.entity_compact_projection
         } else {
             &self.domain.query.entity_full_projection
         };
-        let rows = stmt.query_map(params![text,like,limit,offset], |row| {
-            let payload = serde_json::from_str::<Value>(&row.get::<_,String>(2)?).unwrap_or(Value::Null);
-            let mut row_values = Map::new();
-            row_values.insert("entity_id".into(), json!(row.get::<_,String>(0)?));
-            row_values.insert("kind".into(), json!(row.get::<_,String>(1)?));
-            row_values.insert("event_id".into(), json!(row.get::<_,String>(3)?));
-            Ok(Self::project_row(&row_values, &payload, projection))
-        }).map_err(self.db_error("projection_query_failed"))?;
+        let rows = stmt
+            .query_map(params![text, like, limit, offset], |row| {
+                let payload =
+                    serde_json::from_str::<Value>(&row.get::<_, String>(2)?).unwrap_or(Value::Null);
+                let mut row_values = Map::new();
+                row_values.insert("entity_id".into(), json!(row.get::<_, String>(0)?));
+                row_values.insert("kind".into(), json!(row.get::<_, String>(1)?));
+                row_values.insert("event_id".into(), json!(row.get::<_, String>(3)?));
+                Ok(Self::project_row(&row_values, &payload, projection))
+            })
+            .map_err(self.db_error("projection_query_failed"))?;
         let items = rows
             .collect::<Result<Vec<_>, _>>()
             .map_err(self.db_error("projection_query_row_failed"))?;
@@ -3709,10 +4134,21 @@ impl Engine {
             .map_err(self.db_error("projection_open_failed"))?;
         let visible_entities = self.visible_entity_predicate();
         let entity_count: i64 = db
-            .query_row(&format!("select count(*) from {} where {visible_entities}", self.entity_table), [], |row| row.get(0))
+            .query_row(
+                &format!(
+                    "select count(*) from {} where {visible_entities}",
+                    self.entity_table
+                ),
+                [],
+                |row| row.get(0),
+            )
             .map_err(self.db_error("projection_count_failed"))?;
         let relation_count: i64 = db
-            .query_row(&format!("select count(*) from {}", self.relation_table), [], |row| row.get(0))
+            .query_row(
+                &format!("select count(*) from {}", self.relation_table),
+                [],
+                |row| row.get(0),
+            )
             .map_err(self.db_error("projection_count_failed"))?;
 
         let mut entity_statement = db
@@ -3891,9 +4327,23 @@ impl Engine {
             }
             let generic = query_args.contains_key("query") || query_args.contains_key("template");
             let named_fields = [
-                "recipient", "participant", "sender", "from", "to", "kinds", "since_event",
-                "after_sequence", "include_body", "direction", "viewer", "intent", "read_state",
-                "reply_state", "match", "root", "max_depth",
+                "recipient",
+                "participant",
+                "sender",
+                "from",
+                "to",
+                "kinds",
+                "since_event",
+                "after_sequence",
+                "include_body",
+                "direction",
+                "viewer",
+                "intent",
+                "read_state",
+                "reply_state",
+                "match",
+                "root",
+                "max_depth",
             ];
             let has_cursor = query_args
                 .get("cursor")
@@ -3906,7 +4356,11 @@ impl Engine {
                     json!({"index":index}),
                 ));
             }
-            if !generic && named_fields.iter().any(|field| query_args.contains_key(*field)) {
+            if !generic
+                && named_fields
+                    .iter()
+                    .any(|field| query_args.contains_key(*field))
+            {
                 return Err(self.error(
                     "query_template_missing",
                     "template is required when named-query filters are supplied in a batch item",
@@ -4148,7 +4602,10 @@ impl Engine {
         let entity_pk = self.table(&self.entity_table).primary_key.clone();
         let entity: Option<String> = db
             .query_row(
-                &format!("select payload_json from {} where {}=?1", self.entity_table, entity_pk),
+                &format!(
+                    "select payload_json from {} where {}=?1",
+                    self.entity_table, entity_pk
+                ),
                 [&id],
                 |r| r.get(0),
             )
@@ -4163,15 +4620,18 @@ impl Engine {
         })?;
         let mut stmt = db.prepare(&format!("select relation_id,relation_type,source_id,target_id,payload_json from {} where source_id=?1 or target_id=?1 order by relation_id limit ?2", self.relation_table)).map_err(self.db_error("projection_relation_prepare_failed"))?;
         let relation_fields = &self.domain.query.neighborhood_relation_fields;
-        let rows = stmt.query_map(params![id,limit], |r| {
-            let payload = serde_json::from_str::<Value>(&r.get::<_,String>(4)?).unwrap_or(Value::Null);
-            let mut row_values = Map::new();
-            row_values.insert("relation_id".into(), json!(r.get::<_,String>(0)?));
-            row_values.insert("relation_type".into(), json!(r.get::<_,String>(1)?));
-            row_values.insert("source_id".into(), json!(r.get::<_,String>(2)?));
-            row_values.insert("target_id".into(), json!(r.get::<_,String>(3)?));
-            Ok(Self::project_row(&row_values, &payload, relation_fields))
-        }).map_err(self.db_error("projection_relation_query_failed"))?;
+        let rows = stmt
+            .query_map(params![id, limit], |r| {
+                let payload =
+                    serde_json::from_str::<Value>(&r.get::<_, String>(4)?).unwrap_or(Value::Null);
+                let mut row_values = Map::new();
+                row_values.insert("relation_id".into(), json!(r.get::<_, String>(0)?));
+                row_values.insert("relation_type".into(), json!(r.get::<_, String>(1)?));
+                row_values.insert("source_id".into(), json!(r.get::<_, String>(2)?));
+                row_values.insert("target_id".into(), json!(r.get::<_, String>(3)?));
+                Ok(Self::project_row(&row_values, &payload, relation_fields))
+            })
+            .map_err(self.db_error("projection_relation_query_failed"))?;
         let relations = rows
             .collect::<Result<Vec<_>, _>>()
             .map_err(self.db_error("projection_relation_row_failed"))?;
@@ -4185,15 +4645,22 @@ impl Engine {
             .join(" or ");
         let record_sql = format!("select record_id,record_kind,payload_json,event_id from {} where {} order by record_id limit ?2", self.records_table, match_clause);
         let record_fields = &self.domain.query.neighborhood_record_fields;
-        let mut record_stmt = db.prepare(&record_sql).map_err(self.db_error("projection_neighborhood_record_prepare_failed"))?;
-        let records = record_stmt.query_map(params![id,limit], |r| {
-            let payload = serde_json::from_str::<Value>(&r.get::<_,String>(2)?).unwrap_or(Value::Null);
-            let mut row_values = Map::new();
-            row_values.insert("record_id".into(), json!(r.get::<_,String>(0)?));
-            row_values.insert("record_kind".into(), json!(r.get::<_,String>(1)?));
-            row_values.insert("event_id".into(), json!(r.get::<_,String>(3)?));
-            Ok(Self::project_row(&row_values, &payload, record_fields))
-        }).map_err(self.db_error("projection_neighborhood_record_query_failed"))?.collect::<Result<Vec<_>, _>>().map_err(self.db_error("projection_neighborhood_record_row_failed"))?;
+        let mut record_stmt = db
+            .prepare(&record_sql)
+            .map_err(self.db_error("projection_neighborhood_record_prepare_failed"))?;
+        let records = record_stmt
+            .query_map(params![id, limit], |r| {
+                let payload =
+                    serde_json::from_str::<Value>(&r.get::<_, String>(2)?).unwrap_or(Value::Null);
+                let mut row_values = Map::new();
+                row_values.insert("record_id".into(), json!(r.get::<_, String>(0)?));
+                row_values.insert("record_kind".into(), json!(r.get::<_, String>(1)?));
+                row_values.insert("event_id".into(), json!(r.get::<_, String>(3)?));
+                Ok(Self::project_row(&row_values, &payload, record_fields))
+            })
+            .map_err(self.db_error("projection_neighborhood_record_query_failed"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(self.db_error("projection_neighborhood_record_row_failed"))?;
         Ok(
             json!({"schema":self.schema_id("neighborhood.v1"),"status":"ok","entity":serde_json::from_str::<Value>(&entity).unwrap_or(Value::Null),"relations":relations,"records":records,"limit":limit,"bounded":true}),
         )
@@ -4210,11 +4677,18 @@ impl Engine {
             .get("format")
             .and_then(Value::as_str)
             .unwrap_or(&feature.default_format);
-        let entities = self.query_locked(root, &Map::from_iter([("limit".into(), json!(caps.entities))]))?["items"].clone();
+        let entities = self.query_locked(
+            root,
+            &Map::from_iter([("limit".into(), json!(caps.entities))]),
+        )?["items"]
+            .clone();
         let db = Connection::open(self.projection_path(root))
             .map_err(self.db_error("projection_open_failed"))?;
         let mut stmt = db
-            .prepare(&format!("select payload_json from {} order by relation_id limit {}", self.relation_table, caps.relations))
+            .prepare(&format!(
+                "select payload_json from {} order by relation_id limit {}",
+                self.relation_table, caps.relations
+            ))
             .map_err(self.db_error("projection_export_prepare_failed"))?;
         let relations = stmt
             .query_map([], |r| {
@@ -4224,7 +4698,10 @@ impl Engine {
             .collect::<Result<Vec<_>, _>>()
             .map_err(self.db_error("projection_export_row_failed"))?;
         let mut record_stmt = db
-            .prepare(&format!("select payload_json from {} order by record_id limit {}", self.records_table, caps.records))
+            .prepare(&format!(
+                "select payload_json from {} order by record_id limit {}",
+                self.records_table, caps.records
+            ))
             .map_err(self.db_error("projection_export_record_prepare_failed"))?;
         let records = record_stmt
             .query_map([], |r| {
@@ -4245,9 +4722,7 @@ impl Engine {
 
     fn rebuild_projection(&self, root: &Path) -> Result<(), Value> {
         self.prepare(root)?;
-        self.with_authority_lock(root, "projection", || {
-            self.rebuild_projection_locked(root)
-        })
+        self.with_authority_lock(root, "projection", || self.rebuild_projection_locked(root))
     }
 
     fn with_stable_projection<T>(
@@ -4284,16 +4759,9 @@ impl Engine {
             .map_err(self.db_error("projection_open_failed"))?;
         let stored = db
             .query_row(
-                &format!(
-                    "select ledger_head,ledger_sequence from {table} where meta_id='current'"
-                ),
+                &format!("select ledger_head,ledger_sequence from {table} where meta_id='current'"),
                 [],
-                |row| {
-                    Ok((
-                        row.get::<_, Option<String>>(0)?,
-                        row.get::<_, i64>(1)?,
-                    ))
-                },
+                |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?)),
             )
             .optional();
         let Ok(Some((stored_head, stored_sequence))) = stored else {
@@ -4307,11 +4775,7 @@ impl Engine {
     }
 
     fn rebuild_projection_locked(&self, root: &Path) -> Result<(), Value> {
-        event_ledger::verify(
-            self.error,
-            &self.ledger_layout(root),
-            self.event_hash_field,
-        )?;
+        event_ledger::verify(self.error, &self.ledger_layout(root), self.event_hash_field)?;
         let ledger_files = self.ledger_files(root)?;
         let ledger_head = self.ledger_head(root)?;
         let ledger_sequence = ledger_files.len() as u64;
@@ -4344,15 +4808,17 @@ impl Engine {
         if !projection_path.exists() {
             return Ok(false);
         }
-        let mut db = Connection::open(&projection_path)
-            .map_err(self.db_error("projection_open_failed"))?;
-        let stored = db.query_row(
-            &format!(
-                "select ledger_head,ledger_sequence from {meta_table} where meta_id='current'"
-            ),
-            [],
-            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?)),
-        ).optional();
+        let mut db =
+            Connection::open(&projection_path).map_err(self.db_error("projection_open_failed"))?;
+        let stored = db
+            .query_row(
+                &format!(
+                    "select ledger_head,ledger_sequence from {meta_table} where meta_id='current'"
+                ),
+                [],
+                |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional();
         let Ok(Some((stored_head, stored_sequence))) = stored else {
             return Ok(false);
         };
@@ -4363,13 +4829,17 @@ impl Engine {
             None
         } else {
             let event = self.read_json(&ledger_files[stored_sequence as usize - 1])?;
-            event.get(self.event_hash_field).and_then(Value::as_str).map(str::to_string)
+            event
+                .get(self.event_hash_field)
+                .and_then(Value::as_str)
+                .map(str::to_string)
         };
         if prefix_head != stored_head {
             return Ok(false);
         }
 
-        let tx = db.transaction()
+        let tx = db
+            .transaction()
             .map_err(self.db_error("projection_increment_begin_failed"))?;
         for path in ledger_files.iter().skip(stored_sequence as usize) {
             let event = self.read_json(path)?;
@@ -4396,14 +4866,29 @@ impl Engine {
         for op in event["operations"].as_array().into_iter().flatten() {
             let op_kind = op["op"].as_str().unwrap_or_default();
             if op_kind == self.domain.query.communication.canonicalization_operation {
-                let entity_id = op.get("entity_id").and_then(Value::as_str).unwrap_or_default();
-                let canonical_kind = op.get("canonical_kind").and_then(Value::as_str).unwrap_or_default();
-                let changed = tx.execute(
-                    &format!("update {} set kind=?1 where entity_id=?2", self.entity_table),
-                    params![canonical_kind, entity_id],
-                ).map_err(self.db_error("projection_entity_canonicalization_failed"))?;
+                let entity_id = op
+                    .get("entity_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let canonical_kind = op
+                    .get("canonical_kind")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let changed = tx
+                    .execute(
+                        &format!(
+                            "update {} set kind=?1 where entity_id=?2",
+                            self.entity_table
+                        ),
+                        params![canonical_kind, entity_id],
+                    )
+                    .map_err(self.db_error("projection_entity_canonicalization_failed"))?;
                 if changed != 1 {
-                    return Err(self.error("projection_entity_canonicalization_missing", "canonicalization target is absent from the projection", json!({"entity_id":entity_id})));
+                    return Err(self.error(
+                        "projection_entity_canonicalization_missing",
+                        "canonicalization target is absent from the projection",
+                        json!({"entity_id":entity_id}),
+                    ));
                 }
                 if let Some(table) = &self.datoms_table {
                     tx.execute(
@@ -4411,13 +4896,44 @@ impl Engine {
                         params![entity_id],
                     ).map_err(self.db_error("projection_datom_delete_failed"))?;
                     let sequence = event["sequence"].as_u64().unwrap_or_default();
-                    self.write_datom(tx, table, entity_id, entity_id, "narada.ledger:entity/kind", &Value::String(canonical_kind.to_string()), sequence, event_id)?;
-                    self.write_datom(tx, table, entity_id, entity_id, "narada.ledger:entity/kind_canonicalized_from", op.get("legacy_kind").unwrap_or(&Value::Null), sequence, event_id)?;
-                    self.write_datom(tx, table, entity_id, entity_id, "narada.ledger:entity/kind_canonicalization_event", &Value::String(event_id.to_string()), sequence, event_id)?;
+                    self.write_datom(
+                        tx,
+                        table,
+                        entity_id,
+                        entity_id,
+                        "narada.ledger:entity/kind",
+                        &Value::String(canonical_kind.to_string()),
+                        sequence,
+                        event_id,
+                    )?;
+                    self.write_datom(
+                        tx,
+                        table,
+                        entity_id,
+                        entity_id,
+                        "narada.ledger:entity/kind_canonicalized_from",
+                        op.get("legacy_kind").unwrap_or(&Value::Null),
+                        sequence,
+                        event_id,
+                    )?;
+                    self.write_datom(
+                        tx,
+                        table,
+                        entity_id,
+                        entity_id,
+                        "narada.ledger:entity/kind_canonicalization_event",
+                        &Value::String(event_id.to_string()),
+                        sequence,
+                        event_id,
+                    )?;
                 }
                 continue;
             }
-            let Some(fold) = self.domain.projection.fold.iter()
+            let Some(fold) = self
+                .domain
+                .projection
+                .fold
+                .iter()
                 .find(|entry| entry.operation == op_kind)
             else {
                 continue;
@@ -4434,7 +4950,10 @@ impl Engine {
             let mut values = Vec::with_capacity(table.columns.len());
             for column in &table.columns {
                 let value = if *column == table.primary_key {
-                    op.get(&fold.key_field).and_then(Value::as_str).unwrap().to_string()
+                    op.get(&fold.key_field)
+                        .and_then(Value::as_str)
+                        .unwrap()
+                        .to_string()
                 } else if column == "payload_json" {
                     op.to_string()
                 } else if column == "event_id" {
@@ -4442,10 +4961,15 @@ impl Engine {
                 } else if column == "event_sequence" {
                     event["sequence"].as_u64().unwrap_or_default().to_string()
                 } else {
-                    let mapping = fold.columns.get(column)
-                        .and_then(Value::as_str).unwrap_or_default();
-                    op.get(mapping).and_then(Value::as_str)
-                        .unwrap_or(mapping).to_string()
+                    let mapping = fold
+                        .columns
+                        .get(column)
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    op.get(mapping)
+                        .and_then(Value::as_str)
+                        .unwrap_or(mapping)
+                        .to_string()
                 };
                 values.push(value);
             }
@@ -4490,17 +5014,35 @@ impl Engine {
             let id = operation
                 .get("entity_id")
                 .and_then(Value::as_str)
-                .ok_or_else(|| self.error("projection_datom_invalid", "entity operation lacks entity_id", operation.clone()))?;
+                .ok_or_else(|| {
+                    self.error(
+                        "projection_datom_invalid",
+                        "entity operation lacks entity_id",
+                        operation.clone(),
+                    )
+                })?;
             (id.to_string(), id.to_string())
         } else if operation_kind == self.relation_op() {
             let origin = operation
                 .get("relation_id")
                 .and_then(Value::as_str)
-                .ok_or_else(|| self.error("projection_datom_invalid", "relation operation lacks relation_id", operation.clone()))?;
+                .ok_or_else(|| {
+                    self.error(
+                        "projection_datom_invalid",
+                        "relation operation lacks relation_id",
+                        operation.clone(),
+                    )
+                })?;
             let subject = operation
                 .get("source_id")
                 .and_then(Value::as_str)
-                .ok_or_else(|| self.error("projection_datom_invalid", "relation operation lacks source_id", operation.clone()))?;
+                .ok_or_else(|| {
+                    self.error(
+                        "projection_datom_invalid",
+                        "relation operation lacks source_id",
+                        operation.clone(),
+                    )
+                })?;
             (origin.to_string(), subject.to_string())
         } else {
             let fold = self
@@ -4509,11 +5051,23 @@ impl Engine {
                 .fold
                 .iter()
                 .find(|entry| entry.operation == operation_kind)
-                .ok_or_else(|| self.error("projection_datom_invalid", "operation has no fold descriptor", json!({"operation":operation_kind})))?;
+                .ok_or_else(|| {
+                    self.error(
+                        "projection_datom_invalid",
+                        "operation has no fold descriptor",
+                        json!({"operation":operation_kind}),
+                    )
+                })?;
             let id = operation
                 .get(&fold.key_field)
                 .and_then(Value::as_str)
-                .ok_or_else(|| self.error("projection_datom_invalid", "record operation lacks its identity field", json!({"operation":operation_kind,"field":fold.key_field})))?;
+                .ok_or_else(|| {
+                    self.error(
+                        "projection_datom_invalid",
+                        "record operation lacks its identity field",
+                        json!({"operation":operation_kind,"field":fold.key_field}),
+                    )
+                })?;
             (id.to_string(), id.to_string())
         };
         let identity_field = if operation_kind == self.entity_op() {
@@ -4548,23 +5102,83 @@ impl Engine {
         } else {
             "narada.ledger:record/id"
         };
-        self.write_datom(tx, table, &origin_id, &metadata_subject, identity_attribute, &Value::String(origin_id.clone()), sequence, event_id)?;
-        self.write_datom(tx, table, &origin_id, &metadata_subject, "narada.ledger:event/id", &Value::String(event_id.to_string()), sequence, event_id)?;
-        self.write_datom(tx, table, &origin_id, &metadata_subject, "narada.ledger:event/sequence", &json!(sequence), sequence, event_id)?;
+        self.write_datom(
+            tx,
+            table,
+            &origin_id,
+            &metadata_subject,
+            identity_attribute,
+            &Value::String(origin_id.clone()),
+            sequence,
+            event_id,
+        )?;
+        self.write_datom(
+            tx,
+            table,
+            &origin_id,
+            &metadata_subject,
+            "narada.ledger:event/id",
+            &Value::String(event_id.to_string()),
+            sequence,
+            event_id,
+        )?;
+        self.write_datom(
+            tx,
+            table,
+            &origin_id,
+            &metadata_subject,
+            "narada.ledger:event/sequence",
+            &json!(sequence),
+            sequence,
+            event_id,
+        )?;
 
         if operation_kind == self.entity_op() {
             if let Some(kind) = operation.get("kind") {
-                self.write_datom(tx, table, &origin_id, &metadata_subject, "narada.ledger:entity/kind", kind, sequence, event_id)?;
+                self.write_datom(
+                    tx,
+                    table,
+                    &origin_id,
+                    &metadata_subject,
+                    "narada.ledger:entity/kind",
+                    kind,
+                    sequence,
+                    event_id,
+                )?;
             }
         } else if operation_kind == self.relation_op() {
             if let Some(relation_type) = operation.get("relation_type").and_then(Value::as_str) {
-                self.write_datom(tx, table, &origin_id, &metadata_subject, "narada.ledger:relation/type", &Value::String(relation_type.to_string()), sequence, event_id)?;
+                self.write_datom(
+                    tx,
+                    table,
+                    &origin_id,
+                    &metadata_subject,
+                    "narada.ledger:relation/type",
+                    &Value::String(relation_type.to_string()),
+                    sequence,
+                    event_id,
+                )?;
                 if let Some(target) = operation.get("target_id") {
-                    let attribute = format!("{}:{relation_type}", self.domain.identity.schema_namespace);
-                    self.write_datom(tx, table, &origin_id, &subject, &attribute, target, sequence, event_id)?;
-                    if let Some(inverse_type) = self.domain.query.relation_inverses.get(relation_type) {
-                        let inverse = format!("{}:{inverse_type}", self.domain.identity.schema_namespace);
-                        self.write_datom(tx, table, &origin_id, target.as_str().unwrap_or_default(), &inverse, &Value::String(subject.clone()), sequence, event_id)?;
+                    let attribute =
+                        format!("{}:{relation_type}", self.domain.identity.schema_namespace);
+                    self.write_datom(
+                        tx, table, &origin_id, &subject, &attribute, target, sequence, event_id,
+                    )?;
+                    if let Some(inverse_type) =
+                        self.domain.query.relation_inverses.get(relation_type)
+                    {
+                        let inverse =
+                            format!("{}:{inverse_type}", self.domain.identity.schema_namespace);
+                        self.write_datom(
+                            tx,
+                            table,
+                            &origin_id,
+                            target.as_str().unwrap_or_default(),
+                            &inverse,
+                            &Value::String(subject.clone()),
+                            sequence,
+                            event_id,
+                        )?;
                     }
                 }
             }
@@ -4599,7 +5213,16 @@ impl Engine {
                     continue;
                 }
                 let attribute = format!("{}:{field}", self.domain.identity.schema_namespace);
-                self.write_datom(tx, table, &origin_id, &metadata_subject, &attribute, value, sequence, event_id)?;
+                self.write_datom(
+                    tx,
+                    table,
+                    &origin_id,
+                    &metadata_subject,
+                    &attribute,
+                    value,
+                    sequence,
+                    event_id,
+                )?;
             }
         }
         Ok(())
@@ -4705,26 +5328,63 @@ impl Engine {
         for operation in operations {
             let op_kind = operation["op"].as_str().unwrap_or_default();
             if op_kind == self.domain.query.communication.canonicalization_operation {
-                let entity_id = operation.get("entity_id").and_then(Value::as_str).unwrap_or_default();
-                let legacy_kind = operation.get("legacy_kind").and_then(Value::as_str).unwrap_or_default();
-                let evidence = operation.get("equivalence_evidence").and_then(Value::as_object).ok_or_else(|| self.error(
-                    "communication_canonicalization_evidence_required",
-                    "canonicalization evidence is missing",
-                    json!({"entity_id":entity_id}),
-                ))?;
-                let expected_digest = evidence.get("payload_sha256").and_then(Value::as_str).unwrap_or_default();
-                let expected_event = evidence.get("originating_event_id").and_then(Value::as_str).unwrap_or_default();
-                let db = Connection::open(self.projection_path(root)).map_err(self.db_error("projection_open_failed"))?;
-                let current = db.query_row(
-                    &format!("select kind,payload_json,event_id from {} where entity_id=?1", self.entity_table),
-                    params![entity_id],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
-                ).optional().map_err(self.db_error("communication_canonicalization_lookup_failed"))?;
+                let entity_id = operation
+                    .get("entity_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let legacy_kind = operation
+                    .get("legacy_kind")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let evidence = operation
+                    .get("equivalence_evidence")
+                    .and_then(Value::as_object)
+                    .ok_or_else(|| {
+                        self.error(
+                            "communication_canonicalization_evidence_required",
+                            "canonicalization evidence is missing",
+                            json!({"entity_id":entity_id}),
+                        )
+                    })?;
+                let expected_digest = evidence
+                    .get("payload_sha256")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let expected_event = evidence
+                    .get("originating_event_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let db = Connection::open(self.projection_path(root))
+                    .map_err(self.db_error("projection_open_failed"))?;
+                let current = db
+                    .query_row(
+                        &format!(
+                            "select kind,payload_json,event_id from {} where entity_id=?1",
+                            self.entity_table
+                        ),
+                        params![entity_id],
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, String>(2)?,
+                            ))
+                        },
+                    )
+                    .optional()
+                    .map_err(self.db_error("communication_canonicalization_lookup_failed"))?;
                 let Some((current_kind, payload_json, originating_event_id)) = current else {
-                    return Err(self.error("dangling_reference", "canonicalization references an unknown entity", json!({"entity_id":entity_id})));
+                    return Err(self.error(
+                        "dangling_reference",
+                        "canonicalization references an unknown entity",
+                        json!({"entity_id":entity_id}),
+                    ));
                 };
                 let actual_digest = sha256(payload_json.as_bytes());
-                if current_kind != legacy_kind || actual_digest != expected_digest || originating_event_id != expected_event {
+                if current_kind != legacy_kind
+                    || actual_digest != expected_digest
+                    || originating_event_id != expected_event
+                {
                     return Err(self.error(
                         &self.domain.query.communication.collision_refusal_code,
                         "canonicalization evidence does not prove identity and payload provenance equivalence",
@@ -4799,7 +5459,11 @@ impl Engine {
                 let value = self.required(obj, &field)?;
                 if field == "kind" && kind == self.entity_op() {
                     let communication = &self.domain.query.communication;
-                    if communication.legacy_read_aliases.iter().any(|legacy| legacy == &value) {
+                    if communication
+                        .legacy_read_aliases
+                        .iter()
+                        .any(|legacy| legacy == &value)
+                    {
                         return Err(self.error(
                             &communication.legacy_write_refusal_code,
                             "legacy communication kinds are read aliases and cannot authorize writes",
@@ -4879,9 +5543,18 @@ impl Engine {
             }
             if kind == self.domain.query.communication.canonicalization_operation {
                 let communication = &self.domain.query.communication;
-                let legacy_kind = obj.get("legacy_kind").and_then(Value::as_str).unwrap_or_default();
-                let canonical_kind = obj.get("canonical_kind").and_then(Value::as_str).unwrap_or_default();
-                if !communication.legacy_read_aliases.iter().any(|legacy| legacy == legacy_kind)
+                let legacy_kind = obj
+                    .get("legacy_kind")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let canonical_kind = obj
+                    .get("canonical_kind")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if !communication
+                    .legacy_read_aliases
+                    .iter()
+                    .any(|legacy| legacy == legacy_kind)
                     || canonical_kind != communication.canonical_kind
                 {
                     return Err(self.error(
@@ -4890,11 +5563,16 @@ impl Engine {
                         json!({"legacy_kind":legacy_kind,"canonical_kind":canonical_kind,"canonical_replacement":communication.canonical_kind,"legacy_read_aliases":communication.legacy_read_aliases}),
                     ));
                 }
-                let evidence = obj.get("equivalence_evidence").and_then(Value::as_object).ok_or_else(|| self.error(
+                let evidence = obj
+                    .get("equivalence_evidence")
+                    .and_then(Value::as_object)
+                    .ok_or_else(|| {
+                        self.error(
                     "communication_canonicalization_evidence_required",
                     "canonicalization requires payload digest and originating event evidence",
                     json!({"entity_id":obj.get("entity_id")}),
-                ))?;
+                )
+                    })?;
                 for field in ["payload_sha256", "originating_event_id"] {
                     self.required(evidence, field)?;
                 }
@@ -5115,10 +5793,7 @@ impl Engine {
         Ok(claims)
     }
 
-    fn find_sequence_claim_by_idempotency<'a>(
-        claims: &'a [Value],
-        key: &str,
-    ) -> Option<&'a Value> {
+    fn find_sequence_claim_by_idempotency<'a>(claims: &'a [Value], key: &str) -> Option<&'a Value> {
         claims
             .iter()
             .find(|claim| claim.get("idempotency_key").and_then(Value::as_str) == Some(key))
@@ -5227,11 +5902,7 @@ impl Engine {
     }
 
     fn load_proposal(&self, root: &Path, id: &str) -> Result<Value, Value> {
-        self.read_json(
-            &self
-                .proposals(root)
-                .join(format!("{}.json", safe_name(id))),
-        )
+        self.read_json(&self.proposals(root).join(format!("{}.json", safe_name(id))))
     }
 
     fn read_json(&self, path: &Path) -> Result<Value, Value> {
@@ -5433,6 +6104,18 @@ mod tests {
             value.pointer("/minimal_example/arguments/operations/2/op"),
             Some(&json!("relation.declare"))
         );
+        assert_eq!(
+            value.pointer("/payload_transport/accepted_by/1"),
+            Some(&json!("epistemic_graph_submit_review_admit"))
+        );
+        assert_eq!(
+            value.pointer("/immutable_payload_recovery/steps/1/action"),
+            Some(&json!("create_successor_revision"))
+        );
+        assert_eq!(
+            value.pointer("/communication_example/kind"),
+            Some(&json!("narada.epistemic:communication"))
+        );
         assert!(value["concurrency_rule"]
             .as_str()
             .unwrap_or_default()
@@ -5462,12 +6145,12 @@ mod tests {
 
     #[test]
     fn disabled_feature_tools_are_hidden_and_refused() {
-        let mut value: Value = serde_json::from_str(
-            &fs::read_to_string(descriptor_path()).expect("descriptor text"),
-        )
-        .expect("descriptor json");
+        let mut value: Value =
+            serde_json::from_str(&fs::read_to_string(descriptor_path()).expect("descriptor text"))
+                .expect("descriptor json");
         value["features"]["source_inspect"]["enabled"] = json!(false);
-        let engine = Engine::new(Descriptor::from_value(value).expect("descriptor")).expect("engine");
+        let engine =
+            Engine::new(Descriptor::from_value(value).expect("descriptor")).expect("engine");
         assert!(!engine
             .list_tools()
             .iter()
@@ -5546,9 +6229,14 @@ mod tests {
         assert_eq!(failure["details"]["field"], "sender");
 
         let legacy = json!({"op":"entity.declare","entity_id":"communication:legacy","kind":"communication","title":"Legacy","sender":"a","recipient":"b","intent":"result","sent_at":"2026-08-19T19:00:00Z"});
-        let failure = engine.validate_operations(&[legacy], false).expect_err("legacy write must refuse");
+        let failure = engine
+            .validate_operations(&[legacy], false)
+            .expect_err("legacy write must refuse");
         assert_eq!(failure["code"], "legacy_communication_kind_write_refused");
-        assert_eq!(failure["details"]["canonical_replacement"], "narada.epistemic:communication");
+        assert_eq!(
+            failure["details"]["canonical_replacement"],
+            "narada.epistemic:communication"
+        );
 
         let guidance = engine.guidance();
         assert_eq!(
@@ -5564,7 +6252,8 @@ mod tests {
     #[test]
     fn payload_backed_submit_review_admit_preserves_canonical_validation() {
         let engine = engine();
-        let root = std::env::temp_dir().join(format!("epistemic-payload-submit-{}", Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("epistemic-payload-submit-{}", Uuid::new_v4()));
         let reference = "mcp_payload:epistemic-submit-test@v1";
         let payload = json!({
             "actor":"payload-test",
@@ -5577,8 +6266,7 @@ mod tests {
             }]
         });
         let canonical = serde_json::to_vec(&canonical_json(&payload)).expect("canonical payload");
-        let path = root
-            .join(".ai/tmp/mcp-payloads/workspace/epistemic-submit-test/v1.json");
+        let path = root.join(".ai/tmp/mcp-payloads/workspace/epistemic-submit-test/v1.json");
         fs::create_dir_all(path.parent().expect("payload parent")).expect("payload directory");
         fs::write(
             &path,
@@ -5596,20 +6284,74 @@ mod tests {
         .expect("write payload");
 
         let resolved = engine
-            .resolve_payload_arguments(&root, &Map::from_iter([("payload_ref".into(), json!(reference))]))
+            .resolve_payload_arguments(
+                &root,
+                &Map::from_iter([("payload_ref".into(), json!(reference))]),
+            )
             .expect("resolve immutable payload");
         let admitted = engine
             .submit_review_admit(&root, &resolved)
             .expect("payload-backed canonical admission");
         assert_eq!(admitted["status"], "admitted");
 
+        let legacy_payload = json!({
+            "actor":"payload-test",
+            "authority_basis":{"kind":"test","summary":"Immutable legacy payload refusal fixture."},
+            "operations":[{
+                "op":"entity.declare","local_ref":"message","kind":"marici:communication",
+                "sender":"payload-test","recipient":"payload-reviewer","title":"Legacy payload",
+                "intent":"result","sent_at":"2026-08-24T16:00:00Z"
+            }]
+        });
+        let legacy_canonical =
+            serde_json::to_vec(&canonical_json(&legacy_payload)).expect("canonical legacy payload");
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&json!({
+                "schema":"narada.mcp_payload.revision.v1","ref":reference,
+                "payload_id":"epistemic-submit-test","revision":1,"payload":legacy_payload,
+                "byte_size":legacy_canonical.len(),"sha256":sha256(&legacy_canonical)
+            }))
+            .expect("legacy payload record"),
+        )
+        .expect("write legacy payload");
+        let failure = engine
+            .call_tool(
+                "epistemic_graph_submit_review_admit",
+                &Map::from_iter([("payload_ref".into(), json!(reference))]),
+                &root,
+            )
+            .expect_err("legacy kind in immutable payload must refuse with recovery");
+        assert_eq!(failure["code"], "legacy_communication_kind_write_refused");
+        assert_eq!(
+            failure["details"]["input_transport"],
+            "immutable_payload_ref"
+        );
+        assert_eq!(failure["details"]["payload_revision_mutable"], false);
+        assert_eq!(failure["details"]["graph_mutation_committed"], false);
+        assert_eq!(
+            failure["details"]["recovery"]["suggested_payload_ref"],
+            "mcp_payload:epistemic-submit-test@v2"
+        );
+        assert_eq!(
+            failure["details"]["recovery"]["replace"]["entity.kind"]["to"],
+            "narada.epistemic:communication"
+        );
+
         let mut record: Value =
             serde_json::from_slice(&fs::read(&path).expect("read payload")).expect("payload JSON");
-        record["sha256"] = json!("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
-        fs::write(&path, serde_json::to_vec_pretty(&record).expect("tampered payload"))
-            .expect("write tampered payload");
+        record["sha256"] =
+            json!("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&record).expect("tampered payload"),
+        )
+        .expect("write tampered payload");
         let failure = engine
-            .resolve_payload_arguments(&root, &Map::from_iter([("payload_ref".into(), json!(reference))]))
+            .resolve_payload_arguments(
+                &root,
+                &Map::from_iter([("payload_ref".into(), json!(reference))]),
+            )
             .expect_err("tampered payload must refuse");
         assert_eq!(failure["code"], "payload_ref_sha256_mismatch");
         let _ = fs::remove_dir_all(root);
@@ -5622,7 +6364,9 @@ mod tests {
             "epistemic-communication-alias-test-{}",
             Uuid::new_v4()
         ));
-        engine.rebuild_projection(&root).expect("initial projection");
+        engine
+            .rebuild_projection(&root)
+            .expect("initial projection");
         event_ledger::append_event(
             engine.error,
             &engine.ledger_layout(&root),
@@ -5637,20 +6381,26 @@ mod tests {
                 &Map::from_iter([
                     ("actor".into(), json!("tester")),
                     ("authority_basis".into(), json!({"kind":"test"})),
-                    ("idempotency_key".into(), json!("communication-alias-proposal")),
-                    ("operations".into(), json!([
-                        {
-                            "op":"entity.declare",
-                            "entity_id":"communication:canonical",
-                            "kind":"narada.epistemic:communication",
-                            "title":"Canonical message",
-                            "sender":"marici.Nima",
-                            "recipient":"marici.Benincasa",
-                            "body":"canonical body",
-                            "intent":"reply",
-                            "sent_at":"2026-08-20T00:01:00Z"
-                        }
-                    ])),
+                    (
+                        "idempotency_key".into(),
+                        json!("communication-alias-proposal"),
+                    ),
+                    (
+                        "operations".into(),
+                        json!([
+                            {
+                                "op":"entity.declare",
+                                "entity_id":"communication:canonical",
+                                "kind":"narada.epistemic:communication",
+                                "title":"Canonical message",
+                                "sender":"marici.Nima",
+                                "recipient":"marici.Benincasa",
+                                "body":"canonical body",
+                                "intent":"reply",
+                                "sent_at":"2026-08-20T00:01:00Z"
+                            }
+                        ]),
+                    ),
                 ]),
             )
             .expect("proposal");
@@ -5661,20 +6411,41 @@ mod tests {
                     ("proposal_id".into(), proposal["proposal_id"].clone()),
                     ("actor".into(), json!("tester")),
                     ("authority_basis".into(), json!({"kind":"test"})),
-                    ("idempotency_key".into(), json!("communication-alias-admission")),
+                    (
+                        "idempotency_key".into(),
+                        json!("communication-alias-admission"),
+                    ),
                 ]),
             )
             .expect("admit");
 
-        let canonical = engine.generic_query(&root, &Map::from_iter([("template".into(), json!("inbox")), ("recipient".into(), json!("marici.Benincasa")), ("limit".into(), json!(10))])).expect("canonical query");
+        let canonical = engine
+            .generic_query(
+                &root,
+                &Map::from_iter([
+                    ("template".into(), json!("inbox")),
+                    ("recipient".into(), json!("marici.Benincasa")),
+                    ("limit".into(), json!(10)),
+                ]),
+            )
+            .expect("canonical query");
         assert_eq!(canonical["count"], 2);
-        assert!(canonical["items"].as_array().unwrap().iter().all(|item| item["kind"] == "narada.epistemic:communication"));
+        assert!(canonical["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["kind"] == "narada.epistemic:communication"));
         assert_eq!(canonical["normalization"]["applied"], true);
         assert_eq!(canonical["normalization"]["normalized_count"], 1);
 
-        let preflight = engine.communication_migration_preflight(&root, &Map::new()).expect("migration preflight");
+        let preflight = engine
+            .communication_migration_preflight(&root, &Map::new())
+            .expect("migration preflight");
         assert_eq!(preflight["census"]["by_kind"]["communication"], 1);
-        assert_eq!(preflight["proposed_operations"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            preflight["proposed_operations"].as_array().unwrap().len(),
+            1
+        );
         let originating_event = preflight["census"]["messages"][0]["event_id"].clone();
         let mut collision_operation = preflight["proposed_operations"][0].clone();
         collision_operation["equivalence_evidence"]["payload_sha256"] =
@@ -5694,14 +6465,23 @@ mod tests {
             .proposal_admit(
                 &root,
                 &Map::from_iter([
-                    ("proposal_id".into(), collision_proposal["proposal_id"].clone()),
+                    (
+                        "proposal_id".into(),
+                        collision_proposal["proposal_id"].clone(),
+                    ),
                     ("actor".into(), json!("tester")),
                     ("authority_basis".into(), json!({"kind":"test"})),
-                    ("idempotency_key".into(), json!("communication-collision-admission")),
+                    (
+                        "idempotency_key".into(),
+                        json!("communication-collision-admission"),
+                    ),
                 ]),
             )
             .expect_err("mismatched canonicalization evidence must stop at admission");
-        assert_eq!(collision["code"], "communication_kind_canonicalization_collision");
+        assert_eq!(
+            collision["code"],
+            "communication_kind_canonicalization_collision"
+        );
         let migrated = engine.communication_migrate(&root, &Map::from_iter([
             ("actor".into(), json!("operator")),
             ("authority_basis".into(), json!({"kind":"operator_direct_instruction","summary":"Canonical communication migration test."})),
@@ -5714,10 +6494,25 @@ mod tests {
         assert_eq!(replay["migrated"], 0);
         assert_eq!(replay["status"], "complete");
         let db = Connection::open(engine.projection_path(&root)).expect("projection");
-        let effective: (String, String) = db.query_row("select kind,event_id from entities where entity_id='communication:legacy'", [], |row| Ok((row.get(0)?, row.get(1)?))).expect("legacy entity");
+        let effective: (String, String) = db
+            .query_row(
+                "select kind,event_id from entities where entity_id='communication:legacy'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("legacy entity");
         assert_eq!(effective.0, "narada.epistemic:communication");
         assert_eq!(json!(effective.1), originating_event);
-        let after = engine.generic_query(&root, &Map::from_iter([("template".into(), json!("inbox")), ("recipient".into(), json!("marici.Benincasa")), ("limit".into(), json!(10))])).expect("post-migration query");
+        let after = engine
+            .generic_query(
+                &root,
+                &Map::from_iter([
+                    ("template".into(), json!("inbox")),
+                    ("recipient".into(), json!("marici.Benincasa")),
+                    ("limit".into(), json!(10)),
+                ]),
+            )
+            .expect("post-migration query");
         assert_eq!(after["count"], 2);
         assert_eq!(after["normalization"]["applied"], false);
         let _ = fs::remove_dir_all(root);
@@ -5745,7 +6540,10 @@ mod tests {
         engine.domain.query.max_one_of_values = Some(2);
         engine.domain.query.kind_aliases.insert(
             "communication".to_string(),
-            vec!["marici:communication".to_string(), "communication.v2".to_string()],
+            vec![
+                "marici:communication".to_string(),
+                "communication.v2".to_string(),
+            ],
         );
 
         let legacy = engine
@@ -5884,9 +6682,15 @@ mod tests {
         assert_eq!(hydrated["results"][0]["mode"], "datalog");
         assert_eq!(hydrated["results"][0]["query_origin"], "raw");
         assert_eq!(hydrated["results"][0]["returned"], 1);
-        assert_eq!(hydrated["results"][0]["items"][0]["payload"]["title"], "Keep alpha");
+        assert_eq!(
+            hydrated["results"][0]["items"][0]["payload"]["title"],
+            "Keep alpha"
+        );
         assert!(hydrated["results"][0].get("result").is_none());
-        assert_eq!(hydrated["results"][0]["result_schema"], "narada.epistemic.query.v2");
+        assert_eq!(
+            hydrated["results"][0]["result_schema"],
+            "narada.epistemic.query.v2"
+        );
         assert_eq!(
             hydrated["output_bytes"],
             serde_json::to_vec(&hydrated)
@@ -5915,7 +6719,8 @@ mod tests {
     #[test]
     fn generic_pull_hydrates_entity_relation_and_record_bindings() {
         let engine = engine();
-        let root = std::env::temp_dir().join(format!("epistemic-generic-pull-test-{}", Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("epistemic-generic-pull-test-{}", Uuid::new_v4()));
         let proposal = engine
             .proposal_submit(
                 &root,
@@ -6482,7 +7287,9 @@ mod tests {
                 ]),
             ),
         ]);
-        let first = engine.submit_review_admit(&root, &args).expect("compound admission");
+        let first = engine
+            .submit_review_admit(&root, &args)
+            .expect("compound admission");
         assert_eq!(first["review"]["status"], "policy_valid");
         assert_eq!(first["admission"]["status"], "admitted");
         let proposal = engine
@@ -6589,7 +7396,9 @@ mod tests {
             .expect("claims page");
         assert_eq!(page["count"], 1);
         assert_eq!(page["has_more"], true);
-        let listed = engine.sequence_list(&root, &Map::new()).expect("sequence list");
+        let listed = engine
+            .sequence_list(&root, &Map::new())
+            .expect("sequence list");
         assert_eq!(listed["items"][0]["sequence_name"], "ledger-entry");
         let _ = fs::remove_dir_all(root);
     }
@@ -6808,8 +7617,12 @@ mod tests {
             )
             .unwrap();
         let key = event["idempotency_key"].as_str().unwrap();
-        fs::remove_file(engine.ledger(&root).join(format!("idem-{}.txt", safe_name(key))))
-            .expect("remove disposable ledger index");
+        fs::remove_file(
+            engine
+                .ledger(&root)
+                .join(format!("idem-{}.txt", safe_name(key))),
+        )
+        .expect("remove disposable ledger index");
         let replay = engine
             .proposal_admit(
                 &root,
@@ -6850,35 +7663,44 @@ mod tests {
         let fixture = fixture_root();
         let _ = fs::remove_dir_all(&fixture);
         let root = std::env::temp_dir().join(format!("epistemic-fixture-gen-{}", Uuid::new_v4()));
-        let admit = |operations: Value, proposal_key: &str, admission_key: &str, expected_head: Value| -> Value {
-            let proposal = engine.proposal_submit(
-                &root,
-                &Map::from_iter([
-                    ("actor".into(), json!("fixture")),
-                    (
-                        "authority_basis".into(),
-                        json!({"kind":"fixture","summary":"Golden event-ledger fixture."}),
-                    ),
-                    ("idempotency_key".into(), json!(proposal_key)),
-                    ("expected_ledger_head".into(), expected_head),
-                    ("operations".into(), operations),
-                ]),
-            )
-            .expect("fixture proposal");
-            engine.proposal_admit(
-                &root,
-                &Map::from_iter([
-                    ("proposal_id".into(), proposal["proposal_id"].clone()),
-                    ("actor".into(), json!("fixture")),
-                    (
-                        "authority_basis".into(),
-                        json!({"kind":"fixture","summary":"Golden event-ledger fixture."}),
-                    ),
-                    ("expected_ledger_head".into(), proposal["expected_ledger_head"].clone()),
-                    ("idempotency_key".into(), json!(admission_key)),
-                ]),
-            )
-            .expect("fixture admission")
+        let admit = |operations: Value,
+                     proposal_key: &str,
+                     admission_key: &str,
+                     expected_head: Value|
+         -> Value {
+            let proposal = engine
+                .proposal_submit(
+                    &root,
+                    &Map::from_iter([
+                        ("actor".into(), json!("fixture")),
+                        (
+                            "authority_basis".into(),
+                            json!({"kind":"fixture","summary":"Golden event-ledger fixture."}),
+                        ),
+                        ("idempotency_key".into(), json!(proposal_key)),
+                        ("expected_ledger_head".into(), expected_head),
+                        ("operations".into(), operations),
+                    ]),
+                )
+                .expect("fixture proposal");
+            engine
+                .proposal_admit(
+                    &root,
+                    &Map::from_iter([
+                        ("proposal_id".into(), proposal["proposal_id"].clone()),
+                        ("actor".into(), json!("fixture")),
+                        (
+                            "authority_basis".into(),
+                            json!({"kind":"fixture","summary":"Golden event-ledger fixture."}),
+                        ),
+                        (
+                            "expected_ledger_head".into(),
+                            proposal["expected_ledger_head"].clone(),
+                        ),
+                        ("idempotency_key".into(), json!(admission_key)),
+                    ]),
+                )
+                .expect("fixture admission")
         };
         let first = admit(
             json!([
@@ -6979,7 +7801,9 @@ mod tests {
         println!(
             "digest golden vector: {}",
             engine
-                .digest_value(&json!({"alpha":1,"beta":"x","gamma":[1,2],"nested":{"z":true,"a":null}}))
+                .digest_value(
+                    &json!({"alpha":1,"beta":"x","gamma":[1,2],"nested":{"z":true,"a":null}})
+                )
                 .unwrap()
         );
         let _ = fs::remove_dir_all(root);
@@ -6992,7 +7816,8 @@ mod tests {
         let expected = engine
             .read_json(&fixture.join("expected.json"))
             .expect("fixture metadata");
-        let root = std::env::temp_dir().join(format!("epistemic-fixture-verify-{}", Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("epistemic-fixture-verify-{}", Uuid::new_v4()));
         for (name, directory) in [
             ("ledger", engine.ledger(&root)),
             ("proposals", engine.proposals(&root)),
@@ -7027,7 +7852,10 @@ mod tests {
             .proposal_admit(
                 &root,
                 &Map::from_iter([
-                    ("proposal_id".into(), expected["replay"]["proposal_id"].clone()),
+                    (
+                        "proposal_id".into(),
+                        expected["replay"]["proposal_id"].clone(),
+                    ),
                     ("actor".into(), json!("fixture")),
                     ("authority_basis".into(), json!({"kind":"fixture"})),
                     (
@@ -7043,7 +7871,10 @@ mod tests {
         let manifest = engine
             .load_sequence_manifest(&root, name)
             .expect("fixture manifest verifies");
-        assert_eq!(manifest["creation_hash"], expected["sequence"]["creation_hash"]);
+        assert_eq!(
+            manifest["creation_hash"],
+            expected["sequence"]["creation_hash"]
+        );
         let claims = engine
             .verified_sequence_claims(&root, name, &manifest)
             .expect("fixture claim chain verifies");
@@ -7058,14 +7889,20 @@ mod tests {
     fn status_reports_stale_projection_without_rebuilding_it() {
         let engine = engine();
         let root = std::env::temp_dir().join(format!("epistemic-status-stale-{}", Uuid::new_v4()));
-        engine.rebuild_projection(&root).expect("initial projection");
-        let table = engine.projection_meta_table.as_ref().expect("projection metadata table");
+        engine
+            .rebuild_projection(&root)
+            .expect("initial projection");
+        let table = engine
+            .projection_meta_table
+            .as_ref()
+            .expect("projection metadata table");
         let projection = engine.projection_path(&root);
         let db = Connection::open(&projection).expect("open projection");
         db.execute(
             &format!("update {table} set ledger_sequence = 99 where meta_id = 'current'"),
             [],
-        ).expect("make projection metadata stale");
+        )
+        .expect("make projection metadata stale");
         drop(db);
 
         let status = engine.status(&root).expect("bounded status");
@@ -7075,26 +7912,36 @@ mod tests {
         assert_eq!(status["status_rebuilds_projection"], false);
 
         let db = Connection::open(&projection).expect("reopen projection");
-        let stored_sequence: i64 = db.query_row(
-            &format!("select ledger_sequence from {table} where meta_id = 'current'"),
-            [],
-            |row| row.get(0),
-        ).expect("read unchanged stale metadata");
+        let stored_sequence: i64 = db
+            .query_row(
+                &format!("select ledger_sequence from {table} where meta_id = 'current'"),
+                [],
+                |row| row.get(0),
+            )
+            .expect("read unchanged stale metadata");
         assert_eq!(stored_sequence, 99);
         drop(db);
         let runtime = projection.parent().expect("projection parent");
-        assert!(fs::read_dir(runtime)
-            .expect("read projection runtime")
-            .all(|entry| !entry.expect("runtime entry").file_name()
-                .to_string_lossy().contains(".next-")),
-            "status must not create a scratch projection");
+        assert!(
+            fs::read_dir(runtime)
+                .expect("read projection runtime")
+                .all(|entry| !entry
+                    .expect("runtime entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".next-")),
+            "status must not create a scratch projection"
+        );
         let _ = fs::remove_dir_all(root);
     }
     #[test]
     fn query_incrementally_catches_up_multiple_missing_events() {
         let engine = engine();
-        let root = std::env::temp_dir().join(format!("epistemic-query-catch-up-{}", Uuid::new_v4()));
-        engine.rebuild_projection(&root).expect("initial projection");
+        let root =
+            std::env::temp_dir().join(format!("epistemic-query-catch-up-{}", Uuid::new_v4()));
+        engine
+            .rebuild_projection(&root)
+            .expect("initial projection");
 
         for (entity_id, title) in [
             ("claim:increment-one", "Incremental precursor"),
@@ -7106,34 +7953,39 @@ mod tests {
                 engine.event_hash_field,
                 None,
                 None,
-                |ctx| json!({
-                    "schema":engine.domain.storage.event_schema_id,
-                    "sequence":ctx.sequence,
-                    "event_id":ctx.event_id,
-                    "previous_hash":ctx.previous_hash,
-                    "operations":[{
-                        "op":"entity.declare",
-                        "entity_id":entity_id,
-                        "kind":"claim",
-                        "title":title
-                    }],
-                    "actor":"incremental-test"
-                }),
-            ).expect("append canonical event without projection refresh");
+                |ctx| {
+                    json!({
+                        "schema":engine.domain.storage.event_schema_id,
+                        "sequence":ctx.sequence,
+                        "event_id":ctx.event_id,
+                        "previous_hash":ctx.previous_hash,
+                        "operations":[{
+                            "op":"entity.declare",
+                            "entity_id":entity_id,
+                            "kind":"claim",
+                            "title":title
+                        }],
+                        "actor":"incremental-test"
+                    })
+                },
+            )
+            .expect("append canonical event without projection refresh");
         }
 
         let stale = engine.status(&root).expect("stale status");
         assert_eq!(stale["projection_status"], "stale");
         assert_eq!(stale["event_count"], 2);
 
-        let result = engine.query(
-            &root,
-            &Map::from_iter([
-                ("kind".into(), json!("claim")),
-                ("text".into(), json!("Exact incremental target")),
-                ("limit".into(), json!(10)),
-            ]),
-        ).expect("incremental exact-title query");
+        let result = engine
+            .query(
+                &root,
+                &Map::from_iter([
+                    ("kind".into(), json!("claim")),
+                    ("text".into(), json!("Exact incremental target")),
+                    ("limit".into(), json!(10)),
+                ]),
+            )
+            .expect("incremental exact-title query");
         assert_eq!(result["returned"], 1);
         assert_eq!(result["items"][0]["entity_id"], "claim:increment-target");
 
@@ -7142,11 +7994,16 @@ mod tests {
         assert_eq!(current["projection_current"], true);
         let runtime = engine.projection_path(&root);
         let runtime = runtime.parent().expect("projection parent");
-        assert!(fs::read_dir(runtime)
-            .expect("read projection runtime")
-            .all(|entry| !entry.expect("runtime entry").file_name()
-                .to_string_lossy().contains(".next-")),
-            "incremental catch-up must not create a scratch projection");
+        assert!(
+            fs::read_dir(runtime)
+                .expect("read projection runtime")
+                .all(|entry| !entry
+                    .expect("runtime entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".next-")),
+            "incremental catch-up must not create a scratch projection"
+        );
         let _ = fs::remove_dir_all(root);
     }
 }

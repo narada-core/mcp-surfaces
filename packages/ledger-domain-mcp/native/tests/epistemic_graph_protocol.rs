@@ -39,7 +39,9 @@ fn run(root: &Path, requests: &[Value]) -> Vec<Value> {
             writeln!(input, "{request}").expect("write request");
         }
     }
-    let output = child.wait_with_output().expect("wait for ledger domain surface");
+    let output = child
+        .wait_with_output()
+        .expect("wait for ledger domain surface");
     assert!(
         output.status.success(),
         "{}",
@@ -127,7 +129,10 @@ fn run_framed(root: &Path, requests: &[Value]) -> Vec<Value> {
             })
             .expect("framed response content length");
         let body_start = header_end + separator.len();
-        assert!(remaining.len() >= body_start + length, "truncated framed response");
+        assert!(
+            remaining.len() >= body_start + length,
+            "truncated framed response"
+        );
         values.push(
             serde_json::from_slice(&remaining[body_start..body_start + length])
                 .expect("framed JSON-RPC response"),
@@ -183,11 +188,7 @@ fn live_sequence_create_claim_replay_and_readback() {
                 "epistemic_graph_sequence_claims",
                 json!({"sequence_name":"fixture","limit":10}),
             ),
-            tool(
-                7,
-                "epistemic_graph_sequence_list",
-                json!({"limit":10}),
-            ),
+            tool(7, "epistemic_graph_sequence_list", json!({"limit":10})),
         ],
     );
     let tools = response(&calls, 1)["result"]["tools"]
@@ -284,19 +285,20 @@ fn live_query_inbox_thread_cursor_and_error_envelopes() {
             }),
         )
     };
-    let message = |entity_id: &str, kind: &str, sender: &str, recipient: &str, body: &str, intent: &str| {
-        json!({
-            "op":"entity.declare",
-            "entity_id":entity_id,
-            "kind":kind,
-            "title":entity_id,
-            "sender":sender,
-            "recipient":recipient,
-            "body":body,
-            "intent":intent,
-            "sent_at":"2026-08-20T00:00:00Z"
-        })
-    };
+    let message =
+        |entity_id: &str, kind: &str, sender: &str, recipient: &str, body: &str, intent: &str| {
+            json!({
+                "op":"entity.declare",
+                "entity_id":entity_id,
+                "kind":kind,
+                "title":entity_id,
+                "sender":sender,
+                "recipient":recipient,
+                "body":body,
+                "intent":intent,
+                "sent_at":"2026-08-20T00:00:00Z"
+            })
+        };
     let calls = run(
         &root,
         &[
@@ -486,7 +488,9 @@ fn live_query_inbox_thread_cursor_and_error_envelopes() {
         "inbox requires participant (or legacy recipient)"
     );
     assert!(
-        response(&calls, 11).pointer("/result/structuredContent").is_some(),
+        response(&calls, 11)
+            .pointer("/result/structuredContent")
+            .is_some(),
         "budgeted suffix query failed: {:?}",
         response(&calls, 11)
     );
@@ -496,16 +500,20 @@ fn live_query_inbox_thread_cursor_and_error_envelopes() {
     assert_eq!(legacy["query_cost"]["max_results"], 20);
     assert_eq!(legacy["query_cost"]["timeout_ms"], 5000);
     assert!(legacy["query_cost"]["datoms_loaded"].as_u64().unwrap() <= 500);
-    assert!(legacy["query_cost"]["hard_caps"]["max_datoms"].as_u64().unwrap() >= 500);
+    assert!(
+        legacy["query_cost"]["hard_caps"]["max_datoms"]
+            .as_u64()
+            .unwrap()
+            >= 500
+    );
     assert!(legacy["max_output_bytes"].as_u64().is_some());
     assert_eq!(
         legacy["output_bytes"],
-        serde_json::to_vec(legacy).expect("legacy response serializes").len() as u64
+        serde_json::to_vec(legacy)
+            .expect("legacy response serializes")
+            .len() as u64
     );
-    assert_eq!(
-        legacy["items"][0]["entity_id"],
-        "communication:legacy"
-    );
+    assert_eq!(legacy["items"][0]["entity_id"], "communication:legacy");
     assert_eq!(structured(response(&calls, 12))["count"], 1);
     assert_eq!(
         structured(response(&calls, 12))["items"][0]["entity_id"],
@@ -515,30 +523,45 @@ fn live_query_inbox_thread_cursor_and_error_envelopes() {
     assert_eq!(batch["schema"], "narada.epistemic.query_batch.v2");
     assert_eq!(batch["results"].as_array().map(Vec::len), Some(2));
     assert!(batch["results"][0].get("result").is_none());
-    assert_eq!(batch["results"][1]["items"][0]["relation_type"], "replies_to");
+    assert_eq!(
+        batch["results"][1]["items"][0]["relation_type"],
+        "replies_to"
+    );
     assert_eq!(batch["results"][0]["request"]["mode"], "legacy");
     assert_eq!(batch["results"][1]["request"]["mode"], "raw");
     let budget_controls = run(
         &root,
         &[
-            tool(1, "epistemic_graph_query", json!({
-                "template":"inbox",
-                "recipient":"marici.Grothendieck",
-                "max_datoms":u64::MAX,
-                "max_results":u64::MAX,
-                "timeout_ms":u64::MAX,
-                "limit":1
-            })),
-            tool(2, "epistemic_graph_query", json!({
-                "template":"inbox",
-                "recipient":"marici.Grothendieck",
-                "max_datoms":0
-            })),
-            tool(3, "epistemic_graph_query", json!({
-                "template":"inbox",
-                "recipient":"marici.Grothendieck",
-                "budget_escalation":{"role":"maintenance","evidence":"caller-authored"}
-            })),
+            tool(
+                1,
+                "epistemic_graph_query",
+                json!({
+                    "template":"inbox",
+                    "recipient":"marici.Grothendieck",
+                    "max_datoms":u64::MAX,
+                    "max_results":u64::MAX,
+                    "timeout_ms":u64::MAX,
+                    "limit":1
+                }),
+            ),
+            tool(
+                2,
+                "epistemic_graph_query",
+                json!({
+                    "template":"inbox",
+                    "recipient":"marici.Grothendieck",
+                    "max_datoms":0
+                }),
+            ),
+            tool(
+                3,
+                "epistemic_graph_query",
+                json!({
+                    "template":"inbox",
+                    "recipient":"marici.Grothendieck",
+                    "budget_escalation":{"role":"maintenance","evidence":"caller-authored"}
+                }),
+            ),
         ],
     );
     assert!(
@@ -570,7 +593,6 @@ fn live_query_inbox_thread_cursor_and_error_envelopes() {
         "query_budget_escalation_unavailable"
     );
 
-
     let page_two = run(
         &root,
         &[tool(
@@ -585,13 +607,18 @@ fn live_query_inbox_thread_cursor_and_error_envelopes() {
         )],
     );
     assert!(
-        response(&page_two, 1).pointer("/result/structuredContent").is_some(),
+        response(&page_two, 1)
+            .pointer("/result/structuredContent")
+            .is_some(),
         "page two query failed: {page_two:?}"
     );
     let page_two_result = structured(response(&page_two, 1));
     assert_eq!(page_two_result["count"], 1);
     assert_eq!(page_two_result["has_more"], false);
-    assert_eq!(page_two_result["items"][0]["entity_id"], "communication:legacy");
+    assert_eq!(
+        page_two_result["items"][0]["entity_id"],
+        "communication:legacy"
+    );
 
     let scope_mismatch = run(
         &root,
@@ -669,14 +696,20 @@ fn live_query_inbox_thread_cursor_and_error_envelopes() {
         ],
     );
     assert!(response(&state, 1)["error"].is_null());
-    assert_eq!(structured(response(&state, 2))["admission"]["status"], "already_admitted");
+    assert_eq!(
+        structured(response(&state, 2))["admission"]["status"],
+        "already_admitted"
+    );
     let read_items = structured(response(&state, 3))["items"].as_array().unwrap();
     assert_eq!(read_items.len(), 1);
     assert_eq!(read_items[0]["entity_id"], "communication:root");
     assert_eq!(read_items[0]["message_state"]["status"], "read");
     assert_eq!(read_items[0]["message_state"]["unread"], false);
     assert_eq!(structured(response(&state, 4))["count"], 1);
-    assert_eq!(structured(response(&state, 4))["items"][0]["entity_id"], "communication:legacy");
+    assert_eq!(
+        structured(response(&state, 4))["items"][0]["entity_id"],
+        "communication:legacy"
+    );
     assert_eq!(structured(response(&state, 5))["count"], 1);
 
     let appended = run(
@@ -803,19 +836,27 @@ fn live_inbox_suffix_filters_old_recipient_history_before_budgeting() {
         ],
     );
     assert!(
-        response(&calls, 3).pointer("/result/structuredContent").is_some(),
+        response(&calls, 3)
+            .pointer("/result/structuredContent")
+            .is_some(),
         "indexed suffix query failed: {:?}",
         response(&calls, 3)
     );
     let result = structured(response(&calls, 3));
     assert_eq!(result["count"], 1);
     assert_eq!(result["items"][0]["entity_id"], "communication:new");
-    assert_eq!(result["query_cost"]["planner_mode"], "indexed_subject_suffix");
+    assert_eq!(
+        result["query_cost"]["planner_mode"],
+        "indexed_subject_suffix"
+    );
     assert!(result["query_cost"]["datoms_loaded"].as_u64().unwrap() <= 500);
     let nested = structured(response(&calls, 4));
     assert_eq!(nested["count"], 1);
     assert_eq!(nested["items"][0]["entity_id"], "communication:new");
-    assert_eq!(nested["query_cost"]["planner_mode"], "indexed_subject_suffix");
+    assert_eq!(
+        nested["query_cost"]["planner_mode"],
+        "indexed_subject_suffix"
+    );
     assert!(nested["query_cost"]["datoms_loaded"].as_u64().unwrap() <= 500);
     let _ = fs::remove_dir_all(root.as_path());
 }
@@ -881,15 +922,23 @@ fn live_inbox_without_sequence_bound_keeps_decoration_subject_local() {
         ],
     );
     assert!(
-        response(&calls, 2).pointer("/result/structuredContent").is_some(),
+        response(&calls, 2)
+            .pointer("/result/structuredContent")
+            .is_some(),
         "all-history indexed inbox query failed: {:?}",
         response(&calls, 2)
     );
     let result = structured(response(&calls, 2));
     assert_eq!(result["count"], 1);
     assert_eq!(result["items"][0]["entity_id"], "communication:target");
-    assert_eq!(result["query_cost"]["planner_mode"], "indexed_subject_suffix");
-    assert_eq!(result["query_cost"]["subject_local_attribute"], "narada.ledger:event/sequence");
+    assert_eq!(
+        result["query_cost"]["planner_mode"],
+        "indexed_subject_suffix"
+    );
+    assert_eq!(
+        result["query_cost"]["subject_local_attribute"],
+        "narada.ledger:event/sequence"
+    );
     assert!(result["query_cost"]["datoms_loaded"].as_u64().unwrap() <= 100);
     let _ = fs::remove_dir_all(root.as_path());
 }
@@ -963,13 +1012,20 @@ fn live_query_modes_aliases_and_message_receipt_boundaries() {
         ],
     );
     for id in 1..=4 {
-        assert!(response(&seed, id)["error"].is_null(), "seed request {id}: {seed:?}");
+        assert!(
+            response(&seed, id)["error"].is_null(),
+            "seed request {id}: {seed:?}"
+        );
     }
 
     let errors = run(
         &root,
         &[
-            tool(1, "epistemic_graph_query", json!({"participant":"marici.Grothendieck"})),
+            tool(
+                1,
+                "epistemic_graph_query",
+                json!({"participant":"marici.Grothendieck"}),
+            ),
             tool(
                 2,
                 "epistemic_graph_query",
@@ -997,12 +1053,30 @@ fn live_query_modes_aliases_and_message_receipt_boundaries() {
             ),
         ],
     );
-    assert_eq!(response(&errors, 1)["error"]["data"]["code"], "query_template_missing");
-    assert_eq!(response(&errors, 2)["error"]["data"]["code"], "query_mode_ambiguous");
-    assert_eq!(response(&errors, 3)["error"]["data"]["code"], "query_mode_mixed");
-    assert_eq!(response(&errors, 4)["error"]["data"]["code"], "query_override_conflict");
-    assert_eq!(response(&errors, 5)["error"]["data"]["code"], "query_sender_conflict");
-    assert_eq!(response(&errors, 6)["error"]["data"]["code"], "query_cursor_unsupported");
+    assert_eq!(
+        response(&errors, 1)["error"]["data"]["code"],
+        "query_template_missing"
+    );
+    assert_eq!(
+        response(&errors, 2)["error"]["data"]["code"],
+        "query_mode_ambiguous"
+    );
+    assert_eq!(
+        response(&errors, 3)["error"]["data"]["code"],
+        "query_mode_mixed"
+    );
+    assert_eq!(
+        response(&errors, 4)["error"]["data"]["code"],
+        "query_override_conflict"
+    );
+    assert_eq!(
+        response(&errors, 5)["error"]["data"]["code"],
+        "query_sender_conflict"
+    );
+    assert_eq!(
+        response(&errors, 6)["error"]["data"]["code"],
+        "query_cursor_unsupported"
+    );
 
     let named = run(
         &root,
@@ -1017,8 +1091,16 @@ fn live_query_modes_aliases_and_message_receipt_boundaries() {
                 "epistemic_graph_query",
                 json!({"template":"inbox","participant":"marici.Grothendieck","direction":"outgoing","to":"marici.Caroline","kinds":["marici:communication"],"limit":10}),
             ),
-            tool(3, "epistemic_graph_query", json!({"kind":"communication","limit":10})),
-            tool(4, "epistemic_graph_query", json!({"kind":"narada.epistemic:communication","limit":10})),
+            tool(
+                3,
+                "epistemic_graph_query",
+                json!({"kind":"communication","limit":10}),
+            ),
+            tool(
+                4,
+                "epistemic_graph_query",
+                json!({"kind":"narada.epistemic:communication","limit":10}),
+            ),
             tool(
                 5,
                 "epistemic_graph_query",
@@ -1026,11 +1108,20 @@ fn live_query_modes_aliases_and_message_receipt_boundaries() {
             ),
         ],
     );
-    assert_eq!(structured(response(&named, 1))["query_origin"], "named_template");
-    assert_eq!(structured(response(&named, 2))["query_origin"], "named_template");
+    assert_eq!(
+        structured(response(&named, 1))["query_origin"],
+        "named_template"
+    );
+    assert_eq!(
+        structured(response(&named, 2))["query_origin"],
+        "named_template"
+    );
     assert_eq!(structured(response(&named, 1))["count"], 2);
     assert_eq!(structured(response(&named, 2))["count"], 1);
-    assert_eq!(structured(response(&named, 2))["items"][0]["entity_id"], "communication:outgoing");
+    assert_eq!(
+        structured(response(&named, 2))["items"][0]["entity_id"],
+        "communication:outgoing"
+    );
     assert_eq!(structured(response(&named, 3))["returned"], 3);
     assert_eq!(structured(response(&named, 4))["returned"], 3);
     assert_eq!(structured(response(&named, 5))["query_origin"], "raw");
@@ -1039,12 +1130,23 @@ fn live_query_modes_aliases_and_message_receipt_boundaries() {
     let pinned = run(
         &root,
         &[
-            tool(1, "epistemic_graph_query", json!({"kind":"claim","expected_ledger_head":head})),
-            tool(2, "epistemic_graph_query", json!({"kind":"claim","expected_ledger_head":"wrong-head"})),
+            tool(
+                1,
+                "epistemic_graph_query",
+                json!({"kind":"claim","expected_ledger_head":head}),
+            ),
+            tool(
+                2,
+                "epistemic_graph_query",
+                json!({"kind":"claim","expected_ledger_head":"wrong-head"}),
+            ),
         ],
     );
     assert!(response(&pinned, 1)["error"].is_null());
-    assert_eq!(response(&pinned, 2)["error"]["data"]["code"], "ledger_head_mismatch");
+    assert_eq!(
+        response(&pinned, 2)["error"]["data"]["code"],
+        "ledger_head_mismatch"
+    );
 
     let reads = run(
         &root,
@@ -1070,18 +1172,33 @@ fn live_query_modes_aliases_and_message_receipt_boundaries() {
                 json!({"message_id":"communication:one","reader":"marici.Other","actor":"protocol-test","authority_basis":authority.clone()}),
             ),
             tool(5, "epistemic_graph_query", json!({"limit":20})),
-            tool(6, "epistemic_graph_query", json!({"kind":"narada.epistemic:message_read","limit":20})),
+            tool(
+                6,
+                "epistemic_graph_query",
+                json!({"kind":"narada.epistemic:message_read","limit":20}),
+            ),
             tool(7, "epistemic_graph_status", json!({})),
             tool(8, "epistemic_graph_snapshot", json!({"limit":20})),
         ],
     );
     assert!(response(&reads, 1)["error"].is_null());
     assert_eq!(structured(response(&reads, 2))["replayed"], true);
-    assert_eq!(structured(response(&reads, 2))["read_at"], "2026-08-20T01:00:00Z");
-    assert_eq!(response(&reads, 3)["error"]["data"]["code"], "message_kind_invalid");
-    assert_eq!(response(&reads, 4)["error"]["data"]["code"], "message_reader_not_participant");
+    assert_eq!(
+        structured(response(&reads, 2))["read_at"],
+        "2026-08-20T01:00:00Z"
+    );
+    assert_eq!(
+        response(&reads, 3)["error"]["data"]["code"],
+        "message_kind_invalid"
+    );
+    assert_eq!(
+        response(&reads, 4)["error"]["data"]["code"],
+        "message_reader_not_participant"
+    );
     let visible_items = structured(response(&reads, 5))["items"].as_array().unwrap();
-    assert!(visible_items.iter().all(|item| item["kind"] != "narada.epistemic:message_read"));
+    assert!(visible_items
+        .iter()
+        .all(|item| item["kind"] != "narada.epistemic:message_read"));
     assert_eq!(structured(response(&reads, 6))["returned"], 1);
     assert_eq!(structured(response(&reads, 7))["entity_count"], 4);
     assert_eq!(structured(response(&reads, 7))["stored_entity_count"], 5);
@@ -1108,7 +1225,12 @@ fn live_query_modes_aliases_and_message_receipt_boundaries() {
         )],
     );
     let single = structured(response(&pulls, 1));
-    let owned = single["items"].as_array().unwrap().iter().find(|item| item["entity_id"] == "communication:one").expect("owned message pull");
+    let owned = single["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["entity_id"] == "communication:one")
+        .expect("owned message pull");
     assert_eq!(owned["message_state"], "domain-owned");
     assert_eq!(owned["reply_state"], "domain-owned");
     assert_eq!(owned["_narada_query"]["message_state"]["status"], "read");
@@ -1134,13 +1256,16 @@ fn live_query_modes_aliases_and_message_receipt_boundaries() {
         )],
     );
     let multi_items = structured(response(&multi, 1))["items"].as_array().unwrap();
-    assert!(multi_items.iter().all(|item| item["message"]["_narada_query"]["message_state"].is_object()));
+    assert!(multi_items
+        .iter()
+        .all(|item| item["message"]["_narada_query"]["message_state"].is_object()));
     let _ = fs::remove_dir_all(root);
 }
 
 #[test]
 fn live_projection_rebuild_is_serialized_across_processes() {
-    let root = std::env::temp_dir().join(format!("epistemic-projection-processes-{}", Uuid::new_v4()));
+    let root =
+        std::env::temp_dir().join(format!("epistemic-projection-processes-{}", Uuid::new_v4()));
     let authority = json!({"kind":"test","summary":"Concurrent projection fixture."});
     let seed = run(
         &root,
@@ -1207,7 +1332,10 @@ fn live_projection_rebuild_is_serialized_across_processes() {
     let runtime = root.join(".narada/.ai/epistemic-graph");
     for entry in fs::read_dir(&runtime).expect("read projection runtime") {
         let name = entry.expect("projection runtime entry").file_name();
-        assert!(!name.to_string_lossy().contains(".next-"), "left scratch projection: {name:?}");
+        assert!(
+            !name.to_string_lossy().contains(".next-"),
+            "left scratch projection: {name:?}"
+        );
     }
     let _ = fs::remove_dir_all(root.as_ref());
 }
@@ -1246,8 +1374,11 @@ fn live_read_refuses_tampered_earlier_event_when_terminal_head_is_unchanged() {
     let mut event: Value = serde_json::from_slice(&fs::read(first).expect("read first event"))
         .expect("first event JSON");
     event["actor"] = json!("tampered");
-    fs::write(first, serde_json::to_vec_pretty(&event).expect("encode tampered event"))
-        .expect("write tampered event");
+    fs::write(
+        first,
+        serde_json::to_vec_pretty(&event).expect("encode tampered event"),
+    )
+    .expect("write tampered event");
 
     let status = run(&root, &[tool(1, "epistemic_graph_status", json!({}))]);
     assert_eq!(
@@ -1275,8 +1406,17 @@ fn live_modern_content_length_transport_exposes_status() {
         .iter()
         .any(|version| version == "2026-07-28"));
     assert_eq!(response(&calls, 2)["result"]["resultType"], "complete");
-    assert!(response(&calls, 2)["result"]["tools"].as_array().unwrap().len() >= 21);
-    assert_eq!(response(&calls, 3)["result"]["structuredContent"]["status"], "ok");
+    assert!(
+        response(&calls, 2)["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .len()
+            >= 21
+    );
+    assert_eq!(
+        response(&calls, 3)["result"]["structuredContent"]["status"],
+        "ok"
+    );
     let _ = fs::remove_dir_all(root);
 }
 
@@ -1286,12 +1426,23 @@ fn live_tools_call_rejects_non_object_arguments() {
     let calls = run(
         &root,
         &[
-            rpc(1, "tools/call", json!({"name":"epistemic_graph_status","arguments":[]})),
-            rpc(2, "tools/call", json!({"name":"epistemic_graph_status","arguments":"wrong"})),
+            rpc(
+                1,
+                "tools/call",
+                json!({"name":"epistemic_graph_status","arguments":[]}),
+            ),
+            rpc(
+                2,
+                "tools/call",
+                json!({"name":"epistemic_graph_status","arguments":"wrong"}),
+            ),
         ],
     );
     for id in [1, 2] {
-        assert_eq!(response(&calls, id)["error"]["data"]["code"], "invalid_request");
+        assert_eq!(
+            response(&calls, id)["error"]["data"]["code"],
+            "invalid_request"
+        );
     }
     let _ = fs::remove_dir_all(root);
 }

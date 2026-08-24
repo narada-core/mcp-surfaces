@@ -78,6 +78,15 @@ the batch with `communication_kind_canonicalization_collision`; completed
 pages are idempotent. Fix rejected clients to emit the canonical kind rather
 than retrying a legacy write.
 
+Payload-backed proposal tools accept a lone immutable `payload_ref`. If content
+validation rejects that revision, the graph has not mutated and the revision
+must not be edited or retried indefinitely. Read it as provenance, create the
+next unused revision with only the typed remediation applied, verify its digest
+and byte size, and retry the original proposal tool with the successor ref. A
+legacy-kind refusal on `mcp_payload:example@v1`, for example, recommends a
+canonicalized `mcp_payload:example@v2` and returns this recovery as structured
+error details.
+
 ## Tools
 
 The tool set is descriptor-driven: `tools/list` is generated at runtime from

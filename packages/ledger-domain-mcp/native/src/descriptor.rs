@@ -475,19 +475,15 @@ impl Descriptor {
     /// `domain_invalid:<detail>` string; callers fail startup hard.
     pub fn load(path: &Path) -> Result<Descriptor, String> {
         let text = std::fs::read_to_string(path).map_err(|source| {
-            format!(
-                "domain_invalid:read_failed:{}:{}",
-                path.display(),
-                source
-            )
+            format!("domain_invalid:read_failed:{}:{}", path.display(), source)
         })?;
         Self::parse(&text)
     }
 
     /// Parse and validate descriptor JSON text.
     pub fn parse(text: &str) -> Result<Descriptor, String> {
-        let value: Value = serde_json::from_str(text)
-            .map_err(|source| format!("domain_invalid:json:{source}"))?;
+        let value: Value =
+            serde_json::from_str(text).map_err(|source| format!("domain_invalid:json:{source}"))?;
         Self::from_value(value)
     }
 
@@ -496,9 +492,8 @@ impl Descriptor {
     pub fn from_value(value: Value) -> Result<Descriptor, String> {
         let schema_value: Value = serde_json::from_str(DESCRIPTOR_SCHEMA_JSON)
             .map_err(|source| format!("domain_invalid:descriptor_schema_compile:{source}"))?;
-        let validator = jsonschema::validator_for(&schema_value).map_err(|source| {
-            format!("domain_invalid:descriptor_schema_compile:{source}")
-        })?;
+        let validator = jsonschema::validator_for(&schema_value)
+            .map_err(|source| format!("domain_invalid:descriptor_schema_compile:{source}"))?;
         let failures = validator
             .iter_errors(&value)
             .take(5)
@@ -510,10 +505,7 @@ impl Descriptor {
         let descriptor: Descriptor = serde_json::from_value(value)
             .map_err(|source| format!("domain_invalid:structure:{source}"))?;
         if descriptor.schema != DESCRIPTOR_SCHEMA_ID {
-            return Err(format!(
-                "domain_invalid:schema_id:{}",
-                descriptor.schema
-            ));
+            return Err(format!("domain_invalid:schema_id:{}", descriptor.schema));
         }
         Ok(descriptor)
     }
