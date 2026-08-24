@@ -133,6 +133,15 @@ process.stdin.on('data', (chunk) => {
       args: [restartableEntrypoint, '--site-root', root, '--unclassified'],
       tools: ['echo'],
     },
+    'surface-feedback': {
+      command: 'node',
+      args: [
+        restartableEntrypoint,
+        '--feedback-root', resolve(root, '.narada', 'feedback'),
+        '--canonical-feedback-root', resolve(root, '.narada', 'feedback'),
+      ],
+      tools: ['echo'],
+    },
     'factory-surface': {
       command: 'node',
       args: [restartableEntrypoint],

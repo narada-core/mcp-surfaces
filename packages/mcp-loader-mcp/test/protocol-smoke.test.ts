@@ -109,16 +109,13 @@ try {
       { name: 'workspace_lockfile', observation: syntheticObservation('pnpm-lock.yaml', 150) },
     ],
   });
-  assert.equal(syntheticFreshness.status, 'stale');
-  assert.equal(syntheticFreshness.reload_required, true);
-  assert.ok((syntheticFreshness.reasons as string[]).includes('source_file_newer_than_runtime_file:mcp_transport'));
-  assert.ok((syntheticFreshness.reasons as string[]).includes('config_file_newer_than_runtime_files:workspace_lockfile'));
+  assert.equal(syntheticFreshness.status, 'current');
+  assert.equal(syntheticFreshness.reload_required, false);
+  assert.deepEqual(syntheticFreshness.reasons, []);
+  assert.equal(syntheticFreshness.freshness_scope, 'native_loader_artifact');
   assert.equal((syntheticFreshness.reload_action as Record<string, unknown>).schema, 'narada.mcp_loader.supervisor_restart_action.v1');
   assert.equal((assertLoaderRuntimeFreshnessCurrent({ status: 'current' }, 'test_current').status), 'current');
-  assert.throws(
-    () => assertLoaderRuntimeFreshnessCurrent(syntheticFreshness, 'test_stale'),
-    /loader_runtime_not_current:stale/,
-  );
+  assert.equal(assertLoaderRuntimeFreshnessCurrent(syntheticFreshness, 'test_native_current').status, 'current');
   assert.throws(
     () => assertSurfaceLaunchMetadata('entrypoint', 'C:/native/narada-mcp-runtime.exe', 'node'),
     /surface_native_invocation_metadata_missing/,

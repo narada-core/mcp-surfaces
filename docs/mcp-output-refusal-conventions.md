@@ -31,6 +31,8 @@ When a domain result has its own `offset`, `limit`, or `next_offset`, preserve t
 
 Use `payload_ref` for large or structured inputs that would otherwise exceed inline limits. Tool arguments should stay authoritative for routing and identity fields such as `task_number`, `agent_id`, `message_id`, or `working_directory`. Payload fields may fill companion content such as summaries, findings, task definitions, or long command input.
 
+Payload references are immutable transport, not authority. A loader call targeting one admitted Site may resolve a reference authored in another admitted Site. The loader verifies the complete revision record, requires all admitted copies of that reference to be identical, stages the exact record into the target Site's payload namespace, and reports `payload_transport` in its result. It refuses missing, corrupt, or divergent references. This transport step does not authorize the child mutation: the target binding and child surface still enforce target-Site authority.
+
 Surfaces should reject ambiguous payload forms:
 
 - Non-empty `payload` and `payload_json` in the same call.
