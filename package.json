@@ -66,6 +66,7 @@
     "test:site-registry": "pnpm --filter @narada-core/site-registry-mcp test",
     "test:project-state": "pnpm --filter @narada-core/project-state-mcp test",
     "test:operator-routing": "pnpm --filter @narada-core/operator-routing-mcp test",
+    "test:operator-communication": "pnpm --filter @narada-core/operator-communication-mcp test",
     "test:quota-meter": "pnpm --filter @narada-core/quota-meter-mcp test",
     "test:operator-console-overlay": "pnpm --filter @narada-core/operator-console-overlay-mcp test",
     "test:browser-control": "pnpm --filter @narada-core/browser-control-mcp test",

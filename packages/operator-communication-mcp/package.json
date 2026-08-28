@@ -1,0 +1,33 @@
+{
+  "name": "@narada-core/operator-communication-mcp",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "type": "module",
+  "description": "Schema-governed operator-only response projection MCP surface.",
+  "bin": { "operator-communication-mcp": "./dist/src/main.js" },
+  "types": "./dist/src/main.d.ts",
+  "exports": {
+    "./surface-definition": {
+      "types": "./dist/src/surface-definition.d.ts",
+      "default": "./dist/src/surface-definition.js"
+    },
+    ".": {
+      "types": "./dist/src/main.d.ts",
+      "default": "./dist/src/main.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty false",
+    "test": "pnpm build && node dist/test/operator-communication-mcp.test.js && node dist/test/protocol-smoke.test.js"
+  },
+  "files": ["dist/", "schema/", "display/", "README.md"],
+  "dependencies": {
+    "@narada-core/mcp-fabric-contracts": "workspace:*"
+  },
+  "devDependencies": {
+    "@narada-core/mcp-e2e-harness": "workspace:*",
+    "@types/node": "^22.15.3",
+    "typescript": "^5.8.3"
+  }
+}

@@ -29,6 +29,7 @@ Review revision: `eeb464249eda123f844997481aaaf26d3b7a5880`
 | `packages/nars-session-mcp` | `@narada-core/nars-session-mcp` | Governed input and bounded readback for existing NARS sessions. | [README](../packages/nars-session-mcp/README.md) |
 | `packages/operator-console-overlay-mcp` | `@narada-core/operator-console-overlay-mcp` | Bounded MCP boundary for the Narada Operator Console overlay. | [README](../packages/operator-console-overlay-mcp/README.md) |
 | `packages/operator-routing-mcp` | `@narada-core/operator-routing-mcp` | Transcript-to-target routing and inbox fallback packaging. | [README](../packages/operator-routing-mcp/README.md) |
+| `packages/operator-communication-mcp` | `@narada-core/operator-communication-mcp` | Schema-governed operator-only response projection. | [README](../packages/operator-communication-mcp/README.md) |
 | `packages/project-state-mcp` | `@narada-core/project-state-mcp` | Read-only virtual project-state projection. | [README](../packages/project-state-mcp/README.md) |
 | `packages/quota-meter-mcp` | `@narada-core/quota-meter-mcp` | Quota-meter glide status and overlay lifecycle. | [README](../packages/quota-meter-mcp/README.md) |
 | `packages/runtime-introspection-mcp` | `@narada-core/runtime-introspection-mcp` | Runtime trace and authority-bound memory analysis. | [README](../packages/runtime-introspection-mcp/README.md) |

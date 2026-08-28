@@ -439,6 +439,22 @@ importers:
         specifier: ^5.8.3
         version: 5.9.3
 
+  packages/operator-communication-mcp:
+    dependencies:
+      '@narada-core/mcp-fabric-contracts':
+        specifier: workspace:*
+        version: link:../shared/mcp-fabric-contracts
+    devDependencies:
+      '@narada-core/mcp-e2e-harness':
+        specifier: workspace:*
+        version: link:../shared/mcp-e2e-harness
+      '@types/node':
+        specifier: ^22.15.3
+        version: 22.19.19
+      typescript:
+        specifier: ^5.8.3
+        version: 5.9.3
+
   packages/operator-routing-mcp:
     dependencies:
       '@narada-core/mcp-fabric-contracts':

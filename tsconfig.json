@@ -131,6 +131,9 @@
       "path": "./packages/operator-routing-mcp"
     },
     {
+      "path": "./packages/operator-communication-mcp"
+    },
+    {
       "path": "./packages/quota-meter-mcp"
     },
     {

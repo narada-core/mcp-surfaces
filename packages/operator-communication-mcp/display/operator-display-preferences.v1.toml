@@ -1,0 +1,28 @@
+schema = "narada.operator-display-preferences.v1"
+
+[defaults]
+policy = "short"
+format = "prose"
+
+[policies.minimal]
+fields = ["statement", "corrected", "blocking_condition", "question", "condition", "requested_action"]
+max_chars = 240
+max_array_items = 2
+
+[policies.short]
+fields = ["kind", "statement", "corrected", "blocking_condition", "question", "condition", "requested_action", "impact"]
+max_chars = 500
+max_array_items = 3
+
+[policies.medium]
+fields = ["id", "kind", "statement", "incorrect", "corrected", "blocked_operation", "blocking_condition", "required_release", "question", "alternatives", "recommended", "selection_basis", "condition", "consequence", "mitigation", "requested_action", "scope", "reason", "impact", "epistemic_status", "uncertainty"]
+max_chars = 1200
+max_array_items = 8
+
+[policies.all-limited]
+fields = ["*"]
+max_chars = 4000
+max_array_items = 20
+
+[policies.all-unlimited]
+fields = ["*"]

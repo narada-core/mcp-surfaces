@@ -51,6 +51,7 @@ Current packages:
 - `@narada-core/site-registry-mcp`: User Site MCP surface for canonical cross-site registry inspection and reconciliation planning.
 - `@narada-core/project-state-mcp`: read-only Local Site MCP projection for a virtual project-state registry owned by a Narada project.
 - `@narada-core/operator-routing-mcp`: User Site operator routing surface for transcript-to-target decisions and inbox fallback packaging.
+- `@narada-core/operator-communication-mcp`: schema-governed operator-only response projection surface.
 - `@narada-core/artifacts-mcp`: NARS session artifact registration and renderable artifact reference MCP surface.
 - `@narada-core/nars-session-mcp`: governed input and bounded readback for existing NARS sessions.
 - `@narada-core/quota-meter-mcp`: host-level quota-meter glide status and desktop overlay lifecycle surface.
@@ -195,6 +196,7 @@ pnpm test:launcher
 pnpm test:mcp-loader
 pnpm test:mcp-loader:e2e
 pnpm test:operator-routing
+pnpm test:operator-communication
 pnpm test:runtime-introspection
 pnpm test:speech
 pnpm test:cloudflare-carrier
