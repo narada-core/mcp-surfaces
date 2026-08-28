@@ -155,7 +155,9 @@ function applyDisplayPreferences(operator: RecordValue, preferences: DisplayPref
     const item = asRecord(value, 'operator_item_must_be_table');
     const projected: RecordValue = {};
     for (const [field, raw] of Object.entries(item)) {
-      if (selected.has('*') || selected.has(field)) projected[field] = limitDisplayValue(raw, preferences);
+      if (!(selected.has('*') || selected.has(field))) continue;
+      if (field === 'epistemic_status' && raw === 'verified' && (preferences.policy === 'minimal' || preferences.policy === 'short')) continue;
+      projected[field] = limitDisplayValue(raw, preferences);
     }
     return projected;
   }) : [];

@@ -19,6 +19,10 @@ then `.narada/preferences/operator-communication.toml` under the bound Site,
 then bundled defaults in `display/operator-display-preferences.v1.toml`. The
 default is the `short` policy rendered as `prose`.
 
+Short prose suppresses the redundant `verified` status. Any non-verified
+epistemic status and its required uncertainty remain visible; brevity cannot
+erase qualification.
+
 `display_policy` accepts `minimal`, `short`, `medium`, `all-limited`, or
 `all-unlimited`. Each policy declares its displayed fields and value limits.
 Only `all-unlimited` removes display truncation. `format` accepts `prose`,

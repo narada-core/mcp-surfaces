@@ -10,7 +10,7 @@ max_chars = 240
 max_array_items = 2
 
 [policies.short]
-fields = ["kind", "statement", "corrected", "blocking_condition", "question", "condition", "requested_action", "impact"]
+fields = ["kind", "statement", "corrected", "blocking_condition", "question", "condition", "requested_action", "impact", "epistemic_status", "uncertainty"]
 max_chars = 500
 max_array_items = 3
 

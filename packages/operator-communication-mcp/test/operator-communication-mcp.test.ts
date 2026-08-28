@@ -48,6 +48,11 @@ try {
   assert.match(codeCall.result.content[0].text, /\[\[items\]\]/);
   assert.equal(codeCall.result._meta.display.policy, 'short');
 
+  const inferredResponse = { ...response, operator: { items: [{ ...response.operator.items[0], epistemic_status: 'inferred', uncertainty: 'Source-specific instantiation remains open.' }] } };
+  const inferredCall = handleRequest({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'operator_communication_project', arguments: { response: inferredResponse, persist: false } } }, state) as Record<string, any>;
+  assert.match(inferredCall.result.content[0].text, /Epistemic status: inferred/);
+  assert.match(inferredCall.result.content[0].text, /Uncertainty: Source-specific instantiation remains open\./);
+
   const permissive = `schema = "test"\nunknown_fields = "reject"\n[root]\nrequired = ["operator"]\n[root.fields.operator]\ntype = "table"\nschema_ref = "operator"\n[tables.operator]\nrequired = ["items"]\n[tables.operator.fields.items]\ntype = "array"\nmin_items = 0\n`;
   assert.deepEqual(projectOperator({ response: { operator: { items: [] } }, schema: permissive }, state), { items: [] });
 
