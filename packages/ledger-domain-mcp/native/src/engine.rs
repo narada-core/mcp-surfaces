@@ -2814,9 +2814,10 @@ impl Engine {
             .or_else(|| planner_value("recipient"))
             .and_then(Value::as_str)
             .is_some_and(|value| !value.trim().is_empty());
-        let sequence_lower_bound = planner_value("after_sequence")
+        let explicit_sequence_lower_bound = planner_value("after_sequence")
             .or_else(|| planner_value("since_event"))
-            .and_then(Value::as_u64)
+            .and_then(Value::as_u64);
+        let sequence_lower_bound = explicit_sequence_lower_bound
             // Event sequences are positive.  For a recipient-scoped
             // named inbox query, an omitted lower bound therefore has
             // the same semantics as `after_sequence: 0`, while enabling
@@ -2842,18 +2843,31 @@ impl Engine {
             .and_then(Value::as_str)
             .zip(sequence_lower_bound)
             .filter(|_| subject_seed_attribute.is_some());
-        let datoms = self.load_datoms_for_query(
-            &db,
-            datoms_table,
-            &spec,
-            subject_local_sequence,
-            subject_seed_attribute,
-        )?;
+        let datoms = self
+            .load_datoms_for_query(
+                &db,
+                datoms_table,
+                &spec,
+                subject_local_sequence,
+                subject_seed_attribute,
+            )
+            .map_err(|error| {
+                self.with_inbox_sequence_remediation(
+                    error,
+                    explicit_sequence_lower_bound.is_some(),
+                    subject_seed_attribute.is_some(),
+                )
+            })?;
         if started.elapsed() > Duration::from_millis(effective_timeout_ms) {
             return Err(self.error("query_timeout", "query exceeded its capped time budget while loading indexed datoms", json!({"timeout_ms":effective_timeout_ms,"phase":"datom_load","datoms_loaded":datoms.len()})));
         }
-        let execution = ledger_query::execute(&spec, &datoms)
-            .map_err(|failure| self.error(failure.code, &failure.message, failure.details))?;
+        let execution = ledger_query::execute(&spec, &datoms).map_err(|failure| {
+            self.with_inbox_sequence_remediation(
+                self.error(failure.code, &failure.message, failure.details),
+                explicit_sequence_lower_bound.is_some(),
+                subject_seed_attribute.is_some(),
+            )
+        })?;
         if started.elapsed() > Duration::from_millis(effective_timeout_ms) {
             return Err(self.error(
                     "query_timeout",
@@ -3254,7 +3268,11 @@ impl Engine {
                     "find":[{"pull":{"var":"?message","fields":fields}}],
                     "inputs":inputs,
                     "where":where_clauses,
-                    "order_by":[{"term":"?sequence","direction":"asc"},{"term":"?event_id","direction":"asc"}],
+                    "order_by":[
+                        {"term":"?sequence","direction":"asc"},
+                        {"term":"?event_id","direction":"asc"},
+                        {"term":"?message","direction":"asc"}
+                    ],
                     "limit":limit,
                     "cursor":cursor
                 }))
@@ -3292,7 +3310,11 @@ impl Engine {
                         {"triple":{"subject":"?message","attribute":ledger_sequence,"object":"?sequence"}},
                         {"triple":{"subject":"?message","attribute":ledger_event_id,"object":"?event_id"}}
                     ],
-                    "order_by":[{"term":"?sequence","direction":"asc"},{"term":"?event_id","direction":"asc"}],
+                    "order_by":[
+                        {"term":"?sequence","direction":"asc"},
+                        {"term":"?event_id","direction":"asc"},
+                        {"term":"?message","direction":"asc"}
+                    ],
                     "limit":limit,
                     "cursor":cursor
                 }))
@@ -6013,6 +6035,36 @@ impl Engine {
         value
     }
 
+    fn with_inbox_sequence_remediation(
+        &self,
+        error: Value,
+        has_explicit_sequence_bound: bool,
+        has_subject_seed: bool,
+    ) -> Value {
+        if has_explicit_sequence_bound
+            || !has_subject_seed
+            || error.get("code").and_then(Value::as_str) != Some("query_datom_scan_limit")
+        {
+            return error;
+        }
+        let mut details = error.get("details").cloned().unwrap_or_else(|| json!({}));
+        if !details.is_object() {
+            details = json!({"cause":details});
+        }
+        details["remediation"] = json!(
+            "Retry the inbox query with after_sequence set to the last inbox sequence already rehydrated."
+        );
+        details["retry_arguments"] = json!({
+            "after_sequence":"<last_rehydrated_inbox_sequence>"
+        });
+        details["planner_mode"] = json!("indexed_subject_suffix");
+        self.error(
+            "query_datom_scan_limit",
+            "recipient inbox history exceeds the bounded hydration budget; resume from the last rehydrated sequence",
+            details,
+        )
+    }
+
     fn error(&self, code: &str, message: &str, details: Value) -> Value {
         self.error.error(code, message, details)
     }
@@ -6038,6 +6090,42 @@ mod tests {
     fn engine() -> Engine {
         Engine::new(Descriptor::load(&descriptor_path()).expect("epistemic descriptor"))
             .expect("engine")
+    }
+
+    #[test]
+    fn unbounded_inbox_scan_failure_names_the_sequence_continuation() {
+        let engine = engine();
+        let failure = engine.error(
+            "query_datom_scan_limit",
+            "query datom-scan budget was exceeded",
+            json!({"max_datoms_scanned":200000}),
+        );
+        let refusal = engine.with_inbox_sequence_remediation(failure, false, true);
+        assert_eq!(refusal["code"], "query_datom_scan_limit");
+        assert_eq!(
+            refusal["details"]["retry_arguments"]["after_sequence"],
+            "<last_rehydrated_inbox_sequence>"
+        );
+        assert_eq!(refusal["details"]["planner_mode"], "indexed_subject_suffix");
+        assert_eq!(refusal["details"]["max_datoms_scanned"], 200000);
+    }
+
+    #[test]
+    fn bounded_or_non_inbox_scan_failure_is_not_rewritten() {
+        let engine = engine();
+        let failure = engine.error(
+            "query_datom_scan_limit",
+            "query datom-scan budget was exceeded",
+            json!({"max_datoms_scanned":200000}),
+        );
+        assert_eq!(
+            engine.with_inbox_sequence_remediation(failure.clone(), true, true),
+            failure
+        );
+        assert_eq!(
+            engine.with_inbox_sequence_remediation(failure.clone(), false, false),
+            failure
+        );
     }
 
     #[test]

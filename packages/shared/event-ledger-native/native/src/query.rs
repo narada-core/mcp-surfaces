@@ -749,6 +749,42 @@ struct ExecutionBudget<'a> {
     traversal_edges: usize,
 }
 
+struct DatomIndex<'a> {
+    all: &'a [Datom],
+    by_subject: HashMap<&'a str, Vec<&'a Datom>>,
+    by_attribute: HashMap<&'a str, Vec<&'a Datom>>,
+}
+
+impl<'a> DatomIndex<'a> {
+    fn new(datoms: &'a [Datom]) -> Self {
+        let mut by_subject: HashMap<&str, Vec<&Datom>> = HashMap::new();
+        let mut by_attribute: HashMap<&str, Vec<&Datom>> = HashMap::new();
+        for datom in datoms {
+            by_subject.entry(datom.subject.as_str()).or_default().push(datom);
+            by_attribute.entry(datom.attribute.as_str()).or_default().push(datom);
+        }
+        Self { all: datoms, by_subject, by_attribute }
+    }
+
+    fn triple_candidates(&self, subject: &Term, attribute: &Term, binding: &Map<String, Value>) -> Vec<&'a Datom> {
+        if let Some(value) = resolve(subject, binding) {
+            if let Some(subject) = value.as_str() {
+                return self.by_subject.get(subject).cloned().unwrap_or_default();
+            }
+        }
+        if let Some(value) = resolve(attribute, binding) {
+            if let Some(attribute) = value.as_str() {
+                return self.by_attribute.get(attribute).cloned().unwrap_or_default();
+            }
+        }
+        self.all.iter().collect()
+    }
+
+    fn attribute_candidates(&self, attribute: &str) -> Vec<&'a Datom> {
+        self.by_attribute.get(attribute).cloned().unwrap_or_default()
+    }
+}
+
 impl<'a> ExecutionBudget<'a> {
     fn new(limits: &'a QueryLimits, work_limit: usize) -> Self {
         Self {
@@ -779,12 +815,12 @@ impl<'a> ExecutionBudget<'a> {
 fn apply_triple(
     binding: &Map<String, Value>,
     clause: &Clause,
-    datoms: &[Datom],
+    index: &DatomIndex<'_>,
     budget: &mut ExecutionBudget<'_>,
 ) -> Result<Vec<Map<String, Value>>, QueryFailure> {
     let Clause::Triple { subject, attribute, object } = clause else { return Ok(Vec::new()) };
     let mut results = Vec::new();
-    for datom in datoms {
+    for datom in index.triple_candidates(subject, attribute, binding) {
         budget.scan_datom()?;
         let Some(after_subject) = unify(subject, &Value::String(datom.subject.clone()), binding) else {
             continue;
@@ -805,7 +841,7 @@ fn apply_triple(
 fn apply_reachable(
     binding: &Map<String, Value>,
     clause: &Clause,
-    datoms: &[Datom],
+    index: &DatomIndex<'_>,
     budget: &mut ExecutionBudget<'_>,
 ) -> Result<Vec<Map<String, Value>>, QueryFailure> {
     let Clause::Reachable { from, attribute, to, max_depth } = clause else { return Ok(Vec::new()) };
@@ -824,7 +860,7 @@ fn apply_reachable(
         )
     })?;
     let mut adjacency: HashMap<String, Vec<String>> = HashMap::new();
-    for datom in datoms {
+    for datom in index.attribute_candidates(attribute) {
         budget.scan_datom()?;
         if datom.attribute != *attribute {
             continue;
@@ -857,30 +893,30 @@ fn apply_reachable(
 fn apply_nested(
     binding: &Map<String, Value>,
     clauses: &[Clause],
-    datoms: &[Datom],
+    index: &DatomIndex<'_>,
     budget: &mut ExecutionBudget<'_>,
 ) -> Result<Vec<Map<String, Value>>, QueryFailure> {
-    apply_planned(binding.clone(), clauses, datoms, budget)
+    apply_planned(binding.clone(), clauses, index, budget)
 }
 
 fn apply_clause(
     binding: &Map<String, Value>,
     clause: &Clause,
-    datoms: &[Datom],
+    index: &DatomIndex<'_>,
     budget: &mut ExecutionBudget<'_>,
 ) -> Result<Vec<Map<String, Value>>, QueryFailure> {
     match clause {
-        Clause::Triple { .. } => apply_triple(binding, clause, datoms, budget),
-        Clause::Reachable { .. } => apply_reachable(binding, clause, datoms, budget),
+        Clause::Triple { .. } => apply_triple(binding, clause, index, budget),
+        Clause::Reachable { .. } => apply_reachable(binding, clause, index, budget),
         Clause::Exists { clauses } => {
-            if !apply_nested(binding, clauses, datoms, budget)?.is_empty() {
+            if !apply_nested(binding, clauses, index, budget)?.is_empty() {
                 Ok(vec![binding.clone()])
             } else {
                 Ok(Vec::new())
             }
         }
         Clause::NotExists { clauses } => {
-            if apply_nested(binding, clauses, datoms, budget)?.is_empty() {
+            if apply_nested(binding, clauses, index, budget)?.is_empty() {
                 Ok(vec![binding.clone()])
             } else {
                 Ok(Vec::new())
@@ -924,7 +960,7 @@ fn clause_ready(binding: &Map<String, Value>, clause: &Clause, allow_nested: boo
 fn apply_planned(
     initial: Map<String, Value>,
     clauses: &[Clause],
-    datoms: &[Datom],
+    datom_index: &DatomIndex<'_>,
     budget: &mut ExecutionBudget<'_>,
 ) -> Result<Vec<Map<String, Value>>, QueryFailure> {
     let mut bindings = vec![initial];
@@ -952,14 +988,14 @@ fn apply_planned(
                         !matches!(clauses[*index], Clause::Exists { .. } | Clause::NotExists { .. })
                     })
                     .unwrap_or(remaining[0]);
-                return apply_clause(&bindings[0], &clauses[index], datoms, budget);
+                return apply_clause(&bindings[0], &clauses[index], datom_index, budget);
             }
         };
         let index = remaining.remove(position);
         let clause = &clauses[index];
         let mut next = Vec::new();
         for binding in &bindings {
-            next.extend(apply_clause(binding, clause, datoms, budget)?);
+            next.extend(apply_clause(binding, clause, datom_index, budget)?);
             if next.len() > budget.work_limit {
                 return Err(query_work_failure(budget.work_limit));
             }
@@ -1018,7 +1054,8 @@ pub fn execute(spec: &QuerySpec, datoms: &[Datom]) -> Result<QueryResult, QueryF
     });
     let work_limit = spec.limit.saturating_mul(100).max(1000);
     let mut budget = ExecutionBudget::new(&spec.limits, work_limit);
-    let mut bindings = apply_planned(initial, &spec.clauses, datoms, &mut budget)?;
+    let index = DatomIndex::new(datoms);
+    let mut bindings = apply_planned(initial, &spec.clauses, &index, &mut budget)?;
     let mut seen = HashSet::new();
     bindings.retain(|binding| seen.insert(serde_json::to_string(binding).unwrap_or_default()));
     if !spec.cursor_values.is_empty() {
@@ -1158,6 +1195,35 @@ mod tests {
         )
         .expect_err("traversal budget must refuse");
         assert_eq!(reach_failure.code, "query_traversal_limit");
+    }
+
+    #[test]
+    fn bound_subject_joins_use_the_subject_index_within_scan_budget() {
+        let query = json!({
+            "find":["?message","?sequence"],
+            "where":[
+                {"triple":{"subject":"?message","attribute":"recipient","object":"marici.Nima"}},
+                {"triple":{"subject":"?message","attribute":"kind","object":"communication"}},
+                {"triple":{"subject":"?message","attribute":"sequence","object":"?sequence"}}
+            ],
+            "order_by":[{"term":"?sequence"}],
+            "limit":100
+        });
+        let mut datoms = Vec::new();
+        for sequence in 1..=100 {
+            let subject = format!("message-{sequence}");
+            let event = format!("event-{sequence}");
+            datoms.push(datom(&subject, "recipient", json!("marici.Nima"), sequence, &event));
+            datoms.push(datom(&subject, "kind", json!("communication"), sequence, &event));
+            datoms.push(datom(&subject, "sequence", json!(sequence), sequence, &event));
+        }
+        let mut indexed_limits = limits();
+        indexed_limits.max_datoms_scanned = 700;
+        let result = execute(
+            &parse(&query, 100, &indexed_limits).expect("indexed join query parses"),
+            &datoms,
+        ).expect("bound subject joins must stay within the indexed scan budget");
+        assert_eq!(result.bindings.len(), 100);
     }
 
     #[test]
