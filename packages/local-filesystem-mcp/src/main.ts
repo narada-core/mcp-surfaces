@@ -2995,12 +2995,26 @@ function toolResult(value: any, renderContext: Record<string, unknown> = {}) {
     return {
       ...value,
       content: [assistantTextContent(renderFilesystemToolResultText(structuredContent, renderContext))],
-      structuredContent,
+      structuredContent: withoutDuplicatedReadContent(structuredContent),
     };
   }
   return {
     content: [assistantTextContent(renderFilesystemToolResultText(value, renderContext))],
-    structuredContent: value,
+    structuredContent: withoutDuplicatedReadContent(value),
+  };
+}
+
+function withoutDuplicatedReadContent(value: any) {
+  if (value?.schema !== 'local.filesystem.read.v1' || typeof value.content !== 'string') return value;
+  const { content: _content, ...structuredContent } = value;
+  return {
+    ...structuredContent,
+    content_delivery: {
+      channel: 'content',
+      block_index: 0,
+      format: 'filesystem_read_text',
+      duplicated_in_structured_content: false,
+    },
   };
 }
 

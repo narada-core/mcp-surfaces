@@ -741,7 +741,27 @@ fn tool_result(value: Value) -> Value {
         }))
     }
     .unwrap_or_else(|_| "{}".to_string());
-    json!({"content": [{"type": "text", "text": text, "annotations": {"audience": ["assistant"]}}], "structuredContent": value})
+    let structured_content = without_duplicated_read_content(&value);
+    json!({"content": [{"type": "text", "text": text, "annotations": {"audience": ["assistant"]}}], "structuredContent": structured_content})
+}
+
+fn without_duplicated_read_content(value: &Value) -> Value {
+    if value.get("schema").and_then(Value::as_str) != Some("local.filesystem.read.v1") {
+        return value.clone();
+    }
+    let mut structured = value.as_object().cloned().unwrap_or_default();
+    if structured.remove("content").is_some() {
+        structured.insert(
+            "content_delivery".to_string(),
+            json!({
+                "channel": "content",
+                "block_index": 0,
+                "format": "filesystem_read_text",
+                "duplicated_in_structured_content": false
+            }),
+        );
+    }
+    Value::Object(structured)
 }
 
 fn diagnostic(error: &FsError) -> Value {

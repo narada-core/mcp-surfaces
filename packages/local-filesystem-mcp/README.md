@@ -20,7 +20,7 @@ cargo build --release --locked --manifest-path packages/shared/mcp-runtime-proxy
 
 If you want Narada to inject the surface into a CLI or TUI, use `@narada-core/mcp-registrar` to write the carrier config.
 
-Tool results use `structuredContent` as the authoritative machine payload. The text content is a deterministic, compact rendering for agent transcripts. Large read and search results are bounded by the producing tool's own offset/limit or snapshot paging arguments.
+Tool results use `structuredContent` as the authoritative machine payload. The text content is a deterministic, compact rendering for agent transcripts. For `fs_read_file` and `fs_read_file_range`, the file body is delivered exactly once in `content[0].text`; `structuredContent` retains the authoritative path, hashes, range, and pagination metadata and identifies that delivery through `content_delivery`. Consumers must not expect a duplicate `structuredContent.content` field. Large read and search results are bounded by the producing tool's own offset/limit or snapshot paging arguments.
 
 ## Tools
 

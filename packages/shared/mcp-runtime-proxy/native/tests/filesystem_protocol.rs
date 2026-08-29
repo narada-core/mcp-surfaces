@@ -68,6 +68,14 @@ fn structured(response: &Value) -> &Value {
         .expect("structured result")
 }
 
+fn delivered_read(response: &Value) -> Value {
+    let text = response
+        .pointer("/result/content/0/text")
+        .and_then(Value::as_str)
+        .expect("read text content");
+    serde_json::from_str(text).expect("read text content JSON")
+}
+
 #[test]
 fn filesystem_public_protocol_is_complete_bounded_paged_recoverable_and_native() {
     let root = root();
@@ -145,7 +153,7 @@ fn filesystem_public_protocol_is_complete_bounded_paged_recoverable_and_native()
         "write"
     );
     assert_eq!(
-        structured(&call(
+        delivered_read(&call(
             &root,
             "write",
             5,
@@ -155,7 +163,7 @@ fn filesystem_public_protocol_is_complete_bounded_paged_recoverable_and_native()
         "alpha"
     );
     assert_eq!(
-        structured(&call(
+        delivered_read(&call(
             &root,
             "write",
             6,
@@ -378,7 +386,16 @@ fn filesystem_public_protocol_is_complete_bounded_paged_recoverable_and_native()
         "fs_read_file",
         json!({"path":"work.txt","offset":1,"limit":10}),
     );
-    assert_eq!(structured(&fresh)["content"], "first\nTWO");
+    assert!(structured(&fresh).get("content").is_none());
+    assert_eq!(
+        structured(&fresh)["content_delivery"]["duplicated_in_structured_content"],
+        false
+    );
+    let read_text = fresh
+        .pointer("/result/content/0/text")
+        .and_then(Value::as_str)
+        .expect("read delivery text");
+    assert_eq!(read_text.matches("first\\nTWO").count(), 1);
     assert_eq!(
         call(
             &root,

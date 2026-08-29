@@ -62,6 +62,14 @@ function sha256(value: unknown) {
   return createHash('sha256').update(String(value)).digest('hex');
 }
 
+function deliveredReadContent(response: JsonRpcTestResponse) {
+  const text = String(response.result.content[0].text);
+  const marker = '\ncontent:\n';
+  const index = text.indexOf(marker);
+  assert.notEqual(index, -1, 'expected filesystem read content delivery marker');
+  return text.slice(index + marker.length);
+}
+
 const tempRoot = mkdtempSync(join(tmpdir(), 'local-filesystem-mcp-'));
 try {
   const trusted = join(tempRoot, 'trusted');
@@ -231,7 +239,7 @@ trust_level = "untrusted"
   assert.equal(anchoredConfigEntries[0].provenance.source, 'roots_config_anchored_allowed_root');
   const anchoredState = createServerState({ mode: 'read', anchoredAllowedRoots: ['user_home:.codex'], anchors: { user_home: fakeUserHome }, outputRoot: tempRoot });
   const anchoredRead = call(anchoredState, 1002, 'fs_read_file', { path: join(fakeCodexRoot, 'config.toml') });
-  assert.equal(anchoredRead.result.structuredContent.content, 'model = "test"');
+  assert.equal(deliveredReadContent(anchoredRead), 'model = "test"');
   const doctorResponse = call(anchoredState, 1003, 'fs_doctor');
   assert.equal(doctorResponse.result.structuredContent.allowed_roots[0], resolve(fakeCodexRoot));
   assert.equal(doctorResponse.result.structuredContent.allowed_root_entries[0].provenance.flag, '--anchored-allowed-root');
@@ -252,7 +260,7 @@ trust_level = "untrusted"
   const secretState = createServerState({ mode: 'read', siteRoot, allowedRoots: [trusted], outputRoot: tempRoot });
   assert.equal((secretState.env as NodeJS.ProcessEnv).LOCAL_FILESYSTEM_TEST_SECRET, 'from-site-secret');
   const handoffRead = call(secretState, 213, 'fs_read_file', { path: join(handoffRoot, 'narada-worker-runtime-handoff.md') });
-  assert.equal(handoffRead.result.structuredContent.content, 'handoff');
+  assert.equal(deliveredReadContent(handoffRead), 'handoff');
   const blockedTempRead = call(secretState, 214, 'fs_read_file', { path: join(nonAdmittedTempRoot, 'handoff.md') });
   assert.equal(blockedTempRead.error.data.code, 'path_outside_allowed_roots');
   assert.equal(process.env.LOCAL_FILESYSTEM_TEST_SECRET, undefined);
@@ -274,7 +282,10 @@ trust_level = "untrusted"
   assert.equal(toolsListResponse.result.tools.some((tool: any) => tool.name === 'fs_read_file'), true);
 
   const readResponse = call(readState, 1, 'fs_read_file', { path: join(trusted, 'a.txt'), limit: 1 });
-  assert.equal(readResponse.result.structuredContent.content, 'alpha');
+  assert.equal(deliveredReadContent(readResponse), 'alpha');
+  assert.equal(readResponse.result.structuredContent.content, undefined);
+  assert.equal(readResponse.result.structuredContent.content_delivery.duplicated_in_structured_content, false);
+  assert.equal(JSON.stringify(readResponse.result).split('alpha').length - 1, 1);
   assert.equal(readResponse.result.structuredContent.content_sha256, sha256('alpha\nbeta\n'));
   assert.equal(readResponse.result.structuredContent.content_window_sha256, sha256('alpha'));
   assert.equal(readResponse.result.structuredContent.next_offset, 2);
@@ -293,7 +304,7 @@ trust_level = "untrusted"
   assert.equal(boundedReadResponse.result.structuredContent.returned_lines, 100);
   assert.equal(boundedReadResponse.result.structuredContent.next_offset, 101);
   assert.equal(boundedReadResponse.result.structuredContent.timeout_ms, 5000);
-  assert.match(boundedReadResponse.result.structuredContent.content, /line-100/);
+  assert.match(deliveredReadContent(boundedReadResponse), /line-100/);
   assert.equal(boundedReadResponse.result.structuredContent.content_sha256, sha256(readFileSync(join(trusted, 'bounded-read.txt'))));
   assert.equal(boundedReadResponse.result.structuredContent.content_hash_scope, 'full_file');
   assert.equal(boundedReadResponse.result.structuredContent.hash_source, 'live_file_bytes');
@@ -352,7 +363,7 @@ trust_level = "untrusted"
   assert.equal(requestPathTimeout.error.data.details.recommended_args.end_line, 1);
 
   const rangeResponse = call(readState, 11, 'fs_read_file_range', { path: join(trusted, 'a.txt'), start_line: 2, end_line: 2 });
-  assert.equal(rangeResponse.result.structuredContent.content, 'beta');
+  assert.equal(deliveredReadContent(rangeResponse), 'beta');
   assert.equal(rangeResponse.result.structuredContent.next_offset, null);
   assert.equal(rangeResponse.result.structuredContent.total_lines, 2);
   assert.equal(rangeResponse.result.structuredContent.total_lines_exact, true);
@@ -363,9 +374,9 @@ trust_level = "untrusted"
 
   const sourceReadResponse = call(readState, 111, 'fs_read_file', { path: join(sourcePath, 'mcp-freshness-service.ts') });
   assert.equal(sourceReadResponse.result.structuredContent.schema, 'local.filesystem.read.v1');
-  assert.match(sourceReadResponse.result.structuredContent.content, /classifierFalsePositive/);
+  assert.match(deliveredReadContent(sourceReadResponse), /classifierFalsePositive/);
   const sourceRangeResponse = call(readState, 112, 'fs_read_file_range', { path: join(sourcePath, 'mcp-freshness-service.ts'), start_line: 1, end_line: 1 });
-  assert.equal(sourceRangeResponse.result.structuredContent.content, "import { createHash } from 'node:crypto';");
+  assert.equal(deliveredReadContent(sourceRangeResponse), "import { createHash } from 'node:crypto';");
 
   const revolutionConfigPath = join(revolutionRoot, 'config', 'config.json');
   const revolutionReadResponse = call(readState, 12, 'fs_read_file', { path: revolutionConfigPath });
@@ -376,7 +387,7 @@ trust_level = "untrusted"
   assert.equal(largeRead.result.structuredContent.returned_lines, 1);
   assert.equal(largeRead.result.structuredContent.line_window_complete, true);
   assert.equal(largeRead.result.structuredContent.next_offset, null);
-  assert.equal(typeof largeRead.result.structuredContent.content, 'string');
+  assert.equal(typeof deliveredReadContent(largeRead), 'string');
 
   const statResponse = call(readState, 123, 'fs_stat', { path: join(trusted, 'a.txt') });
   assert.equal(statResponse.result.structuredContent.schema, 'local.filesystem.stat.v1');
@@ -765,7 +776,7 @@ trust_level = "untrusted"
   const transientPatch = call(writeState, 310, 'fs_apply_patch', { patch: `*** Begin Patch\n*** Add File: .ai/tmp/patched.js\n+console.log('blocked');\n*** End Patch` });
   assert.equal(transientPatch.error.data.code, 'transient_executable_write_disallowed');
   const verifyWriteRead = call(writeState, 30, 'fs_read_file', { path: join(trusted, 'b.txt') });
-  assert.equal(verifyWriteRead.result.structuredContent.content, 'created');
+  assert.equal(deliveredReadContent(verifyWriteRead), 'created');
   const guardedReadThenReplace = call(writeState, 3001, 'fs_str_replace_file', { path: join(trusted, 'b.txt'), old: 'created', new: 'created-via-guard', expected_sha256: verifyWriteRead.result.structuredContent.content_sha256 });
   assert.equal(guardedReadThenReplace.result.structuredContent.status, 'replaced');
   const changedAfterRead = call(writeState, 3002, 'fs_str_replace_file', { path: join(trusted, 'b.txt'), old: 'created-via-guard', new: 'blocked', expected_sha256: verifyWriteRead.result.structuredContent.content_sha256 });

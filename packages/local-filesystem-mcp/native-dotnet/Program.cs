@@ -598,14 +598,27 @@ internal static class Program
 
     private static JsonObject ToolResult(JsonObject value, bool isError)
     {
+        var text = value.ToJsonString(JsonOptions);
+        var structuredContent = (JsonObject)value.DeepClone();
+        if (structuredContent["schema"]?.GetValue<string>() == "local.filesystem.read.v1"
+            && structuredContent.Remove("content"))
+        {
+            structuredContent["content_delivery"] = new JsonObject
+            {
+                ["channel"] = "content",
+                ["block_index"] = 0,
+                ["format"] = "filesystem_read_text",
+                ["duplicated_in_structured_content"] = false,
+            };
+        }
         var result = new JsonObject
         {
             ["content"] = new JsonArray(new JsonObject
             {
                 ["type"] = "text",
-                ["text"] = value.ToJsonString(JsonOptions),
+                ["text"] = text,
             }),
-            ["structuredContent"] = value,
+            ["structuredContent"] = structuredContent,
         };
         if (isError)
         {

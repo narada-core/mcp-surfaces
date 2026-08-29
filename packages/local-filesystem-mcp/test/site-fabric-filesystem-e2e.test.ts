@@ -43,6 +43,16 @@ function structured(response: JsonRecord): JsonRecord {
   return (response.result as JsonRecord)?.structuredContent as JsonRecord ?? response.result as JsonRecord;
 }
 
+function deliveredReadContent(response: JsonRecord): string {
+  const result = response.result as JsonRecord;
+  const blocks = result.content as JsonRecord[];
+  const text = String(blocks[0]?.text ?? '');
+  const marker = '\ncontent:\n';
+  const index = text.indexOf(marker);
+  assert.notEqual(index, -1, JSON.stringify(response));
+  return text.slice(index + marker.length);
+}
+
 try {
   await runMcpProtocolSmoke(server.client, {
     expectedServerName: 'local-filesystem-write',
@@ -61,19 +71,22 @@ try {
   assert.equal(written.status, 'written', JSON.stringify(written));
   assert.equal(readFileSync(filePath, 'utf8'), 'alpha\nbeta\n');
 
-  const read = structured(await server.client.request(3, 'tools/call', {
+  const readResponse = await server.client.request(3, 'tools/call', {
     name: 'fs_read_file',
     arguments: { path: filePath, limit: 1 },
-  }));
-  assert.equal(read.content, 'alpha');
+  });
+  const read = structured(readResponse);
+  assert.equal(deliveredReadContent(readResponse), 'alpha');
+  assert.equal(read.content, undefined);
   assert.equal(read.next_offset, 2);
   assert.equal(read.line_window_complete, false);
 
-  const range = structured(await server.client.request(4, 'tools/call', {
+  const rangeResponse = await server.client.request(4, 'tools/call', {
     name: 'fs_read_file_range',
     arguments: { path: filePath, start_line: 2, end_line: 2 },
-  }));
-  assert.equal(range.content, 'beta');
+  });
+  const range = structured(rangeResponse);
+  assert.equal(deliveredReadContent(rangeResponse), 'beta');
   assert.equal(range.total_lines_exact, true);
 
   const stat = structured(await server.client.request(5, 'tools/call', {
