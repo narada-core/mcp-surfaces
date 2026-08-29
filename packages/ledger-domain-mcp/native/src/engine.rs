@@ -2686,6 +2686,9 @@ impl Engine {
         } else {
             self.named_query(args)?
         };
+        if !args.contains_key("query") {
+            self.expand_named_identity_terms(root, args, &mut query_value)?;
+        }
         let raw_cursor = args
             .get("cursor")
             .cloned()
@@ -2972,6 +2975,125 @@ impl Engine {
                 .sum(),
             _ => 0,
         }
+    }
+
+    fn expand_named_identity_terms(
+        &self,
+        root: &Path,
+        args: &Map<String, Value>,
+        query: &mut Value,
+    ) -> Result<(), Value> {
+        let Some(template) = args.get("template").and_then(Value::as_str) else {
+            return Ok(());
+        };
+        let canonical_template = self.canonical_named_template(template);
+        let Some(identity) = self
+            .domain
+            .query
+            .named_queries
+            .get(&canonical_template)
+            .and_then(Value::as_object)
+            .and_then(|config| config.get("participant_identity"))
+            .and_then(Value::as_object)
+        else {
+            return Ok(());
+        };
+        let Some(kind) = identity.get("kind").and_then(Value::as_str) else {
+            return Ok(());
+        };
+        let fields = identity
+            .get("alias_fields")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        if fields.is_empty() {
+            return Ok(());
+        }
+        let db = Connection::open(self.projection_path(root))
+            .map_err(self.db_error("projection_open_failed"))?;
+        let mut statement = db
+            .prepare(&format!(
+                "select entity_id,payload_json from {} where kind=?1",
+                self.entity_table
+            ))
+            .map_err(self.db_error("projection_identity_prepare_failed"))?;
+        let rows = statement
+            .query_map(params![kind], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(self.db_error("projection_identity_query_failed"))?;
+        let identities = rows
+            .map(|row| row.map_err(self.db_error("projection_identity_row_failed")))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let match_value = |key: &str| {
+            args.get(key).or_else(|| {
+                args.get("match")
+                    .and_then(Value::as_object)
+                    .and_then(|matched| matched.get(key))
+            })
+        };
+        let participant = match_value("participant").or_else(|| match_value("recipient"));
+        let sender = match_value("sender").or_else(|| match_value("from"));
+        let resolved_inputs = [
+            ("participant", participant),
+            ("viewer", match_value("viewer").or(participant)),
+            ("sender", sender),
+            ("to", match_value("to")),
+        ];
+        let mut replacements = BTreeMap::<String, Vec<Value>>::new();
+        for (input_key, raw_value) in resolved_inputs {
+            let Some(raw) = raw_value.and_then(Value::as_str) else {
+                continue;
+            };
+            let mut equivalents = vec![Value::String(raw.to_string())];
+            for (entity_id, payload_json) in &identities {
+                let payload: Value = serde_json::from_str(payload_json).unwrap_or(Value::Null);
+                let aliases = fields
+                    .iter()
+                    .filter_map(|field| payload.get(*field).and_then(Value::as_str))
+                    .collect::<Vec<_>>();
+                if entity_id == raw || aliases.contains(&raw) {
+                    for candidate in std::iter::once(entity_id.as_str()).chain(aliases) {
+                        let candidate = Value::String(candidate.to_string());
+                        if !equivalents.contains(&candidate) {
+                            equivalents.push(candidate);
+                        }
+                    }
+                }
+            }
+            if equivalents.len() > 1 {
+                replacements.insert(input_key.to_string(), equivalents);
+            }
+        }
+
+        fn rewrite(value: &mut Value, replacements: &BTreeMap<String, Vec<Value>>) {
+            match value {
+                Value::Object(object) => {
+                    if object.len() == 1 {
+                        if let Some(key) = object.get("input").and_then(Value::as_str) {
+                            if let Some(equivalents) = replacements.get(key) {
+                                *value = json!({"one_of":equivalents});
+                                return;
+                            }
+                        }
+                    }
+                    for child in object.values_mut() {
+                        rewrite(child, replacements);
+                    }
+                }
+                Value::Array(values) => {
+                    for child in values {
+                        rewrite(child, replacements);
+                    }
+                }
+                _ => {}
+            }
+        }
+        rewrite(query, &replacements);
+        Ok(())
     }
 
     fn named_query(&self, args: &Map<String, Value>) -> Result<Value, Value> {
@@ -6461,6 +6583,73 @@ mod tests {
             )
             .expect_err("tampered payload must refuse");
         assert_eq!(failure["code"], "payload_ref_sha256_mismatch");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn inbox_unifies_canonical_participant_ids_with_declared_names() {
+        let engine = engine();
+        let root = std::env::temp_dir().join(format!(
+            "epistemic-participant-identity-test-{}",
+            Uuid::new_v4()
+        ));
+        engine
+            .rebuild_projection(&root)
+            .expect("initial projection");
+        event_ledger::append_event(
+            engine.error,
+            &engine.ledger_layout(&root),
+            engine.event_hash_field,
+            None,
+            None,
+            |ctx| json!({
+                "schema":engine.domain.storage.event_schema_id,
+                "sequence":ctx.sequence,
+                "event_id":ctx.event_id,
+                "previous_hash":ctx.previous_hash,
+                "operations":[
+                    {
+                        "op":"entity.declare",
+                        "entity_id":"team_member:kitaev",
+                        "kind":"team_member",
+                        "title":"marici.Kitaev",
+                        "canonical_name":"marici.Kitaev"
+                    },
+                    {
+                        "op":"entity.declare",
+                        "entity_id":"communication:canonical-recipient",
+                        "kind":"narada.epistemic:communication",
+                        "title":"Canonical recipient message",
+                        "sender":"team_member:aspect",
+                        "recipient":"team_member:kitaev",
+                        "body":"identity regression",
+                        "intent":"request",
+                        "sent_at":"2026-08-29T00:00:00Z"
+                    }
+                ],
+                "actor":"historical-fixture"
+            }),
+        )
+        .expect("append identity fixture");
+
+        for participant in ["marici.Kitaev", "team_member:kitaev"] {
+            let result = engine
+                .generic_query(
+                    &root,
+                    &Map::from_iter([
+                        ("template".into(), json!("inbox")),
+                        ("recipient".into(), json!(participant)),
+                        ("read_state".into(), json!("all")),
+                        ("limit".into(), json!(10)),
+                    ]),
+                )
+                .expect("identity-normalized inbox query");
+            assert_eq!(result["count"], 1, "participant {participant}");
+            assert_eq!(
+                result["items"][0]["entity_id"],
+                "communication:canonical-recipient"
+            );
+        }
         let _ = fs::remove_dir_all(root);
     }
 

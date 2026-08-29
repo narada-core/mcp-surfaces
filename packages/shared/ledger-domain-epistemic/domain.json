@@ -165,6 +165,7 @@
         "sequence_attribute": "narada.ledger:event/sequence",
         "event_id_attribute": "narada.ledger:event/id",
         "participant_attributes": {"incoming": "narada.epistemic:recipient", "outgoing": "narada.epistemic:sender"},
+        "participant_identity": {"kind": "team_member", "alias_fields": ["canonical_name", "title"]},
         "intent_attribute": "narada.epistemic:intent",
         "body_field": "body",
         "fields": ["entity_id", "kind", "event_id", "event_sequence", "sender", "recipient", "intent", "sent_at", "body"]
