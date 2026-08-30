@@ -20,6 +20,21 @@ const SERVERS: ServerConfig[] = __NARADA_PI_MCP_SERVERS__;
 const PROTOCOL_VERSION = "2026-07-28";
 const MAX_BOOTSTRAP_TOOLS = 80;
 const MAX_BOOTSTRAP_SCHEMA_CHARS = 120_000;
+const BOOTSTRAP_TOOL_PROJECTIONS = new Map<string, ReadonlySet<string>>([
+  ["task-lifecycle", new Set(["task_lifecycle_bridge_poll"])],
+]);
+
+function projectBootstrapTools(config: ServerConfig, tools: any[]): any[] {
+  const projection = BOOTSTRAP_TOOL_PROJECTIONS.get(config.name);
+  if (!projection) return tools;
+  const projected = tools.filter((tool) => projection.has(tool?.name));
+  const projectedNames = new Set(projected.map((tool) => tool?.name));
+  const missing = [...projection].filter((name) => !projectedNames.has(name));
+  if (missing.length > 0) {
+    throw new Error(`${config.name}: bootstrap tool projection is missing required tools: ${missing.join(", ")}`);
+  }
+  return projected;
+}
 
 class McpClient {
   readonly config: ServerConfig;
@@ -147,7 +162,10 @@ export default function naradaMcpCarrier(pi: any): void {
       for (const config of SERVERS.filter((server) => server.enabled)) {
         const client = new McpClient(config);
         try {
-          inventories.push({ client, tools: await client.initialize() });
+          inventories.push({
+            client,
+            tools: projectBootstrapTools(config, await client.initialize()),
+          });
           nextClients.push(client);
         } catch (error) {
           client.close();

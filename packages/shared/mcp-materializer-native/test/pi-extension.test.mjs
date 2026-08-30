@@ -82,6 +82,47 @@ test('generated Pi extension qualifies flat-namespace collisions deterministical
   assert.match(source, /qualified tool name collision/);
 });
 
+test('generated Pi extension projects task lifecycle to its bounded bridge tool', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'narada-pi-lifecycle-projection-'));
+  try {
+    const serverPath = join(root, 'server.mjs');
+    await writeFile(serverPath, `
+import { createInterface } from "node:readline";
+createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { protocolVersion: "2026-07-28", capabilities: { tools: {} }, serverInfo: { name: "task-lifecycle", version: "1" } } }) + "\\n");
+  } else if (message.method === "tools/list") {
+    const tools = [
+      { name: "task_lifecycle_bridge_poll", inputSchema: { type: "object", properties: {} } },
+      ...Array.from({ length: 69 }, (_, index) => ({ name: "task_lifecycle_other_" + index, inputSchema: { type: "object", properties: {} } })),
+    ];
+    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { tools } }) + "\\n");
+  }
+});
+`, 'utf8');
+    const source = (await readFile(templatePath, 'utf8')).replace(
+      '__NARADA_PI_MCP_SERVERS__',
+      JSON.stringify([{ name: 'task-lifecycle', command: process.execPath, args: [serverPath], enabled: true, startupTimeoutMs: 2000 }]),
+    );
+    const extensionPath = join(root, 'index.ts');
+    await writeFile(extensionPath, source, 'utf8');
+    const extension = (await import(`${pathToFileURL(extensionPath).href}?projection=1`)).default;
+    const handlers = new Map();
+    const registered = [];
+    extension({
+      on(name, handler) { handlers.set(name, handler); },
+      getAllTools() { return []; },
+      registerTool(tool) { registered.push(tool); },
+    });
+    await handlers.get('session_start')?.({}, { ui: { notify() {} } });
+    assert.deepEqual(registered.map((tool) => tool.name), ['task_lifecycle_bridge_poll']);
+    await handlers.get('session_shutdown')?.();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('generated Pi extension refuses bootstrap schema growth beyond its hard budget', async () => {
   const root = await mkdtemp(join(tmpdir(), 'narada-pi-budget-'));
   try {

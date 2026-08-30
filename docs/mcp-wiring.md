@@ -148,7 +148,9 @@ Generated shape:
 Pi has no native MCP configuration format. Narada materializes one global
 extension at `~/.pi/agent/extensions/narada-mcp/index.ts`. It eagerly starts
 only the compact bootstrap set (`agent-context`, `local-filesystem`,
-`mcp-loader`, and `task-lifecycle`). Other admitted Site authority remains
+`mcp-loader`, and `task-lifecycle`). The eager Task Lifecycle projection contains
+only `task_lifecycle_bridge_poll`; its full operation surface, like other Site
+capabilities, is attached lazily through Loader. Other admitted Site authority remains
 discoverable and callable lazily through Loader instead of permanently adding
 every Site tool schema to Pi's model context.
 
