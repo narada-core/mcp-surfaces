@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { buildGuidanceResult } from '../src/guidance.js';
 import {
   createServerState,
@@ -11,6 +12,7 @@ import {
   handleRequest,
 } from '../src/main.js';
 import { decideStructuredCommandExecution } from '../src/policy.js';
+import { surfaceDefinition } from '../src/surface-definition.js';
 type DynamicTestValue = string & DynamicTestValue[] & {
   [key: string]: DynamicTestValue;
   [index: number]: DynamicTestValue;
@@ -20,6 +22,16 @@ type JsonRpcTestResponse = {
   result: DynamicTestValue;
   error: DynamicTestValue;
 };
+
+const declaredStructuredCommandTransport = surfaceDefinition().descriptor.projections[0]?.transport;
+const declaredStructuredCommandArgs = declaredStructuredCommandTransport?.kind === 'stdio'
+  ? declaredStructuredCommandTransport.args
+  : [];
+assert.equal(declaredStructuredCommandArgs.includes('python'), true);
+const workspaceRoot = resolve(fileURLToPath(new URL('../../../..', import.meta.url)));
+const siteRegistry = JSON.parse(readFileSync(join(workspaceRoot, '.narada', 'capabilities', 'mcp-surfaces.json'), 'utf8'));
+const projectedStructuredCommand = siteRegistry.surfaces.find((surface: any) => surface.surface_projection?.surface_id === 'structured-command');
+assert.equal(projectedStructuredCommand.surface_projection.surface_descriptor.projections[0].transport.args.includes('python'), true);
 
 type ExecutionResult = Record<string, unknown> & {
   status: string;
@@ -707,6 +719,13 @@ assert.deepEqual(policy.result.structuredContent.default_allowed_prefixes, [
   'cargo fmt',
   'cargo check',
   'cargo test',
+  'cargo build',
+  'cargo native-build',
+  'cargo native-test',
+  'cargo native-package',
+  'cargo native-materialize',
+  'cargo native-release',
+  'cargo native-verify',
   'narada launcher workspace-plan',
   'narada doctor',
   'pwsh -file',
