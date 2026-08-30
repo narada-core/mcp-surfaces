@@ -116,12 +116,21 @@ test('native loader keeps a runtime-proxy child across stateful task-lifecycle c
     }, 2);
     assert.equal(opened.schema, 'narada.mcp_loader.surface_handle_opened.v1');
     const connectionId = opened.connection_id;
+    const inspect = async (toolName: string, id: number) => {
+      const result = await call('tools/call', {
+        name: 'mcp_loader_inspect_tool',
+        arguments: { connection_id: connectionId, tool_name: toolName },
+      }, id);
+      return result.schema_lease as string;
+    };
 
+    const payloadLease = await inspect('mcp_payload_create', 30);
     const payloadCreated = await call('tools/call', {
       name: 'mcp_loader_call_tool',
       arguments: {
         connection_id: connectionId,
         tool_name: 'mcp_payload_create',
+        schema_lease: payloadLease,
         arguments: { payload: { title: 'native loader stateful regression' }, created_by: 'native-stateful.test' },
       },
     }, 3);
@@ -129,17 +138,19 @@ test('native loader keeps a runtime-proxy child across stateful task-lifecycle c
     assert.equal(payloadCreated.result.structuredContent.status, 'created');
     const payloadRef = payloadCreated.result.structuredContent.ref;
 
+    const createLease = await inspect('task_lifecycle_create', 40);
     const taskCreated = await call('tools/call', {
       name: 'mcp_loader_call_tool',
-      arguments: { connection_id: connectionId, tool_name: 'task_lifecycle_create', arguments: { payload_ref: payloadRef } },
+      arguments: { connection_id: connectionId, tool_name: 'task_lifecycle_create', schema_lease: createLease, arguments: { payload_ref: payloadRef } },
     }, 4);
     assert.equal(taskCreated.result.structuredContent.schema, 'narada.task.create.v0');
     assert.equal(taskCreated.result.structuredContent.status, 'created');
     assert.equal(taskCreated.result.structuredContent.task_number, 2433);
 
+    const showLease = await inspect('task_lifecycle_show', 50);
     const taskShown = await call('tools/call', {
       name: 'mcp_loader_call_tool',
-      arguments: { connection_id: connectionId, tool_name: 'task_lifecycle_show', arguments: { task_number: 2433 } },
+      arguments: { connection_id: connectionId, tool_name: 'task_lifecycle_show', schema_lease: showLease, arguments: { task_number: 2433 } },
     }, 5);
     assert.equal(taskShown.result.structuredContent.schema, 'narada.producer_output_page.v1');
     assert.equal(taskShown.result.structuredContent.status, 'ok');

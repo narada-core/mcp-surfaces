@@ -557,6 +557,7 @@ type SurfaceHandle = {
 
 type LoaderState = {
   policy: LoaderPolicy;
+  schemaLeaseSecret: string;
   connections: Map<string, ChildConnection>;
   surfaceHandles: Map<string, SurfaceHandle>;
   bindingAdmission: McpBindingAdmissionEnvelopeV1 | null;
@@ -609,6 +610,7 @@ export function createServerState(options: JsonRecord = {}): LoaderState {
   };
   return {
     policy,
+    schemaLeaseSecret: randomUUID(),
     connections: new Map(),
     surfaceHandles: new Map(),
     bindingAdmission: loadBindingAdmission(options),
@@ -713,6 +715,17 @@ export function listTools() {
     tool('mcp_loader_list_tools', 'List tools exposed by an attached MCP surface.', {
       connection_id: { type: 'string', description: 'Connection id returned by mcp_loader_attach_surface.' },
     }, ['connection_id'], { readOnly: true }),
+    tool('mcp_loader_inspect_tool', 'Inspect one exact child-tool contract and issue a generation-bound schema lease required for invocation.', {
+      connection_id: { type: 'string', description: 'Connection id returned by mcp_loader_attach_surface.' },
+      tool_name: { type: 'string', description: 'Canonical child tool name.' },
+    }, ['connection_id', 'tool_name'], { readOnly: true }),
+    tool('mcp_loader_inspect_binding_tool', 'Resume or open one admitted binding, inspect one exact child-tool contract, and issue a generation-bound schema lease.', {
+      site_root: { type: 'string', description: 'Site root directory.' },
+      binding_id: { type: 'string', description: 'Exact binding identity from the admitted session envelope.' },
+      surface_id: { type: 'string', description: 'Optional consistency assertion for the admitted binding.' },
+      runtime_kind: { type: 'string', description: 'Optional explicit runtime context.' },
+      tool_name: { type: 'string', description: 'Canonical child tool name.' },
+    }, ['site_root', 'binding_id', 'tool_name'], { readOnly: false }),
     tool('mcp_loader_surface_status', 'Inspect the runtime status and loader-managed restartability of an attached MCP surface child process.', {
       connection_id: { type: 'string', description: 'Connection id returned by mcp_loader_attach_surface.' },
     }, ['connection_id'], { readOnly: true }),
@@ -722,15 +735,17 @@ export function listTools() {
     tool('mcp_loader_call_tool', 'Call a tool on an attached MCP surface. Results are bounded by default and include a typed summary; set include_runtime_metadata=true when lifecycle/freshness evidence is needed on this call. If the nested arguments include timeout_ms, the loader honors it up to its bounded maximum and waits an additional bounded grace (--tool-timeout-grace-ms, default 1000 ms) so the tool can return its own bounded timeout result.', {
       connection_id: { type: 'string', description: 'Connection id returned by mcp_loader_attach_surface.' },
       tool_name: { type: 'string', description: 'Tool name on the attached surface.' },
+      schema_lease: { type: 'string', description: 'Opaque lease returned by mcp_loader_inspect_tool for this exact child generation and contract.' },
       arguments: { type: 'object', description: 'Arguments object for the tool call.' },
       include_runtime_metadata: { type: 'boolean', description: 'Include loader runtime_lifecycle and runtime_freshness metadata on this result. Defaults to false; attach/status/observation tools remain authoritative for lifecycle evidence.' },
-    }, ['connection_id', 'tool_name'], { readOnly: false }),
+    }, ['connection_id', 'tool_name', 'schema_lease'], { readOnly: false }),
     tool('mcp_loader_call_surface_tool', 'Call a tool through a stable logical surface handle. Results are bounded by default and include a typed summary; set include_runtime_metadata=true for lifecycle/freshness evidence. The handle follows loader-managed child replacement; use mcp_loader_open_surface to create a new handle after loader restart.', {
       surface_handle: { type: 'string', description: 'Stable handle returned by mcp_loader_open_surface.' },
       tool_name: { type: 'string', description: 'Tool name on the logical surface.' },
+      schema_lease: { type: 'string', description: 'Opaque lease returned by mcp_loader_inspect_tool for the current child generation and contract.' },
       arguments: { type: 'object', description: 'Arguments object for the tool call.' },
       include_runtime_metadata: { type: 'boolean', description: 'Include loader runtime_lifecycle and runtime_freshness metadata on this result. Defaults to false.' },
-    }, ['surface_handle', 'tool_name'], { readOnly: false }),
+    }, ['surface_handle', 'tool_name', 'schema_lease'], { readOnly: false }),
     tool('mcp_loader_read_result', 'Read a bounded page from a materialized proxied child result. The ref is bound to the same Site authority as the connection.', {
       connection_id: { type: 'string', description: 'Connection id returned by mcp_loader_call_tool or mcp_loader_call_surface_tool.' },
       ref: { type: 'string', description: 'Materialized result ref returned in result.details_ref or result.output_ref.' },
@@ -781,6 +796,10 @@ async function callTool(params: JsonRecord, state: LoaderState): Promise<JsonRec
       return surfaceHandleInventory(state);
     case 'mcp_loader_list_tools':
       return listAttachedTools(args, state);
+    case 'mcp_loader_inspect_tool':
+      return inspectAttachedTool(args, state);
+    case 'mcp_loader_inspect_binding_tool':
+      return inspectBindingTool(args, state);
     case 'mcp_loader_surface_status':
       return surfaceStatus(args, state);
     case 'mcp_loader_tool_discovery_manifest':
@@ -1459,11 +1478,73 @@ async function toolDiscoveryManifest(args: JsonRecord, state: LoaderState): Prom
   };
 }
 
+function childToolContract(connection: ChildConnection, toolName: string): JsonRecord {
+  const tool = connection.toolSnapshot?.find((candidate) => candidate.name === toolName);
+  if (!tool) throw diagnosticError('child_tool_not_found', `child_tool_not_found:${toolName}`, {
+    connection_id: connection.connectionId,
+    surface_id: connection.surfaceId,
+    tool_name: toolName,
+  });
+  return tool;
+}
+
+function schemaLeaseToken(state: LoaderState, connection: ChildConnection, toolName: string, toolSchemaDigest: string): string {
+  return stableDigest({ secret: state.schemaLeaseSecret, connection_id: connection.connectionId,
+    generation_id: connection.generationId, tool_name: toolName, tool_schema_digest: toolSchemaDigest });
+}
+
+function inspectAttachedTool(args: JsonRecord, state: LoaderState): JsonRecord {
+  const connection = getConnection(args, state);
+  const toolName = requiredString(args.tool_name, 'missing_tool_name');
+  const tool = childToolContract(connection, toolName);
+  const toolSchemaDigest = stableDigest(tool);
+  const inputSchema = tool.inputSchema ?? tool.input_schema ?? null;
+  const outputSchema = tool.outputSchema ?? tool.output_schema ?? null;
+  return {
+    schema: 'narada.mcp_loader.schema_lease.v1', status: 'issued', connection_id: connection.connectionId,
+    logical_connection_id: connection.logicalConnectionId, generation_id: connection.generationId,
+    surface_id: connection.surfaceId, tool_name: toolName, tool_schema_digest: toolSchemaDigest,
+    input_schema_digest: stableDigest(inputSchema), output_schema_digest: stableDigest(outputSchema),
+    tool_contract: tool, schema_lease: schemaLeaseToken(state, connection, toolName, toolSchemaDigest),
+    lease_scope: 'loader_process_child_generation', transferable: false,
+  };
+}
+
+async function inspectBindingTool(args: JsonRecord, state: LoaderState): Promise<JsonRecord> {
+  const bindingId = requiredString(args.binding_id, 'missing_binding_id');
+  const siteRoot = normalizePath(requiredString(args.site_root, 'missing_site_root'));
+  const existing = [...state.connections.values()].find((connection) =>
+    connection.bindingId === bindingId && normalizePath(connection.siteRoot) === siteRoot && isConnectionLive(connection));
+  const existingHandle = existing && [...state.surfaceHandles.values()].find((handle) =>
+    handle.logicalConnectionId === existing.logicalConnectionId);
+  const opened = existing && existingHandle ? {
+    status: 'resumed', connection_id: existing.connectionId, surface_handle: existingHandle.handle,
+  } : await openSurfaceHandle(args, state);
+  return {
+    ...inspectAttachedTool({ connection_id: opened.connection_id, tool_name: args.tool_name }, state),
+    binding_resolution: { status: opened.status, binding_id: bindingId,
+      surface_handle: opened.surface_handle, handle_scope: 'loader_process', caller_must_retain_handle: false },
+  };
+}
+
+function validateSchemaLease(args: JsonRecord, state: LoaderState, connection: ChildConnection, toolName: string): void {
+  const supplied = requiredString(args.schema_lease, 'schema_lease_required');
+  const toolSchemaDigest = stableDigest(childToolContract(connection, toolName));
+  if (supplied !== schemaLeaseToken(state, connection, toolName, toolSchemaDigest)) {
+    throw diagnosticError('schema_lease_stale', 'schema_lease_stale', {
+      connection_id: connection.connectionId, generation_id: connection.generationId,
+      tool_name: toolName, tool_schema_digest: toolSchemaDigest,
+      next_call: { tool_name: 'mcp_loader_inspect_tool', arguments: { connection_id: connection.connectionId, tool_name: toolName } },
+    });
+  }
+}
+
 async function callAttachedTool(args: JsonRecord, state: LoaderState): Promise<JsonRecord> {
   const connection = getConnection(args, state);
   if (connection.bindingId) admitBindingForOperation(state, connection.siteRoot, connection.bindingId, 'attach');
   else assertBindingAdmissionAvailable(state);
   const toolName = requiredString(args.tool_name, 'missing_tool_name');
+  validateSchemaLease(args, state, connection, toolName);
   const toolArgs = asRecord(args.arguments);
   enforceRequestSize(toolArgs, state.policy.maxRequestBytes);
   const timeout = resolveToolCallTimeoutMs(toolArgs.timeout_ms, state.policy.toolCallTimeoutMs, state.policy.toolCallGraceMs);
@@ -1535,6 +1616,7 @@ async function callSurfaceHandleTool(args: JsonRecord, state: LoaderState): Prom
   return callAttachedTool({
     connection_id: connection.connectionId,
     tool_name: requiredString(args.tool_name, 'missing_tool_name'),
+    schema_lease: args.schema_lease,
     arguments: asRecord(args.arguments),
     include_runtime_metadata: args.include_runtime_metadata,
   }, state);
@@ -1910,7 +1992,7 @@ function isUnderPath(child: string, parent: string): boolean {
 const SHARED_SURFACE_REGISTRY: Record<string, { entrypoint: string; args: string[] }> = {
   'operator-console-overlay': { entrypoint: MCP_SURFACES_ROOT + '/operator-console-overlay-mcp/dist/src/main.js', args: [] },
   'local-filesystem': { entrypoint: `${MCP_SURFACES_ROOT}/local-filesystem-mcp/dist/src/main.js`, args: ['--mode', 'write', '--allowed-root', '{site_root}', '--anchored-allowed-root', 'user_home:.codex', '--output-root', '{site_root}'] },
-  'structured-command': { entrypoint: `${MCP_SURFACES_ROOT}/structured-command-mcp/dist/src/main.js`, args: ['--allowed-root', '{site_root}', '--allow-command', 'node', '--allow-command', 'pnpm', '--allow-command', 'npm'] },
+  'structured-command': { entrypoint: `${MCP_SURFACES_ROOT}/structured-command-mcp/dist/src/main.js`, args: ['--allowed-root', '{site_root}', '--allow-command', 'node', '--allow-command', 'pnpm', '--allow-command', 'npm', '--allow-command', 'python', '--allow-prefix', 'uv run --with sympy python'] },
   'git': { entrypoint: `${MCP_SURFACES_ROOT}/git-mcp/dist/src/main.js`, args: ['--allowed-root', '{workspace_root}', '--output-root', '{site_root}', '--mode', 'write'] },
   'site-inbox': { entrypoint: `${MCP_SURFACES_ROOT}/site-inbox-mcp/dist/src/main.js`, args: ['--site-root', '{site_root}'] },
   'mailbox': { entrypoint: `${MCP_SURFACES_ROOT}/mailbox-mcp/dist/src/main.js`, args: ['--site-root', '{site_root}'] },
@@ -2460,6 +2542,13 @@ function callToolResult(result: JsonRecord): JsonRecord {
 function renderResult(result: JsonRecord): string {
   const schema = typeof result.schema === 'string' ? result.schema : 'mcp_loader.result';
   const status = typeof result.status === 'string' ? result.status : 'ok';
+  if (schema === 'narada.mcp_loader.schema_lease.v1') {
+    const lines = [`${schema}: ${status}`];
+    for (const key of ['connection_id', 'surface_id', 'tool_name', 'generation_id', 'schema_lease']) {
+      if (typeof result[key] === 'string') lines.push(`${key}: ${result[key]}`);
+    }
+    return lines.join('\n');
+  }
   if (schema === 'narada.mcp_loader.site_tool_inventory_check.v1') {
     return renderSiteToolInventoryResult(result, schema, status);
   }

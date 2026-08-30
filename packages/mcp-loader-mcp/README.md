@@ -10,6 +10,15 @@ attached-tool schemas. `mcp_loader_tool_discovery_manifest` returns compact
 canonical names by default; pass `compact: false` for schemas and
 `include_runtime_metadata: true` only when lifecycle evidence is material.
 
+Every proxied child invocation requires a generation-bound schema lease.
+Inspect an attached tool with `mcp_loader_inspect_tool`, or inspect a
+reconnect-safe binding with `mcp_loader_inspect_binding_tool`. The inspection
+returns the exact child contract, its canonical digests, and an opaque
+`schema_lease`. Pass that lease unchanged to the corresponding call tool.
+Leases are bound to the loader process, child connection, child generation,
+canonical tool name, and complete tool contract. Child replacement or contract
+drift invalidates the lease and requires fresh inspection.
+
 Every loader lifecycle projection uses the `narada.mcp_loader.runtime_lifecycle.v1` shape. Attached replayable projections expose `runtime_lifecycle` with `managed_by: "mcp-loader"`, `restartable: true`, and connection-scoped inspect/restart actions. `session_pinned` and `restart_required` projections expose `restartable: false`, `restartability_status: "unavailable_for_lifecycle"`, no child restart action, and a carrier/runtime-supervisor recovery action instead. The machine-readable `loader_restart_action` describes the operation required to restart the loader itself; its `next_call.tool_name` is the external supervisor capability `restart_mcp_loader_process`, deliberately not a child-surface tool and not implemented by the loader process itself. Pre-attachment guidance exposes the same shape with `restartable: null` and `restartability_status: "available_after_successful_attach"`. Inspect `mcp_loader_surface_status` or `mcp_loader_connection_inventory`, then call `mcp_loader_surface_restart({ connection_id, reason })` only for an attached replayable projection. The agent session does not need to restart for that child replacement. Child-surface domain policy remains authoritative, and restart invalidates refs owned by the replaced child.
 
 Runtime lifecycle and freshness metadata is opt-in on ordinary discovery and proxy calls. Pass `include_runtime_metadata: true` when that evidence is material; compact responses are the default. A proxied child guidance result is augmented with loader lifecycle and freshness only when that flag is set.
@@ -30,6 +39,7 @@ The loader's own public tools are:
   `mcp_loader_surface_status`, `mcp_loader_surface_restart`,
   `mcp_loader_detach`, and `mcp_loader_connection_inventory`.
 - `mcp_loader_list_tools`, `mcp_loader_tool_discovery_manifest`,
+  `mcp_loader_inspect_tool`, `mcp_loader_inspect_binding_tool`,
   `mcp_loader_call_tool`, and `mcp_loader_call_surface_tool`.
 - `mcp_loader_runtime_observation` and `mcp_loader_process_ownership`.
 

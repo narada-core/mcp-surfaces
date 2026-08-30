@@ -106,12 +106,17 @@ test('registrar-bound epistemic graph survives loader restart', { timeout: 60_00
     }));
     assert.equal(opened.status, 'opened');
     let surfaceHandle = String(opened.surface_handle);
-    const call = async (id: number, toolName: string, args: Record<string, unknown>) => childResult(structured(
-      await loader!.client.request(id, 'tools/call', {
+    const call = async (id: number, toolName: string, args: Record<string, unknown>) => {
+      const inspected = structured(await loader!.client.request(id * 1000, 'tools/call', {
+        name: 'mcp_loader_inspect_binding_tool',
+        arguments: { site_root: siteRoot, binding_id: bound.binding_id, surface_id: 'epistemic-graph', tool_name: toolName },
+      }));
+      surfaceHandle = String((inspected.binding_resolution as Record<string, unknown>).surface_handle);
+      return childResult(structured(await loader!.client.request(id, 'tools/call', {
         name: 'mcp_loader_call_surface_tool',
-        arguments: { surface_handle: surfaceHandle, tool_name: toolName, arguments: args },
-      }),
-    ));
+        arguments: { surface_handle: surfaceHandle, tool_name: toolName, schema_lease: inspected.schema_lease, arguments: args },
+      })));
+    };
     const authorityBasis = { kind: 'e2e_fixture', summary: 'Prove Site-bound epistemic graph behavior.' };
     const created = await call(3, 'epistemic_graph_sequence_create', {
       sequence_name: 'fixture-records', actor: 'fixture-agent', authority_basis: authorityBasis, start_at: 7,
@@ -132,8 +137,8 @@ test('registrar-bound epistemic graph survives loader restart', { timeout: 60_00
       authority_basis: authorityBasis,
       idempotency_key: 'fixture-graph-1',
       operations: [
-        { op: 'entity.declare', entity_id: 'communication:root', kind: 'communication', title: 'Root', sender: 'marici.Caroline', recipient: 'marici.Grothendieck', body: 'Root body', intent: 'result', sent_at: '2026-08-20T00:00:00Z' },
-        { op: 'entity.declare', entity_id: 'communication:reply', kind: 'communication', title: 'Reply', sender: 'marici.Benincasa', recipient: 'marici.Grothendieck', body: 'Reply body', intent: 'reply', sent_at: '2026-08-20T00:01:00Z' },
+        { op: 'entity.declare', entity_id: 'communication:root', kind: 'narada.epistemic:communication', title: 'Root', sender: 'marici.Caroline', recipient: 'marici.Grothendieck', body: 'Root body', intent: 'result', sent_at: '2026-08-20T00:00:00Z' },
+        { op: 'entity.declare', entity_id: 'communication:reply', kind: 'narada.epistemic:communication', title: 'Reply', sender: 'marici.Benincasa', recipient: 'marici.Grothendieck', body: 'Reply body', intent: 'reply', sent_at: '2026-08-20T00:01:00Z' },
         { op: 'relation.declare', relation_id: 'relation:fixture-reply', relation_type: 'replies_to', source_id: 'communication:reply', target_id: 'communication:root' },
       ],
     });

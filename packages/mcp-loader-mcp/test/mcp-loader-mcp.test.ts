@@ -254,6 +254,15 @@ async function call(method: string, params: Record<string, unknown>, id: number)
   return undefined;
 }
 
+async function inspectLease(connectionId: string, toolName: string, id: number): Promise<string> {
+  const inspection = await call('tools/call', {
+    name: 'mcp_loader_inspect_tool',
+    arguments: { connection_id: connectionId, tool_name: toolName },
+  }, id);
+  assert.equal(inspection?.schema, 'narada.mcp_loader.schema_lease.v1');
+  return String(inspection?.schema_lease);
+}
+
 try {
   child.stdin.write(rpc('initialize', { protocolVersion: '2024-11-05' }, 1));
   child.stdin.write(rpc('tools/list', {}, 2));
@@ -476,20 +485,21 @@ try {
   assert.equal(fabricAttach?.schema, 'narada.mcp_loader.surface_attached.v1');
   assert.equal(fabricAttach?.entrypoint, restartableEntrypoint.replace(/\\/g, '/'));
   assert.deepEqual(fabricAttach?.args, ['--site-root', root, '--marker', 'fabric']);
-  const fabricCall = await call('tools/call', { name: 'mcp_loader_call_tool', arguments: { connection_id: fabricAttach?.connection_id, tool_name: 'echo', arguments: { n: 0 } } }, 19);
+  const fabricLease = await inspectLease(String(fabricAttach?.connection_id), 'echo', 190);
+  const fabricCall = await call('tools/call', { name: 'mcp_loader_call_tool', arguments: { connection_id: fabricAttach?.connection_id, tool_name: 'echo', schema_lease: fabricLease, arguments: { n: 0 } } }, 19);
   assert.deepEqual(fabricCall?.result?.structuredContent?.child_args, ['--site-root', root, '--marker', 'fabric']);
   assert.equal(fabricCall?.result?.structuredContent?.site_root, root.replace(/\\/g, '/'));
   assert.equal(fabricCall?.result?.structuredContent?.caller_agent_id, 'test.agent');
   assert.equal(fabricCall?.result?.structuredContent?.carrier_session_id, 'carrier-test');
   assert.equal(fabricCall?.result?.structuredContent?.site_id, 'test-site');
-  const propagatedTimeoutCall = await call('tools/call', { name: 'mcp_loader_call_tool', arguments: { connection_id: fabricAttach?.connection_id, tool_name: 'echo', arguments: { delay_ms: 1050, timeout_ms: 1200 } } }, 191);
+  const propagatedTimeoutCall = await call('tools/call', { name: 'mcp_loader_call_tool', arguments: { connection_id: fabricAttach?.connection_id, tool_name: 'echo', schema_lease: fabricLease, arguments: { delay_ms: 1050, timeout_ms: 1200 } } }, 191);
   assert.equal(propagatedTimeoutCall?.schema, 'narada.mcp_loader.tool_result.v1');
   assert.equal(propagatedTimeoutCall?.result?.structuredContent?.args?.timeout_ms, 1200);
   assert.equal(propagatedTimeoutCall?.result?.structuredContent?.request_meta?.narada_request_timeout_ms, 1200);
   // Regression: a nested timeout_ms must not double as the loader's outer wait deadline.
   // The child answers at 250 ms; before the grace fix the loader rejected at 100 ms
   // with child_timeout instead of waiting inner timeout + grace (100 + 1000 ms).
-  const graceCall = await call('tools/call', { name: 'mcp_loader_call_tool', arguments: { connection_id: fabricAttach?.connection_id, tool_name: 'echo', arguments: { delay_ms: 250, timeout_ms: 100 } } }, 192);
+  const graceCall = await call('tools/call', { name: 'mcp_loader_call_tool', arguments: { connection_id: fabricAttach?.connection_id, tool_name: 'echo', schema_lease: fabricLease, arguments: { delay_ms: 250, timeout_ms: 100 } } }, 192);
   assert.equal(graceCall?.schema, 'narada.mcp_loader.tool_result.v1');
   assert.equal(graceCall?.result?.structuredContent?.args?.timeout_ms, 100);
   assert.equal(graceCall?.result?.structuredContent?.request_meta?.narada_request_timeout_ms, 100);
@@ -536,7 +546,8 @@ try {
 
   const guidanceAttach = await call('tools/call', { name: 'mcp_loader_attach_surface', arguments: { site_root: root, surface_id: 'guidance-surface' } }, 201);
   assert.equal(guidanceAttach?.schema, 'narada.mcp_loader.surface_attached.v1');
-  const guidanceCall = await call('tools/call', { name: 'mcp_loader_call_tool', arguments: { connection_id: guidanceAttach?.connection_id, tool_name: 'guidance-surface_guidance', arguments: {}, include_runtime_metadata: true } }, 202);
+  const guidanceLease = await inspectLease(String(guidanceAttach?.connection_id), 'guidance-surface_guidance', 2002);
+  const guidanceCall = await call('tools/call', { name: 'mcp_loader_call_tool', arguments: { connection_id: guidanceAttach?.connection_id, tool_name: 'guidance-surface_guidance', schema_lease: guidanceLease, arguments: {}, include_runtime_metadata: true } }, 202);
   assert.equal(guidanceCall?.schema, 'narada.mcp_loader.tool_result.v1');
   assert.equal(guidanceCall?.result?.structuredContent?.loader_runtime_lifecycle?.schema, 'narada.mcp_loader.runtime_lifecycle.v1');
   assert.equal(guidanceCall?.result?.structuredContent?.loader_runtime_lifecycle?.managed_by, 'mcp-loader');
@@ -564,7 +575,8 @@ try {
   assert.equal(initialStatus?.status, 'live');
   assert.equal(initialStatus?.runtime_lifecycle?.managed_by, 'mcp-loader');
   assert.equal(initialStatus?.runtime_lifecycle?.restartable, true);
-  const firstCall = await call('tools/call', { name: 'mcp_loader_call_tool', arguments: { connection_id: oldConnectionId, tool_name: 'echo', arguments: { n: 1 }, include_runtime_metadata: true } }, 13);
+  const firstLease = await inspectLease(oldConnectionId, 'echo', 130);
+  const firstCall = await call('tools/call', { name: 'mcp_loader_call_tool', arguments: { connection_id: oldConnectionId, tool_name: 'echo', schema_lease: firstLease, arguments: { n: 1 }, include_runtime_metadata: true } }, 13);
   assert.equal(firstCall?.schema, 'narada.mcp_loader.tool_result.v1');
   assert.equal(firstCall?.runtime_lifecycle?.managed_by, 'mcp-loader');
   assert.equal(firstCall?.runtime_lifecycle?.restartable, true);
@@ -579,9 +591,10 @@ try {
   assert.equal(restart?.runtime_lifecycle?.managed_by, 'mcp-loader');
   assert.equal(restart?.runtime_lifecycle?.restartable, true);
   assert.equal(restart?.termination?.status, 'terminated');
-  const oldCall = await call('tools/call', { name: 'mcp_loader_call_tool', arguments: { connection_id: oldConnectionId, tool_name: 'echo', arguments: {} } }, 15);
+  const oldCall = await call('tools/call', { name: 'mcp_loader_call_tool', arguments: { connection_id: oldConnectionId, tool_name: 'echo', schema_lease: firstLease, arguments: {} } }, 15);
   assert.equal(oldCall?.data?.code, 'connection_not_found');
-  const replacementCall = await call('tools/call', { name: 'mcp_loader_call_tool', arguments: { connection_id: restart?.connection_id, tool_name: 'echo', arguments: { n: 2 } } }, 16);
+  const replacementLease = await inspectLease(String(restart?.connection_id), 'echo', 160);
+  const replacementCall = await call('tools/call', { name: 'mcp_loader_call_tool', arguments: { connection_id: restart?.connection_id, tool_name: 'echo', schema_lease: replacementLease, arguments: { n: 2 } } }, 16);
   assert.equal(replacementCall?.schema, 'narada.mcp_loader.tool_result.v1');
   assert.notEqual(replacementCall?.result?.structuredContent?.pid, firstPid);
   const replacementDetach = await call('tools/call', { name: 'mcp_loader_detach', arguments: { connection_id: restart?.connection_id } }, 17);
@@ -596,16 +609,18 @@ try {
   const handleInventory = await call('tools/call', { name: 'mcp_loader_surface_handle_inventory', arguments: {} }, 301);
   assert.equal(handleInventory?.schema, 'narada.mcp_loader.surface_handle_inventory.v1');
   assert.equal(handleInventory?.handles?.some((entry: Record<string, any>) => entry.surface_handle === surfaceHandle && entry.status === 'live'), true);
-  const handleCallBeforeRestart = await call('tools/call', { name: 'mcp_loader_call_surface_tool', arguments: { surface_handle: surfaceHandle, tool_name: 'echo', arguments: { n: 'before-handle-restart' } } }, 302);
+  const handleLease = await inspectLease(String(handleOpen?.connection_id), 'echo', 3020);
+  const handleCallBeforeRestart = await call('tools/call', { name: 'mcp_loader_call_surface_tool', arguments: { surface_handle: surfaceHandle, tool_name: 'echo', schema_lease: handleLease, arguments: { n: 'before-handle-restart' } } }, 302);
   assert.equal(handleCallBeforeRestart?.schema, 'narada.mcp_loader.tool_result.v1');
   const handlePid = handleCallBeforeRestart?.result?.structuredContent?.pid;
   const handleRestart = await call('tools/call', { name: 'mcp_loader_surface_restart', arguments: { connection_id: handleOpen?.connection_id, reason: 'stable handle contract' } }, 303);
   assert.equal(handleRestart?.schema, 'narada.mcp_loader.surface_restarted.v1');
   assert.equal(handleRestart?.replacement_connection?.logical_connection_id, handleOpen?.logical_connection_id);
-  const handleCallAfterRestart = await call('tools/call', { name: 'mcp_loader_call_surface_tool', arguments: { surface_handle: surfaceHandle, tool_name: 'echo', arguments: { n: 'after-handle-restart' } } }, 304);
+  const handleReplacementLease = await inspectLease(String(handleRestart?.connection_id), 'echo', 3040);
+  const handleCallAfterRestart = await call('tools/call', { name: 'mcp_loader_call_surface_tool', arguments: { surface_handle: surfaceHandle, tool_name: 'echo', schema_lease: handleReplacementLease, arguments: { n: 'after-handle-restart' } } }, 304);
   assert.equal(handleCallAfterRestart?.schema, 'narada.mcp_loader.tool_result.v1');
   assert.notEqual(handleCallAfterRestart?.result?.structuredContent?.pid, handlePid);
-  const largeHandleCall = await call('tools/call', { name: 'mcp_loader_call_surface_tool', arguments: { surface_handle: surfaceHandle, tool_name: 'echo', arguments: { blob: 'x'.repeat(20000) } } }, 305);
+  const largeHandleCall = await call('tools/call', { name: 'mcp_loader_call_surface_tool', arguments: { surface_handle: surfaceHandle, tool_name: 'echo', schema_lease: handleReplacementLease, arguments: { blob: 'x'.repeat(20000) } } }, 305);
   assert.equal(largeHandleCall?.schema, 'narada.mcp_loader.tool_result.v1');
   assert.equal(largeHandleCall?.result_bounded, true);
   assert.equal(largeHandleCall?.result_summary?.schema, 'narada.mcp_loader.child_result.v1');

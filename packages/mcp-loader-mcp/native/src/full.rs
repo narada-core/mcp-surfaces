@@ -231,6 +231,7 @@ struct LoaderState {
     run_id: String,
     owner_pid: u32,
     ownership_marker: String,
+    schema_lease_secret: String,
     connections: HashMap<String, Connection>,
     handles: HashMap<String, SurfaceHandle>,
     binding_admission: Option<Value>,
@@ -963,6 +964,7 @@ fn run_server(options: Options) -> Result<(), Diagnostic> {
         run_id,
         owner_pid,
         ownership_marker,
+        schema_lease_secret: new_id("schema-lease-secret"),
         connections: HashMap::new(),
         handles: HashMap::new(),
         binding_admission,
@@ -2099,11 +2101,13 @@ fn list_tools() -> Vec<Value> {
         tool_definition("mcp_loader_resume_or_open_surface","Resume the current loader-process handle for a binding when present, otherwise reopen the admitted binding and return a fresh handle.",json!({"site_root":{"type":"string"},"binding_id":{"type":"string"},"surface_id":{"type":"string"},"runtime_kind":{"type":"string"},"include_runtime_metadata":{"type":"boolean","default":false}}),&["site_root","binding_id"],false,false),
         tool_definition("mcp_loader_surface_handle_inventory","List stable logical surface handles and the current child generation, without spawning or replacing a surface.",json!({}),&[],true,false),
         tool_definition("mcp_loader_list_tools","List tools exposed by an attached MCP surface. Runtime metadata is opt-in.",json!({"connection_id":{"type":"string"},"include_runtime_metadata":{"type":"boolean","default":false}}),&["connection_id"],true,false),
+        tool_definition("mcp_loader_inspect_tool","Inspect one exact child-tool contract and issue a generation-bound schema lease required for invocation.",json!({"connection_id":{"type":"string"},"tool_name":{"type":"string"}}),&["connection_id","tool_name"],true,false),
+        tool_definition("mcp_loader_inspect_binding_tool","Resume or open one admitted binding, inspect one exact child-tool contract, and issue a generation-bound schema lease.",json!({"site_root":{"type":"string"},"binding_id":{"type":"string"},"surface_id":{"type":"string"},"runtime_kind":{"type":"string"},"tool_name":{"type":"string"}}),&["site_root","binding_id","tool_name"],false,false),
         tool_definition("mcp_loader_surface_status","Inspect the runtime status and loader-managed restartability of an attached MCP surface child process.",json!({"connection_id":{"type":"string"}}),&["connection_id"],true,false),
         tool_definition("mcp_loader_tool_discovery_manifest","Return canonical semantic tool names for an attached surface and flag generated aliases as non-authoritative. Compact names are the default; exact schemas and runtime metadata are opt-in.",json!({"connection_id":{"type":"string"},"compact":{"type":"boolean","default":true},"include_runtime_metadata":{"type":"boolean","default":false}}),&["connection_id"],true,false),
-        tool_definition("mcp_loader_call_tool","Call a tool on an attached MCP surface. Results are bounded by default and include a typed summary; set include_runtime_metadata=true when lifecycle/freshness evidence is needed on this call.",json!({"connection_id":{"type":"string"},"tool_name":{"type":"string"},"arguments":{"type":"object"},"include_runtime_metadata":{"type":"boolean"}}),&["connection_id","tool_name"],false,false),
-        tool_definition("mcp_loader_call_surface_tool","Call a tool through a stable logical surface handle. Results are bounded by default and include a typed summary; set include_runtime_metadata=true for lifecycle/freshness evidence.",json!({"surface_handle":{"type":"string"},"tool_name":{"type":"string"},"arguments":{"type":"object"},"include_runtime_metadata":{"type":"boolean"}}),&["surface_handle","tool_name"],false,false),
-        tool_definition("mcp_loader_call_binding_tool","Atomically resume or reopen an admitted binding and call one child tool. Use this for workflows that must survive loader-client reconnects without threading a process-local handle.",json!({"site_root":{"type":"string"},"binding_id":{"type":"string"},"surface_id":{"type":"string"},"runtime_kind":{"type":"string"},"tool_name":{"type":"string"},"arguments":{"type":"object"},"include_runtime_metadata":{"type":"boolean","default":false}}),&["site_root","binding_id","tool_name"],false,false),
+        tool_definition("mcp_loader_call_tool","Call a tool on an attached MCP surface using a schema lease issued for this exact tool contract and child generation.",json!({"connection_id":{"type":"string"},"tool_name":{"type":"string"},"schema_lease":{"type":"string"},"arguments":{"type":"object"},"include_runtime_metadata":{"type":"boolean"}}),&["connection_id","tool_name","schema_lease"],false,false),
+        tool_definition("mcp_loader_call_surface_tool","Call a tool through a stable logical surface handle using a schema lease issued for its current child generation.",json!({"surface_handle":{"type":"string"},"tool_name":{"type":"string"},"schema_lease":{"type":"string"},"arguments":{"type":"object"},"include_runtime_metadata":{"type":"boolean"}}),&["surface_handle","tool_name","schema_lease"],false,false),
+        tool_definition("mcp_loader_call_binding_tool","Atomically resume or reopen an admitted binding and call one child tool using a schema lease issued by mcp_loader_inspect_binding_tool.",json!({"site_root":{"type":"string"},"binding_id":{"type":"string"},"surface_id":{"type":"string"},"runtime_kind":{"type":"string"},"tool_name":{"type":"string"},"schema_lease":{"type":"string"},"arguments":{"type":"object"},"include_runtime_metadata":{"type":"boolean","default":false}}),&["site_root","binding_id","tool_name","schema_lease"],false,false),
         tool_definition("mcp_loader_read_result","Read a bounded page from a materialized proxied child result. The ref is bound to the same Site authority as the connection.",json!({"connection_id":{"type":"string"},"ref":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":20000},"timeout_ms":{"type":"integer","minimum":1,"maximum":15000}}),&["connection_id","ref"],true,false),
         tool_definition("mcp_loader_detach","Detach and terminate an attached MCP surface.",json!({"connection_id":{"type":"string"}}),&["connection_id"],false,true),
         tool_definition("mcp_loader_surface_restart","Replace an attached MCP surface child process with a freshly initialized connection using the same site, surface, entrypoint, and args; this does not restart the agent session.",json!({"connection_id":{"type":"string"},"reason":{"type":"string"}}),&["connection_id"],false,true),
@@ -2953,6 +2957,7 @@ fn attach_surface(arguments: &JsonObject, state: &mut LoaderState) -> Result<Val
         descriptor_digest,
         declared_digest,
         admitted.as_ref().map(|(entry, _)| entry.clone()),
+        arguments.get("binding_id").and_then(Value::as_str).map(ToOwned::to_owned),
     )?;
     let id = connection.connection_id.clone();
     let response = attached_response(&connection, state);
@@ -3037,6 +3042,7 @@ fn open_connection(
     descriptor_digest: Option<String>,
     declared_digest: Option<String>,
     admitted_binding: Option<Value>,
+    requested_binding_id: Option<String>,
 ) -> Result<Connection, Diagnostic> {
     let connection_id = new_id("connection");
     let logical_connection_id = connection_id.clone();
@@ -3171,7 +3177,8 @@ fn open_connection(
             .as_ref()
             .and_then(|entry| entry.get("binding_id"))
             .and_then(Value::as_str)
-            .map(ToOwned::to_owned),
+            .map(ToOwned::to_owned)
+            .or(requested_binding_id),
         admission_envelope_id: state
             .binding_admission
             .as_ref()
@@ -3826,6 +3833,141 @@ fn tool_discovery_manifest(
     Ok(result)
 }
 
+fn child_tool_contract<'a>(
+    connection: &'a Connection,
+    tool_name: &str,
+) -> Result<&'a Value, Diagnostic> {
+    connection
+        .tools
+        .iter()
+        .find(|tool| tool.get("name").and_then(Value::as_str) == Some(tool_name))
+        .ok_or_else(|| {
+            Diagnostic::new(
+                "child_tool_not_found",
+                format!("child_tool_not_found:{tool_name}"),
+            )
+            .with_details(json!({
+                "connection_id": connection.connection_id,
+                "surface_id": connection.surface_id,
+                "tool_name": tool_name
+            }))
+        })
+}
+
+fn child_tool_schema_digest(tool: &Value) -> String {
+    sha256(&stable_json(tool))
+}
+
+fn schema_lease_token(
+    state: &LoaderState,
+    connection: &Connection,
+    tool_name: &str,
+    schema_digest: &str,
+) -> String {
+    schema_lease_digest(
+        &state.schema_lease_secret,
+        &connection.connection_id,
+        &connection.generation_id,
+        tool_name,
+        schema_digest,
+    )
+}
+
+fn schema_lease_digest(
+    secret: &str,
+    connection_id: &str,
+    generation_id: &str,
+    tool_name: &str,
+    schema_digest: &str,
+) -> String {
+    sha256(&stable_json(&json!({
+        "secret": secret,
+        "connection_id": connection_id,
+        "generation_id": generation_id,
+        "tool_name": tool_name,
+        "tool_schema_digest": schema_digest
+    })))
+}
+
+fn inspect_attached_tool(
+    arguments: &JsonObject,
+    state: &LoaderState,
+) -> Result<Value, Diagnostic> {
+    let connection = get_connection(arguments, state)?;
+    let tool_name = required_string(arguments, "tool_name", "missing_tool_name")?;
+    let tool = child_tool_contract(connection, &tool_name)?;
+    let tool_schema_digest = child_tool_schema_digest(tool);
+    let input_schema = tool
+        .get("inputSchema")
+        .or_else(|| tool.get("input_schema"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let output_schema = tool
+        .get("outputSchema")
+        .or_else(|| tool.get("output_schema"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    Ok(json!({
+        "schema": "narada.mcp_loader.schema_lease.v1",
+        "status": "issued",
+        "connection_id": connection.connection_id,
+        "logical_connection_id": connection.logical_connection_id,
+        "generation_id": connection.generation_id,
+        "surface_id": connection.surface_id,
+        "tool_name": tool_name,
+        "tool_schema_digest": tool_schema_digest,
+        "input_schema_digest": sha256(&stable_json(&input_schema)),
+        "output_schema_digest": sha256(&stable_json(&output_schema)),
+        "tool_contract": tool,
+        "schema_lease": schema_lease_token(state, connection, &tool_name, &tool_schema_digest),
+        "lease_scope": "loader_process_child_generation",
+        "transferable": false
+    }))
+}
+
+fn validate_schema_lease(
+    arguments: &JsonObject,
+    state: &LoaderState,
+    connection_id: &str,
+    tool_name: &str,
+) -> Result<(), Diagnostic> {
+    let supplied = required_string(arguments, "schema_lease", "schema_lease_required")
+        .map_err(|_| {
+            Diagnostic::new("schema_lease_required", "schema_lease_required").with_details(json!({
+                "connection_id": connection_id,
+                "tool_name": tool_name,
+                "next_call": {
+                    "tool_name": "mcp_loader_inspect_tool",
+                    "arguments": {"connection_id": connection_id, "tool_name": tool_name}
+                }
+            }))
+        })?;
+    let connection = state.connections.get(connection_id).ok_or_else(|| {
+        Diagnostic::new(
+            "connection_not_found",
+            format!("connection_not_found:{connection_id}"),
+        )
+    })?;
+    let tool = child_tool_contract(connection, tool_name)?;
+    let digest = child_tool_schema_digest(tool);
+    let expected = schema_lease_token(state, connection, tool_name, &digest);
+    if supplied != expected {
+        return Err(Diagnostic::new("schema_lease_stale", "schema_lease_stale").with_details(
+            json!({
+                "connection_id": connection_id,
+                "generation_id": connection.generation_id,
+                "tool_name": tool_name,
+                "tool_schema_digest": digest,
+                "next_call": {
+                    "tool_name": "mcp_loader_inspect_tool",
+                    "arguments": {"connection_id": connection_id, "tool_name": tool_name}
+                }
+            }),
+        ));
+    }
+    Ok(())
+}
+
 fn get_connection<'a>(
     arguments: &JsonObject,
     state: &'a LoaderState,
@@ -3874,6 +4016,7 @@ fn call_attached_tool(
 ) -> Result<Value, Diagnostic> {
     let connection_id = required_string(arguments, "connection_id", "missing_connection_id")?;
     let tool_name = required_string(arguments, "tool_name", "missing_tool_name")?;
+    validate_schema_lease(arguments, state, &connection_id, &tool_name)?;
     if let Some(connection) = state.connections.get(&connection_id) {
         if let Some(binding_id) = connection.binding_id.as_deref() {
             admitted_binding(state, &connection.site_root, binding_id, "attach")?;
@@ -4176,6 +4319,7 @@ fn restart_connection(
         previous.descriptor_digest.clone(),
         previous.declared_tool_contract_digest.clone(),
         admitted.map(|(entry, _)| entry),
+        previous.binding_id.clone(),
     ) {
         Ok(mut connection) => {
             connection.logical_connection_id = previous.logical_connection_id.clone();
@@ -4256,6 +4400,50 @@ fn call_surface_handle_tool(
     call_attached_tool(&delegated, state)
 }
 
+fn inspect_binding_tool(
+    arguments: &JsonObject,
+    state: &mut LoaderState,
+) -> Result<Value, Diagnostic> {
+    let opened = resume_or_open_surface(arguments, state)?;
+    let handle_name = opened
+        .get("surface_handle")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            Diagnostic::new(
+                "surface_handle_missing",
+                "surface_handle_missing_after_resume_or_open",
+            )
+        })?;
+    let handle = state.handles.get(handle_name).ok_or_else(|| {
+        Diagnostic::new(
+            "surface_handle_not_found",
+            format!("surface_handle_not_found:{handle_name}"),
+        )
+    })?;
+    let connection = find_connection_for_handle(handle, state)
+        .filter(|connection| connection_live(connection))
+        .ok_or_else(|| {
+            Diagnostic::new(
+                "surface_handle_connection_unavailable",
+                format!("surface_handle_connection_unavailable:{handle_name}"),
+            )
+        })?;
+    let mut delegated = Map::new();
+    delegated.insert("connection_id".into(), json!(connection.connection_id));
+    delegated.insert(
+        "tool_name".into(),
+        arguments.get("tool_name").cloned().unwrap_or(Value::Null),
+    );
+    let mut result = inspect_attached_tool(&delegated, state)?;
+    result["binding_resolution"] = json!({
+        "status": opened.get("status").cloned().unwrap_or_else(|| json!("opened")),
+        "binding_id": arguments.get("binding_id").cloned().unwrap_or(Value::Null),
+        "surface_handle": handle_name,
+        "handle_scope": "loader_process"
+    });
+    Ok(result)
+}
+
 fn call_binding_tool(arguments: &JsonObject, state: &mut LoaderState) -> Result<Value, Diagnostic> {
     let opened = resume_or_open_surface(arguments, state)?;
     let handle = opened
@@ -4280,6 +4468,13 @@ fn call_binding_tool(arguments: &JsonObject, state: &mut LoaderState) -> Result<
             .cloned()
             .unwrap_or_else(|| json!({})),
     );
+    delegated.insert(
+        "schema_lease".into(),
+        arguments
+            .get("schema_lease")
+            .cloned()
+            .unwrap_or(Value::Null),
+    );
     if let Some(value) = arguments.get("include_runtime_metadata") {
         delegated.insert("include_runtime_metadata".into(), value.clone());
     }
@@ -4300,6 +4495,21 @@ fn render_result(result: &Value) -> String {
         .and_then(Value::as_str)
         .unwrap_or("mcp_loader.result");
     let status = result.get("status").and_then(Value::as_str).unwrap_or("ok");
+    if schema == "narada.mcp_loader.schema_lease.v1" {
+        let mut lines = vec![format!("{}: {}", schema, status)];
+        for key in [
+            "connection_id",
+            "surface_id",
+            "tool_name",
+            "generation_id",
+            "schema_lease",
+        ] {
+            if let Some(value) = result.get(key).and_then(Value::as_str) {
+                lines.push(format!("{}: {}", key, value));
+            }
+        }
+        return lines.join("\n");
+    }
     if schema == "narada.mcp_loader.site_tool_inventory_check.v1" {
         let mut lines = vec![
             format!("{}: {}", schema, status),
@@ -5155,6 +5365,8 @@ fn call_tool(name: &str, arguments: Value, state: &mut LoaderState) -> Result<Va
         "mcp_loader_resume_or_open_surface" => resume_or_open_surface(&object, state),
         "mcp_loader_surface_handle_inventory" => Ok(surface_handle_inventory(state)),
         "mcp_loader_list_tools" => list_attached_tools(&object, state),
+        "mcp_loader_inspect_tool" => inspect_attached_tool(&object, state),
+        "mcp_loader_inspect_binding_tool" => inspect_binding_tool(&object, state),
         "mcp_loader_surface_status" => surface_status(&object, state),
         "mcp_loader_tool_discovery_manifest" => tool_discovery_manifest(&object, state),
         "mcp_loader_call_tool" => call_attached_tool(&object, state),
@@ -5174,7 +5386,8 @@ fn call_tool(name: &str, arguments: Value, state: &mut LoaderState) -> Result<Va
 mod tests {
     use super::{
         admitted_binding_entry, canonical_binding_id, child_error_diagnostic, compact_child_result,
-        extract_proxy_child_args, list_tools, request_error_details, runtime_freshness,
+        extract_proxy_child_args, list_tools, render_result, request_error_details, runtime_freshness,
+        schema_lease_digest,
         try_parse_wire, unavailable_handle_recovery, validate_input_schema, LoaderState, Policy,
         SurfaceHandle,
     };
@@ -5196,7 +5409,15 @@ mod tests {
         );
         assert_eq!(
             find("mcp_loader_call_binding_tool")["inputSchema"]["required"],
-            json!(["site_root", "binding_id", "tool_name"])
+            json!(["site_root", "binding_id", "tool_name", "schema_lease"])
+        );
+        assert_eq!(
+            find("mcp_loader_call_tool")["inputSchema"]["required"],
+            json!(["connection_id", "tool_name", "schema_lease"])
+        );
+        assert_eq!(
+            find("mcp_loader_call_surface_tool")["inputSchema"]["required"],
+            json!(["surface_handle", "tool_name", "schema_lease"])
         );
         for name in [
             "mcp_loader_list_site_surfaces",
@@ -5213,6 +5434,27 @@ mod tests {
             find("mcp_loader_tool_discovery_manifest")["inputSchema"]["properties"]["compact"]
                 ["default"],
             true
+        );
+    }
+
+    #[test]
+    fn schema_lease_is_bound_to_generation_tool_and_exact_contract() {
+        let lease = schema_lease_digest("secret", "connection", "generation-1", "echo", "schema-a");
+        assert_eq!(
+            lease,
+            schema_lease_digest("secret", "connection", "generation-1", "echo", "schema-a")
+        );
+        assert_ne!(
+            lease,
+            schema_lease_digest("secret", "connection", "generation-2", "echo", "schema-a")
+        );
+        assert_ne!(
+            lease,
+            schema_lease_digest("secret", "connection", "generation-1", "other", "schema-a")
+        );
+        assert_ne!(
+            lease,
+            schema_lease_digest("secret", "connection", "generation-1", "echo", "schema-b")
         );
     }
 
@@ -5238,6 +5480,7 @@ mod tests {
             run_id: "test-loader".to_string(),
             owner_pid: 0,
             ownership_marker: "test-loader".to_string(),
+            schema_lease_secret: "test-schema-lease-secret".to_string(),
             connections: std::collections::HashMap::new(),
             handles: std::collections::HashMap::new(),
             binding_admission: None,
@@ -5332,6 +5575,22 @@ mod tests {
         assert_eq!(compacted["isError"], false);
         let text_only = json!({"content":[{"type":"text","text":"only"}]});
         assert_eq!(compact_child_result(&text_only), text_only);
+    }
+
+    #[test]
+    fn schema_lease_text_projection_includes_invocation_token() {
+        let rendered = render_result(&json!({
+            "schema":"narada.mcp_loader.schema_lease.v1",
+            "status":"issued",
+            "connection_id":"connection-1",
+            "surface_id":"epistemic-graph",
+            "tool_name":"epistemic_graph_query",
+            "generation_id":"generation-2",
+            "schema_lease":"schema-lease-token"
+        }));
+        assert!(rendered.contains("schema_lease: schema-lease-token"));
+        assert!(rendered.contains("tool_name: epistemic_graph_query"));
+        assert!(rendered.contains("generation_id: generation-2"));
     }
 
     #[test]

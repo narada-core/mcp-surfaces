@@ -68,12 +68,19 @@ process.stdin.on('data', (chunk) => {
     const attachedData = attached.result.structuredContent;
     assert.equal(attachedData.schema, 'narada.mcp_loader.surface_attached.v1');
     const connectionId = attachedData.connection_id;
-    const called = await call('tools/call', { name: 'mcp_loader_call_tool', arguments: { connection_id: connectionId, tool_name: 'echo', arguments: { value: 'ok' } } }, 4);
+    const uninspected = await call('tools/call', { name: 'mcp_loader_call_tool', arguments: { connection_id: connectionId, tool_name: 'echo', arguments: { value: 'blocked' } } }, 4);
+    assert.equal(uninspected.error.data.code, 'schema_lease_required');
+    const inspected = await call('tools/call', { name: 'mcp_loader_inspect_tool', arguments: { connection_id: connectionId, tool_name: 'echo' } }, 5);
+    const schemaLease = inspected.result.structuredContent.schema_lease;
+    assert.match(schemaLease, /^[a-f0-9]{64}$/);
+    const called = await call('tools/call', { name: 'mcp_loader_call_tool', arguments: { connection_id: connectionId, tool_name: 'echo', schema_lease: schemaLease, arguments: { value: 'ok' } } }, 6);
     assert.equal(called.result.structuredContent.result.structuredContent.args.value, 'ok');
-    const restarted = await call('tools/call', { name: 'mcp_loader_surface_restart', arguments: { connection_id: connectionId } }, 5);
+    const restarted = await call('tools/call', { name: 'mcp_loader_surface_restart', arguments: { connection_id: connectionId } }, 7);
     assert.equal(restarted.result.structuredContent.status, 'restarted');
     const replacementId = restarted.result.structuredContent.connection_id;
-    const detached = await call('tools/call', { name: 'mcp_loader_detach', arguments: { connection_id: replacementId } }, 6);
+    const stale = await call('tools/call', { name: 'mcp_loader_call_tool', arguments: { connection_id: replacementId, tool_name: 'echo', schema_lease: schemaLease, arguments: {} } }, 8);
+    assert.equal(stale.error.data.code, 'schema_lease_stale');
+    const detached = await call('tools/call', { name: 'mcp_loader_detach', arguments: { connection_id: replacementId } }, 9);
     assert.equal(detached.result.structuredContent.status, 'detached');
   } finally {
     processHandle.kill();

@@ -17,6 +17,7 @@ if (process.platform !== 'win32' && process.platform !== 'linux' && process.plat
 
 const result = spawnSync('cargo', ['build', '--release', '--locked', '--manifest-path', join(nativeRoot, 'Cargo.toml')], {
   cwd: packageRoot,
+  env: { ...process.env, CARGO_TARGET_DIR: join(nativeRoot, 'target') },
   stdio: 'inherit',
   windowsHide: true,
 });

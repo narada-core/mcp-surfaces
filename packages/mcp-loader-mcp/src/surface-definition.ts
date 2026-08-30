@@ -6,6 +6,7 @@ const READ_ONLY_TOOLS = [
   'mcp_loader_connection_inventory', 'mcp_loader_list_site_surfaces',
   'mcp_loader_site_fabric_diagnostics', 'mcp_loader_site_tool_inventory_check',
   'mcp_loader_list_tools', 'mcp_loader_surface_status',
+  'mcp_loader_inspect_tool',
   'mcp_loader_tool_discovery_manifest', 'mcp_loader_runtime_observation',
 ] as const;
 

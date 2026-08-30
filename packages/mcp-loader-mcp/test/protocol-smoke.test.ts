@@ -138,6 +138,8 @@ try {
     'mcp_loader_open_surface',
     'mcp_loader_surface_handle_inventory',
     'mcp_loader_list_tools',
+    'mcp_loader_inspect_tool',
+    'mcp_loader_inspect_binding_tool',
     'mcp_loader_surface_status',
     'mcp_loader_tool_discovery_manifest',
     'mcp_loader_call_tool',
