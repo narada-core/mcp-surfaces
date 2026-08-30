@@ -6,7 +6,7 @@
 cargo test --locked --manifest-path packages/mcp-registrar/native/Cargo.toml
 ```
 
-Native Rust MCP surface registrar for binding/unbinding surfaces across Narada sites and carriers (opencode, Kimi, Codex).
+Native Rust MCP surface registrar for binding/unbinding surfaces across Narada sites and carriers (opencode, Kimi, Codex, Pi).
 
 ## Purpose
 
@@ -121,7 +121,7 @@ records the external source path and revision-evidence requirement.
 
 ## Wiring Surfaces
 
-Use the registrar when you want to inject a standalone MCP surface into Codex, opencode, Kimi, or a Narada site without hand-editing carrier config.
+Use the registrar when you want to inject a standalone MCP surface into Codex, opencode, Kimi, Pi, or a Narada site without hand-editing carrier config.
 
 - `registrar_site_bind` writes a site-local `.ai/mcp/` binding.
 - `registrar_carrier_bind` validates a static carrier projection request. It does
@@ -133,7 +133,7 @@ Use the registrar when you want to inject a standalone MCP surface into Codex, o
   not evidence that the Site surface is unreachable.
 - `registrar_sync` applies the same surface binding across the supported sites and carriers.
 
-For a concrete example, `@narada-core/local-filesystem-mcp` can run standalone, while this registrar handles how it gets exposed to a specific CLI or TUI. See `docs/mcp-wiring.md` for the emitted Codex, opencode, and Kimi shapes.
+For a concrete example, `@narada-core/local-filesystem-mcp` can run standalone, while this registrar handles how it gets exposed to a specific CLI or TUI. See `docs/mcp-wiring.md` for the emitted Codex, opencode, Kimi, and Pi shapes.
 
 ### Codex Apps default
 

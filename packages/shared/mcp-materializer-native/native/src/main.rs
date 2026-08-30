@@ -68,6 +68,7 @@ enum CarrierKind {
     Codex,
     Kimi,
     Opencode,
+    Pi,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -1269,6 +1270,7 @@ fn materialize(
             CarrierKind::Codex => "codex",
             CarrierKind::Kimi => "kimi",
             CarrierKind::Opencode => "opencode",
+            CarrierKind::Pi => "pi",
         };
         let description = describe_config(carrier_kind, &config, &selectors)
             .map_err(|error| Failure::new("materializer_contract_describe_failed", error))?;
@@ -2315,6 +2317,7 @@ fn validate_proxy_launch(
                 CarrierKind::Codex => "codex",
                 CarrierKind::Kimi => "kimi",
                 CarrierKind::Opencode => "opencode",
+                CarrierKind::Pi => "pi",
             }
             .to_string(),
         ),
@@ -2397,7 +2400,34 @@ fn emit_carrier(carrier: &CarrierInput) -> Result<Vec<u8>, Failure> {
         CarrierKind::Codex => emit_codex(carrier),
         CarrierKind::Kimi => emit_json_carrier(carrier, "mcpServers"),
         CarrierKind::Opencode => emit_json_carrier(carrier, "mcp"),
+        CarrierKind::Pi => emit_pi(carrier),
     }
+}
+
+fn emit_pi(carrier: &CarrierInput) -> Result<Vec<u8>, Failure> {
+    const TEMPLATE: &str = include_str!("../../assets/pi-mcp-extension.ts");
+    const PLACEHOLDER: &str = "__NARADA_PI_MCP_SERVERS__";
+    if TEMPLATE.matches(PLACEHOLDER).count() != 1 {
+        return Err(Failure::new(
+            "materializer_pi_template_invalid",
+            "Pi extension template must contain exactly one server placeholder",
+        ));
+    }
+    let servers = carrier
+        .servers
+        .iter()
+        .map(|server| {
+            json!({
+                "name": server.name,
+                "command": server.command,
+                "args": server.args,
+                "enabled": server.enabled,
+                "startupTimeoutMs": server.startup_timeout_sec.unwrap_or(60) * 1000,
+            })
+        })
+        .collect::<Vec<_>>();
+    let encoded = serde_json::to_string(&servers).map_err(json_failure)?;
+    Ok(TEMPLATE.replace(PLACEHOLDER, &encoded).into_bytes())
 }
 
 fn emit_json_carrier(carrier: &CarrierInput, field: &str) -> Result<Vec<u8>, Failure> {
@@ -2425,6 +2455,7 @@ fn emit_json_carrier(carrier: &CarrierInput, field: &str) -> Result<Vec<u8>, Fai
                 "enabled": server.enabled,
             }),
             CarrierKind::Codex => unreachable!("Codex uses TOML"),
+            CarrierKind::Pi => unreachable!("Pi uses its extension projection"),
         };
         servers.insert(server.name.clone(), value);
     }
@@ -2779,6 +2810,34 @@ mod tests {
         let carrier = &input.carriers[0];
         validate_protocol_route(carrier, &carrier.servers[0])
             .expect("modern Kimi route must reach the modern-only Registrar");
+    }
+
+    #[test]
+    fn emits_pi_extension_with_only_materialized_servers() {
+        let root = tempdir().unwrap();
+        let mut input = fixture(root.path());
+        let carrier = &mut input.carriers[0];
+        carrier.carrier_kind = CarrierKind::Pi;
+        carrier.servers[0].name = "local-filesystem".into();
+        carrier.servers[0].startup_timeout_sec = Some(7);
+        let source = String::from_utf8(emit_carrier(carrier).unwrap()).unwrap();
+        assert!(source.contains("export default function naradaMcpCarrier"));
+        assert!(source.contains("\"name\":\"local-filesystem\""));
+        assert!(source.contains("\"startupTimeoutMs\":7000"));
+        assert!(source.contains("tools/list"));
+        assert!(source.contains("pi.registerTool"));
+        assert!(!source.contains("__NARADA_PI_MCP_SERVERS__"));
+    }
+
+    #[test]
+    fn pi_projection_is_whole_document_managed() {
+        let root = tempdir().unwrap();
+        let mut input = fixture(root.path());
+        input.carriers[0].carrier_kind = CarrierKind::Pi;
+        let emitted = emit_carrier(&input.carriers[0]).unwrap();
+        let description = describe_config("pi", &emitted, &[]).unwrap();
+        assert_eq!(description.managed_projection.scope, "whole_document");
+        assert_eq!(description.managed_projection.sha256, sha256(&emitted));
     }
 
     #[test]

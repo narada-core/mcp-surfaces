@@ -1,11 +1,11 @@
 # MCP Wiring
 
-This repository ships standalone MCP surfaces. A surface can run without Narada, but if you want it inside a specific supported CLI or TUI, you still need carrier config for that host. In this repo, that means Codex, opencode, or Kimi through the registrar.
+This repository ships standalone MCP surfaces. A surface can run without Narada, but if you want it inside a specific supported CLI or TUI, you still need carrier config for that host. In this repo, that means Codex, opencode, Kimi, or Pi through the registrar.
 
 ## What To Use
 
 - `@narada-core/local-filesystem-mcp` when you want governed filesystem access.
-- `@narada-core/mcp-registrar` when you want Narada to write the carrier config for Codex, opencode, or Kimi.
+- `@narada-core/mcp-registrar` when you want Narada to write the carrier config for Codex, opencode, Kimi, or Pi.
 
 ## Standalone Filesystem Example
 
@@ -18,7 +18,7 @@ node <installed-package>/dist/src/main.js --mode read --allowed-root <your-works
 
 ## Carrier Wiring Examples
 
-Carrier-native config files are host/user-site bootstrap profiles. Each Site binding declares `loading_mode: "static"` or `"progressive"`. Static bindings materialize their selected surfaces directly. Progressive bindings materialize only an explicit bootstrap allowlist; the built-in Codex, opencode, and Kimi profiles start with `agent-context`, `mcp-registrar`, `mcp-loader`, and `local-filesystem`, while all other admitted surfaces remain available through the loader. Local Site surfaces are never inferred from the current directory or from an unchosen Site; Narada launch/session materialization and the Site fabric remain the authority that binds them.
+Carrier-native config files are host/user-site bootstrap profiles. Each Site binding declares `loading_mode: "static"` or `"progressive"`. Static bindings materialize their selected surfaces directly. Progressive bindings materialize only an explicit bootstrap allowlist; the built-in Codex, opencode, Kimi, and Pi profiles start with `agent-context`, `mcp-registrar`, `mcp-loader`, and `local-filesystem`, while all other admitted surfaces remain available through the loader. Local Site surfaces are never inferred from the current directory or from an unchosen Site; Narada launch/session materialization and the Site fabric remain the authority that binds them.
 
 The registrar emits carrier-specific config, not one universal file.
 
@@ -142,6 +142,20 @@ Generated shape:
   }
 }
 ```
+
+### Pi
+
+Pi has no native MCP configuration format. Narada materializes one global
+extension at `~/.pi/agent/extensions/narada-mcp/index.ts`. It starts only the
+servers admitted into that carrier generation, performs the MCP handshake,
+discovers their live tool schemas, and registers those tools through Pi's
+`registerTool` API.
+
+The extension is a whole-document managed artifact and does not infer authority
+from Pi's working directory. Commands, arguments, Site roots, and loader
+admission digests come from the same transactional carrier materialization used
+for other hosts. Newly admitted bindings require rematerialization and a Pi
+restart. Session shutdown closes all child MCP processes.
 
 These carrier examples describe projection shape, not a hand-authored
 configuration. The generated file and its generation sidecar are authoritative.

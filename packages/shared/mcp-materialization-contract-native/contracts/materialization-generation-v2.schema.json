@@ -18,7 +18,7 @@
     "schema": { "const": "narada.mcp_materialization_generation.v2" },
     "contract_version": { "const": 7 },
     "carrier_id": { "type": "string", "minLength": 1 },
-    "carrier_kind": { "enum": ["codex", "kimi", "opencode"] },
+    "carrier_kind": { "enum": ["codex", "kimi", "opencode", "pi"] },
     "config_path": { "type": "string", "minLength": 1 },
     "config_artifact": {
       "type": "object",

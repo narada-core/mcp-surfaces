@@ -398,6 +398,7 @@ pub(crate) fn derive_input(options: DeriveOptions) -> Result<MaterializationInpu
                 CarrierKind::Codex => "codex",
                 CarrierKind::Kimi => "kimi",
                 CarrierKind::Opencode => "opencode",
+                CarrierKind::Pi => "pi",
             };
             let mut admission_envelope = json!({
                 "schema": "narada.mcp.binding_admission_envelope.v1",
@@ -748,6 +749,7 @@ pub(crate) fn options_from_generation(path: &Path) -> Result<DeriveOptions, Fail
             CarrierKind::Codex => carrier_kind == "codex",
             CarrierKind::Kimi => carrier_kind == "kimi",
             CarrierKind::Opencode => carrier_kind == "opencode",
+            CarrierKind::Pi => carrier_kind == "pi",
         })
         .ok_or_else(|| Failure::new("materializer_carrier_kind_unsupported", carrier_kind))?;
     let relative = PathBuf::from(&declared.config_relative_path);

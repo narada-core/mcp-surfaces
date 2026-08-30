@@ -94,6 +94,11 @@ fn materializes_every_supported_carrier_kind_without_javascript_runtime_environm
             "opencode",
             root.path().join("opencode/opencode.jsonc"),
         ),
+        (
+            "pi-test",
+            "pi",
+            root.path().join("pi/agent/extensions/narada-mcp/index.ts"),
+        ),
     ];
     let input_path = root.path().join("materialization-input.json");
     let contract_path = root.path().join("carrier-contract.json");
@@ -190,7 +195,7 @@ fn materializes_every_supported_carrier_kind_without_javascript_runtime_environm
     );
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(result["status"], "committed");
-    assert_eq!(result["carrier_count"], 3);
+    assert_eq!(result["carrier_count"], 4);
     for (_, _, path) in &paths {
         assert!(path.exists(), "missing {}", path.display());
         assert!(path
@@ -230,10 +235,15 @@ fn materializes_every_supported_carrier_kind_without_javascript_runtime_environm
     assert_eq!(opencode_server["command"][1], "proxy");
     assert_eq!(opencode_server["enabled"], true);
 
+    let pi = fs::read_to_string(&paths[3].2).unwrap();
+    assert!(pi.contains("export default function naradaMcpCarrier"));
+    assert!(pi.contains("\"name\":\"narada-site-test-local-filesystem\""));
+    assert!(pi.contains("pi.registerTool"));
+
     let index: Value =
         serde_json::from_slice(&fs::read(root.path().join("installed-carriers.json")).unwrap())
             .unwrap();
-    assert_eq!(index["carriers"].as_array().unwrap().len(), 3);
+    assert_eq!(index["carriers"].as_array().unwrap().len(), 4);
 }
 
 #[test]
