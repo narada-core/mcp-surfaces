@@ -68,8 +68,9 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   }
 });
 
-test('generated Pi extension refuses collisions before registering any MCP tools', async () => {
+test('generated Pi extension qualifies flat-namespace collisions deterministically', async () => {
   const source = await readFile(templatePath, 'utf8');
-  assert.match(source, /Narada MCP tool name collision/);
-  assert.match(source, /seen\.has\(tool\.name\) \|\| existing\.has\(tool\.name\)/);
+  assert.match(source, /serverPrefix.*replace/);
+  assert.match(source, /serverPrefix}__\$\{tool\.name/);
+  assert.match(source, /qualified tool name collision/);
 });

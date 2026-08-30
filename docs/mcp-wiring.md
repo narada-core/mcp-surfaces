@@ -157,6 +157,10 @@ admission digests come from the same transactional carrier materialization used
 for other hosts. Newly admitted bindings require rematerialization and a Pi
 restart. Session shutdown closes all child MCP processes.
 
+Pi has one flat tool namespace. Tool names that are unique across the admitted
+servers remain unchanged. A duplicated name is exposed deterministically as
+`<server>__<tool>`; calls still target the original MCP server and tool name.
+
 These carrier examples describe projection shape, not a hand-authored
 configuration. The generated file and its generation sidecar are authoritative.
 

@@ -165,7 +165,7 @@ function Test-ShortcutContract {
   Assert-Condition (-not ([string]$contract.arguments_template -match '-WindowStyle\\s+Hidden')) 'desktop launcher must remain visibly informative'
   Assert-Condition ([int]$contract.window_style -eq 1) 'desktop launcher must use a normal visible window style'
   $materializeScriptText = Get-Content -LiteralPath $materializePath -Raw
-  Assert-Condition ($materializeScriptText -match 'Restart Codex, Kimi Code, and OpenCode') 'success notification must name every materialized carrier'
+  Assert-Condition ($materializeScriptText -match 'Restart Codex, Kimi Code, OpenCode, and Pi') 'success notification must name every materialized carrier'
   Assert-Condition ($materializeScriptText -match 'Write-Status') 'launcher must print visible status messages'
   Assert-Condition ($materializeScriptText -match 'Get-Command cargo\.exe') 'launcher must resolve Cargo independently of compatibility tooling'
 

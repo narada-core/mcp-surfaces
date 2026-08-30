@@ -60,7 +60,7 @@ function Show-SuccessNotification {
     try {
       $notification.Icon = [System.Drawing.SystemIcons]::Information
       $notification.BalloonTipTitle = 'Narada MCP'
-      $notification.BalloonTipText = 'All carriers materialized. Restart Codex, Kimi Code, and OpenCode to load the refreshed configuration.'
+      $notification.BalloonTipText = 'All carriers materialized. Restart Codex, Kimi Code, OpenCode, and Pi to load the refreshed configuration.'
       $notification.Visible = $true
       $notification.ShowBalloonTip(5000)
       Start-Sleep -Seconds 5
@@ -110,7 +110,7 @@ try {
     '--installed-index', $installedIndex
   )
   Write-LogLine 'Materialization completed successfully.'
-  Write-Status 'All carriers materialized by the native authority. Restart Codex, Kimi Code, and OpenCode.' ([ConsoleColor]::Green)
+  Write-Status 'All carriers materialized by the native authority. Restart Codex, Kimi Code, OpenCode, and Pi.' ([ConsoleColor]::Green)
   if (-not $NoNotification) { Show-SuccessNotification }
   exit 0
 } catch {

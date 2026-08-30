@@ -158,25 +158,31 @@ export default function naradaMcpCarrier(pi: any): void {
       }
 
       const existing = new Set((pi.getAllTools?.() ?? []).map((tool: any) => tool.name));
-      const seen = new Set<string>();
+      const counts = new Map<string, number>();
       for (const { client, tools } of inventories) {
         for (const tool of tools) {
           if (typeof tool?.name !== "string" || !tool.name) {
             throw new Error(`${client.config.name}: tools/list contained an invalid tool name`);
           }
-          if (seen.has(tool.name) || existing.has(tool.name)) {
-            throw new Error(`Narada MCP tool name collision: ${tool.name}`);
-          }
-          seen.add(tool.name);
+          counts.set(tool.name, (counts.get(tool.name) ?? 0) + 1);
         }
       }
 
+      const exposed = new Set<string>();
       for (const { client, tools } of inventories) {
         for (const tool of tools) {
+          const serverPrefix = client.config.name.replace(/[^A-Za-z0-9_-]/g, "_");
+          const exposedName = counts.get(tool.name) === 1 && !existing.has(tool.name)
+            ? tool.name
+            : `${serverPrefix}__${tool.name}`;
+          if (existing.has(exposedName) || exposed.has(exposedName)) {
+            throw new Error(`Narada MCP qualified tool name collision: ${exposedName}`);
+          }
+          exposed.add(exposedName);
           pi.registerTool({
-            name: tool.name,
-            label: tool.title ?? tool.name,
-            description: tool.description ?? `MCP tool from ${client.config.name}`,
+            name: exposedName,
+            label: tool.title ?? exposedName,
+            description: `${tool.description ?? "MCP tool"} (server: ${client.config.name}; MCP name: ${tool.name})`,
             parameters: tool.inputSchema ?? { type: "object", additionalProperties: true },
             execute: async (_toolCallId: string, params: unknown, signal: AbortSignal) => {
               const result = await client.request("tools/call", { name: tool.name, arguments: params ?? {} }, 120000, signal);
@@ -192,7 +198,7 @@ export default function naradaMcpCarrier(pi: any): void {
         }
       }
       clients = nextClients;
-      ctx?.ui?.notify?.(`Narada MCP: ${seen.size} tools from ${clients.length} admitted servers`, "info");
+      ctx?.ui?.notify?.(`Narada MCP: ${exposed.size} tools from ${clients.length} admitted servers`, "info");
     } catch (error) {
       for (const client of nextClients) client.close();
       clients = [];
