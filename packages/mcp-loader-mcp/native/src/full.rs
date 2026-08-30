@@ -40,7 +40,7 @@ const DEFAULT_TOOL_CALL_TIMEOUT_MS: u64 = 120_000;
 const DEFAULT_TOOL_TIMEOUT_GRACE_MS: u64 = 1_000;
 const MAX_TOOL_TIMEOUT_MS: u64 = 900_000;
 const MAX_TOOL_TIMEOUT_GRACE_MS: u64 = 60_000;
-const DEFAULT_LOADER_RESULT_INLINE_LIMIT: usize = 12_000;
+const DEFAULT_LOADER_RESULT_INLINE_LIMIT: usize = 4_000;
 const DEFAULT_OUTPUT_SHOW_CHAR_LIMIT: usize = 4_000;
 const MAX_OUTPUT_SHOW_CHAR_LIMIT: usize = 4_000;
 const MAX_OUTPUT_PAGE_BYTES: usize = 8 * 1024;
@@ -4514,6 +4514,27 @@ fn render_result(result: &Value) -> String {
         }
         return lines.join("\n");
     }
+    if schema == "narada.mcp_loader.tool_result.v1" {
+        let mut lines = vec![format!("{}: {}", schema, status)];
+        for key in ["connection_id", "surface_id", "details_ref", "details_reader"] {
+            if let Some(value) = result.get(key).and_then(Value::as_str) {
+                lines.push(format!("{}: {}", key, value));
+            }
+        }
+        if let Some(summary) = result.get("result_summary") {
+            lines.push(format!("result_summary: {}", serde_json::to_string(summary).unwrap_or_default()));
+        }
+        if let Some(child) = result.get("result") {
+            let child_text = pretty_json(child);
+            let (excerpt, end) = bounded_page(&child_text, 0, 3_000, 6_000);
+            lines.push("result:".to_string());
+            lines.push(excerpt);
+            if end < child_text.chars().count() {
+                lines.push("result_text_truncated: true".to_string());
+            }
+        }
+        return lines.join("\n");
+    }
     if schema == "narada.mcp_loader.schema_lease.v1" {
         let mut lines = vec![format!("{}: {}", schema, status)];
         for key in [
@@ -5627,6 +5648,23 @@ mod tests {
         assert!(rendered.contains("output_text:\nbounded excerpt"));
         let read_tool = list_tools().into_iter().find(|tool| tool["name"] == "mcp_loader_read_result").unwrap();
         assert_eq!(read_tool["inputSchema"]["properties"]["limit"]["maximum"], 4000);
+    }
+
+    #[test]
+    fn tool_result_text_never_suppresses_inline_result_or_materialized_reference() {
+        let inline = render_result(&json!({
+            "schema":"narada.mcp_loader.tool_result.v1","connection_id":"c1","surface_id":"s1",
+            "result":{"schema":"child.v1","status":"ok","value":7},
+            "result_summary":{"schema":"child.v1","status":"ok"}
+        }));
+        assert!(inline.contains("\"value\": 7"));
+        let bounded = render_result(&json!({
+            "schema":"narada.mcp_loader.tool_result.v1","connection_id":"c1","surface_id":"s1",
+            "details_ref":"mcp_output:o_1","details_reader":"mcp_loader_read_result",
+            "result":{"schema":"narada.producer_output_page.v1","status":"ok"}
+        }));
+        assert!(bounded.contains("details_ref: mcp_output:o_1"));
+        assert!(bounded.contains("details_reader: mcp_loader_read_result"));
     }
 
     #[test]

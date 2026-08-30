@@ -92,7 +92,7 @@ const DEFAULT_MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 const STDERR_TAIL_LIMIT = 8000;
 const DEFAULT_ATTACH_TIMEOUT_MS = 30000;
 const DEFAULT_RUNTIME_LEASE_MS = 30000;
-const DEFAULT_LOADER_RESULT_INLINE_LIMIT = 12000;
+const DEFAULT_LOADER_RESULT_INLINE_LIMIT = 4000;
 const DEFAULT_OUTPUT_SHOW_CHAR_LIMIT = 4000;
 const MAX_OUTPUT_SHOW_CHAR_LIMIT = 4000;
 const SITE_TOOL_OBSERVATION_PAYLOAD_PREFIX = 'site-tools-';
@@ -2558,6 +2558,19 @@ function renderResult(result: JsonRecord): string {
       if (page[key] !== undefined) lines.push(`${key}: ${JSON.stringify(page[key])}`);
     }
     if (typeof page.output_text === 'string') lines.push('output_text:', page.output_text);
+    return lines.join('\n');
+  }
+  if (schema === 'narada.mcp_loader.tool_result.v1') {
+    const lines = [`${schema}: ${status}`];
+    for (const key of ['connection_id', 'surface_id', 'details_ref', 'details_reader']) {
+      if (typeof result[key] === 'string') lines.push(`${key}: ${result[key]}`);
+    }
+    if (result.result_summary !== undefined) lines.push(`result_summary: ${JSON.stringify(result.result_summary)}`);
+    if (result.result !== undefined) {
+      const childText = JSON.stringify(result.result, null, 2);
+      lines.push('result:', childText.slice(0, 3000));
+      if (childText.length > 3000) lines.push('result_text_truncated: true');
+    }
     return lines.join('\n');
   }
   if (schema === 'narada.mcp_loader.schema_lease.v1') {

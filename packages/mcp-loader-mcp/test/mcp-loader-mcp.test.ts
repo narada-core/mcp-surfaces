@@ -549,11 +549,24 @@ try {
   const guidanceLease = await inspectLease(String(guidanceAttach?.connection_id), 'guidance-surface_guidance', 2002);
   const guidanceCall = await call('tools/call', { name: 'mcp_loader_call_tool', arguments: { connection_id: guidanceAttach?.connection_id, tool_name: 'guidance-surface_guidance', schema_lease: guidanceLease, arguments: {}, include_runtime_metadata: true } }, 202);
   assert.equal(guidanceCall?.schema, 'narada.mcp_loader.tool_result.v1');
-  assert.equal(guidanceCall?.result?.structuredContent?.loader_runtime_lifecycle?.schema, 'narada.mcp_loader.runtime_lifecycle.v1');
-  assert.equal(guidanceCall?.result?.structuredContent?.loader_runtime_lifecycle?.managed_by, 'mcp-loader');
-  assert.equal(guidanceCall?.result?.structuredContent?.loader_runtime_lifecycle?.restartable, true);
-  assert.equal(guidanceCall?.result?.structuredContent?.loader_runtime_lifecycle?.actions?.restart?.tool_name, 'mcp_loader_surface_restart');
-  assert.equal(guidanceCall?.result?.structuredContent?.loader_runtime_freshness?.schema, 'narada.mcp_loader.runtime_freshness.v1');
+  let guidanceStructured = guidanceCall?.result?.structuredContent;
+  if (guidanceCall?.result_bounded) {
+    assert.match(String(guidanceCall?.details_ref), /^mcp_output:/);
+    let offset = 0;
+    let serialized = '';
+    for (let pageNumber = 0; pageNumber < 20; pageNumber += 1) {
+      const page = await call('tools/call', { name: 'mcp_loader_read_result', arguments: { connection_id: guidanceAttach?.connection_id, ref: guidanceCall?.details_ref, offset, limit: 4000 } }, 2200 + pageNumber);
+      serialized += String(page?.result?.output_text ?? '');
+      if (page?.result?.next_offset === null) break;
+      offset = Number(page?.result?.next_offset);
+    }
+    guidanceStructured = JSON.parse(serialized).structuredContent;
+  }
+  assert.equal(guidanceStructured?.loader_runtime_lifecycle?.schema, 'narada.mcp_loader.runtime_lifecycle.v1');
+  assert.equal(guidanceStructured?.loader_runtime_lifecycle?.managed_by, 'mcp-loader');
+  assert.equal(guidanceStructured?.loader_runtime_lifecycle?.restartable, true);
+  assert.equal(guidanceStructured?.loader_runtime_lifecycle?.actions?.restart?.tool_name, 'mcp_loader_surface_restart');
+  assert.equal(guidanceStructured?.loader_runtime_freshness?.schema, 'narada.mcp_loader.runtime_freshness.v1');
   const guidanceDetach = await call('tools/call', { name: 'mcp_loader_detach', arguments: { connection_id: guidanceAttach?.connection_id } }, 203);
   assert.equal(guidanceDetach?.termination?.status, 'terminated');
 
