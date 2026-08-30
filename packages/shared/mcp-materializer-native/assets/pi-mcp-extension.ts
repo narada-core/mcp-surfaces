@@ -20,6 +20,7 @@ const SERVERS: ServerConfig[] = __NARADA_PI_MCP_SERVERS__;
 const PROTOCOL_VERSION = "2026-07-28";
 const MAX_BOOTSTRAP_TOOLS = 80;
 const MAX_BOOTSTRAP_SCHEMA_CHARS = 120_000;
+const MAX_COLLAPSED_RESULT_CHARS = 4_000;
 const BOOTSTRAP_TOOL_PROJECTIONS = new Map<string, ReadonlySet<string>>([
   ["task-lifecycle", new Set(["task_lifecycle_bridge_poll"])],
 ]);
@@ -40,6 +41,53 @@ function projectBootstrapTools(config: ServerConfig, tools: any[]): any[] {
     throw new Error(`${config.name}: bootstrap tool projection is missing required tools: ${missing.join(", ")}`);
   }
   return projected;
+}
+
+function resultText(result: any): string {
+  return (Array.isArray(result?.content) ? result.content : [])
+    .filter((block: any) => block?.type === "text" && typeof block.text === "string")
+    .map((block: any) => block.text)
+    .join("\n");
+}
+
+function textComponent(text: string): { render: (width: number) => string[] } {
+  return {
+    render(width: number): string[] {
+      const lineWidth = Math.max(1, width);
+      return text.split("\n").flatMap((line) => {
+        if (line.length === 0) return [""];
+        const rendered: string[] = [];
+        for (let offset = 0; offset < line.length; offset += lineWidth) {
+          rendered.push(line.slice(offset, offset + lineWidth));
+        }
+        return rendered;
+      });
+    },
+  };
+}
+
+function resultSummary(toolName: string, result: any, fullText: string): string {
+  const structured = result?.structuredContent;
+  const path = structured?.relative_path ?? structured?.path;
+  const lines = structured?.returned_lines;
+  if (typeof path === "string" && typeof lines === "number") {
+    return `${toolName}: read ${path} (${lines} lines)`;
+  }
+  const schema = structured?.schema;
+  const status = structured?.status;
+  const identity = [schema, status].filter((value) => typeof value === "string").join(": ");
+  const chars = fullText.length.toLocaleString("en-US");
+  return `${toolName}: ${identity || "MCP result"} (${chars} characters)`;
+}
+
+function carrierRoutingGuidance(serverName: string, toolName: string): string {
+  if (serverName === "structured-command" && toolName.startsWith("structured_command_")) {
+    return " Git is not a structured-command fallback: activate the current Site's <site-id>-git binding through mcp-loader, inspect the exact Git tool for a lease, and call that binding.";
+  }
+  if (serverName === "mcp-loader") {
+    return " Site-local Git is lazy: activate <site-id>-git at the repository Site root; do not send git through structured-command.";
+  }
+  return "";
 }
 
 class McpClient {
@@ -228,10 +276,11 @@ export default function naradaMcpCarrier(pi: any): void {
           pi.registerTool({
             name: exposedName,
             label: tool.title ?? exposedName,
-            description: `${tool.description ?? "MCP tool"} (server: ${client.config.name}; MCP name: ${tool.name})`,
+            description: `${tool.description ?? "MCP tool"} (server: ${client.config.name}; MCP name: ${tool.name}).${carrierRoutingGuidance(client.config.name, tool.name)}`,
             parameters: tool.inputSchema ?? { type: "object", additionalProperties: true },
             execute: async (_toolCallId: string, params: unknown, signal: AbortSignal) => {
               const result = await client.request("tools/call", { name: tool.name, arguments: params ?? {} }, 120000, signal);
+              const rawText = resultText(result);
               const content = result?.structuredContent !== undefined
                 ? [{ type: "text", text: JSON.stringify(result.structuredContent) }]
                 : Array.isArray(result?.content) && result.content.length > 0
@@ -244,9 +293,17 @@ export default function naradaMcpCarrier(pi: any): void {
                   isError: result?.isError === true,
                   structuredSchema: result?.structuredContent?.schema ?? null,
                   continuation: result?.structuredContent?.result?.next_offset ?? result?.structuredContent?.next_offset ?? null,
+                  uiSummary: resultSummary(exposedName, result, rawText),
                 },
                 isError: result?.isError === true,
               };
+            },
+            renderResult: (result: any, options: { expanded: boolean }) => {
+              const fullText = resultText(result);
+              if (options.expanded || fullText.length <= MAX_COLLAPSED_RESULT_CHARS) {
+                return textComponent(fullText || JSON.stringify(result?.details ?? null));
+              }
+              return textComponent(`${result?.details?.uiSummary ?? resultSummary(exposedName, result, fullText)} — press Ctrl+O to expand`);
             },
           });
         }

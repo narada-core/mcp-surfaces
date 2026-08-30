@@ -69,6 +69,16 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     });
     assert.doesNotMatch(result.content[0].text, /summary without lease/);
 
+    const largeResult = {
+      content: [{ type: 'text', text: 'x'.repeat(5000) }],
+      details: { uiSummary: 'fixture_echo: large fixture' },
+    };
+    const collapsed = registered[0].renderResult(largeResult, { expanded: false });
+    assert.match(collapsed.render(120).join('\n'), /large fixture.*Ctrl\+O to expand/);
+    assert.doesNotMatch(collapsed.render(120).join('\n'), /x{100}/);
+    const expanded = registered[0].renderResult(largeResult, { expanded: true });
+    assert.match(expanded.render(120).join('\n'), /x{100}/);
+
     await handlers.get('session_shutdown')?.();
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -87,6 +97,12 @@ test('generated Pi extension hides agent context from a naked carrier', async ()
   assert.match(source, /config\.name !== "agent-context"/);
   assert.match(source, /NARADA_CARRIER_SESSION_ADMISSION_RECEIPT/);
   assert.match(source, /SERVERS\.filter\(shouldBootstrapServer\)/);
+});
+
+test('generated Pi extension routes Git away from structured-command', async () => {
+  const source = await readFile(templatePath, 'utf8');
+  assert.match(source, /Git is not a structured-command fallback/);
+  assert.match(source, /activate <site-id>-git/);
 });
 
 test('generated Pi extension projects task lifecycle to its bounded bridge tool', async () => {

@@ -1232,7 +1232,7 @@ fn execute(
             .cloned()
             .unwrap_or_else(|| json!([]));
         return Ok(
-            json!({"schema": "narada.structured_command.execution_result.v0", "status": "refused", "decision": decision, "refusal_reasons": reasons, "remediation_hints": decision.get("remediation_hints").cloned().unwrap_or_else(|| json!([])), "mcp_fallbacks": [], "command": command, "args": command_args, "working_directory": working_directory.to_string_lossy(), "execution_posture": posture, "test_scope": test_scope, "expected_cost": expected_cost, "executed": false}),
+            json!({"schema": "narada.structured_command.execution_result.v0", "status": "refused", "decision": decision, "refusal_reasons": reasons, "remediation_hints": decision.get("remediation_hints").cloned().unwrap_or_else(|| json!([])), "mcp_fallbacks": decision.get("mcp_fallbacks").cloned().unwrap_or_else(|| json!([])), "command": command, "args": command_args, "working_directory": working_directory.to_string_lossy(), "execution_posture": posture, "test_scope": test_scope, "expected_cost": expected_cost, "executed": false}),
         );
     }
     let background = force_background
@@ -1622,6 +1622,10 @@ fn decide(state: &State, command: &str, args: &[String], cwd: &Path) -> Value {
     } else {
         "refused"
     };
+    let is_git = Path::new(command)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("git"));
     let remediation_hints = reasons
         .iter()
         .map(|reason| {
@@ -1629,6 +1633,8 @@ fn decide(state: &State, command: &str, args: &[String], cwd: &Path) -> Value {
                 "Use an explicit argv-based allowed command; shell interpreters remain disallowed."
             } else if reason.starts_with("working_directory_outside_allowed_roots:") {
                 "Run from an allowed root or request a policy update."
+            } else if reason.starts_with("command_not_allowed:") && is_git {
+                "Use the Site-owned Git MCP binding through mcp-loader; do not add git to structured-command policy."
             } else if reason.starts_with("command_not_allowed:") {
                 "Inspect policy and use an allowlisted command or prefix."
             } else if reason.starts_with("package_manager_wrapper_for_native_tool:") {
@@ -1639,7 +1645,18 @@ fn decide(state: &State, command: &str, args: &[String], cwd: &Path) -> Value {
         })
         .map(String::from)
         .collect::<Vec<_>>();
-    json!({"schema": "narada.structured_command.execution_decision.v0", "status": status, "reasons": reasons, "remediation_hints": remediation_hints, "mcp_fallbacks": [], "command": command, "args": args, "working_directory": cwd.to_string_lossy(), "shell_interpolation": false})
+    let mcp_fallbacks = if is_git {
+        json!([{
+            "surface_id": "git",
+            "binding_id_pattern": "<site-id>-git",
+            "activation_tool": "mcp_loader_resume_or_open_surface",
+            "inspection_tool": "mcp_loader_inspect_binding_tool",
+            "call_tool": "mcp_loader_call_binding_tool"
+        }])
+    } else {
+        json!([])
+    };
+    json!({"schema": "narada.structured_command.execution_decision.v0", "status": status, "reasons": reasons, "remediation_hints": remediation_hints, "mcp_fallbacks": mcp_fallbacks, "command": command, "args": args, "working_directory": cwd.to_string_lossy(), "shell_interpolation": false})
 }
 
 fn wraps_cargo_with_pnpm(command: &str, args: &[String]) -> bool {
@@ -2195,6 +2212,38 @@ mod tests {
             let decision = decide(&state, "cargo", &argv, &root);
             assert_eq!(decision["status"], "allowed", "cargo {subcommand}: {decision}");
         }
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn refused_git_command_routes_to_site_git_mcp() {
+        let root = env::temp_dir().join(format!(
+            "narada-structured-command-git-routing-{}",
+            unique_id("test")
+        ));
+        fs::create_dir_all(&root).expect("root");
+        let state = parse_state(&[
+            "--allowed-root".into(),
+            root.to_string_lossy().to_string(),
+        ])
+        .expect("state");
+
+        let decision = decide(
+            &state,
+            "git",
+            &["status".into(), "--short".into(), "--branch".into()],
+            &root,
+        );
+        assert_eq!(decision["status"], "refused");
+        assert_eq!(decision["mcp_fallbacks"][0]["surface_id"], "git");
+        assert_eq!(
+            decision["mcp_fallbacks"][0]["activation_tool"],
+            "mcp_loader_resume_or_open_surface"
+        );
+        assert!(decision["remediation_hints"][0]
+            .as_str()
+            .is_some_and(|value| value.contains("Git MCP")));
 
         fs::remove_dir_all(root).expect("cleanup");
     }
