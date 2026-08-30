@@ -24,6 +24,12 @@ const BOOTSTRAP_TOOL_PROJECTIONS = new Map<string, ReadonlySet<string>>([
   ["task-lifecycle", new Set(["task_lifecycle_bridge_poll"])],
 ]);
 
+function shouldBootstrapServer(config: ServerConfig): boolean {
+  if (!config.enabled) return false;
+  if (config.name !== "agent-context") return true;
+  return Boolean(process.env.NARADA_CARRIER_SESSION_ADMISSION_RECEIPT);
+}
+
 function projectBootstrapTools(config: ServerConfig, tools: any[]): any[] {
   const projection = BOOTSTRAP_TOOL_PROJECTIONS.get(config.name);
   if (!projection) return tools;
@@ -159,7 +165,7 @@ export default function naradaMcpCarrier(pi: any): void {
     const nextClients: McpClient[] = [];
     try {
       const inventories: Array<{ client: McpClient; tools: any[] }> = [];
-      for (const config of SERVERS.filter((server) => server.enabled)) {
+      for (const config of SERVERS.filter(shouldBootstrapServer)) {
         const client = new McpClient(config);
         try {
           inventories.push({

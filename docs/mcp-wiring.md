@@ -154,6 +154,11 @@ capabilities, is attached lazily through Loader. Other admitted Site authority r
 discoverable and callable lazily through Loader instead of permanently adding
 every Site tool schema to Pi's model context.
 
+`agent-context` is conditional: the extension starts it only when the Pi process
+has a carrier-session admission receipt. A naked Pi process therefore receives
+no orientation or identity tools; this does not reduce its independently
+materialized filesystem, Loader, Site-binding, or anonymous lifecycle authority.
+
 The extension is a whole-document managed artifact and does not infer authority
 from Pi's working directory. Commands, arguments, Site roots, and loader
 admission digests come from the same transactional carrier materialization used

@@ -82,6 +82,13 @@ test('generated Pi extension qualifies flat-namespace collisions deterministical
   assert.match(source, /qualified tool name collision/);
 });
 
+test('generated Pi extension hides agent context from a naked carrier', async () => {
+  const source = await readFile(templatePath, 'utf8');
+  assert.match(source, /config\.name !== "agent-context"/);
+  assert.match(source, /NARADA_CARRIER_SESSION_ADMISSION_RECEIPT/);
+  assert.match(source, /SERVERS\.filter\(shouldBootstrapServer\)/);
+});
+
 test('generated Pi extension projects task lifecycle to its bounded bridge tool', async () => {
   const root = await mkdtemp(join(tmpdir(), 'narada-pi-lifecycle-projection-'));
   try {
