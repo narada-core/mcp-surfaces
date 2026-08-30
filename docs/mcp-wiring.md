@@ -160,6 +160,10 @@ restart. Session shutdown closes all child MCP processes.
 Pi has one flat tool namespace. Tool names that are unique across the admitted
 servers remain unchanged. A duplicated name is exposed deterministically as
 `<server>__<tool>`; calls still target the original MCP server and tool name.
+When an MCP call returns canonical `structuredContent`, the bridge projects
+that object as Pi's single model-visible result instead of duplicating it beside
+the human summary. This preserves opaque leases, cursors, and typed readback
+fields that exist only in the structured result.
 
 These carrier examples describe projection shape, not a hand-authored
 configuration. The generated file and its generation sidecar are authoritative.

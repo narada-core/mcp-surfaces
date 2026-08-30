@@ -20,7 +20,10 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   } else if (message.method === "tools/list") {
     process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { tools: [{ name: "fixture_echo", description: "Echo", inputSchema: { type: "object", properties: { value: { type: "string" } }, required: ["value"] } }] } }) + "\\n");
   } else if (message.method === "tools/call") {
-    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { content: [{ type: "text", text: message.params.arguments.value }] } }) + "\\n");
+    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: {
+      content: [{ type: "text", text: "summary without lease" }],
+      structuredContent: { value: message.params.arguments.value, schema_lease: "lease-fixture" }
+    } }) + "\\n");
   }
 });
 `, 'utf8');
@@ -60,7 +63,11 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     assert.equal(registered[0].name, 'fixture_echo');
     assert.deepEqual(registered[0].parameters.required, ['value']);
     const result = await registered[0].execute('call-1', { value: 'hello' }, new AbortController().signal);
-    assert.equal(result.content[0].text, 'hello');
+    assert.deepEqual(JSON.parse(result.content[0].text), {
+      value: 'hello',
+      schema_lease: 'lease-fixture',
+    });
+    assert.doesNotMatch(result.content[0].text, /summary without lease/);
 
     await handlers.get('session_shutdown')?.();
   } finally {

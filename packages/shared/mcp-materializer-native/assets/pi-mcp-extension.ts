@@ -186,10 +186,13 @@ export default function naradaMcpCarrier(pi: any): void {
             parameters: tool.inputSchema ?? { type: "object", additionalProperties: true },
             execute: async (_toolCallId: string, params: unknown, signal: AbortSignal) => {
               const result = await client.request("tools/call", { name: tool.name, arguments: params ?? {} }, 120000, signal);
-              return {
-                content: Array.isArray(result?.content)
+              const content = result?.structuredContent !== undefined
+                ? [{ type: "text", text: JSON.stringify(result.structuredContent) }]
+                : Array.isArray(result?.content)
                   ? result.content
-                  : [{ type: "text", text: JSON.stringify(result ?? null) }],
+                  : [{ type: "text", text: JSON.stringify(result ?? null) }];
+              return {
+                content,
                 details: { mcpServer: client.config.name, isError: result?.isError === true },
                 isError: result?.isError === true,
               };
