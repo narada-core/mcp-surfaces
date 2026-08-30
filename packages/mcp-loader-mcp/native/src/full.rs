@@ -2124,9 +2124,9 @@ fn list_tools() -> Vec<Value> {
         tool_definition("mcp_loader_open_surface","Open an exactly admitted binding and return a stable logical handle for calls across loader-managed child generations. Runtime metadata is opt-in.",json!({"site_root":{"type":"string"},"binding_id":{"type":"string"},"surface_id":{"type":"string"},"runtime_kind":{"type":"string"},"entrypoint":{"type":"string"},"args":{"type":"array","items":{"type":"string"}},"include_runtime_metadata":{"type":"boolean","default":false}}),&["site_root","binding_id"],false,false),
         tool_definition("mcp_loader_resume_or_open_surface","Resume the current loader-process handle for a binding when present, otherwise reopen the admitted binding and return a fresh handle.",json!({"site_root":{"type":"string"},"binding_id":{"type":"string"},"surface_id":{"type":"string"},"runtime_kind":{"type":"string"},"include_runtime_metadata":{"type":"boolean","default":false}}),&["site_root","binding_id"],false,false),
         tool_definition("mcp_loader_surface_handle_inventory","List stable logical surface handles and the current child generation, without spawning or replacing a surface.",json!({}),&[],true,false),
-        tool_definition("mcp_loader_list_tools","List tools exposed by an attached MCP surface. Runtime metadata is opt-in.",json!({"connection_id":{"type":"string"},"include_runtime_metadata":{"type":"boolean","default":false}}),&["connection_id"],true,false),
-        tool_definition("mcp_loader_inspect_tool","Inspect one exact child-tool contract and issue a generation-bound schema lease required for invocation.",json!({"connection_id":{"type":"string"},"tool_name":{"type":"string"}}),&["connection_id","tool_name"],true,false),
-        tool_definition("mcp_loader_inspect_binding_tool","Resume or open one admitted binding, inspect one exact child-tool contract, and issue a generation-bound schema lease.",json!({"site_root":{"type":"string"},"binding_id":{"type":"string"},"surface_id":{"type":"string"},"runtime_kind":{"type":"string"},"tool_name":{"type":"string"}}),&["site_root","binding_id","tool_name"],false,false),
+        tool_definition("mcp_loader_list_tools","List compact tool summaries exposed by an attached MCP surface. Exact schemas and runtime metadata are separately opt-in.",json!({"connection_id":{"type":"string"},"include_schemas":{"type":"boolean","default":false},"include_runtime_metadata":{"type":"boolean","default":false}}),&["connection_id"],true,false),
+        tool_definition("mcp_loader_inspect_tool","Issue a generation-bound schema lease and a compact exact-contract summary. The complete child contract is opt-in.",json!({"connection_id":{"type":"string"},"tool_name":{"type":"string"},"include_tool_contract":{"type":"boolean","default":false}}),&["connection_id","tool_name"],true,false),
+        tool_definition("mcp_loader_inspect_binding_tool","Resume or open one admitted binding, issue a schema lease, and return a compact exact-contract summary. The complete child contract is opt-in.",json!({"site_root":{"type":"string"},"binding_id":{"type":"string"},"surface_id":{"type":"string"},"runtime_kind":{"type":"string"},"tool_name":{"type":"string"},"include_tool_contract":{"type":"boolean","default":false}}),&["site_root","binding_id","tool_name"],false,false),
         tool_definition("mcp_loader_surface_status","Inspect the runtime status and loader-managed restartability of an attached MCP surface child process.",json!({"connection_id":{"type":"string"}}),&["connection_id"],true,false),
         tool_definition("mcp_loader_tool_discovery_manifest","Return canonical semantic tool names for an attached surface and flag generated aliases as non-authoritative. Compact names are the default; exact schemas and runtime metadata are opt-in.",json!({"connection_id":{"type":"string"},"compact":{"type":"boolean","default":true},"include_runtime_metadata":{"type":"boolean","default":false}}),&["connection_id"],true,false),
         tool_definition("mcp_loader_call_tool","Call a tool on an attached MCP surface using a schema lease issued for this exact tool contract and child generation.",json!({"connection_id":{"type":"string"},"tool_name":{"type":"string"},"schema_lease":{"type":"string"},"arguments":{"type":"object"},"include_runtime_metadata":{"type":"boolean"}}),&["connection_id","tool_name","schema_lease"],false,false),
@@ -2981,7 +2981,10 @@ fn attach_surface(arguments: &JsonObject, state: &mut LoaderState) -> Result<Val
         descriptor_digest,
         declared_digest,
         admitted.as_ref().map(|(entry, _)| entry.clone()),
-        arguments.get("binding_id").and_then(Value::as_str).map(ToOwned::to_owned),
+        arguments
+            .get("binding_id")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
     )?;
     let id = connection.connection_id.clone();
     let response = attached_response(&connection, state);
@@ -3322,6 +3325,11 @@ fn build_child_env(
 }
 
 fn attached_response(connection: &Connection, state: &LoaderState) -> Value {
+    let tools = connection
+        .tools
+        .iter()
+        .map(|tool| compact_tool_contract(tool, false))
+        .collect::<Vec<_>>();
     json!({
         "schema":"narada.mcp_loader.surface_attached.v1",
         "connection_id":connection.connection_id,"logical_connection_id":connection.logical_connection_id,
@@ -3331,7 +3339,7 @@ fn attached_response(connection: &Connection, state: &LoaderState) -> Value {
         "runtime_kind":connection.runtime_kind,"runtime_requirements":connection.runtime_requirements,
         "runtime_lifecycle":runtime_lifecycle(Some(&connection.connection_id),Some(&connection.lifecycle)),
         "runtime_freshness":runtime_freshness(state),"runtime_command":connection.runtime_command,"entrypoint":connection.entrypoint,"args":connection.args,"child_invocation_kind":connection.child_invocation_kind,
-        "server_info":connection.server_info,"tools":connection.tools,"descriptor_digest":connection.descriptor_digest,
+        "server_info":connection.server_info,"tools_compact":true,"tool_count":tools.len(),"tools":tools,"descriptor_digest":connection.descriptor_digest,
         "tool_contract_digest":connection.tool_contract_digest,"declared_tool_contract_digest":connection.declared_tool_contract_digest,
         "lifecycle":connection.lifecycle,"ownership":connection_ownership(connection)
     })
@@ -3790,7 +3798,16 @@ fn unavailable_handle_recovery(handle: &SurfaceHandle) -> Value {
 
 fn list_attached_tools(arguments: &JsonObject, state: &LoaderState) -> Result<Value, Diagnostic> {
     let connection = get_connection(arguments, state)?;
-    let mut result = json!({"schema":"narada.mcp_loader.tools.v1","connection_id":connection.connection_id,"surface_id":connection.surface_id,"tools":connection.tools});
+    let include_schemas = arguments
+        .get("include_schemas")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let tools = connection
+        .tools
+        .iter()
+        .map(|tool| compact_tool_contract(tool, include_schemas))
+        .collect::<Vec<_>>();
+    let mut result = json!({"schema":"narada.mcp_loader.tools.v1","connection_id":connection.connection_id,"surface_id":connection.surface_id,"compact":!include_schemas,"tool_count":tools.len(),"tools":tools});
     if arguments
         .get("include_runtime_metadata")
         .and_then(Value::as_bool)
@@ -3801,6 +3818,30 @@ fn list_attached_tools(arguments: &JsonObject, state: &LoaderState) -> Result<Va
         result["runtime_freshness"] = runtime_freshness(state);
     }
     Ok(result)
+}
+
+fn compact_tool_contract(tool: &Value, include_schema: bool) -> Value {
+    if include_schema {
+        return tool.clone();
+    }
+    json!({
+        "name": tool.get("name").cloned().unwrap_or(Value::Null),
+        "description": tool.get("description").cloned().unwrap_or(Value::Null),
+        "annotations": tool.get("annotations").cloned().unwrap_or(Value::Null)
+    })
+}
+
+fn compact_input_contract(input_schema: &Value) -> Value {
+    let properties = input_schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .map(|properties| properties.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    json!({
+        "required": input_schema.get("required").cloned().unwrap_or_else(|| json!([])),
+        "properties": properties,
+        "additional_properties": input_schema.get("additionalProperties").cloned().unwrap_or(Value::Null)
+    })
 }
 
 fn surface_status(arguments: &JsonObject, state: &LoaderState) -> Result<Value, Diagnostic> {
@@ -3913,10 +3954,7 @@ fn schema_lease_digest(
     })))
 }
 
-fn inspect_attached_tool(
-    arguments: &JsonObject,
-    state: &LoaderState,
-) -> Result<Value, Diagnostic> {
+fn inspect_attached_tool(arguments: &JsonObject, state: &LoaderState) -> Result<Value, Diagnostic> {
     let connection = get_connection(arguments, state)?;
     let tool_name = required_string(arguments, "tool_name", "missing_tool_name")?;
     let tool = child_tool_contract(connection, &tool_name)?;
@@ -3931,7 +3969,7 @@ fn inspect_attached_tool(
         .or_else(|| tool.get("output_schema"))
         .cloned()
         .unwrap_or(Value::Null);
-    Ok(json!({
+    let mut result = json!({
         "schema": "narada.mcp_loader.schema_lease.v1",
         "status": "issued",
         "connection_id": connection.connection_id,
@@ -3942,11 +3980,21 @@ fn inspect_attached_tool(
         "tool_schema_digest": tool_schema_digest,
         "input_schema_digest": sha256(&stable_json(&input_schema)),
         "output_schema_digest": sha256(&stable_json(&output_schema)),
-        "tool_contract": tool,
+        "description": tool.get("description").cloned().unwrap_or(Value::Null),
+        "annotations": tool.get("annotations").cloned().unwrap_or(Value::Null),
+        "input_contract": compact_input_contract(&input_schema),
         "schema_lease": schema_lease_token(state, connection, &tool_name, &tool_schema_digest),
         "lease_scope": "loader_process_child_generation",
         "transferable": false
-    }))
+    });
+    if arguments
+        .get("include_tool_contract")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        result["tool_contract"] = tool.clone();
+    }
+    Ok(result)
 }
 
 fn validate_schema_lease(
@@ -3955,8 +4003,8 @@ fn validate_schema_lease(
     connection_id: &str,
     tool_name: &str,
 ) -> Result<(), Diagnostic> {
-    let supplied = required_string(arguments, "schema_lease", "schema_lease_required")
-        .map_err(|_| {
+    let supplied =
+        required_string(arguments, "schema_lease", "schema_lease_required").map_err(|_| {
             Diagnostic::new("schema_lease_required", "schema_lease_required").with_details(json!({
                 "connection_id": connection_id,
                 "tool_name": tool_name,
@@ -3976,8 +4024,8 @@ fn validate_schema_lease(
     let digest = child_tool_schema_digest(tool);
     let expected = schema_lease_token(state, connection, tool_name, &digest);
     if supplied != expected {
-        return Err(Diagnostic::new("schema_lease_stale", "schema_lease_stale").with_details(
-            json!({
+        return Err(
+            Diagnostic::new("schema_lease_stale", "schema_lease_stale").with_details(json!({
                 "connection_id": connection_id,
                 "generation_id": connection.generation_id,
                 "tool_name": tool_name,
@@ -3986,8 +4034,8 @@ fn validate_schema_lease(
                     "tool_name": "mcp_loader_inspect_tool",
                     "arguments": {"connection_id": connection_id, "tool_name": tool_name}
                 }
-            }),
-        ));
+            })),
+        );
     }
     Ok(())
 }
@@ -4527,7 +4575,13 @@ fn render_result(result: &Value) -> String {
                 lines.push(format!("{}: {}", key, value));
             }
         }
-        for key in ["ref", "offset", "limit", "next_offset", "full_output_char_length"] {
+        for key in [
+            "ref",
+            "offset",
+            "limit",
+            "next_offset",
+            "full_output_char_length",
+        ] {
             if let Some(value) = page.get(key) {
                 lines.push(format!("{}: {}", key, value));
             }
@@ -4540,13 +4594,21 @@ fn render_result(result: &Value) -> String {
     }
     if schema == "narada.mcp_loader.tool_result.v1" {
         let mut lines = vec![format!("{}: {}", schema, status)];
-        for key in ["connection_id", "surface_id", "details_ref", "details_reader"] {
+        for key in [
+            "connection_id",
+            "surface_id",
+            "details_ref",
+            "details_reader",
+        ] {
             if let Some(value) = result.get(key).and_then(Value::as_str) {
                 lines.push(format!("{}: {}", key, value));
             }
         }
         if let Some(summary) = result.get("result_summary") {
-            lines.push(format!("result_summary: {}", serde_json::to_string(summary).unwrap_or_default()));
+            lines.push(format!(
+                "result_summary: {}",
+                serde_json::to_string(summary).unwrap_or_default()
+            ));
         }
         if let Some(child) = result.get("result") {
             let child_text = pretty_json(child);
@@ -5450,8 +5512,8 @@ fn call_tool(name: &str, arguments: Value, state: &mut LoaderState) -> Result<Va
 mod tests {
     use super::{
         admitted_binding_entry, canonical_binding_id, child_error_diagnostic, compact_child_result,
-        extract_proxy_child_args, list_tools, render_result, request_error_details, runtime_freshness,
-        schema_lease_digest,
+        compact_input_contract, compact_tool_contract, extract_proxy_child_args, list_tools,
+        render_result, request_error_details, runtime_freshness, schema_lease_digest,
         try_parse_wire, unavailable_handle_recovery, validate_input_schema, LoaderState, Policy,
         SurfaceHandle,
     };
@@ -5658,6 +5720,35 @@ mod tests {
     }
 
     #[test]
+    fn child_tool_discovery_is_compact_unless_schemas_are_requested() {
+        let tool = json!({
+            "name":"large_query",
+            "description":"Query safely.",
+            "annotations":{"readOnlyHint":true},
+            "inputSchema":{"type":"object","required":["participant"],"properties":{"participant":{"type":"string"},"query":{"type":"object","properties":{"large":{"type":"string"}}}},"additionalProperties":false}
+        });
+        let compact = compact_tool_contract(&tool, false);
+        assert_eq!(compact["name"], "large_query");
+        assert!(compact.get("inputSchema").is_none());
+        assert_eq!(compact_tool_contract(&tool, true), tool);
+    }
+
+    #[test]
+    fn schema_lease_summary_names_inputs_without_repeating_the_schema() {
+        let schema = json!({
+            "type":"object",
+            "required":["participant"],
+            "properties":{"participant":{"type":"string"},"limit":{"type":"integer"}},
+            "additionalProperties":false
+        });
+        let summary = compact_input_contract(&schema);
+        assert_eq!(summary["required"], json!(["participant"]));
+        assert_eq!(summary["properties"], json!(["participant", "limit"]));
+        assert_eq!(summary["additional_properties"], false);
+        assert!(summary.to_string().len() < schema.to_string().len());
+    }
+
+    #[test]
     fn result_page_text_projection_is_resumable_and_bounded_by_contract() {
         let rendered = render_result(&json!({
             "schema":"narada.mcp_loader.result_page.v1",
@@ -5670,8 +5761,14 @@ mod tests {
         }));
         assert!(rendered.contains("next_offset: 4000"));
         assert!(rendered.contains("output_text:\nbounded excerpt"));
-        let read_tool = list_tools().into_iter().find(|tool| tool["name"] == "mcp_loader_read_result").unwrap();
-        assert_eq!(read_tool["inputSchema"]["properties"]["limit"]["maximum"], 4000);
+        let read_tool = list_tools()
+            .into_iter()
+            .find(|tool| tool["name"] == "mcp_loader_read_result")
+            .unwrap();
+        assert_eq!(
+            read_tool["inputSchema"]["properties"]["limit"]["maximum"],
+            4000
+        );
     }
 
     #[test]

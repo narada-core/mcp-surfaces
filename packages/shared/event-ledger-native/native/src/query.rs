@@ -185,7 +185,10 @@ fn parse_term(value: &Value, limits: &QueryLimits) -> Result<Term, QueryFailure>
         if values.len() > limits.max_one_of_values {
             return Err(QueryFailure::new(
                 "query_term_limit",
-                format!("one_of must contain at most {} values", limits.max_one_of_values),
+                format!(
+                    "one_of must contain at most {} values",
+                    limits.max_one_of_values
+                ),
                 json!({"count":values.len(),"max":limits.max_one_of_values}),
             ));
         }
@@ -208,7 +211,10 @@ fn parse_clause_at(
     if *clause_count > limits.max_clauses {
         return Err(QueryFailure::new(
             "query_clause_limit",
-            format!("query clauses must contain at most {} clauses in total", limits.max_clauses),
+            format!(
+                "query clauses must contain at most {} clauses in total",
+                limits.max_clauses
+            ),
             json!({"count":*clause_count,"max":limits.max_clauses}),
         ));
     }
@@ -239,7 +245,11 @@ fn parse_clause_at(
                 triple.clone(),
             )
         })?;
-        reject_unknown_keys(triple, &["subject", "attribute", "object", "value"], "triple")?;
+        reject_unknown_keys(
+            triple,
+            &["subject", "attribute", "object", "value"],
+            "triple",
+        )?;
         if triple.contains_key("object") == triple.contains_key("value") {
             return Err(QueryFailure::new(
                 "query_invalid_clause",
@@ -248,14 +258,29 @@ fn parse_clause_at(
             ));
         }
         let subject = triple.get("subject").ok_or_else(|| {
-            QueryFailure::new("query_invalid_clause", "triple subject is required", triple.clone().into())
+            QueryFailure::new(
+                "query_invalid_clause",
+                "triple subject is required",
+                triple.clone().into(),
+            )
         })?;
         let attribute = triple.get("attribute").ok_or_else(|| {
-            QueryFailure::new("query_invalid_clause", "triple attribute is required", triple.clone().into())
+            QueryFailure::new(
+                "query_invalid_clause",
+                "triple attribute is required",
+                triple.clone().into(),
+            )
         })?;
-        let object_value = triple.get("object").or_else(|| triple.get("value")).ok_or_else(|| {
-            QueryFailure::new("query_invalid_clause", "triple object is required", triple.clone().into())
-        })?;
+        let object_value = triple
+            .get("object")
+            .or_else(|| triple.get("value"))
+            .ok_or_else(|| {
+                QueryFailure::new(
+                    "query_invalid_clause",
+                    "triple object is required",
+                    triple.clone().into(),
+                )
+            })?;
         return Ok(Clause::Triple {
             subject: parse_term(subject, limits)?,
             attribute: parse_term(attribute, limits)?,
@@ -264,11 +289,19 @@ fn parse_clause_at(
     }
     if let Some(compare) = object.get("compare") {
         let compare = compare.as_object().ok_or_else(|| {
-            QueryFailure::new("query_invalid_clause", "compare clause must be an object", compare.clone())
+            QueryFailure::new(
+                "query_invalid_clause",
+                "compare clause must be an object",
+                compare.clone(),
+            )
         })?;
         reject_unknown_keys(compare, &["op", "left", "right"], "compare")?;
         let op = compare.get("op").and_then(Value::as_str).ok_or_else(|| {
-            QueryFailure::new("query_invalid_clause", "compare op is required", compare.clone().into())
+            QueryFailure::new(
+                "query_invalid_clause",
+                "compare op is required",
+                compare.clone().into(),
+            )
         })?;
         if !matches!(op, "=" | "!=" | ">" | ">=" | "<" | "<=") {
             return Err(QueryFailure::new(
@@ -278,10 +311,18 @@ fn parse_clause_at(
             ));
         }
         let left = compare.get("left").ok_or_else(|| {
-            QueryFailure::new("query_invalid_clause", "compare left is required", compare.clone().into())
+            QueryFailure::new(
+                "query_invalid_clause",
+                "compare left is required",
+                compare.clone().into(),
+            )
         })?;
         let right = compare.get("right").ok_or_else(|| {
-            QueryFailure::new("query_invalid_clause", "compare right is required", compare.clone().into())
+            QueryFailure::new(
+                "query_invalid_clause",
+                "compare right is required",
+                compare.clone().into(),
+            )
         })?;
         return Ok(Clause::Compare {
             op: op.to_string(),
@@ -291,18 +332,41 @@ fn parse_clause_at(
     }
     if let Some(reachable) = object.get("reachable") {
         let reachable = reachable.as_object().ok_or_else(|| {
-            QueryFailure::new("query_invalid_clause", "reachable clause must be an object", reachable.clone())
+            QueryFailure::new(
+                "query_invalid_clause",
+                "reachable clause must be an object",
+                reachable.clone(),
+            )
         })?;
-        reject_unknown_keys(reachable, &["from", "to", "attribute", "max_depth"], "reachable")?;
+        reject_unknown_keys(
+            reachable,
+            &["from", "to", "attribute", "max_depth"],
+            "reachable",
+        )?;
         let from = reachable.get("from").ok_or_else(|| {
-            QueryFailure::new("query_invalid_clause", "reachable from is required", reachable.clone().into())
+            QueryFailure::new(
+                "query_invalid_clause",
+                "reachable from is required",
+                reachable.clone().into(),
+            )
         })?;
         let to = reachable.get("to").ok_or_else(|| {
-            QueryFailure::new("query_invalid_clause", "reachable to is required", reachable.clone().into())
+            QueryFailure::new(
+                "query_invalid_clause",
+                "reachable to is required",
+                reachable.clone().into(),
+            )
         })?;
-        let attribute = reachable.get("attribute").and_then(Value::as_str).ok_or_else(|| {
-            QueryFailure::new("query_invalid_clause", "reachable attribute is required", reachable.clone().into())
-        })?;
+        let attribute = reachable
+            .get("attribute")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                QueryFailure::new(
+                    "query_invalid_clause",
+                    "reachable attribute is required",
+                    reachable.clone().into(),
+                )
+            })?;
         let requested_depth = reachable
             .get("max_depth")
             .map(|value| {
@@ -331,10 +395,7 @@ fn parse_clause_at(
             max_depth,
         });
     }
-    for (key, constructor) in [
-        ("exists", true),
-        ("not_exists", false),
-    ] {
+    for (key, constructor) in [("exists", true), ("not_exists", false)] {
         let Some(nested) = object.get(key) else {
             continue;
         };
@@ -342,7 +403,10 @@ fn parse_clause_at(
         if next_predicate_depth > limits.max_predicate_depth {
             return Err(QueryFailure::new(
                 "query_predicate_depth_limit",
-                format!("nested predicates may not exceed {} levels", limits.max_predicate_depth),
+                format!(
+                    "nested predicates may not exceed {} levels",
+                    limits.max_predicate_depth
+                ),
                 json!({"depth":next_predicate_depth,"max":limits.max_predicate_depth}),
             ));
         }
@@ -355,7 +419,14 @@ fn parse_clause_at(
         })?;
         reject_unknown_keys(
             nested_object,
-            &["where", "triple", "compare", "reachable", "exists", "not_exists"],
+            &[
+                "where",
+                "triple",
+                "compare",
+                "reachable",
+                "exists",
+                "not_exists",
+            ],
             key,
         )?;
         let nested_values = if let Some(where_values) = nested_object.get("where") {
@@ -366,13 +437,16 @@ fn parse_clause_at(
                     nested.clone(),
                 ));
             }
-            where_values.as_array().ok_or_else(|| {
-                QueryFailure::new(
-                    "query_invalid_clause",
-                    format!("{key}.where must be an array"),
-                    where_values.clone(),
-                )
-            })?.clone()
+            where_values
+                .as_array()
+                .ok_or_else(|| {
+                    QueryFailure::new(
+                        "query_invalid_clause",
+                        format!("{key}.where must be an array"),
+                        where_values.clone(),
+                    )
+                })?
+                .clone()
         } else {
             if nested_object.len() != 1 {
                 return Err(QueryFailure::new(
@@ -386,7 +460,10 @@ fn parse_clause_at(
         if nested_values.is_empty() || nested_values.len() > limits.max_clauses {
             return Err(QueryFailure::new(
                 "query_clause_limit",
-                format!("{key}.where must contain between 1 and {} clauses", limits.max_clauses),
+                format!(
+                    "{key}.where must contain between 1 and {} clauses",
+                    limits.max_clauses
+                ),
                 json!({"count":nested_values.len(),"max":limits.max_clauses}),
             ));
         }
@@ -407,7 +484,11 @@ fn parse_clause_at(
     ))
 }
 
-pub fn parse(value: &Value, default_limit: usize, limits: &QueryLimits) -> Result<QuerySpec, QueryFailure> {
+pub fn parse(
+    value: &Value,
+    default_limit: usize,
+    limits: &QueryLimits,
+) -> Result<QuerySpec, QueryFailure> {
     let object = value.as_object().ok_or_else(|| {
         QueryFailure::new("query_invalid", "query must be an object", value.clone())
     })?;
@@ -434,7 +515,10 @@ pub fn parse(value: &Value, default_limit: usize, limits: &QueryLimits) -> Resul
     if inputs.len() > limits.max_clauses {
         return Err(QueryFailure::new(
             "query_input_limit",
-            format!("inputs must contain at most {} variables", limits.max_clauses),
+            format!(
+                "inputs must contain at most {} variables",
+                limits.max_clauses
+            ),
             json!({"count":inputs.len(),"max":limits.max_clauses}),
         ));
     }
@@ -458,9 +542,15 @@ pub fn parse(value: &Value, default_limit: usize, limits: &QueryLimits) -> Resul
     let find_values = object
         .get("find")
         .and_then(Value::as_array)
-        .ok_or_else(|| QueryFailure::new("query_invalid_find", "find must be an array", Value::Null))?;
+        .ok_or_else(|| {
+            QueryFailure::new("query_invalid_find", "find must be an array", Value::Null)
+        })?;
     if find_values.is_empty() {
-        return Err(QueryFailure::new("query_invalid_find", "find must not be empty", Value::Null));
+        return Err(QueryFailure::new(
+            "query_invalid_find",
+            "find must not be empty",
+            Value::Null,
+        ));
     }
     if find_values.len() > limits.max_clauses {
         return Err(QueryFailure::new(
@@ -480,9 +570,17 @@ pub fn parse(value: &Value, default_limit: usize, limits: &QueryLimits) -> Resul
                 QueryFailure::new("query_invalid_pull", "pull must be an object", pull.clone())
             })?;
             reject_unknown_keys(pull, &["var", "variable", "target_kind", "fields"], "pull")?;
-            let variable = pull.get("var").or_else(|| pull.get("variable")).and_then(Value::as_str).ok_or_else(|| {
-                QueryFailure::new("query_invalid_pull", "pull variable is required", pull.clone().into())
-            })?;
+            let variable = pull
+                .get("var")
+                .or_else(|| pull.get("variable"))
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    QueryFailure::new(
+                        "query_invalid_pull",
+                        "pull variable is required",
+                        pull.clone().into(),
+                    )
+                })?;
             let target_kind = match pull.get("target_kind") {
                 None => None,
                 Some(value) => {
@@ -506,28 +604,46 @@ pub fn parse(value: &Value, default_limit: usize, limits: &QueryLimits) -> Resul
             let fields = pull
                 .get("fields")
                 .and_then(Value::as_array)
-                .ok_or_else(|| QueryFailure::new("query_invalid_pull", "pull fields must be an array", pull.clone().into()))?
+                .ok_or_else(|| {
+                    QueryFailure::new(
+                        "query_invalid_pull",
+                        "pull fields must be an array",
+                        pull.clone().into(),
+                    )
+                })?
                 .iter()
-                .map(|field| field.as_str().map(str::to_string).ok_or_else(|| QueryFailure::new("query_invalid_pull", "pull field must be a string", field.clone())))
+                .map(|field| {
+                    field.as_str().map(str::to_string).ok_or_else(|| {
+                        QueryFailure::new(
+                            "query_invalid_pull",
+                            "pull field must be a string",
+                            field.clone(),
+                        )
+                    })
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             if fields.is_empty() || fields.len() > limits.max_clauses {
                 return Err(QueryFailure::new(
                     "query_pull_field_limit",
-                    format!("pull fields must contain between 1 and {} fields", limits.max_clauses),
+                    format!(
+                        "pull fields must contain between 1 and {} fields",
+                        limits.max_clauses
+                    ),
                     json!({"count":fields.len(),"max":limits.max_clauses}),
                 ));
             }
             let variable = variable_name(variable)?;
-            pulls.push(PullSpec { variable: variable.clone(), fields, target_kind });
+            pulls.push(PullSpec {
+                variable: variable.clone(),
+                fields,
+                target_kind,
+            });
             finds.push(Term::Variable(variable));
         } else {
             finds.push(parse_term(item, limits)?);
         }
     }
-    if finds
-        .iter()
-        .any(|term| term.as_variable_name().is_none())
-    {
+    if finds.iter().any(|term| term.as_variable_name().is_none()) {
         return Err(QueryFailure::new(
             "query_find_requires_variable",
             "find terms must be variables or pull expressions",
@@ -538,14 +654,19 @@ pub fn parse(value: &Value, default_limit: usize, limits: &QueryLimits) -> Resul
     let clauses = object
         .get("where")
         .and_then(Value::as_array)
-        .ok_or_else(|| QueryFailure::new("query_invalid_where", "where must be an array", Value::Null))?
+        .ok_or_else(|| {
+            QueryFailure::new("query_invalid_where", "where must be an array", Value::Null)
+        })?
         .iter()
         .map(|clause| parse_clause_at(clause, limits, 0, &mut clause_count))
         .collect::<Result<Vec<_>, _>>()?;
     if clauses.is_empty() || clauses.len() > limits.max_clauses {
         return Err(QueryFailure::new(
             "query_clause_limit",
-            format!("where must contain between 1 and {} clauses", limits.max_clauses),
+            format!(
+                "where must contain between 1 and {} clauses",
+                limits.max_clauses
+            ),
             json!({"count":clauses.len(),"max":limits.max_clauses}),
         ));
     }
@@ -571,9 +692,21 @@ pub fn parse(value: &Value, default_limit: usize, limits: &QueryLimits) -> Resul
     let order_by = order_values
         .iter()
         .map(|item| {
-            let item = item.as_object().ok_or_else(|| QueryFailure::new("query_invalid_order", "order_by item must be an object", item.clone()))?;
+            let item = item.as_object().ok_or_else(|| {
+                QueryFailure::new(
+                    "query_invalid_order",
+                    "order_by item must be an object",
+                    item.clone(),
+                )
+            })?;
             reject_unknown_keys(item, &["term", "direction"], "order_by")?;
-            let term = item.get("term").ok_or_else(|| QueryFailure::new("query_invalid_order", "order_by term is required", item.clone().into()))?;
+            let term = item.get("term").ok_or_else(|| {
+                QueryFailure::new(
+                    "query_invalid_order",
+                    "order_by term is required",
+                    item.clone().into(),
+                )
+            })?;
             let direction = match item.get("direction") {
                 None => "asc",
                 Some(Value::String(direction)) => direction.as_str(),
@@ -586,9 +719,16 @@ pub fn parse(value: &Value, default_limit: usize, limits: &QueryLimits) -> Resul
                 }
             };
             if !matches!(direction, "asc" | "desc") {
-                return Err(QueryFailure::new("query_invalid_order", "order direction must be asc or desc", item.clone().into()));
+                return Err(QueryFailure::new(
+                    "query_invalid_order",
+                    "order direction must be asc or desc",
+                    item.clone().into(),
+                ));
             }
-            Ok(OrderTerm { term: parse_term(term, limits)?, descending: direction == "desc" })
+            Ok(OrderTerm {
+                term: parse_term(term, limits)?,
+                descending: direction == "desc",
+            })
         })
         .collect::<Result<Vec<_>, _>>()?;
     let limit = match object.get("limit") {
@@ -631,7 +771,11 @@ pub fn parse(value: &Value, default_limit: usize, limits: &QueryLimits) -> Resul
     };
     if let Some(cursor) = object.get("cursor") {
         if let Some(cursor_object) = cursor.as_object() {
-            reject_unknown_keys(cursor_object, &["schema", "head", "query", "values"], "cursor")?;
+            reject_unknown_keys(
+                cursor_object,
+                &["schema", "head", "query", "values"],
+                "cursor",
+            )?;
         } else if !cursor.is_null() {
             return Err(QueryFailure::new(
                 "query_cursor_invalid",
@@ -669,7 +813,16 @@ pub fn parse(value: &Value, default_limit: usize, limits: &QueryLimits) -> Resul
             }
         }
     }
-    Ok(QuerySpec { inputs, finds, pulls, clauses, order_by, limit, cursor_values, limits: limits.clone() })
+    Ok(QuerySpec {
+        inputs,
+        finds,
+        pulls,
+        clauses,
+        order_by,
+        limit,
+        cursor_values,
+        limits: limits.clone(),
+    })
 }
 
 fn resolve(term: &Term, binding: &Map<String, Value>) -> Option<Value> {
@@ -692,7 +845,10 @@ fn unify(term: &Term, value: &Value, binding: &Map<String, Value>) -> Option<Map
             }
         }
         Term::Value(expected) => (expected == value).then_some(result),
-        Term::OneOf(values) => values.iter().any(|expected| expected == value).then_some(result),
+        Term::OneOf(values) => values
+            .iter()
+            .any(|expected| expected == value)
+            .then_some(result),
     }
 }
 
@@ -706,7 +862,9 @@ fn compare_values(left: &Value, right: &Value) -> Option<Ordering> {
 }
 
 fn compare(op: &str, left: &Value, right: &Value) -> bool {
-    let Some(ordering) = compare_values(left, right) else { return op == "=" && left == right };
+    let Some(ordering) = compare_values(left, right) else {
+        return op == "=" && left == right;
+    };
     match op {
         "=" => ordering == Ordering::Equal,
         "!=" => ordering != Ordering::Equal,
@@ -752,37 +910,94 @@ struct ExecutionBudget<'a> {
 struct DatomIndex<'a> {
     all: &'a [Datom],
     by_subject: HashMap<&'a str, Vec<&'a Datom>>,
+    by_subject_attribute: HashMap<(&'a str, &'a str), Vec<&'a Datom>>,
     by_attribute: HashMap<&'a str, Vec<&'a Datom>>,
+    by_attribute_value: HashMap<(&'a str, String), Vec<&'a Datom>>,
 }
 
 impl<'a> DatomIndex<'a> {
     fn new(datoms: &'a [Datom]) -> Self {
         let mut by_subject: HashMap<&str, Vec<&Datom>> = HashMap::new();
+        let mut by_subject_attribute: HashMap<(&str, &str), Vec<&Datom>> = HashMap::new();
         let mut by_attribute: HashMap<&str, Vec<&Datom>> = HashMap::new();
+        let mut by_attribute_value: HashMap<(&str, String), Vec<&Datom>> = HashMap::new();
         for datom in datoms {
-            by_subject.entry(datom.subject.as_str()).or_default().push(datom);
-            by_attribute.entry(datom.attribute.as_str()).or_default().push(datom);
+            by_subject
+                .entry(datom.subject.as_str())
+                .or_default()
+                .push(datom);
+            by_subject_attribute
+                .entry((datom.subject.as_str(), datom.attribute.as_str()))
+                .or_default()
+                .push(datom);
+            by_attribute
+                .entry(datom.attribute.as_str())
+                .or_default()
+                .push(datom);
+            by_attribute_value
+                .entry((datom.attribute.as_str(), stable_value_key(&datom.value)))
+                .or_default()
+                .push(datom);
         }
-        Self { all: datoms, by_subject, by_attribute }
+        Self {
+            all: datoms,
+            by_subject,
+            by_subject_attribute,
+            by_attribute,
+            by_attribute_value,
+        }
     }
 
-    fn triple_candidates(&self, subject: &Term, attribute: &Term, binding: &Map<String, Value>) -> Vec<&'a Datom> {
+    fn triple_candidates(
+        &self,
+        subject: &Term,
+        attribute: &Term,
+        object: &Term,
+        binding: &Map<String, Value>,
+    ) -> Vec<&'a Datom> {
         if let Some(value) = resolve(subject, binding) {
             if let Some(subject) = value.as_str() {
+                if let Some(attribute) = resolve(attribute, binding) {
+                    if let Some(attribute) = attribute.as_str() {
+                        return self
+                            .by_subject_attribute
+                            .get(&(subject, attribute))
+                            .cloned()
+                            .unwrap_or_default();
+                    }
+                }
                 return self.by_subject.get(subject).cloned().unwrap_or_default();
             }
         }
         if let Some(value) = resolve(attribute, binding) {
             if let Some(attribute) = value.as_str() {
-                return self.by_attribute.get(attribute).cloned().unwrap_or_default();
+                if let Some(object) = resolve(object, binding) {
+                    return self
+                        .by_attribute_value
+                        .get(&(attribute, stable_value_key(&object)))
+                        .cloned()
+                        .unwrap_or_default();
+                }
+                return self
+                    .by_attribute
+                    .get(attribute)
+                    .cloned()
+                    .unwrap_or_default();
             }
         }
         self.all.iter().collect()
     }
 
     fn attribute_candidates(&self, attribute: &str) -> Vec<&'a Datom> {
-        self.by_attribute.get(attribute).cloned().unwrap_or_default()
+        self.by_attribute
+            .get(attribute)
+            .cloned()
+            .unwrap_or_default()
     }
+}
+
+fn stable_value_key(value: &Value) -> String {
+    serde_json::to_string(value).unwrap_or_default()
 }
 
 impl<'a> ExecutionBudget<'a> {
@@ -818,14 +1033,26 @@ fn apply_triple(
     index: &DatomIndex<'_>,
     budget: &mut ExecutionBudget<'_>,
 ) -> Result<Vec<Map<String, Value>>, QueryFailure> {
-    let Clause::Triple { subject, attribute, object } = clause else { return Ok(Vec::new()) };
+    let Clause::Triple {
+        subject,
+        attribute,
+        object,
+    } = clause
+    else {
+        return Ok(Vec::new());
+    };
     let mut results = Vec::new();
-    for datom in index.triple_candidates(subject, attribute, binding) {
+    for datom in index.triple_candidates(subject, attribute, object, binding) {
         budget.scan_datom()?;
-        let Some(after_subject) = unify(subject, &Value::String(datom.subject.clone()), binding) else {
+        let Some(after_subject) = unify(subject, &Value::String(datom.subject.clone()), binding)
+        else {
             continue;
         };
-        let Some(after_attribute) = unify(attribute, &Value::String(datom.attribute.clone()), &after_subject) else {
+        let Some(after_attribute) = unify(
+            attribute,
+            &Value::String(datom.attribute.clone()),
+            &after_subject,
+        ) else {
             continue;
         };
         if let Some(result) = unify(object, &datom.value, &after_attribute) {
@@ -844,7 +1071,15 @@ fn apply_reachable(
     index: &DatomIndex<'_>,
     budget: &mut ExecutionBudget<'_>,
 ) -> Result<Vec<Map<String, Value>>, QueryFailure> {
-    let Clause::Reachable { from, attribute, to, max_depth } = clause else { return Ok(Vec::new()) };
+    let Clause::Reachable {
+        from,
+        attribute,
+        to,
+        max_depth,
+    } = clause
+    else {
+        return Ok(Vec::new());
+    };
     let start_value = resolve(from, binding).ok_or_else(|| {
         QueryFailure::new(
             "query_reachable_unbound",
@@ -867,7 +1102,10 @@ fn apply_reachable(
         }
         if let Some(target) = datom.value.as_str() {
             budget.traverse_edge()?;
-            adjacency.entry(datom.subject.clone()).or_default().push(target.to_string());
+            adjacency
+                .entry(datom.subject.clone())
+                .or_default()
+                .push(target.to_string());
         }
     }
     let mut queue = VecDeque::from(vec![(start.clone(), 0usize)]);
@@ -875,9 +1113,13 @@ fn apply_reachable(
     visited.insert(start);
     let mut results = Vec::new();
     while let Some((current, depth)) = queue.pop_front() {
-        if depth >= *max_depth { continue; }
+        if depth >= *max_depth {
+            continue;
+        }
         for next in adjacency.get(&current).into_iter().flatten() {
-            if !visited.insert(next.clone()) { continue; }
+            if !visited.insert(next.clone()) {
+                continue;
+            }
             if let Some(result) = unify(to, &Value::String(next.clone()), binding) {
                 if results.len() >= budget.work_limit {
                     return Err(query_work_failure(budget.work_limit));
@@ -937,7 +1179,10 @@ fn apply_clause(
                     json!({"term":"right"}),
                 )
             })?;
-            Ok(compare(op, &left, &right).then_some(binding.clone()).into_iter().collect())
+            Ok(compare(op, &left, &right)
+                .then_some(binding.clone())
+                .into_iter()
+                .collect())
         }
     }
 }
@@ -970,11 +1215,16 @@ fn apply_planned(
             break;
         }
         let allow_nested = remaining.iter().all(|index| {
-            matches!(clauses[*index], Clause::Exists { .. } | Clause::NotExists { .. })
+            matches!(
+                clauses[*index],
+                Clause::Exists { .. } | Clause::NotExists { .. }
+            )
         });
-        let position = remaining
-            .iter()
-            .position(|index| bindings.iter().all(|binding| clause_ready(binding, &clauses[*index], allow_nested)));
+        let position = remaining.iter().position(|index| {
+            bindings
+                .iter()
+                .all(|binding| clause_ready(binding, &clauses[*index], allow_nested))
+        });
         let position = match position {
             Some(position) => position,
             None => {
@@ -985,7 +1235,10 @@ fn apply_planned(
                     .iter()
                     .copied()
                     .find(|index| {
-                        !matches!(clauses[*index], Clause::Exists { .. } | Clause::NotExists { .. })
+                        !matches!(
+                            clauses[*index],
+                            Clause::Exists { .. } | Clause::NotExists { .. }
+                        )
                     })
                     .unwrap_or(remaining[0]);
                 return apply_clause(&bindings[0], &clauses[index], datom_index, budget);
@@ -1005,14 +1258,18 @@ fn apply_planned(
     Ok(bindings)
 }
 
-fn term_key(term: &Term, binding: &Map<String, Value>) -> Option<Value> { resolve(term, binding) }
+fn term_key(term: &Term, binding: &Map<String, Value>) -> Option<Value> {
+    resolve(term, binding)
+}
 
 fn after_cursor(
     binding: &Map<String, Value>,
     order_by: &[OrderTerm],
     cursor: &Map<String, Value>,
 ) -> Result<bool, QueryFailure> {
-    if cursor.is_empty() { return Ok(true); }
+    if cursor.is_empty() {
+        return Ok(true);
+    }
     for order in order_by {
         let Some(key) = order.term.as_variable_name() else {
             return Err(QueryFailure::new(
@@ -1035,24 +1292,43 @@ fn after_cursor(
                 json!({"variable":key}),
             ));
         };
-        if ordering == Ordering::Equal { continue; }
-        return Ok(if order.descending { ordering == Ordering::Less } else { ordering == Ordering::Greater });
+        if ordering == Ordering::Equal {
+            continue;
+        }
+        return Ok(if order.descending {
+            ordering == Ordering::Less
+        } else {
+            ordering == Ordering::Greater
+        });
     }
     Ok(false)
 }
 
 impl Term {
     pub fn as_variable_name(&self) -> Option<&str> {
-        match self { Term::Variable(name) => Some(name.as_str()), _ => None }
+        match self {
+            Term::Variable(name) => Some(name.as_str()),
+            _ => None,
+        }
     }
 }
 
 pub fn execute(spec: &QuerySpec, datoms: &[Datom]) -> Result<QueryResult, QueryFailure> {
-    let initial = spec.inputs.iter().fold(Map::new(), |mut binding, (key, value)| {
-        binding.insert(variable_name(key).unwrap_or_else(|_| format!("?{key}")), value.clone());
-        binding
-    });
-    let work_limit = spec.limit.saturating_mul(100).max(1000);
+    let initial = spec
+        .inputs
+        .iter()
+        .fold(Map::new(), |mut binding, (key, value)| {
+            binding.insert(
+                variable_name(key).unwrap_or_else(|_| format!("?{key}")),
+                value.clone(),
+            );
+            binding
+        });
+    // Intermediate bindings are independently bounded by the effective,
+    // server-capped work budget. A result-page limit is not a sound work
+    // ceiling: a selective indexed predicate may legitimately identify more
+    // candidates before read/reply filters and stable ordering are applied.
+    let work_limit = spec.limits.max_datoms_scanned.max(1000);
     let mut budget = ExecutionBudget::new(&spec.limits, work_limit);
     let index = DatomIndex::new(datoms);
     let mut bindings = apply_planned(initial, &spec.clauses, &index, &mut budget)?;
@@ -1080,9 +1356,19 @@ pub fn execute(spec: &QuerySpec, datoms: &[Datom]) -> Result<QueryResult, QueryF
     }
     bindings.sort_by(|left, right| {
         for order in &spec.order_by {
-            let (Some(left), Some(right)) = (term_key(&order.term, left), term_key(&order.term, right)) else { continue };
+            let (Some(left), Some(right)) =
+                (term_key(&order.term, left), term_key(&order.term, right))
+            else {
+                continue;
+            };
             let ordering = compare_values(&left, &right).unwrap_or(Ordering::Equal);
-            if ordering != Ordering::Equal { return if order.descending { ordering.reverse() } else { ordering }; }
+            if ordering != Ordering::Equal {
+                return if order.descending {
+                    ordering.reverse()
+                } else {
+                    ordering
+                };
+            }
         }
         Ordering::Equal
     });
@@ -1090,7 +1376,10 @@ pub fn execute(spec: &QuerySpec, datoms: &[Datom]) -> Result<QueryResult, QueryF
     if has_more && !spec.order_by.is_empty() {
         let duplicate_order_key = bindings.windows(2).any(|window| {
             spec.order_by.iter().all(|order| {
-                match (term_key(&order.term, &window[0]), term_key(&order.term, &window[1])) {
+                match (
+                    term_key(&order.term, &window[0]),
+                    term_key(&order.term, &window[1]),
+                ) {
                     (Some(left), Some(right)) => left == right,
                     _ => false,
                 }
@@ -1105,7 +1394,12 @@ pub fn execute(spec: &QuerySpec, datoms: &[Datom]) -> Result<QueryResult, QueryF
         }
     }
     let bindings = bindings.into_iter().take(spec.limit).collect();
-    Ok(QueryResult { bindings, pulls: spec.pulls.clone(), order_by: spec.order_by.clone(), has_more })
+    Ok(QueryResult {
+        bindings,
+        pulls: spec.pulls.clone(),
+        order_by: spec.order_by.clone(),
+        has_more,
+    })
 }
 
 #[cfg(test)]
@@ -1153,8 +1447,11 @@ mod tests {
             datom("m2", "kind", json!("claim"), 2, "e2"),
             datom("m2", "sequence", json!(2), 2, "e2"),
         ];
-        let result = execute(&parse(&query, 20, &limits()).expect("query parses"), &datoms)
-            .expect("planner should move compare after its binding triple");
+        let result = execute(
+            &parse(&query, 20, &limits()).expect("query parses"),
+            &datoms,
+        )
+        .expect("planner should move compare after its binding triple");
         assert_eq!(result.bindings.len(), 1);
         assert_eq!(result.bindings[0]["?message"], "m2");
     }
@@ -1213,16 +1510,35 @@ mod tests {
         for sequence in 1..=100 {
             let subject = format!("message-{sequence}");
             let event = format!("event-{sequence}");
-            datoms.push(datom(&subject, "recipient", json!("marici.Nima"), sequence, &event));
-            datoms.push(datom(&subject, "kind", json!("communication"), sequence, &event));
-            datoms.push(datom(&subject, "sequence", json!(sequence), sequence, &event));
+            datoms.push(datom(
+                &subject,
+                "recipient",
+                json!("marici.Nima"),
+                sequence,
+                &event,
+            ));
+            datoms.push(datom(
+                &subject,
+                "kind",
+                json!("communication"),
+                sequence,
+                &event,
+            ));
+            datoms.push(datom(
+                &subject,
+                "sequence",
+                json!(sequence),
+                sequence,
+                &event,
+            ));
         }
         let mut indexed_limits = limits();
         indexed_limits.max_datoms_scanned = 700;
         let result = execute(
             &parse(&query, 100, &indexed_limits).expect("indexed join query parses"),
             &datoms,
-        ).expect("bound subject joins must stay within the indexed scan budget");
+        )
+        .expect("bound subject joins must stay within the indexed scan budget");
         assert_eq!(result.bindings.len(), 100);
     }
 
@@ -1268,8 +1584,8 @@ mod tests {
             "find":["?message"],
             "where":[{"triple":{"subject":"?message","attribute":"kind","object":{"one_of":["claim","test","source"]}}}]
         });
-        let one_of_failure = parse(&one_of_query, 20, &term_limits)
-            .expect_err("one_of values must be bounded");
+        let one_of_failure =
+            parse(&one_of_query, 20, &term_limits).expect_err("one_of values must be bounded");
         assert_eq!(one_of_failure.code, "query_term_limit");
 
         let mut predicate_limits = limits();
@@ -1368,8 +1684,11 @@ mod tests {
             "limit":1,
             "cursor":{"values":{"?sequence":1,"?event_id":"e1"}}
         });
-        let second = execute(&parse(&second_query, 20, &limits()).expect("cursor parses"), &datoms)
-            .expect("cursor executes");
+        let second = execute(
+            &parse(&second_query, 20, &limits()).expect("cursor parses"),
+            &datoms,
+        )
+        .expect("cursor executes");
         assert_eq!(second.bindings.len(), 1);
         assert_eq!(second.bindings[0]["?message"], "m2");
         assert!(!second.has_more);
@@ -1391,8 +1710,11 @@ mod tests {
             datom("m1", "replied_by", json!("m2"), 2, "e2"),
             datom("m2", "replied_by", json!("m3"), 3, "e3"),
         ];
-        let result = execute(&parse(&query, 20, &limits()).expect("query parses"), &datoms)
-            .expect("query executes");
+        let result = execute(
+            &parse(&query, 20, &limits()).expect("query parses"),
+            &datoms,
+        )
+        .expect("query executes");
         let ids = result
             .bindings
             .iter()
@@ -1454,8 +1776,11 @@ mod tests {
             datom("r1", "message_id", json!("m1"), 4, "e4"),
             datom("reply", "replies_to", json!("m2"), 5, "e5"),
         ];
-        let result = execute(&parse(&query, 20, &limits()).expect("query parses"), &datoms)
-            .expect("nested predicates execute");
+        let result = execute(
+            &parse(&query, 20, &limits()).expect("query parses"),
+            &datoms,
+        )
+        .expect("nested predicates execute");
         assert_eq!(result.bindings.len(), 1);
         assert_eq!(result.bindings[0]["?message"], "m3");
     }
@@ -1483,8 +1808,11 @@ mod tests {
             datom("r2", "kind", json!("note"), 4, "e4"),
             datom("r2", "target", json!("m2"), 4, "e4"),
         ];
-        let result = execute(&parse(&query, 20, &limits()).expect("query parses"), &datoms)
-            .expect("nested planner should move compare after its binding triple");
+        let result = execute(
+            &parse(&query, 20, &limits()).expect("query parses"),
+            &datoms,
+        )
+        .expect("nested planner should move compare after its binding triple");
         assert_eq!(result.bindings.len(), 1);
         assert_eq!(result.bindings[0]["?message"], "m1");
     }
@@ -1510,11 +1838,8 @@ mod tests {
             "cursor":{"values":{"?message":1}}
         });
         let spec = parse(&query, 20, &limits()).expect("cursor parses");
-        let failure = execute(
-            &spec,
-            &[datom("m1", "kind", json!("claim"), 1, "e1")],
-        )
-        .expect_err("incomparable cursor must refuse");
+        let failure = execute(&spec, &[datom("m1", "kind", json!("claim"), 1, "e1")])
+            .expect_err("incomparable cursor must refuse");
         assert_eq!(failure.code, "query_cursor_type_mismatch");
     }
 
@@ -1634,25 +1959,31 @@ mod tests {
             ),
         ];
         for (query, expected_code) in invalid_types {
-            let failure = parse(&query, 20, &limits()).expect_err("invalid query types must refuse");
+            let failure =
+                parse(&query, 20, &limits()).expect_err("invalid query types must refuse");
             assert_eq!(failure.code, expected_code);
         }
     }
 
     #[test]
-    fn nested_predicates_share_the_intermediate_work_bound() {
+    fn combinatorial_joins_share_the_server_capped_intermediate_work_bound() {
         let query = json!({
-            "find":["?message"],
+            "find":["?message", "?receipt"],
             "where":[
                 {"triple":{"subject":"?message","attribute":"kind","object":"communication"}},
-                {"exists":{"where":[
-                    {"triple":{"subject":"?receipt","attribute":"kind","object":"message_read"}}
-                ]}}
+                {"triple":{"subject":"?receipt","attribute":"kind","object":"message_read"}}
             ],
             "limit":1
         });
-        let mut datoms = vec![datom("m1", "kind", json!("communication"), 1, "e1")];
-        for index in 0..1001 {
+        let mut datoms = Vec::new();
+        for index in 0..101 {
+            datoms.push(datom(
+                &format!("message-{index}"),
+                "kind",
+                json!("communication"),
+                1,
+                "e1",
+            ));
             datoms.push(datom(
                 &format!("receipt-{index}"),
                 "kind",
@@ -1662,7 +1993,41 @@ mod tests {
             ));
         }
         let spec = parse(&query, 20, &limits()).expect("query parses");
-        let failure = execute(&spec, &datoms).expect_err("nested intermediate work must refuse");
-        assert_eq!(failure.code, "query_work_limit");
+        let failure = execute(&spec, &datoms).expect_err("combinatorial work must refuse");
+        assert!(matches!(
+            failure.code,
+            "query_work_limit" | "query_datom_scan_limit"
+        ));
+    }
+
+    #[test]
+    fn selective_history_may_exceed_result_limit_multiplier_without_false_refusal() {
+        let query = json!({
+            "find":["?message", "?sequence"],
+            "where":[
+                {"triple":{"subject":"?message","attribute":"kind","object":"communication"}},
+                {"triple":{"subject":"?message","attribute":"recipient","object":"nima"}},
+                {"triple":{"subject":"?message","attribute":"sequence","object":"?sequence"}}
+            ],
+            "order_by":[{"term":"?sequence","direction":"asc"},{"term":"?message","direction":"asc"}],
+            "limit":5
+        });
+        let mut datoms = Vec::new();
+        for index in 0..1500 {
+            let subject = format!("message-{index:04}");
+            datoms.push(datom(
+                &subject,
+                "kind",
+                json!("communication"),
+                index,
+                "event",
+            ));
+            datoms.push(datom(&subject, "recipient", json!("nima"), index, "event"));
+            datoms.push(datom(&subject, "sequence", json!(index), index, "event"));
+        }
+        let spec = parse(&query, 20, &limits()).expect("query parses");
+        let result = execute(&spec, &datoms).expect("indexed history remains within capped work");
+        assert_eq!(result.bindings.len(), 5);
+        assert!(result.has_more);
     }
 }
