@@ -3400,6 +3400,23 @@ fn resume_or_open_surface(
     state: &mut LoaderState,
 ) -> Result<Value, Diagnostic> {
     let binding_id = required_string(arguments, "binding_id", "missing_binding_id")?;
+    let admitted = admitted_binding(
+        state,
+        arguments.get("site_root").and_then(Value::as_str).unwrap_or_default(),
+        &binding_id,
+        "resume_or_open",
+    )?;
+    let resolved_binding_id = admitted
+        .as_ref()
+        .and_then(|(entry, _)| entry.get("binding_id"))
+        .and_then(Value::as_str)
+        .unwrap_or(binding_id.as_str())
+        .to_string();
+    let resolved_surface_id = admitted
+        .as_ref()
+        .and_then(|(entry, _)| entry.get("surface_id"))
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
     let requested_site_root = arguments
         .get("site_root")
         .and_then(Value::as_str)
@@ -3407,7 +3424,11 @@ fn resume_or_open_surface(
     if let Some(record) = state.handles.values().find(|handle| {
         state.connections.values().any(|connection| {
             connection.logical_connection_id == handle.logical_connection_id
-                && connection.binding_id.as_deref() == Some(binding_id.as_str())
+                && (connection.binding_id.as_deref() == Some(resolved_binding_id.as_str())
+                    || resolved_surface_id
+                        .as_deref()
+                        .map(|surface| connection.surface_id == surface)
+                        .unwrap_or(false))
                 && connection_live(connection)
         })
     }) {
@@ -3425,7 +3446,11 @@ fn resume_or_open_surface(
     // attach or a concurrent binding inspection may already have established
     // the one live child for this admitted binding without creating a handle.
     if let Some(connection) = state.connections.values().find(|connection| {
-        connection.binding_id.as_deref() == Some(binding_id.as_str())
+        (connection.binding_id.as_deref() == Some(resolved_binding_id.as_str())
+            || resolved_surface_id
+                .as_deref()
+                .map(|surface| connection.surface_id == surface)
+                .unwrap_or(false))
             && requested_site_root
                 .as_deref()
                 .map(|root| normalize_path(&connection.site_root) == root)

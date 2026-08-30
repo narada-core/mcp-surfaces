@@ -116,14 +116,16 @@ test('native loader attaches native_entrypoint and native_applet children', asyn
     assert.equal(restarted.tool_discovery.tool_name, 'mcp_loader_list_tools');
     opened[opened.length - 1] = restarted.connection_id;
 
-    const firstInspection = await loader.call('tools/call', {
-      name: 'mcp_loader_inspect_binding_tool',
-      arguments: { site_root: root, binding_id: 'native-entrypoint', tool_name: 'task_lifecycle_guidance' },
-    });
-    const secondInspection = await loader.call('tools/call', {
-      name: 'mcp_loader_inspect_binding_tool',
-      arguments: { site_root: root, binding_id: 'native-entrypoint', tool_name: 'task_lifecycle_guidance' },
-    });
+    const [firstInspection, secondInspection] = await Promise.all([
+      loader.call('tools/call', {
+        name: 'mcp_loader_inspect_binding_tool',
+        arguments: { site_root: root, binding_id: 'native-entrypoint', tool_name: 'task_lifecycle_guidance' },
+      }),
+      loader.call('tools/call', {
+        name: 'mcp_loader_inspect_binding_tool',
+        arguments: { site_root: root, binding_id: 'native-entrypoint', tool_name: 'task_lifecycle_guidance' },
+      }),
+    ]);
     assert.equal(firstInspection.connection_id, restarted.connection_id);
     assert.equal(secondInspection.connection_id, restarted.connection_id);
     assert.equal(firstInspection.tool_contract_digest, firstInspection.tool_schema_digest);

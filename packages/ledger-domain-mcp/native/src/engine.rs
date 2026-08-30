@@ -851,6 +851,7 @@ impl Engine {
             | "sequence_claim_next"
             | "sequence_claims" => Some("sequences"),
             "proposal_submit"
+            | "operations_batch"
             | "submit_review_admit"
             | "capture_sources"
             | "proposal_read"
@@ -950,6 +951,7 @@ impl Engine {
                 self.proposal_submit(site_root, &resolved)
                     .map_err(|error| self.enrich_payload_ref_refusal(error, payload_ref, name))
             }
+            "operations_batch" => self.operations_batch(site_root, args),
             "submit_review_admit" => {
                 let payload_ref = args.get("payload_ref").and_then(Value::as_str);
                 let resolved = self.resolve_payload_arguments(site_root, args)?;
@@ -1563,6 +1565,111 @@ impl Engine {
             "next_value":next_value,
             "exhausted":next_value.is_none()
         })
+    }
+
+    fn operations_batch(&self, root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
+        let batches = args
+            .get("batches")
+            .and_then(Value::as_array)
+            .ok_or_else(|| self.error("operations_batch_required", "batches must be a non-empty array", Value::Null))?;
+        if batches.is_empty() {
+            return Err(self.error("operations_batch_required", "batches must be a non-empty array", Value::Null));
+        }
+        let mut operations = Vec::new();
+        let mut census = Vec::new();
+        for (batch_index, batch) in batches.iter().enumerate() {
+            let batch = batch.as_object().ok_or_else(|| self.error(
+                "operations_batch_invalid",
+                "each batch must be an object",
+                json!({"batch_index":batch_index}),
+            ))?;
+            let defaults = batch.get("defaults").and_then(Value::as_object).ok_or_else(|| self.error(
+                "operations_batch_defaults_invalid",
+                "defaults must be a non-empty object",
+                json!({"batch_index":batch_index}),
+            ))?;
+            if defaults.is_empty() {
+                return Err(self.error("operations_batch_defaults_invalid", "defaults must be a non-empty object", json!({"batch_index":batch_index})));
+            }
+            let columns = batch.get("columns").and_then(Value::as_array).ok_or_else(|| self.error(
+                "operations_batch_columns_invalid",
+                "columns must be a non-empty array",
+                json!({"batch_index":batch_index}),
+            ))?;
+            if columns.is_empty() {
+                return Err(self.error("operations_batch_columns_invalid", "columns must be a non-empty array", json!({"batch_index":batch_index})));
+            }
+            let mut names = Vec::new();
+            let mut unique = std::collections::HashSet::new();
+            for (column_index, column) in columns.iter().enumerate() {
+                let name = column.as_str().filter(|value| !value.is_empty()).ok_or_else(|| self.error(
+                    "operations_batch_column_invalid",
+                    "every column must be a non-empty string",
+                    json!({"batch_index":batch_index,"column_index":column_index}),
+                ))?;
+                if !unique.insert(name.to_string()) {
+                    return Err(self.error(
+                        "operations_batch_column_duplicate",
+                        "columns must be unique",
+                        json!({"batch_index":batch_index,"column":name}),
+                    ));
+                }
+                names.push(name.to_string());
+            }
+            let rows = batch.get("rows").and_then(Value::as_array).ok_or_else(|| self.error(
+                "operations_batch_rows_invalid",
+                "rows must be a non-empty array",
+                json!({"batch_index":batch_index}),
+            ))?;
+            if rows.is_empty() {
+                return Err(self.error("operations_batch_rows_invalid", "rows must be a non-empty array", json!({"batch_index":batch_index})));
+            }
+            for (row_index, row) in rows.iter().enumerate() {
+                let cells = row.as_array().ok_or_else(|| self.error(
+                    "operations_batch_row_invalid",
+                    "each row must be an array",
+                    json!({"batch_index":batch_index,"row_index":row_index}),
+                ))?;
+                if cells.len() != names.len() {
+                    return Err(self.error(
+                        "operations_batch_row_width_mismatch",
+                        "row width must equal the number of columns",
+                        json!({"batch_index":batch_index,"row_index":row_index,"expected":names.len(),"actual":cells.len()}),
+                    ));
+                }
+                if operations.len() as u64 >= self.domain.caps.operations_per_proposal.max {
+                    return Err(self.error(
+                        "operations_batch_limit_exceeded",
+                        "expanded operations exceed the proposal hard cap",
+                        json!({"max_operations":self.domain.caps.operations_per_proposal.max,"batch_index":batch_index,"row_index":row_index}),
+                    ));
+                }
+                let mut operation = defaults.clone();
+                for (name, value) in names.iter().zip(cells.iter()) {
+                    operation.insert(name.clone(), value.clone());
+                }
+                operations.push(Value::Object(operation));
+            }
+            census.push(json!({"batch_index":batch_index,"row_count":rows.len(),"columns":names,"default_fields":defaults.keys().collect::<Vec<_>>() }));
+        }
+        let mut proposal_args = Map::new();
+        for field in ["actor", "authority_basis", "idempotency_key", "expected_ledger_head"] {
+            if let Some(value) = args.get(field) {
+                proposal_args.insert(field.to_string(), value.clone());
+            }
+        }
+        proposal_args.insert("operations".to_string(), Value::Array(operations.clone()));
+        let mut receipt = self.proposal_submit(root, &proposal_args)?;
+        if let Some(object) = receipt.as_object_mut() {
+            object.insert("compact_input".to_string(), json!({
+                "schema":"narada.epistemic.operations_batch_expansion.v1",
+                "batch_count":batches.len(),
+                "expanded_operation_count":operations.len(),
+                "batches":census,
+                "normalization":"defaults_then_row_columns"
+            }));
+        }
+        Ok(receipt)
     }
 
     fn proposal_submit(&self, root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
@@ -6277,6 +6384,55 @@ mod tests {
         let narada = Path::new("site/.narada");
         assert_eq!(engine.ledger(narada), narada.join("epistemic/ledger"));
         assert_eq!(engine.runtime(narada), narada.join(".ai/epistemic-graph"));
+    }
+
+    #[test]
+    fn compact_operation_batches_expand_into_an_ordinary_immutable_proposal() {
+        let engine = engine();
+        let root = std::env::temp_dir().join(format!("epistemic-operations-batch-{}", Uuid::new_v4()));
+        let args = json!({
+            "actor":"operator",
+            "authority_basis":{"kind":"operator_direct_instruction"},
+            "batches":[{
+                "defaults":{"op":"entity.declare","kind":"claim","version":"v1"},
+                "columns":["title","locator"],
+                "rows":[
+                    ["First claim","urn:claim:first"],
+                    ["Second claim","urn:claim:second"]
+                ]
+            }]
+        });
+        let receipt = engine
+            .operations_batch(&root, args.as_object().expect("batch arguments"))
+            .expect("compact proposal");
+        assert_eq!(receipt["compact_input"]["expanded_operation_count"], 2);
+        let proposal = engine
+            .proposal_read(
+                &root,
+                json!({"proposal_id":receipt["proposal_id"],"limit":10})
+                    .as_object()
+                    .expect("read arguments"),
+            )
+            .expect("stored proposal");
+        assert_eq!(proposal["operations"][0]["title"], "First claim");
+        assert_eq!(proposal["operations"][1]["locator"], "urn:claim:second");
+
+        let malformed = json!({
+            "actor":"operator",
+            "authority_basis":{"kind":"operator_direct_instruction"},
+            "batches":[{
+                "defaults":{"op":"entity.declare","kind":"claim"},
+                "columns":["title","locator"],
+                "rows":[["missing locator"]]
+            }]
+        });
+        let error = engine
+            .operations_batch(&root, malformed.as_object().expect("malformed arguments"))
+            .expect_err("row width refusal");
+        assert_eq!(error["code"], "operations_batch_row_width_mismatch");
+        assert_eq!(error["details"]["batch_index"], 0);
+        assert_eq!(error["details"]["row_index"], 0);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

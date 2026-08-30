@@ -52,12 +52,31 @@ Entity kinds are not limited to the six core kinds (`problem`, `conjecture`, `cl
 
 Mutations are proposal based:
 
-1. Submit an immutable proposal with `epistemic_graph_proposal_submit`, or create one from bounded sources with `epistemic_graph_capture_sources`.
+1. Submit an immutable proposal with `epistemic_graph_proposal_submit`, create one from bounded sources with `epistemic_graph_capture_sources`, or use `epistemic_graph_operations_batch` when many operations share fields.
 2. Read the stored proposal with `epistemic_graph_proposal_read`.
 3. Review it explicitly with `epistemic_graph_proposal_review`.
 4. Admit or reject it with the corresponding proposal tool.
 5. Use `epistemic_graph_submit_review_admit` only when one authenticated operator intentionally performs the compound workflow; the immutable proposal and review records are still preserved.
 6. Use `epistemic_graph_proposal_resubmit` to replace identified operations without mutating the original proposal.
+
+For repeated data, `epistemic_graph_operations_batch` expands each row by applying its named columns over shared defaults, then sends the normalized operations through the ordinary immutable proposal validator:
+
+```json
+{
+  "actor": "operator",
+  "authority_basis": { "kind": "operator_direct_instruction" },
+  "batches": [{
+    "defaults": { "op": "entity.declare", "kind": "claim", "version": "v1" },
+    "columns": ["title", "locator"],
+    "rows": [
+      ["First claim", "urn:claim:first"],
+      ["Second claim", "urn:claim:second"]
+    ]
+  }]
+}
+```
+
+Rows must exactly match the declared columns. The response reports the expansion census; the resulting proposal stores the fully expanded canonical operations.
 
 Every mutation adapter must overwrite caller-supplied actor/authority fields with the authenticated principal and Site binding. Optimistic concurrency uses the expected ledger head where the tool contract provides it.
 

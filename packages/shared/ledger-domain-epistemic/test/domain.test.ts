@@ -19,8 +19,8 @@ assert.equal(domain.identity.tool_prefix, 'epistemic_graph');
 assert.equal(domain.identity.error_schema_id, 'narada.epistemic.error.v1');
 
 // Every tool name carries the domain tool prefix, and the tool list is the
-// engine's generation target: 24 tools, exactly one guidance tool.
-assert.equal(domain.tools.length, 24);
+// engine's generation target: 25 tools, exactly one guidance tool.
+assert.equal(domain.tools.length, 25);
 for (const tool of domain.tools) {
   assert.ok(tool.name.startsWith(domain.identity.tool_prefix + '_'), `tool name lacks prefix: ${tool.name}`);
   assert.equal(tool.annotations.destructiveHint, false, `${tool.name} destructiveHint`);
@@ -102,6 +102,22 @@ assert.equal(validateSubmitReviewAdmit({ payload_ref: 'not-a-payload-ref' }), fa
 const proposalSubmit = domain.tools.find((tool: any) => tool.name === 'epistemic_graph_proposal_submit');
 const validateProposalSubmit = ajv.compile(proposalSubmit.inputSchema);
 assert.equal(validateProposalSubmit({ payload_ref: 'mcp_payload:epistemic-proposal@v1' }), true);
+const operationsBatch = domain.tools.find((tool: any) => tool.name === 'epistemic_graph_operations_batch');
+const validateOperationsBatch = ajv.compile(operationsBatch.inputSchema);
+assert.equal(validateOperationsBatch({
+  actor: 'operator',
+  authority_basis: { kind: 'operator_direct_instruction' },
+  batches: [{
+    defaults: { op: 'entity.declare', kind: 'claim', version: 'v1' },
+    columns: ['title', 'locator'],
+    rows: [['First claim', 'urn:claim:first'], ['Second claim', 'urn:claim:second']],
+  }],
+}), true);
+assert.equal(validateOperationsBatch({
+  actor: 'operator',
+  authority_basis: { kind: 'operator_direct_instruction' },
+  batches: [{ defaults: {}, columns: [], rows: [] }],
+}), false);
 
 // Guidance stays byte-identical to narada.epistemic.guidance.v2.
 assert.equal(domain.guidance.schema_id, 'narada.epistemic.guidance.v2');
