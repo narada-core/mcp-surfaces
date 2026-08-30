@@ -2116,6 +2116,7 @@ fn list_tools() -> Vec<Value> {
         tool_definition("mcp_loader_policy_inspect","Inspect the policy governing runtime MCP surface loading.",json!({}),&[],true,false),
         tool_definition("mcp_loader_connection_inventory","List attached loader connections, including liveness, age, explicit loader-managed restartability, capacity, and bounded recovery actions for stale children.",json!({}),&[],true,false),
         tool_definition("mcp_loader_process_ownership","Inspect process ownership for children spawned by this loader run. This is a read-only reconciliation view: it reports loader-owned direct children and safe cleanup actions, but never enumerates or terminates unrelated host processes or conhost descendants.",json!({}),&[],true,false),
+        tool_definition("mcp_loader_owned_port_lookup","Look up listeners on one port, returning only exact direct child processes owned by this loader.",json!({"port":{"type":"integer","minimum":1,"maximum":65535}}),&["port"],true,false),
         tool_definition("mcp_loader_runtime_observation","Return the normalized V2 runtime observation for one attached surface, including stable logical identity, generation state, lifecycle eligibility, contract digests, and bounded actuator guidance.",json!({"connection_id":{"type":"string"},"carrier_kind":{"type":"string"},"manifest_digest":{"type":"string"}}),&["connection_id","carrier_kind"],true,false),
         tool_definition("mcp_loader_list_site_surfaces","List resolvable MCP surfaces declared in a site's local fabric. Runtime metadata is opt-in.",json!({"site_root":{"type":"string"},"include_runtime_metadata":{"type":"boolean","default":false}}),&["site_root"],true,false),
         tool_definition("mcp_loader_site_fabric_diagnostics","Inspect site MCP fabric provenance and classify shared-registry drift or intentional entrypoint overrides.",json!({"site_root":{"type":"string"}}),&["site_root"],true,false),
@@ -2129,9 +2130,9 @@ fn list_tools() -> Vec<Value> {
         tool_definition("mcp_loader_inspect_binding_tool","Resume or open one admitted binding, issue a schema lease, and return a compact exact-contract summary. The complete child contract is opt-in.",json!({"site_root":{"type":"string"},"binding_id":{"type":"string"},"surface_id":{"type":"string"},"runtime_kind":{"type":"string"},"tool_name":{"type":"string"},"include_tool_contract":{"type":"boolean","default":false}}),&["site_root","binding_id","tool_name"],false,false),
         tool_definition("mcp_loader_surface_status","Inspect the runtime status and loader-managed restartability of an attached MCP surface child process.",json!({"connection_id":{"type":"string"}}),&["connection_id"],true,false),
         tool_definition("mcp_loader_tool_discovery_manifest","Return canonical semantic tool names for an attached surface and flag generated aliases as non-authoritative. Discovery never returns bulk schemas; inspect one tool to obtain its exact leased contract.",json!({"connection_id":{"type":"string"},"include_runtime_metadata":{"type":"boolean","default":false}}),&["connection_id"],true,false),
-        tool_definition("mcp_loader_call_tool","Call a tool on an attached MCP surface using a schema lease issued for this exact tool contract and child generation.",json!({"connection_id":{"type":"string"},"tool_name":{"type":"string"},"schema_lease":{"type":"string"},"arguments":{"type":"object"},"include_runtime_metadata":{"type":"boolean"}}),&["connection_id","tool_name","schema_lease"],false,false),
-        tool_definition("mcp_loader_call_surface_tool","Call a tool through a stable logical surface handle using a schema lease issued for its current child generation.",json!({"surface_handle":{"type":"string"},"tool_name":{"type":"string"},"schema_lease":{"type":"string"},"arguments":{"type":"object"},"include_runtime_metadata":{"type":"boolean"}}),&["surface_handle","tool_name","schema_lease"],false,false),
-        tool_definition("mcp_loader_call_binding_tool","Atomically resume or reopen an admitted binding and call one child tool using a schema lease issued by mcp_loader_inspect_binding_tool.",json!({"site_root":{"type":"string"},"binding_id":{"type":"string"},"surface_id":{"type":"string"},"runtime_kind":{"type":"string"},"tool_name":{"type":"string"},"schema_lease":{"type":"string"},"arguments":{"type":"object"},"include_runtime_metadata":{"type":"boolean","default":false}}),&["site_root","binding_id","tool_name","schema_lease"],false,false),
+        tool_definition("mcp_loader_call_tool","Call a child tool using either its generation lease or a previously inspected exact contract digest. An unchanged digest renews authorization without another inspection round trip.",json!({"connection_id":{"type":"string"},"tool_name":{"type":"string"},"schema_lease":{"type":"string"},"tool_contract_digest":{"type":"string"},"arguments":{"type":"object"},"include_runtime_metadata":{"type":"boolean"}}),&["connection_id","tool_name"],false,false),
+        tool_definition("mcp_loader_call_surface_tool","Call through a stable logical handle using either its generation lease or a cached exact contract digest.",json!({"surface_handle":{"type":"string"},"tool_name":{"type":"string"},"schema_lease":{"type":"string"},"tool_contract_digest":{"type":"string"},"arguments":{"type":"object"},"include_runtime_metadata":{"type":"boolean"}}),&["surface_handle","tool_name"],false,false),
+        tool_definition("mcp_loader_call_binding_tool","Atomically reuse one admitted binding child and call a tool using either its generation lease or a cached exact contract digest.",json!({"site_root":{"type":"string"},"binding_id":{"type":"string"},"surface_id":{"type":"string"},"runtime_kind":{"type":"string"},"tool_name":{"type":"string"},"schema_lease":{"type":"string"},"tool_contract_digest":{"type":"string"},"arguments":{"type":"object"},"include_runtime_metadata":{"type":"boolean","default":false}}),&["site_root","binding_id","tool_name"],false,false),
         tool_definition("mcp_loader_read_result","Read a compact resumable page from a materialized proxied child result. Pages are capped at 4,000 characters so ordinary calls remain transcript-safe.",json!({"connection_id":{"type":"string"},"ref":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":4000},"timeout_ms":{"type":"integer","minimum":1,"maximum":15000}}),&["connection_id","ref"],true,false),
         tool_definition("mcp_loader_detach","Detach and terminate an attached MCP surface.",json!({"connection_id":{"type":"string"}}),&["connection_id"],false,true),
         tool_definition("mcp_loader_surface_restart","Replace an attached MCP surface child process with a freshly initialized connection using the same site, surface, entrypoint, and args; this does not restart the agent session.",json!({"connection_id":{"type":"string"},"reason":{"type":"string"}}),&["connection_id"],false,true),
@@ -2781,7 +2782,7 @@ fn attach_surface(arguments: &JsonObject, state: &mut LoaderState) -> Result<Val
     if state.connections.len() >= state.policy.max_connections {
         let inventory = connection_inventory(state);
         return Err(Diagnostic::new("max_connections_reached", format!("max_connections_reached:{}", state.connections.len()))
-            .with_details(json!({"max_connections":inventory["max_connections"],"connection_count":inventory["connection_count"],"available_slots":inventory["available_slots"],"closed_connection_ids":inventory["closed_connection_ids"],"recovery":inventory["recovery"]})));
+            .with_details(json!({"max_connections":inventory["max_connections"],"connection_count":inventory["connection_count"],"available_slots":inventory["available_slots"],"closed_connection_ids":inventory["closed_connection_ids"],"reclaimable_connections":inventory["connections"],"recovery":inventory["recovery"]})));
     }
     let extra_args = string_array(arguments.get("args"))?.unwrap_or_default();
     if admitted.is_some() && (explicit_entrypoint.is_some() || !extra_args.is_empty()) {
@@ -3399,6 +3400,10 @@ fn resume_or_open_surface(
     state: &mut LoaderState,
 ) -> Result<Value, Diagnostic> {
     let binding_id = required_string(arguments, "binding_id", "missing_binding_id")?;
+    let requested_site_root = arguments
+        .get("site_root")
+        .and_then(Value::as_str)
+        .map(normalize_path);
     if let Some(record) = state.handles.values().find(|handle| {
         state.connections.values().any(|connection| {
             connection.logical_connection_id == handle.logical_connection_id
@@ -3413,6 +3418,42 @@ fn resume_or_open_surface(
             "binding_id":binding_id,
             "site_root":record.site_root,
             "surface_id":record.surface_id,
+            "handle_scope":"loader_process"
+        }));
+    }
+    // Handles are a convenience projection, not connection identity.  A prior
+    // attach or a concurrent binding inspection may already have established
+    // the one live child for this admitted binding without creating a handle.
+    if let Some(connection) = state.connections.values().find(|connection| {
+        connection.binding_id.as_deref() == Some(binding_id.as_str())
+            && requested_site_root
+                .as_deref()
+                .map(|root| normalize_path(&connection.site_root) == root)
+                .unwrap_or(true)
+            && connection_live(connection)
+    }) {
+        let handle = format!("{}{}", SURFACE_HANDLE_PREFIX, new_id("h").replace('-', ""));
+        let record = SurfaceHandle {
+            handle: handle.clone(),
+            logical_connection_id: connection.logical_connection_id.clone(),
+            binding_id: connection.binding_id.clone(),
+            site_root: connection.site_root.clone(),
+            surface_id: connection.surface_id.clone(),
+            runtime_kind: connection.runtime_kind.clone(),
+            created_at: ms_to_iso(now_ms()),
+        };
+        let connection_id = connection.connection_id.clone();
+        let site_root = connection.site_root.clone();
+        let surface_id = connection.surface_id.clone();
+        state.handles.insert(handle.clone(), record);
+        return Ok(json!({
+            "schema":"narada.mcp_loader.surface_handle_resumed.v1",
+            "status":"adopted_existing_connection",
+            "surface_handle":handle,
+            "connection_id":connection_id,
+            "binding_id":binding_id,
+            "site_root":site_root,
+            "surface_id":surface_id,
             "handle_scope":"loader_process"
         }));
     }
@@ -3529,6 +3570,50 @@ fn process_ownership(state: &LoaderState) -> Value {
         "external_process_policy":"unowned_or_unobserved_processes_are_not_enumerated_or_terminated",
         "host_process_reconciliation":{"status":"not_available","reason":"mcp-loader has no authority to enumerate arbitrary host processes or conhost descendants","conhost_descendants":"not_enumerated","remediation":"Use the host/runtime supervisor for external process inspection; use mcp_loader_detach for a known loader-owned connection."}
     })
+}
+
+fn owned_port_lookup(arguments: &JsonObject, state: &LoaderState) -> Result<Value, Diagnostic> {
+    let port = arguments
+        .get("port")
+        .and_then(Value::as_u64)
+        .filter(|value| (1..=65535).contains(value))
+        .ok_or_else(|| Diagnostic::new("invalid_port", "invalid_port"))?;
+    let owned: HashMap<u32, &Connection> = state
+        .connections
+        .values()
+        .map(|connection| (connection.session.pid, connection))
+        .collect();
+    #[cfg(windows)]
+    let output = Command::new("netstat")
+        .args(["-ano", "-p", "tcp"])
+        .creation_flags(0x0800_0000)
+        .output();
+    #[cfg(not(windows))]
+    let output = Command::new("ss").args(["-ltnp"]).output();
+    let stdout = output
+        .map_err(|error| Diagnostic::new("owned_port_lookup_failed", error.to_string()))?
+        .stdout;
+    let text = String::from_utf8_lossy(&stdout);
+    let needle = format!(":{port}");
+    let mut owners = Vec::new();
+    for line in text.lines().filter(|line| line.contains(&needle)) {
+        let Some(pid) = line.split_whitespace().last().and_then(|value| value.parse::<u32>().ok()) else { continue; };
+        let Some(connection) = owned.get(&pid) else { continue; };
+        owners.push(json!({
+            "port":port,
+            "pid":pid,
+            "connection_id":connection.connection_id,
+            "binding_id":connection.binding_id,
+            "surface_id":connection.surface_id,
+            "ownership_status":"loader_owned_direct_child",
+            "actions":{
+                "inspect":{"tool_name":"mcp_loader_surface_status","arguments":{"connection_id":connection.connection_id}},
+                "restart":{"tool_name":"mcp_loader_surface_restart","arguments":{"connection_id":connection.connection_id,"reason":"owned_port_restart"}},
+                "detach":{"tool_name":"mcp_loader_detach","arguments":{"connection_id":connection.connection_id}}
+            }
+        }));
+    }
+    Ok(json!({"schema":"narada.mcp_loader.owned_port_lookup.v1","status":"ok","port":port,"owner_count":owners.len(),"owners":owners,"scope":"loader_owned_direct_children_only"}))
 }
 
 fn list_site_surfaces(arguments: &JsonObject, state: &LoaderState) -> Result<Value, Diagnostic> {
@@ -3950,6 +4035,7 @@ fn inspect_attached_tool(arguments: &JsonObject, state: &LoaderState) -> Result<
         "surface_id": connection.surface_id,
         "tool_name": tool_name,
         "tool_schema_digest": tool_schema_digest,
+        "tool_contract_digest": tool_schema_digest,
         "input_schema_digest": sha256(&stable_json(&input_schema)),
         "output_schema_digest": sha256(&stable_json(&output_schema)),
         "description": tool.get("description").cloned().unwrap_or(Value::Null),
@@ -3975,25 +4061,42 @@ fn validate_schema_lease(
     connection_id: &str,
     tool_name: &str,
 ) -> Result<(), Diagnostic> {
+    let connection = state.connections.get(connection_id).ok_or_else(|| {
+        Diagnostic::new(
+            "connection_not_found",
+            format!("connection_not_found:{connection_id}"),
+        )
+        .with_details(json!({
+            "connection_id":connection_id,
+            "recovery":{
+                "inventory":{"tool_name":"mcp_loader_connection_inventory","arguments":{}},
+                "resume_or_open":{"tool_name":"mcp_loader_resume_or_open_surface","required_arguments":["site_root","binding_id"]},
+                "note":"Use the stable surface handle or binding identity retained from attach/inspection; a missing raw connection id cannot recreate authority by itself."
+            }
+        }))
+    })?;
+    let tool = child_tool_contract(connection, tool_name)?;
+    let digest = child_tool_schema_digest(tool);
+    if arguments
+        .get("tool_schema_digest")
+        .or_else(|| arguments.get("tool_contract_digest"))
+        .and_then(Value::as_str)
+        == Some(digest.as_str())
+    {
+        return Ok(());
+    }
     let supplied =
         required_string(arguments, "schema_lease", "schema_lease_required").map_err(|_| {
-            Diagnostic::new("schema_lease_required", "schema_lease_required").with_details(json!({
+            Diagnostic::new("schema_lease_required", "schema_lease_or_contract_digest_required").with_details(json!({
                 "connection_id": connection_id,
                 "tool_name": tool_name,
+                "accepted_authorization": ["schema_lease", "tool_schema_digest"],
                 "next_call": {
                     "tool_name": "mcp_loader_inspect_tool",
                     "arguments": {"connection_id": connection_id, "tool_name": tool_name}
                 }
             }))
         })?;
-    let connection = state.connections.get(connection_id).ok_or_else(|| {
-        Diagnostic::new(
-            "connection_not_found",
-            format!("connection_not_found:{connection_id}"),
-        )
-    })?;
-    let tool = child_tool_contract(connection, tool_name)?;
-    let digest = child_tool_schema_digest(tool);
     let expected = schema_lease_token(state, connection, tool_name, &digest);
     if supplied != expected {
         return Err(
@@ -4022,6 +4125,13 @@ fn get_connection<'a>(
             "connection_not_found",
             format!("connection_not_found:{}", id),
         )
+        .with_details(json!({
+            "connection_id":id,
+            "recovery":{
+                "inventory":{"tool_name":"mcp_loader_connection_inventory","arguments":{}},
+                "resume_or_open":{"tool_name":"mcp_loader_resume_or_open_surface","required_arguments":["site_root","binding_id"]}
+            }
+        }))
     })
 }
 
@@ -4521,6 +4631,9 @@ fn call_binding_tool(arguments: &JsonObject, state: &mut LoaderState) -> Result<
             .cloned()
             .unwrap_or(Value::Null),
     );
+    if let Some(value) = arguments.get("tool_schema_digest").or_else(|| arguments.get("tool_contract_digest")) {
+        delegated.insert("tool_schema_digest".into(), value.clone());
+    }
     if let Some(value) = arguments.get("include_runtime_metadata") {
         delegated.insert("include_runtime_metadata".into(), value.clone());
     }
@@ -5456,6 +5569,7 @@ fn call_tool(name: &str, arguments: Value, state: &mut LoaderState) -> Result<Va
         "mcp_loader_policy_inspect" => Ok(policy_inspect(state)),
         "mcp_loader_connection_inventory" => Ok(connection_inventory(state)),
         "mcp_loader_process_ownership" => Ok(process_ownership(state)),
+        "mcp_loader_owned_port_lookup" => owned_port_lookup(&object, state),
         "mcp_loader_runtime_observation" => runtime_observation(&object, state),
         "mcp_loader_list_site_surfaces" => list_site_surfaces(&object, state),
         "mcp_loader_site_fabric_diagnostics" => site_fabric_diagnostics(&object, state),
@@ -5509,15 +5623,15 @@ mod tests {
         );
         assert_eq!(
             find("mcp_loader_call_binding_tool")["inputSchema"]["required"],
-            json!(["site_root", "binding_id", "tool_name", "schema_lease"])
+            json!(["site_root", "binding_id", "tool_name"])
         );
         assert_eq!(
             find("mcp_loader_call_tool")["inputSchema"]["required"],
-            json!(["connection_id", "tool_name", "schema_lease"])
+            json!(["connection_id", "tool_name"])
         );
         assert_eq!(
             find("mcp_loader_call_surface_tool")["inputSchema"]["required"],
-            json!(["surface_handle", "tool_name", "schema_lease"])
+            json!(["surface_handle", "tool_name"])
         );
         for name in [
             "mcp_loader_list_site_surfaces",

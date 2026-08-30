@@ -116,6 +116,34 @@ test('native loader attaches native_entrypoint and native_applet children', asyn
     assert.equal(restarted.tool_discovery.tool_name, 'mcp_loader_list_tools');
     opened[opened.length - 1] = restarted.connection_id;
 
+    const firstInspection = await loader.call('tools/call', {
+      name: 'mcp_loader_inspect_binding_tool',
+      arguments: { site_root: root, binding_id: 'native-entrypoint', tool_name: 'task_lifecycle_guidance' },
+    });
+    const secondInspection = await loader.call('tools/call', {
+      name: 'mcp_loader_inspect_binding_tool',
+      arguments: { site_root: root, binding_id: 'native-entrypoint', tool_name: 'task_lifecycle_guidance' },
+    });
+    assert.equal(firstInspection.connection_id, restarted.connection_id);
+    assert.equal(secondInspection.connection_id, restarted.connection_id);
+    assert.equal(firstInspection.tool_contract_digest, firstInspection.tool_schema_digest);
+    const digestAuthorizedCall = await loader.call('tools/call', {
+      name: 'mcp_loader_call_binding_tool',
+      arguments: {
+        site_root: root,
+        binding_id: 'native-entrypoint',
+        tool_name: 'task_lifecycle_guidance',
+        tool_contract_digest: firstInspection.tool_contract_digest,
+        arguments: {},
+      },
+    });
+    assert.equal(digestAuthorizedCall.schema, 'narada.mcp_loader.tool_result.v1');
+    const inventoryAfterInspections = await loader.call('tools/call', {
+      name: 'mcp_loader_connection_inventory',
+      arguments: {},
+    });
+    assert.equal(inventoryAfterInspections.connection_count, 1);
+
     const nativeEntrypoint = await loader.call('tools/call', { name: 'mcp_loader_open_surface', arguments: { site_root: root, binding_id: 'native-entrypoint', surface_id: 'native-entrypoint' } });
     assert.equal(nativeEntrypoint.schema, 'narada.mcp_loader.surface_handle_opened.v1');
     opened.push(nativeEntrypoint.connection_id);

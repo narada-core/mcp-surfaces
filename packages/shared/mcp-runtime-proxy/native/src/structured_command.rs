@@ -7,6 +7,8 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc, Arc,
@@ -680,8 +682,10 @@ fn list_tools() -> Vec<Value> {
         tool("structured_command_execution_policy_inspect", "Inspect the policy governing structured command execution.", json!({"type": "object", "additionalProperties": false}), true),
         tool("structured_command_output_show", "Read a materialized structured-command output ref with offset/limit paging.", json!({"type": "object", "properties": {"ref": {"type": "string"}, "output_ref": {"type": "string"}, "offset": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 20000}}, "oneOf": [{"required":["ref"]},{"required":["output_ref"]}], "additionalProperties": false}), true),
         tool("structured_command_execute", "Execute a structured argv command under allowed-root and command policy, or read an existing execution_ref. Supply exactly one of command, input_ref, or execution_ref.", execution_schema(true), false),
-        tool("structured_command_start", "Start a durable detached native command and return an execution_ref immediately. Supply command or input_ref.", execution_schema(false), false),
+        tool("structured_command_start", "Start a detached native command and return an execution_ref immediately. durable_process_lifetime_ms is the explicit kill deadline; observation_timeout_ms never terminates the process.", execution_schema(false), false),
         tool("structured_command_execution_show", "Read one durable structured command execution by execution_ref.", json!({"type": "object", "properties": {"execution_ref": {"type": "string", "minLength": 1}, "stdout_offset": {"type": "integer", "minimum": 0}, "stderr_offset": {"type": "integer", "minimum": 0}, "stdout_limit": {"type": "integer", "minimum": 1, "maximum": 20000}, "stderr_limit": {"type": "integer", "minimum": 1, "maximum": 20000}}, "required": ["execution_ref"], "additionalProperties": false}), true),
+        tool("structured_command_execution_stop", "Stop one running structured-command process tree owned by this surface.", json!({"type":"object","properties":{"execution_ref":{"type":"string","minLength":1},"reason":{"type":"string"}},"required":["execution_ref"],"additionalProperties":false}), false),
+        tool("structured_command_execution_restart", "Stop one running owned execution when necessary and start a replacement from its recorded argv and working directory.", json!({"type":"object","properties":{"execution_ref":{"type":"string","minLength":1},"durable_process_lifetime_ms":{"type":"integer","minimum":1}},"required":["execution_ref"],"additionalProperties":false}), false),
         tool("structured_command_powershell_parse_check", "Parse-check an allowed-root PowerShell script without admitting arbitrary execution.", json!({"type": "object", "properties": {"path": {"type": "string"}, "working_directory": {"type": "string"}, "timeout_ms": {"type": "integer"}}, "required": ["path"], "additionalProperties": false}), true),
         tool("structured_command_input_create", "Create a scoped structured command input ref.", json!({"type": "object", "properties": {"input_id": {"type": "string"}, "command": {"type": "string", "minLength": 1}, "args": {"type": "array", "items": {"type": "string"}}, "working_directory": {"type": "string"}, "timeout_ms": {"type": "integer", "minimum": 1}, "wait_for_completion": {"type": "boolean"}, "test_scope": {"type": "string"}, "expected_cost": {"type": "string"}}, "required": ["command"], "additionalProperties": false}), false),
         tool("structured_command_elevated_window_execute", "On Windows, launch a policy-approved command in a visible elevated UAC window. Execution requires confirm_elevation=true.", json!({"type": "object", "properties": {"command": {"type": "string", "minLength": 1}, "args": {"type": "array", "items": {"type": "string"}}, "working_directory": {"type": "string", "minLength": 1}, "confirm_elevation": {"type": "boolean"}, "wait": {"type": "boolean"}, "dry_run": {"type": "boolean"}, "timeout_ms":{"type":"integer","minimum":1}}, "required": ["command", "working_directory"], "additionalProperties": false}), false),
@@ -690,6 +694,8 @@ fn list_tools() -> Vec<Value> {
 
 fn execution_schema(allow_execution_ref: bool) -> Value {
     let mut properties = json!({"input_ref": {"type": "string", "minLength": 1}, "command": {"type": "string", "minLength": 1}, "args": {"type": "array", "items": {"type": "string"}}, "working_directory": {"type": "string"}, "timeout_ms": {"type": "integer", "minimum": 1}, "wait_for_completion": {"type": "boolean"}, "test_scope": {"type": "string"}, "expected_cost": {"type": "string"}, "stdout_offset": {"type": "integer", "minimum": 0}, "stderr_offset": {"type": "integer", "minimum": 0}, "stdout_limit": {"type": "integer", "minimum": 1, "maximum": 20000}, "stderr_limit": {"type": "integer", "minimum": 1, "maximum": 20000}}).as_object().unwrap().clone();
+    properties.insert("observation_timeout_ms".into(), json!({"type":"integer","minimum":1}));
+    properties.insert("durable_process_lifetime_ms".into(), json!({"type":"integer","minimum":1}));
     if allow_execution_ref {
         properties.insert(
             "execution_ref".to_string(),
@@ -745,6 +751,8 @@ fn call_tool(
         "structured_command_execution_policy_inspect" => Ok(policy_payload(state)),
         "structured_command_execute" => execute(state, args, cancellation, false),
         "structured_command_execution_show" => show_execution(state, args),
+        "structured_command_execution_stop" => stop_execution(state, args),
+        "structured_command_execution_restart" => restart_execution(state, args),
         "structured_command_input_create" => create_input_record(state, args),
         "structured_command_output_show" => output_show(state, args),
         "structured_command_powershell_parse_check" => {
@@ -1241,12 +1249,18 @@ fn execute(
             .and_then(Value::as_bool)
             == Some(false);
     if background {
+        let process_lifetime_ms = effective_args
+            .get("durable_process_lifetime_ms")
+            .or_else(|| effective_args.get("timeout_ms"))
+            .and_then(Value::as_u64)
+            .unwrap_or(state.max_timeout_ms)
+            .clamp(1, state.max_timeout_ms);
         return start_background(
             state,
             &command,
             &command_args,
             &working_directory,
-            timeout_ms,
+            process_lifetime_ms,
             posture,
             args_object.get("input_ref").cloned().unwrap_or(Value::Null),
         );
@@ -1317,7 +1331,9 @@ fn start_background(
     let pending = json!({
         "schema":"narada.structured_command.execution_result.v0","status":"running","executed":true,
         "command":command,"args":args,"working_directory":cwd.to_string_lossy(),"started_at":started_at,
-        "finished_at":Value::Null,"timeout_ms":timeout_ms,"execution_posture":posture,
+        "finished_at":Value::Null,"timeout_ms":timeout_ms,"execution_timeout_ms":Value::Null,
+        "observation_timeout_ms":0,"durable_process_lifetime_ms":timeout_ms,
+        "scheduled_termination":{"kind":"relative_deadline","after_ms":timeout_ms},"execution_posture":posture,
         "test_scope":posture.get("test_scope").and_then(Value::as_str).unwrap_or("unknown"),
         "expected_cost":posture.get("expected_cost").and_then(Value::as_str).unwrap_or("unknown"),
         "execution_mode":"background","wait_for_completion":false,"pending":true,"exit_code":Value::Null,
@@ -1368,14 +1384,12 @@ fn start_background(
         .stderr(Stdio::null());
     apply_headless_process_posture(&mut runner);
     match runner.spawn() {
-        Ok(child) => Ok(page_execution(&pending, &Map::new(), Some(execution_ref))
-            .as_object()
-            .cloned()
-            .map(|mut value| {
-                value.insert("runner_pid".to_string(), json!(child.id()));
-                Value::Object(value)
-            })
-            .unwrap_or(pending)),
+        Ok(child) => {
+            let mut running = pending.clone();
+            running["runner_pid"] = json!(child.id());
+            update_execution_record(state, &execution_ref, &running)?;
+            Ok(page_execution(&running, &Map::new(), Some(execution_ref)))
+        }
         Err(error) => {
             let failed = json!({"schema":"narada.structured_command.execution_result.v0","status":"failed","executed":false,"pending":false,"command":command,"args":args,"working_directory":cwd.to_string_lossy(),"started_at":started_at,"finished_at":now_rfc3339(),"timeout_ms":timeout_ms,"execution_mode":"background","wait_for_completion":false,"error":"background_runner_spawn_failed","stderr":error.to_string(),"stdout":"","exit_code":Value::Null,"timed_out":false,"cancelled":false});
             update_execution_record(state, &execution_ref, &failed)?;
@@ -1387,6 +1401,70 @@ fn start_background(
             ))
         }
     }
+}
+
+fn stop_execution(state: &State, args: &Value) -> Result<Value, StructuredError> {
+    let reference = args
+        .get("execution_ref")
+        .and_then(Value::as_str)
+        .ok_or_else(|| StructuredError::new("structured_command_execution_ref_required", "structured_command_execution_ref_required", json!({})))?;
+    let mut payload = read_execution_record(state, reference)?;
+    if payload.get("pending").and_then(Value::as_bool) != Some(true) {
+        return Ok(json!({"schema":"narada.structured_command.execution_control.v1","status":"already_terminal","execution_ref":reference,"execution":page_execution(&payload,&Map::new(),Some(reference.to_string()))}));
+    }
+    let pid = payload
+        .get("runner_pid")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| StructuredError::new("structured_command_runner_pid_missing", "structured_command_runner_pid_missing", json!({"execution_ref":reference})))?;
+    #[cfg(windows)]
+    let status = Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status();
+    #[cfg(not(windows))]
+    let status = Command::new("kill").args(["-TERM", &pid.to_string()]).status();
+    let stopped = status.map(|value| value.success()).unwrap_or(false);
+    if !stopped {
+        return Err(StructuredError::new("structured_command_execution_stop_failed", "structured_command_execution_stop_failed", json!({"execution_ref":reference,"runner_pid":pid})));
+    }
+    payload["status"] = json!("stopped");
+    payload["pending"] = json!(false);
+    payload["cancelled"] = json!(true);
+    payload["finished_at"] = json!(now_rfc3339());
+    payload["stop_reason"] = args.get("reason").cloned().unwrap_or_else(|| json!("operator_requested"));
+    update_execution_record(state, reference, &payload)?;
+    Ok(json!({"schema":"narada.structured_command.execution_control.v1","status":"stopped","execution_ref":reference,"runner_pid":pid}))
+}
+
+fn restart_execution(state: &State, args: &Value) -> Result<Value, StructuredError> {
+    let reference = args
+        .get("execution_ref")
+        .and_then(Value::as_str)
+        .ok_or_else(|| StructuredError::new("structured_command_execution_ref_required", "structured_command_execution_ref_required", json!({})))?;
+    let payload = read_execution_record(state, reference)?;
+    if payload.get("pending").and_then(Value::as_bool) == Some(true) {
+        stop_execution(state, &json!({"execution_ref":reference,"reason":"restart"}))?;
+    }
+    let command = payload.get("command").and_then(Value::as_str).unwrap_or_default();
+    let command_args = value_strings(payload.get("args"));
+    let cwd = PathBuf::from(payload.get("working_directory").and_then(Value::as_str).unwrap_or_default());
+    let lifetime_ms = args
+        .get("durable_process_lifetime_ms")
+        .and_then(Value::as_u64)
+        .or_else(|| payload.get("durable_process_lifetime_ms").and_then(Value::as_u64))
+        .unwrap_or(state.max_timeout_ms)
+        .clamp(1, state.max_timeout_ms);
+    let mut replacement = start_background(
+        state,
+        command,
+        &command_args,
+        &cwd,
+        lifetime_ms,
+        payload.get("execution_posture").cloned().unwrap_or_else(|| json!({})),
+        payload.get("input_ref").cloned().unwrap_or(Value::Null),
+    )?;
+    replacement["restarts_execution_ref"] = json!(reference);
+    Ok(replacement)
 }
 
 fn infer_test_scope(command: &str, args: &[String]) -> &'static str {
