@@ -72,18 +72,28 @@ function textComponent(text: string): { render: (width: number) => string[] } {
   };
 }
 
-function resultSummary(toolName: string, result: any, fullText: string): string {
+function resultSummary(result: any, fullText: string): string {
   const structured = result?.structuredContent;
   const path = structured?.relative_path ?? structured?.path;
   const lines = structured?.returned_lines;
   if (typeof path === "string" && typeof lines === "number") {
-    return `${toolName}: read ${path} (${lines} lines)`;
+    return `read ${path} (${lines} lines)`;
   }
-  const schema = structured?.schema;
-  const status = structured?.status;
+  const summary = structured?.result_summary;
+  const schema = summary?.schema ?? structured?.schema;
+  const status = summary?.status ?? structured?.status;
   const identity = [schema, status].filter((value) => typeof value === "string").join(": ");
   const chars = fullText.length.toLocaleString("en-US");
-  return `${toolName}: ${identity || "MCP result"} (${chars} characters)`;
+  return `${identity || "MCP result"} (${chars} characters)`;
+}
+
+function alwaysCollapseResult(result: any): boolean {
+  const structured = result?.structuredContent;
+  const produced = structured?.result;
+  return structured?.result_bounded === true
+    || produced?.result_materialized === true
+    || produced?.truncated === true
+    || produced?.output_truncated === true;
 }
 
 function carrierRoutingGuidance(serverName: string, toolName: string): string {
@@ -301,17 +311,18 @@ export default function naradaMcpCarrier(pi: any): void {
                   isError: result?.isError === true,
                   structuredSchema: result?.structuredContent?.schema ?? null,
                   continuation: result?.structuredContent?.result?.next_offset ?? result?.structuredContent?.next_offset ?? null,
-                  uiSummary: resultSummary(exposedName, result, rawText),
+                  uiSummary: resultSummary(result, rawText),
+                  alwaysCollapse: alwaysCollapseResult(result),
                 },
                 isError: result?.isError === true,
               };
             },
             renderResult: (result: any, options: { expanded: boolean }) => {
               const fullText = resultText(result);
-              if (options.expanded || fullText.length <= MAX_COLLAPSED_RESULT_CHARS) {
+              if (options.expanded || (!result?.details?.alwaysCollapse && fullText.length <= MAX_COLLAPSED_RESULT_CHARS)) {
                 return textComponent(fullText || JSON.stringify(result?.details ?? null));
               }
-              return textComponent(`${result?.details?.uiSummary ?? resultSummary(exposedName, result, fullText)} — press Ctrl+O to expand`);
+              return textComponent(`${result?.details?.uiSummary ?? resultSummary(result, fullText)} — press Ctrl+O to expand`);
             },
           });
         }
