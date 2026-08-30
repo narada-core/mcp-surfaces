@@ -2826,6 +2826,8 @@ mod tests {
         assert!(source.contains("\"startupTimeoutMs\":7000"));
         assert!(source.contains("tools/list"));
         assert!(source.contains("pi.registerTool"));
+        assert!(source.contains("Array.isArray(result?.content) && result.content.length > 0"));
+        assert!(!source.contains("text: JSON.stringify(result.structuredContent)"));
         assert!(!source.contains("__NARADA_PI_MCP_SERVERS__"));
     }
 

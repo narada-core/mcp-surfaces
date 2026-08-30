@@ -629,6 +629,10 @@ try {
   const resultPage = await call('tools/call', { name: 'mcp_loader_read_result', arguments: { connection_id: handleRestart?.connection_id, ref: largeHandleCall?.details_ref, limit: 512 } }, 306);
   assert.equal(resultPage?.schema, 'narada.mcp_loader.result_page.v1');
   assert.equal(resultPage?.result?.schema, 'narada.mcp_output_page.v1');
+  assert.equal(resultPage?.result?.limit, 512);
+  const defaultResultPage = await call('tools/call', { name: 'mcp_loader_read_result', arguments: { connection_id: handleRestart?.connection_id, ref: largeHandleCall?.details_ref } }, 3061);
+  assert.equal(defaultResultPage?.result?.limit, 4000);
+  assert.ok(String(defaultResultPage?.result?.output_text).length <= 4000);
   const handleDetach = await call('tools/call', { name: 'mcp_loader_detach', arguments: { connection_id: handleRestart?.connection_id } }, 307);
   assert.equal(handleDetach?.termination?.status, 'terminated');
   const unavailableHandleCall = await call('tools/call', { name: 'mcp_loader_call_surface_tool', arguments: { surface_handle: surfaceHandle, tool_name: 'echo', arguments: {} } }, 308);

@@ -41,9 +41,9 @@ const DEFAULT_TOOL_TIMEOUT_GRACE_MS: u64 = 1_000;
 const MAX_TOOL_TIMEOUT_MS: u64 = 900_000;
 const MAX_TOOL_TIMEOUT_GRACE_MS: u64 = 60_000;
 const DEFAULT_LOADER_RESULT_INLINE_LIMIT: usize = 12_000;
-const DEFAULT_OUTPUT_SHOW_CHAR_LIMIT: usize = 10_000;
-const MAX_OUTPUT_SHOW_CHAR_LIMIT: usize = 20_000;
-const MAX_OUTPUT_PAGE_BYTES: usize = 12 * 1024;
+const DEFAULT_OUTPUT_SHOW_CHAR_LIMIT: usize = 4_000;
+const MAX_OUTPUT_SHOW_CHAR_LIMIT: usize = 4_000;
+const MAX_OUTPUT_PAGE_BYTES: usize = 8 * 1024;
 const MAX_INLINE_RESPONSE_BYTES: usize = 32 * 1024;
 const STDERR_TAIL_LIMIT: usize = 8_000;
 const RUNTIME_PROXY_STATUS_TOOL_NAME: &str = "mcp_runtime_proxy_status";
@@ -2108,7 +2108,7 @@ fn list_tools() -> Vec<Value> {
         tool_definition("mcp_loader_call_tool","Call a tool on an attached MCP surface using a schema lease issued for this exact tool contract and child generation.",json!({"connection_id":{"type":"string"},"tool_name":{"type":"string"},"schema_lease":{"type":"string"},"arguments":{"type":"object"},"include_runtime_metadata":{"type":"boolean"}}),&["connection_id","tool_name","schema_lease"],false,false),
         tool_definition("mcp_loader_call_surface_tool","Call a tool through a stable logical surface handle using a schema lease issued for its current child generation.",json!({"surface_handle":{"type":"string"},"tool_name":{"type":"string"},"schema_lease":{"type":"string"},"arguments":{"type":"object"},"include_runtime_metadata":{"type":"boolean"}}),&["surface_handle","tool_name","schema_lease"],false,false),
         tool_definition("mcp_loader_call_binding_tool","Atomically resume or reopen an admitted binding and call one child tool using a schema lease issued by mcp_loader_inspect_binding_tool.",json!({"site_root":{"type":"string"},"binding_id":{"type":"string"},"surface_id":{"type":"string"},"runtime_kind":{"type":"string"},"tool_name":{"type":"string"},"schema_lease":{"type":"string"},"arguments":{"type":"object"},"include_runtime_metadata":{"type":"boolean","default":false}}),&["site_root","binding_id","tool_name","schema_lease"],false,false),
-        tool_definition("mcp_loader_read_result","Read a bounded page from a materialized proxied child result. The ref is bound to the same Site authority as the connection.",json!({"connection_id":{"type":"string"},"ref":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":20000},"timeout_ms":{"type":"integer","minimum":1,"maximum":15000}}),&["connection_id","ref"],true,false),
+        tool_definition("mcp_loader_read_result","Read a compact resumable page from a materialized proxied child result. Pages are capped at 4,000 characters so ordinary calls remain transcript-safe.",json!({"connection_id":{"type":"string"},"ref":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":4000},"timeout_ms":{"type":"integer","minimum":1,"maximum":15000}}),&["connection_id","ref"],true,false),
         tool_definition("mcp_loader_detach","Detach and terminate an attached MCP surface.",json!({"connection_id":{"type":"string"}}),&["connection_id"],false,true),
         tool_definition("mcp_loader_surface_restart","Replace an attached MCP surface child process with a freshly initialized connection using the same site, surface, entrypoint, and args; this does not restart the agent session.",json!({"connection_id":{"type":"string"},"reason":{"type":"string"}}),&["connection_id"],false,true),
     ];
@@ -4495,6 +4495,25 @@ fn render_result(result: &Value) -> String {
         .and_then(Value::as_str)
         .unwrap_or("mcp_loader.result");
     let status = result.get("status").and_then(Value::as_str).unwrap_or("ok");
+    if schema == "narada.mcp_loader.result_page.v1" {
+        let page = result.get("result").unwrap_or(&Value::Null);
+        let mut lines = vec![format!("{}: {}", schema, status)];
+        for key in ["connection_id", "surface_id"] {
+            if let Some(value) = result.get(key).and_then(Value::as_str) {
+                lines.push(format!("{}: {}", key, value));
+            }
+        }
+        for key in ["ref", "offset", "limit", "next_offset", "full_output_char_length"] {
+            if let Some(value) = page.get(key) {
+                lines.push(format!("{}: {}", key, value));
+            }
+        }
+        if let Some(text) = page.get("output_text").and_then(Value::as_str) {
+            lines.push("output_text:".to_string());
+            lines.push(text.to_string());
+        }
+        return lines.join("\n");
+    }
     if schema == "narada.mcp_loader.schema_lease.v1" {
         let mut lines = vec![format!("{}: {}", schema, status)];
         for key in [
@@ -5591,6 +5610,23 @@ mod tests {
         assert!(rendered.contains("schema_lease: schema-lease-token"));
         assert!(rendered.contains("tool_name: epistemic_graph_query"));
         assert!(rendered.contains("generation_id: generation-2"));
+    }
+
+    #[test]
+    fn result_page_text_projection_is_resumable_and_bounded_by_contract() {
+        let rendered = render_result(&json!({
+            "schema":"narada.mcp_loader.result_page.v1",
+            "connection_id":"connection-1",
+            "surface_id":"epistemic-graph",
+            "result":{
+                "ref":"mcp_output:o_1","offset":0,"limit":4000,"next_offset":4000,
+                "full_output_char_length":12000,"output_text":"bounded excerpt"
+            }
+        }));
+        assert!(rendered.contains("next_offset: 4000"));
+        assert!(rendered.contains("output_text:\nbounded excerpt"));
+        let read_tool = list_tools().into_iter().find(|tool| tool["name"] == "mcp_loader_read_result").unwrap();
+        assert_eq!(read_tool["inputSchema"]["properties"]["limit"]["maximum"], 4000);
     }
 
     #[test]

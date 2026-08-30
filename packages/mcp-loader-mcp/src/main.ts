@@ -93,6 +93,8 @@ const STDERR_TAIL_LIMIT = 8000;
 const DEFAULT_ATTACH_TIMEOUT_MS = 30000;
 const DEFAULT_RUNTIME_LEASE_MS = 30000;
 const DEFAULT_LOADER_RESULT_INLINE_LIMIT = 12000;
+const DEFAULT_OUTPUT_SHOW_CHAR_LIMIT = 4000;
+const MAX_OUTPUT_SHOW_CHAR_LIMIT = 4000;
 const SITE_TOOL_OBSERVATION_PAYLOAD_PREFIX = 'site-tools-';
 const SITE_TOOL_OBSERVATION_MAX_ENTRIES = 32;
 const SITE_TOOL_OBSERVATION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -746,12 +748,12 @@ export function listTools() {
       arguments: { type: 'object', description: 'Arguments object for the tool call.' },
       include_runtime_metadata: { type: 'boolean', description: 'Include loader runtime_lifecycle and runtime_freshness metadata on this result. Defaults to false.' },
     }, ['surface_handle', 'tool_name', 'schema_lease'], { readOnly: false }),
-    tool('mcp_loader_read_result', 'Read a bounded page from a materialized proxied child result. The ref is bound to the same Site authority as the connection.', {
+    tool('mcp_loader_read_result', 'Read a compact resumable page from a materialized proxied child result. Pages are capped at 4,000 characters so ordinary calls remain transcript-safe.', {
       connection_id: { type: 'string', description: 'Connection id returned by mcp_loader_call_tool or mcp_loader_call_surface_tool.' },
       ref: { type: 'string', description: 'Materialized result ref returned in result.details_ref or result.output_ref.' },
       output_ref: { type: 'string', description: 'Alias for ref.' },
       offset: { type: 'integer', minimum: 0, description: 'Character offset into the materialized JSON output.' },
-      limit: { type: 'integer', minimum: 1, description: 'Maximum output characters for this page.' },
+      limit: { type: 'integer', minimum: 1, maximum: 4000, description: 'Maximum output characters for this page.' },
       timeout_ms: { type: 'integer', minimum: 1, maximum: 15000, description: 'Strict upper bound for reading and validating the materialized output file.' },
     }, ['connection_id'], { readOnly: true }),
     tool('mcp_loader_detach', 'Detach and terminate an attached MCP surface.', {
@@ -1625,12 +1627,18 @@ async function callSurfaceHandleTool(args: JsonRecord, state: LoaderState): Prom
 async function readLoaderResult(args: JsonRecord, state: LoaderState): Promise<JsonRecord> {
   const connection = getConnection(args, state);
   const ref = requiredString(args.ref ?? args.output_ref, 'missing_output_ref');
+  const requestedLimit = args.limit === undefined ? DEFAULT_OUTPUT_SHOW_CHAR_LIMIT : Number(args.limit);
+  if (!Number.isInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > MAX_OUTPUT_SHOW_CHAR_LIMIT) {
+    throw diagnosticError('output_limit_exceeds_transport_maximum', `output_limit_exceeds_transport_maximum:${String(args.limit)}`, {
+      maximum: MAX_OUTPUT_SHOW_CHAR_LIMIT,
+    });
+  }
   const page = await outputShowAsync({
     siteRoot: connection.siteRoot,
     args: {
       ref,
       ...(args.offset === undefined ? {} : { offset: args.offset }),
-      ...(args.limit === undefined ? {} : { limit: args.limit }),
+      limit: requestedLimit,
       ...(args.timeout_ms === undefined ? {} : { timeout_ms: args.timeout_ms }),
     },
     maxBytes: state.policy.maxResponseBytes,
@@ -2542,6 +2550,16 @@ function callToolResult(result: JsonRecord): JsonRecord {
 function renderResult(result: JsonRecord): string {
   const schema = typeof result.schema === 'string' ? result.schema : 'mcp_loader.result';
   const status = typeof result.status === 'string' ? result.status : 'ok';
+  if (schema === 'narada.mcp_loader.result_page.v1') {
+    const page = asRecord(result.result);
+    const lines = [`${schema}: ${status}`];
+    for (const key of ['connection_id', 'surface_id']) if (typeof result[key] === 'string') lines.push(`${key}: ${result[key]}`);
+    for (const key of ['ref', 'offset', 'limit', 'next_offset', 'full_output_char_length']) {
+      if (page[key] !== undefined) lines.push(`${key}: ${JSON.stringify(page[key])}`);
+    }
+    if (typeof page.output_text === 'string') lines.push('output_text:', page.output_text);
+    return lines.join('\n');
+  }
   if (schema === 'narada.mcp_loader.schema_lease.v1') {
     const lines = [`${schema}: ${status}`];
     for (const key of ['connection_id', 'surface_id', 'tool_name', 'generation_id', 'schema_lease']) {
