@@ -50,6 +50,12 @@ function resultText(result: any): string {
     .join("\n");
 }
 
+function preservesDeliveredContent(result: any): boolean {
+  return result?.structuredContent?.content_delivery?.format === "filesystem_read_text"
+    && Array.isArray(result?.content)
+    && result.content.some((block: any) => block?.type === "text" && typeof block.text === "string");
+}
+
 function textComponent(text: string): { render: (width: number) => string[] } {
   return {
     render(width: number): string[] {
@@ -281,7 +287,9 @@ export default function naradaMcpCarrier(pi: any): void {
             execute: async (_toolCallId: string, params: unknown, signal: AbortSignal) => {
               const result = await client.request("tools/call", { name: tool.name, arguments: params ?? {} }, 120000, signal);
               const rawText = resultText(result);
-              const content = result?.structuredContent !== undefined
+              const content = preservesDeliveredContent(result)
+                ? result.content
+                : result?.structuredContent !== undefined
                 ? [{ type: "text", text: JSON.stringify(result.structuredContent) }]
                 : Array.isArray(result?.content) && result.content.length > 0
                   ? result.content

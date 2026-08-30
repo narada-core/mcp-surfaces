@@ -142,9 +142,25 @@ test('native loader attaches native_entrypoint and native_applet children', asyn
     assert.equal(digestAuthorizedCall.schema, 'narada.mcp_loader.tool_result.v1');
     const inventoryAfterInspections = await loader.call('tools/call', {
       name: 'mcp_loader_connection_inventory',
-      arguments: {},
+      arguments: { compact: true },
     });
     assert.equal(inventoryAfterInspections.connection_count, 1);
+    assert.equal(inventoryAfterInspections.compact, true);
+    assert.equal(inventoryAfterInspections.runtime_freshness, null);
+    assert.equal(Object.hasOwn(inventoryAfterInspections.connections[0], 'runtime_freshness'), false);
+    assert.equal(digestAuthorizedCall.authorization_resolution, 'digest_reused');
+
+    const batchInspection = await loader.call('tools/call', {
+      name: 'mcp_loader_inspect_binding_tools',
+      arguments: {
+        site_root: root,
+        binding_id: 'native-entrypoint',
+        tool_names: ['task_lifecycle_guidance', 'task_lifecycle_bridge_poll'],
+      },
+    });
+    assert.equal(batchInspection.schema, 'narada.mcp_loader.schema_lease_batch.v1');
+    assert.equal(batchInspection.lease_count, 2);
+    assert.equal(batchInspection.connection_id, restarted.connection_id);
 
     const nativeEntrypoint = await loader.call('tools/call', { name: 'mcp_loader_open_surface', arguments: { site_root: root, binding_id: 'native-entrypoint', surface_id: 'native-entrypoint' } });
     assert.equal(nativeEntrypoint.schema, 'narada.mcp_loader.surface_handle_opened.v1');
@@ -182,7 +198,11 @@ test('native loader attaches native_entrypoint and native_applet children', asyn
     );
   } finally {
     for (const connection_id of opened) {
-      await loader.call('tools/call', { name: 'mcp_loader_detach', arguments: { connection_id } }).catch(() => undefined);
+      const detached = await loader.call('tools/call', { name: 'mcp_loader_detach', arguments: { connection_id } }).catch(() => undefined);
+      if (detached) {
+        assert.equal(detached.termination.classification, 'expected_protocol_detach');
+        assert.equal(detached.termination.child_exit_is_crash, false);
+      }
     }
     loader.child.kill();
     rmSync(root, { recursive: true, force: true });
