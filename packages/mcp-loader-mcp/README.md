@@ -5,10 +5,11 @@ Policy-gated runtime attachment and proxying for MCP surfaces admitted by a Site
 ## Guidance
 
 Use `mcp_loader_guidance` for model-facing orientation, workflow selection,
-recovery guidance, and loader boundaries. Use `mcp_loader_list_tools` for exact
-attached-tool schemas. `mcp_loader_tool_discovery_manifest` returns compact
-canonical names by default; pass `compact: false` for schemas and
-`include_runtime_metadata: true` only when lifecycle evidence is material.
+recovery guidance, and loader boundaries. Use `mcp_loader_list_tools` or
+`mcp_loader_tool_discovery_manifest` only for compact discovery. Bulk schema
+projection is intentionally unavailable. Inspect one named tool to receive its
+exact contract and generation-bound lease. Use `include_runtime_metadata: true`
+only when lifecycle evidence is material.
 
 Every proxied child invocation requires a generation-bound schema lease.
 Inspect an attached tool with `mcp_loader_inspect_tool`, or inspect a
@@ -98,10 +99,9 @@ The payload's declared creator and id namespace are lineage hints and accidental
 
 The Rust implementation is the sole admitted loader authority in every runtime profile. The loader does not guess, locate, or substitute Node/Bun runtimes and has no compiled-in TypeScript surface registry. It may still execute an external runtime when that exact command is part of the admitted Site-fabric declaration; that is child execution, not a loader implementation fallback.
 
-Native freshness is anchored to native/src/main.rs, native/src/full.rs, the native
-Cargo manifest, and the workspace Cargo lockfile. Legacy TypeScript/JavaScript
-sources are not loader dependencies and do not participate in native loader
-freshness.
+Native freshness is anchored to `native/src/main.rs`, `native/src/full.rs`, the native
+Cargo manifest, and the workspace Cargo lockfile. There is no TypeScript or
+JavaScript Loader implementation or runtime fallback in this package.
 
 For a registrar-materialized native child, the Rust loader deliberately unwraps the native runtime-proxy record and launches `--child-command` directly. The carrier-level runtime proxy remains responsible for materialization preflight; mcp-loader is responsible for the attached child's policy, ownership, supervision, and lifecycle. In native modes, `--entrypoint` is retained as a validated identity field and must match `--child-command`; `--child-applet` is recorded explicitly for multicall children.
 
@@ -109,7 +109,7 @@ Run the authoritative Rust suite with:
 
     cargo test --locked --manifest-path native/Cargo.toml
 
-The bounded loader benchmark is pnpm run benchmark:loader. It measures Node/Node, Bun/Bun, and Rust/Node over the same initialize, tools/list, explicit stdio attach, repeated tools/call, and detach workload. It also reports peak loader memory, attached-child memory, and their combined peak; on Windows these are private bytes, while Unix uses RSS. Override NARADA_LOADER_BENCHMARK_SAMPLES and NARADA_LOADER_BENCHMARK_WARM_CALLS for a finite sample size.
+Native behavior is verified through the Rust suite and black-box native harnesses. No benchmark or test route launches a TypeScript Loader.
 
 ## Boundary
 

@@ -3,7 +3,7 @@
   "artifact_role": "site_capability_surface_registry_not_mcp_client_config",
   "site_id": "mcp-surfaces",
   "generated_by": "mcp-registrar",
-  "generated_at": "2026-08-30T19:02:22.1800679Z",
+  "generated_at": "2026-08-30T19:18:23.5724094Z",
   "generation_policy": {
     "source": ".ai/mcp + registrar surface catalog",
     "mode": "enabled_surface_tool_authority",

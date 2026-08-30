@@ -7,10 +7,7 @@
     "tsBuildInfoFile": "dist/.tsbuildinfo"
   },
   "references": [
-    { "path": "../shared/mcp-fabric-contracts" },
-    { "path": "../shared/mcp-runtime-observation" },
-    { "path": "../shared/mcp-transport" },
     { "path": "../shared/mcp-e2e-harness" }
   ],
-  "include": ["src/**/*.ts", "test/**/*.ts"]
+  "include": ["test/**/*.ts"]
 }
