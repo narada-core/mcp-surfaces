@@ -32,6 +32,10 @@ const workspaceRoot = resolve(fileURLToPath(new URL('../../../..', import.meta.u
 const siteRegistry = JSON.parse(readFileSync(join(workspaceRoot, '.narada', 'capabilities', 'mcp-surfaces.json'), 'utf8'));
 const projectedStructuredCommand = siteRegistry.surfaces.find((surface: any) => surface.surface_projection?.surface_id === 'structured-command');
 assert.equal(projectedStructuredCommand.surface_projection.surface_descriptor.projections[0].transport.args.includes('python'), true);
+const clientProjection = JSON.parse(readFileSync(join(workspaceRoot, '.ai', 'mcp', 'narada-mcp-surfaces-structured-command-mcp.json'), 'utf8'));
+const projectedClient = clientProjection.mcpServers['narada-mcp-surfaces-structured-command'];
+assert.equal(projectedClient.args.includes('python'), true);
+assert.equal(projectedClient.surface_projection.surface_descriptor.projections[0].transport.args.includes('python'), true);
 
 type ExecutionResult = Record<string, unknown> & {
   status: string;

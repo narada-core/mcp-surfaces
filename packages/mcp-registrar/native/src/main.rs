@@ -101,6 +101,7 @@ fn dispatch(request: &Value) -> Value {
         Err(e) => return error(id, format!("mcp_registrar_native_contract_invalid:{e}")),
     };
     extend_epistemic_catalog(&mut contract);
+    admit_structured_command_python(&mut contract);
     align_native_surface_descriptor_schemas(&mut contract);
     if let Err(e) = validate_contract(&contract) {
         return error(id, format!("mcp_registrar_native_contract_invalid:{e}"));
@@ -314,6 +315,46 @@ fn dispatch(request: &Value) -> Value {
         }
     }
     response
+}
+
+fn ensure_python_command_admission(args: &mut Value) {
+    let Some(values) = args.as_array_mut() else {
+        return;
+    };
+    if values
+        .windows(2)
+        .any(|pair| pair[0] == "--allow-command" && pair[1] == "python")
+    {
+        return;
+    }
+    values.push(json!("--allow-command"));
+    values.push(json!("python"));
+}
+
+fn admit_structured_command_python(contract: &mut Value) {
+    let Some(surface) = contract
+        .pointer_mut("/read_models/registrar_surface_list/items")
+        .and_then(Value::as_array_mut)
+        .and_then(|items| {
+            items
+                .iter_mut()
+                .find(|item| item["id"] == "structured-command")
+        })
+    else {
+        return;
+    };
+    ensure_python_command_admission(&mut surface["args"]);
+    if let Some(projections) = surface["projections"].as_array_mut() {
+        for projection in projections {
+            ensure_python_command_admission(&mut projection["args"]);
+        }
+    }
+    if let Some(projections) = surface["descriptor"]["projections"].as_array_mut() {
+        for projection in projections {
+            ensure_python_command_admission(&mut projection["transport"]["args"]);
+        }
+    }
+    surface["descriptor_digest"] = json!(sha256_text(&canonical_json(&surface["descriptor"])));
 }
 
 fn extend_epistemic_catalog(contract: &mut Value) {
@@ -5338,6 +5379,40 @@ mod tests {
     #[test]
     fn embedded_native_contract_is_valid() {
         validate_contract(&embedded_contract()).unwrap();
+    }
+
+    #[test]
+    fn structured_command_python_admission_is_complete_and_idempotent() {
+        let mut contract = embedded_contract();
+        admit_structured_command_python(&mut contract);
+        admit_structured_command_python(&mut contract);
+
+        let surface = contract
+            .pointer("/read_models/registrar_surface_list/items")
+            .and_then(Value::as_array)
+            .and_then(|items| items.iter().find(|item| item["id"] == "structured-command"))
+            .expect("structured-command surface");
+        let count_python_admissions = |args: &Value| {
+            args.as_array()
+                .expect("argument array")
+                .windows(2)
+                .filter(|pair| pair[0] == "--allow-command" && pair[1] == "python")
+                .count()
+        };
+
+        assert_eq!(count_python_admissions(&surface["args"]), 1);
+        assert_eq!(
+            count_python_admissions(&surface["projections"][0]["args"]),
+            1
+        );
+        assert_eq!(
+            count_python_admissions(&surface["descriptor"]["projections"][0]["transport"]["args"]),
+            1
+        );
+        assert_eq!(
+            surface["descriptor_digest"],
+            sha256_text(&canonical_json(&surface["descriptor"]))
+        );
     }
 
     #[test]

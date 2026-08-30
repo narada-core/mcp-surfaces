@@ -3,7 +3,7 @@
   "artifact_role": "site_capability_surface_registry_not_mcp_client_config",
   "site_id": "mcp-surfaces",
   "generated_by": "mcp-registrar",
-  "generated_at": "2026-08-30T16:26:22.3875288Z",
+  "generated_at": "2026-08-30T16:59:11.1384205Z",
   "generation_policy": {
     "source": ".ai/mcp + registrar surface catalog",
     "mode": "enabled_surface_tool_authority",
@@ -1952,7 +1952,7 @@
           "tenancy": "session_isolated",
           "replacement": "manual"
         },
-        "descriptor_digest": "046e21bd789dae70b3b18e6aa0d6175db2dd011a40a6dba28eddd70b0b68858b",
+        "descriptor_digest": "1988bea2f28ff4a2521a2f2e15c9138885bbbb210643931434d0e4623a626559",
         "tool_contract_digest": "b202228727483deb62f84235a2f795112e5eb663e9a0ca8216a4d0c8d55ebf31",
         "surface_descriptor": {
           "schema_version": "2.0",
