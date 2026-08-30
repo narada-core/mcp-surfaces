@@ -237,7 +237,8 @@ fn materializes_every_supported_carrier_kind_without_javascript_runtime_environm
 
     let pi = fs::read_to_string(&paths[3].2).unwrap();
     assert!(pi.contains("export default function naradaMcpCarrier"));
-    assert!(pi.contains("\"name\":\"narada-site-test-local-filesystem\""));
+    assert!(!pi.contains("\"name\":\"narada-site-test-local-filesystem\""));
+    assert!(pi.contains("Site capabilities are lazy through mcp-loader"));
     assert!(pi.contains("pi.registerTool"));
 
     let index: Value =
@@ -478,6 +479,15 @@ fn derives_all_carriers_from_declared_site_capabilities_without_javascript() {
         &fs::read(home.join(".codex/config.toml.narada-binding-admission.json")).unwrap(),
     )
     .unwrap();
+    assert_eq!(
+        admission["authority_context"]["schema"],
+        "narada.carrier_authority_context.v1"
+    );
+    assert_eq!(admission["authority_context"]["identity"]["status"], "anonymous");
+    assert_eq!(
+        admission["authority_context"]["binding_activation"],
+        "capability_governed"
+    );
     assert!(admission["bindings"]
         .as_array()
         .unwrap()

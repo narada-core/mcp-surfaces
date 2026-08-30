@@ -1579,7 +1579,18 @@ impl LifecycleServer {
             }
         }
         Ok(
-            json!({"schema":"narada.task.inbox.bridge.v1","status":if args.get("dry_run").and_then(Value::as_bool)==Some(true){"planned"}else{"ok"},"count":envelopes.len(),"envelopes":envelopes}),
+            json!({
+                "schema":"narada.task.inbox.bridge.v1",
+                "status":if args.get("dry_run").and_then(Value::as_bool)==Some(true){"planned"}else{"ok"},
+                "participation_scope":"carrier_user",
+                "identity_effect":{
+                    "identity_inferred":false,
+                    "poll_authorizes_named_claim":false,
+                    "poll_authorizes_named_reply":false
+                },
+                "count":envelopes.len(),
+                "envelopes":envelopes
+            }),
         )
     }
 
@@ -4759,6 +4770,36 @@ mod modern_protocol_tests {
         let projected = fs::read_to_string(&path).expect("read task projection");
         assert!(projected.lines().any(|line| line == "status: closed"));
         fs::remove_dir_all(root).expect("remove task projection fixture");
+    }
+
+    #[test]
+    fn anonymous_bridge_poll_is_read_only_and_identity_neutral() {
+        let root = std::env::temp_dir().join(format!(
+            "narada-native-bridge-poll-{}",
+            Uuid::new_v4()
+        ));
+        let options = Options {
+            surface: Surface::Task,
+            site_root: root.clone(),
+            site_root_source: "test".to_string(),
+            prepare: false,
+            migrate_legacy: false,
+            source_database_path: None,
+        };
+        LifecycleServer::prepare_database(&options).expect("prepare task database");
+        let server = LifecycleServer::new(options).expect("open task server");
+        let result = server
+            .task_bridge_poll(json!({"dry_run":true,"limit":20}))
+            .expect("poll");
+        assert_eq!(result["status"], "planned");
+        assert_eq!(result["participation_scope"], "carrier_user");
+        assert_eq!(result["identity_effect"]["identity_inferred"], false);
+        assert_eq!(
+            result["identity_effect"]["poll_authorizes_named_reply"],
+            false
+        );
+        drop(server);
+        fs::remove_dir_all(root).expect("remove bridge fixture");
     }
 
     #[test]

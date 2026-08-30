@@ -74,7 +74,9 @@ the immutable carrier artifact graph.
   canonical `manifest_ref`, progress, and an exact `next_call`. When the carrier
   was not launched through an admitted Narada session, return a bounded
   `orientation_unavailable` result naming the carrier-session launcher as the
-  recovery owner; absence of hidden entry evidence is not a transport failure.
+  recovery owner for identity-bearing work only. Absence of hidden entry
+  evidence is not a transport failure and does not revoke materialized Site,
+  filesystem, Loader, or lifecycle authority.
 - `agent_orientation_read({ continuation })`: replay the opaque continuation
   returned by `next_call`. It delivers one bounded page or performs the final
   acknowledgement. The caller never supplies step ids, offsets, hashes,

@@ -2416,6 +2416,12 @@ fn emit_pi(carrier: &CarrierInput) -> Result<Vec<u8>, Failure> {
     let servers = carrier
         .servers
         .iter()
+        .filter(|server| {
+            matches!(
+                server.name.as_str(),
+                "agent-context" | "local-filesystem" | "mcp-loader" | "task-lifecycle"
+            )
+        })
         .map(|server| {
             json!({
                 "name": server.name,
@@ -2813,21 +2819,26 @@ mod tests {
     }
 
     #[test]
-    fn emits_pi_extension_with_only_materialized_servers() {
+    fn emits_pi_extension_with_only_bootstrap_servers() {
         let root = tempdir().unwrap();
         let mut input = fixture(root.path());
         let carrier = &mut input.carriers[0];
         carrier.carrier_kind = CarrierKind::Pi;
         carrier.servers[0].name = "local-filesystem".into();
         carrier.servers[0].startup_timeout_sec = Some(7);
+        let mut lazy = carrier.servers[0].clone();
+        lazy.name = "narada-marici-git".into();
+        carrier.servers.push(lazy);
         let source = String::from_utf8(emit_carrier(carrier).unwrap()).unwrap();
         assert!(source.contains("export default function naradaMcpCarrier"));
         assert!(source.contains("\"name\":\"local-filesystem\""));
         assert!(source.contains("\"startupTimeoutMs\":7000"));
+        assert!(!source.contains("narada-marici-git"));
         assert!(source.contains("tools/list"));
         assert!(source.contains("pi.registerTool"));
         assert!(source.contains("Array.isArray(result?.content) && result.content.length > 0"));
-        assert!(!source.contains("text: JSON.stringify(result.structuredContent)"));
+        assert!(source.contains("result?.structuredContent !== undefined"));
+        assert!(source.contains("MAX_BOOTSTRAP_SCHEMA_CHARS"));
         assert!(!source.contains("__NARADA_PI_MCP_SERVERS__"));
     }
 

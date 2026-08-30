@@ -412,6 +412,22 @@ pub(crate) fn derive_input(options: DeriveOptions) -> Result<MaterializationInpu
                 "carrier_kind": carrier_kind,
                 "runtime_kind": "native",
                 "authority_epoch": 0,
+                "authority_context": {
+                    "schema": "narada.carrier_authority_context.v1",
+                    "carrier_materialization": {
+                        "status": "valid",
+                        "authority_epoch": 0,
+                        "fabric_digest": ambient_fabric_digest.clone()
+                    },
+                    "session_attestation": { "status": "absent" },
+                    "identity": { "status": "anonymous" },
+                    "site_authority": {
+                        "status": "materialized",
+                        "site_ids": site_ids.iter().cloned().collect::<Vec<_>>()
+                    },
+                    "binding_activation": "capability_governed",
+                    "lifecycle_participation": "carrier_user_scope"
+                },
                 "carrier_session_admission_receipt_ref": format!("materialized:{}", carrier.carrier_id),
                 "authority_readback_ref": format!("materialized:{}", carrier.carrier_id),
                 "fabric_digest": ambient_fabric_digest.clone(),

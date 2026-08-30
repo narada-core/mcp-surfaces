@@ -81,3 +81,43 @@ test('generated Pi extension qualifies flat-namespace collisions deterministical
   assert.match(source, /serverPrefix}__\$\{tool\.name/);
   assert.match(source, /qualified tool name collision/);
 });
+
+test('generated Pi extension refuses bootstrap schema growth beyond its hard budget', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'narada-pi-budget-'));
+  try {
+    const serverPath = join(root, 'server.mjs');
+    await writeFile(serverPath, `
+import { createInterface } from "node:readline";
+createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { protocolVersion: "2026-07-28", capabilities: { tools: {} }, serverInfo: { name: "fixture", version: "1" } } }) + "\\n");
+  } else if (message.method === "tools/list") {
+    const tools = Array.from({ length: 81 }, (_, index) => ({ name: "tool_" + index, inputSchema: { type: "object", properties: {} } }));
+    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { tools } }) + "\\n");
+  }
+});
+`, 'utf8');
+    const source = (await readFile(templatePath, 'utf8')).replace(
+      '__NARADA_PI_MCP_SERVERS__',
+      JSON.stringify([{ name: 'fixture', command: process.execPath, args: [serverPath], enabled: true, startupTimeoutMs: 2000 }]),
+    );
+    const extensionPath = join(root, 'index.ts');
+    await writeFile(extensionPath, source, 'utf8');
+    const extension = (await import(`${pathToFileURL(extensionPath).href}?budget=1`)).default;
+    const handlers = new Map();
+    const registered = [];
+    extension({
+      on(name, handler) { handlers.set(name, handler); },
+      getAllTools() { return []; },
+      registerTool(tool) { registered.push(tool); },
+    });
+    await assert.rejects(
+      handlers.get('session_start')?.({}, { ui: { notify() {} } }),
+      /narada_pi_bootstrap_context_budget_exceeded/,
+    );
+    assert.equal(registered.length, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

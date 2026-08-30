@@ -67,17 +67,25 @@ pub fn read(context: &Context, projection: &str, args: &Value) -> Result<Value, 
 
 fn orientation_unavailable(reason: &str) -> Value {
     json!({
-        "schema":"narada.agent_context.orientation_unavailable.v1",
-        "status":"blocked",
-        "ordinary_work_gate":"not_established",
+        "schema":"narada.agent_context.orientation_unavailable.v2",
+        "status":"anonymous",
+        "ordinary_work_gate":"open",
         "reason_code":reason,
         "source_mutation":false,
         "missing_carrier_entry_evidence":true,
         "retry_safe":true,
+        "authority_effect":{
+            "identity_authority":"unavailable",
+            "identity_bearing_operations":"blocked",
+            "materialized_site_authority":"unaffected",
+            "ordinary_non_identity_work":"allowed"
+        },
         "recovery":{
             "owner":"carrier_session_launcher",
             "action":"start_an_admitted_carrier_session",
-            "instruction":"Start the carrier through Narada's admitted-session launcher, then call agent_orientation_read({}) again. Static MCP materialization cannot synthesize session admission or orientation-delivery evidence."
+            "required_for":"identity-bearing operations only",
+            "restart_required":true,
+            "instruction":"Use the current materialized carrier authority for non-identity work. Start the carrier through Narada's admitted-session launcher only when a named identity is required, then call agent_orientation_read({}) again."
         }
     })
 }
@@ -909,8 +917,12 @@ mod ergonomics_tests {
     #[test]
     fn missing_carrier_entry_evidence_is_a_bounded_recoverable_result() {
         let result = orientation_unavailable("agent_context_exact_admission_receipt_required");
-        assert_eq!(result["status"], "blocked");
-        assert_eq!(result["ordinary_work_gate"], "not_established");
+        assert_eq!(result["status"], "anonymous");
+        assert_eq!(result["ordinary_work_gate"], "open");
+        assert_eq!(
+            result["authority_effect"]["materialized_site_authority"],
+            "unaffected"
+        );
         assert_eq!(result["recovery"]["owner"], "carrier_session_launcher");
         assert_eq!(result["retry_safe"], true);
     }

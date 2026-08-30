@@ -146,10 +146,11 @@ Generated shape:
 ### Pi
 
 Pi has no native MCP configuration format. Narada materializes one global
-extension at `~/.pi/agent/extensions/narada-mcp/index.ts`. It starts only the
-servers admitted into that carrier generation, performs the MCP handshake,
-discovers their live tool schemas, and registers those tools through Pi's
-`registerTool` API.
+extension at `~/.pi/agent/extensions/narada-mcp/index.ts`. It eagerly starts
+only the compact bootstrap set (`agent-context`, `local-filesystem`,
+`mcp-loader`, and `task-lifecycle`). Other admitted Site authority remains
+discoverable and callable lazily through Loader instead of permanently adding
+every Site tool schema to Pi's model context.
 
 The extension is a whole-document managed artifact and does not infer authority
 from Pi's working directory. Commands, arguments, Site roots, and loader
@@ -160,10 +161,11 @@ restart. Session shutdown closes all child MCP processes.
 Pi has one flat tool namespace. Tool names that are unique across the admitted
 servers remain unchanged. A duplicated name is exposed deterministically as
 `<server>__<tool>`; calls still target the original MCP server and tool name.
-When an MCP call returns canonical `structuredContent`, the bridge projects
+When an MCP call returns canonical `structuredContent`, the bridge serializes
 that object as Pi's single model-visible result instead of duplicating it beside
 the human summary. This preserves opaque leases, cursors, and typed readback
-fields that exist only in the structured result.
+fields that exist only in the structured result. Startup refuses an oversized
+bootstrap schema set with per-server context diagnostics.
 
 These carrier examples describe projection shape, not a hand-authored
 configuration. The generated file and its generation sidecar are authoritative.

@@ -1826,7 +1826,16 @@ fn ensure_site_root_allowed(site_root: &str, policy: &Policy) -> Result<(), Diag
         Err(Diagnostic::new(
             "site_root_not_allowed",
             format!("site_root_not_allowed:{}", site_root),
-        ))
+        ).with_details(json!({
+            "blocked_operation":"site_binding_activation",
+            "failed_requirement":"materialized_site_authority",
+            "requested_site_root":site_root,
+            "unaffected_authority":["other_materialized_sites","static_carrier_surfaces"],
+            "repair_owner":"carrier_materialization",
+            "agent_may_repair":false,
+            "restart_required":true,
+            "remediation":"Register the Site root in the User Site authority, rematerialize carriers, and restart. Do not infer authority from the current working directory."
+        })))
     }
 }
 
@@ -1959,6 +1968,12 @@ fn admitted_binding(
                 "requested_binding_id":binding_id,
                 "operation":operation,
                 "candidate_binding_ids":candidates,
+                "blocked_operation":"binding_activation_or_call",
+                "failed_requirement":"materialized_binding_admission",
+                "unaffected_authority":["other_admitted_bindings","static_carrier_surfaces"],
+                "repair_owner":"site_configuration_or_carrier_materialization",
+                "agent_may_repair":false,
+                "restart_required":true,
                 "remediation":"Use the canonical binding_id returned by mcp_loader_list_site_surfaces or registrar_site_bind. Generated server names prefixed with narada- are accepted as compatibility aliases."
             }))
         })?;
@@ -1974,7 +1989,16 @@ fn admitted_binding(
         return Err(Diagnostic::new(
             "mcp_binding_not_admitted",
             format!("mcp_binding_not_admitted:{binding_id}:{operation}"),
-        ));
+        ).with_details(json!({
+            "requested_binding_id":binding_id,
+            "operation":operation,
+            "blocked_operation":"binding_operation",
+            "failed_requirement":"operation_admission",
+            "unaffected_authority":["admitted_operations_on_this_binding","other_admitted_bindings"],
+            "repair_owner":"site_configuration",
+            "agent_may_repair":false,
+            "restart_required":true
+        })));
     }
     let server = entry.get("binding_identity").cloned().ok_or_else(|| {
         Diagnostic::new(

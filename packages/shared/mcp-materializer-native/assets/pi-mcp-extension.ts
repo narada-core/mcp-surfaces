@@ -18,6 +18,8 @@ type JsonRpcResponse = {
 
 const SERVERS: ServerConfig[] = __NARADA_PI_MCP_SERVERS__;
 const PROTOCOL_VERSION = "2026-07-28";
+const MAX_BOOTSTRAP_TOOLS = 80;
+const MAX_BOOTSTRAP_SCHEMA_CHARS = 120_000;
 
 class McpClient {
   readonly config: ServerConfig;
@@ -157,6 +159,26 @@ export default function naradaMcpCarrier(pi: any): void {
         throw new Error("No admitted MCP server completed startup");
       }
 
+      const schemaDiagnostics = inventories.map(({ client, tools }) => ({
+        server: client.config.name,
+        toolCount: tools.length,
+        schemaChars: tools.reduce(
+          (total, tool) => total + JSON.stringify(tool?.inputSchema ?? {}).length,
+          0,
+        ),
+      }));
+      const bootstrapToolCount = schemaDiagnostics.reduce((total, row) => total + row.toolCount, 0);
+      const bootstrapSchemaChars = schemaDiagnostics.reduce((total, row) => total + row.schemaChars, 0);
+      if (bootstrapToolCount > MAX_BOOTSTRAP_TOOLS || bootstrapSchemaChars > MAX_BOOTSTRAP_SCHEMA_CHARS) {
+        throw new Error(`narada_pi_bootstrap_context_budget_exceeded:${JSON.stringify({
+          bootstrapToolCount,
+          bootstrapSchemaChars,
+          maxBootstrapTools: MAX_BOOTSTRAP_TOOLS,
+          maxBootstrapSchemaChars: MAX_BOOTSTRAP_SCHEMA_CHARS,
+          servers: schemaDiagnostics,
+        })}`);
+      }
+
       const existing = new Set((pi.getAllTools?.() ?? []).map((tool: any) => tool.name));
       const counts = new Map<string, number>();
       for (const { client, tools } of inventories) {
@@ -186,9 +208,11 @@ export default function naradaMcpCarrier(pi: any): void {
             parameters: tool.inputSchema ?? { type: "object", additionalProperties: true },
             execute: async (_toolCallId: string, params: unknown, signal: AbortSignal) => {
               const result = await client.request("tools/call", { name: tool.name, arguments: params ?? {} }, 120000, signal);
-              const content = Array.isArray(result?.content) && result.content.length > 0
-                ? result.content
-                : [{ type: "text", text: JSON.stringify(result?.structuredContent ?? result ?? null) }];
+              const content = result?.structuredContent !== undefined
+                ? [{ type: "text", text: JSON.stringify(result.structuredContent) }]
+                : Array.isArray(result?.content) && result.content.length > 0
+                  ? result.content
+                  : [{ type: "text", text: JSON.stringify(result ?? null) }];
               return {
                 content,
                 details: {
@@ -204,7 +228,10 @@ export default function naradaMcpCarrier(pi: any): void {
         }
       }
       clients = nextClients;
-      ctx?.ui?.notify?.(`Narada MCP: ${exposed.size} tools from ${clients.length} admitted servers`, "info");
+      ctx?.ui?.notify?.(
+        `Narada MCP: ${exposed.size} bootstrap tools from ${clients.length} servers (${bootstrapSchemaChars} schema chars); Site capabilities are lazy through mcp-loader`,
+        "info",
+      );
     } catch (error) {
       for (const client of nextClients) client.close();
       clients = [];

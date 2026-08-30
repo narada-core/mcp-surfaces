@@ -118,6 +118,12 @@ Inbox bridge:
 - `task_lifecycle_bridge_poll`
 - `task_lifecycle_inbox_target`
 
+Bridge polling is carrier/User-Site participation and does not establish a
+named identity. Anonymous materialized carriers may perform opening and closing
+polls, but polling never authorizes claiming, acknowledging, targeting, or
+replying as a named recipient. Those mutations require their own exact identity
+and lifecycle authority.
+
 Verification helpers:
 
 - `task_lifecycle_test_mcp_tool`

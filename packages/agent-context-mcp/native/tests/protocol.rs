@@ -266,7 +266,8 @@ fn public_protocol_is_native_bounded_persistent_and_recoverable() {
         "dry_run"
     );
     let orientation = server.tool("agent_orientation_read", json!({}));
-    assert_eq!(structured(&orientation)["status"], "blocked");
+    assert_eq!(structured(&orientation)["status"], "anonymous");
+    assert_eq!(structured(&orientation)["ordinary_work_gate"], "open");
     assert_eq!(structured(&orientation)["retry_safe"], true);
     assert!(
         server.tool("agent_orientation_acknowledge", json!({}))["error"]["message"]
@@ -473,7 +474,7 @@ fn public_protocol_is_native_bounded_persistent_and_recoverable() {
     assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 2);
     assert_eq!(
         structured(&occupant.tool("agent_orientation_read", json!({})))["status"],
-        "blocked"
+        "anonymous"
     );
     assert_eq!(
         structured(&occupant.tool("mcp_output_show", json!({"ref":"mcp_output:o_fixture"})))
