@@ -144,7 +144,7 @@ pub struct AppendOutcome {
     pub sequence: u64,
 }
 
-/// Append one immutable event: derive `sequence = event_count + 1` and
+/// Append one immutable event: derive `sequence = last_event.sequence + 1` and
 /// `event_id = <prefix>-{sequence:012}-{uuid v4}`, let `build` supply the
 /// domain envelope around the ledger-owned fields, compute and append the
 /// hash field, write the event `create_new` + `sync_all`, and write the
@@ -164,12 +164,14 @@ pub fn append_event(
     build: impl FnOnce(EnvelopeContext) -> Value,
 ) -> Result<AppendOutcome, Value> {
     let existing = files(schema, layout)?;
-    let previous_hash = match existing.last() {
-        Some(path) => io::read_json(schema, path)?[hash_field]
-            .as_str()
-            .map(str::to_string),
-        None => None,
-    };
+    let last_event = existing
+        .last()
+        .map(|path| io::read_json(schema, path))
+        .transpose()?;
+    let previous_hash = last_event
+        .as_ref()
+        .and_then(|event| event[hash_field].as_str())
+        .map(str::to_string);
     if let Some(expected) = expected_head {
         if expected != previous_hash.as_deref() {
             return Err(schema.error(
@@ -179,7 +181,16 @@ pub fn append_event(
             ));
         }
     }
-    let sequence = existing.len() as u64 + 1;
+    let sequence = match last_event {
+        Some(event) => event["sequence"].as_u64().ok_or_else(|| {
+            schema.error(
+                "ledger_sequence_invalid",
+                "last ledger event has no valid sequence",
+                json!({"path":existing.last().map(|path|path.to_string_lossy())}),
+            )
+        })? + 1,
+        None => 1,
+    };
     let event_id = format!("{}-{sequence:012}-{}", layout.file_prefix, Uuid::new_v4());
     let context = EnvelopeContext {
         sequence,

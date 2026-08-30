@@ -173,6 +173,24 @@ mod tests {
     }
 
     #[test]
+    fn append_sequence_follows_last_event_not_directory_file_count() {
+        let root = temp_root("ledger-orphan");
+        let layout = test_layout(&root);
+        fs::create_dir_all(&layout.directory).unwrap();
+        let first = append_test_event(&layout, "one", None);
+        fs::write(
+            layout.directory.join("ev-000000000000-orphan.json"),
+            b"{}",
+        )
+        .unwrap();
+        let second = append_test_event(&layout, "two", None);
+        assert_eq!(first.sequence, 1);
+        assert_eq!(second.sequence, 2);
+        assert_eq!(second.event["previous_hash"], json!(first.event_hash));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn head_cas_refuses_stale_or_unexpected_heads() {
         let root = temp_root("cas");
         let layout = test_layout(&root);
