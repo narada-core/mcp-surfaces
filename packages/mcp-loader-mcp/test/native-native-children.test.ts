@@ -97,6 +97,25 @@ test('native loader attaches native_entrypoint and native_applet children', asyn
     const initialized = await loader.call('initialize', { protocolVersion: '2024-11-05' });
     assert.equal(initialized.serverInfo.name, 'mcp-loader-mcp');
 
+    const directlyAttached = await loader.call('tools/call', {
+      name: 'mcp_loader_attach_surface',
+      arguments: { site_root: root, binding_id: 'native-entrypoint', surface_id: 'native-entrypoint' },
+    });
+    assert.equal(directlyAttached.schema, 'narada.mcp_loader.surface_attached.v1');
+    assert.equal(directlyAttached.tool_count > 0, true);
+    assert.equal(Object.hasOwn(directlyAttached, 'tools'), false);
+    assert.equal(directlyAttached.tool_discovery.tool_name, 'mcp_loader_list_tools');
+    opened.push(directlyAttached.connection_id);
+
+    const restarted = await loader.call('tools/call', {
+      name: 'mcp_loader_surface_restart',
+      arguments: { connection_id: directlyAttached.connection_id, reason: 'bounded response regression' },
+    });
+    assert.equal(restarted.status, 'restarted');
+    assert.equal(Object.hasOwn(restarted, 'tools'), false);
+    assert.equal(restarted.tool_discovery.tool_name, 'mcp_loader_list_tools');
+    opened[opened.length - 1] = restarted.connection_id;
+
     const nativeEntrypoint = await loader.call('tools/call', { name: 'mcp_loader_open_surface', arguments: { site_root: root, binding_id: 'native-entrypoint', surface_id: 'native-entrypoint' } });
     assert.equal(nativeEntrypoint.schema, 'narada.mcp_loader.surface_handle_opened.v1');
     opened.push(nativeEntrypoint.connection_id);

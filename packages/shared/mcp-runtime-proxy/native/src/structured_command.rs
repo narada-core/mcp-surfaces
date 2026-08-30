@@ -1622,10 +1622,15 @@ fn decide(state: &State, command: &str, args: &[String], cwd: &Path) -> Value {
     } else {
         "refused"
     };
-    let is_git = Path::new(command)
+    let command_name = Path::new(command)
         .file_stem()
         .and_then(|value| value.to_str())
-        .is_some_and(|value| value.eq_ignore_ascii_case("git"));
+        .unwrap_or(command)
+        .to_ascii_lowercase();
+    let is_git = command_name == "git";
+    let is_content_search = matches!(command_name.as_str(), "rg" | "grep" | "findstr");
+    let is_file_listing = matches!(command_name.as_str(), "ls" | "dir" | "find")
+        || (command_name == "rg" && args.iter().any(|value| value == "--files"));
     let remediation_hints = reasons
         .iter()
         .map(|reason| {
@@ -1635,6 +1640,10 @@ fn decide(state: &State, command: &str, args: &[String], cwd: &Path) -> Value {
                 "Run from an allowed root or request a policy update."
             } else if reason.starts_with("command_not_allowed:") && is_git {
                 "Use the Site-owned Git MCP binding through mcp-loader; do not add git to structured-command policy."
+            } else if reason.starts_with("command_not_allowed:") && is_file_listing {
+                "Use local-filesystem fs_glob_search for bounded file discovery."
+            } else if reason.starts_with("command_not_allowed:") && is_content_search {
+                "Use local-filesystem fs_grep_search for content search or fs_glob_search for file discovery."
             } else if reason.starts_with("command_not_allowed:") {
                 "Inspect policy and use an allowlisted command or prefix."
             } else if reason.starts_with("package_manager_wrapper_for_native_tool:") {
@@ -1645,13 +1654,47 @@ fn decide(state: &State, command: &str, args: &[String], cwd: &Path) -> Value {
         })
         .map(String::from)
         .collect::<Vec<_>>();
-    let mcp_fallbacks = if is_git {
+    let refused_by_command_policy = reasons
+        .iter()
+        .any(|reason| reason.starts_with("command_not_allowed:"));
+    let mcp_fallbacks = if !refused_by_command_policy {
+        json!([])
+    } else if is_git {
+        let tool_name = match args.first().map(String::as_str) {
+            Some("add") => "git_add",
+            Some("commit") => "git_commit",
+            Some("diff") => "git_diff",
+            Some("log") => "git_log",
+            Some("push") => "git_push",
+            Some("show") => "git_show",
+            _ => "git_status",
+        };
         json!([{
             "surface_id": "git",
             "binding_id_pattern": "<site-id>-git",
             "activation_tool": "mcp_loader_resume_or_open_surface",
             "inspection_tool": "mcp_loader_inspect_binding_tool",
-            "call_tool": "mcp_loader_call_binding_tool"
+            "call_tool": "mcp_loader_call_binding_tool",
+            "child_tool_name": tool_name
+        }])
+    } else if is_file_listing {
+        json!([{
+            "surface_id": "local-filesystem",
+            "tool_name": "fs_glob_search",
+            "purpose": "bounded_file_discovery",
+            "arguments": { "pattern": "*", "directory": cwd.to_string_lossy() }
+        }])
+    } else if is_content_search {
+        let pattern = args
+            .iter()
+            .find(|value| !value.starts_with('-'))
+            .cloned()
+            .unwrap_or_else(|| "<search pattern>".to_string());
+        json!([{
+            "surface_id": "local-filesystem",
+            "tool_name": "fs_grep_search",
+            "purpose": "bounded_content_search",
+            "arguments": { "pattern": pattern, "path": cwd.to_string_lossy() }
         }])
     } else {
         json!([])
@@ -2241,9 +2284,35 @@ mod tests {
             decision["mcp_fallbacks"][0]["activation_tool"],
             "mcp_loader_resume_or_open_surface"
         );
+        assert_eq!(decision["mcp_fallbacks"][0]["child_tool_name"], "git_status");
         assert!(decision["remediation_hints"][0]
             .as_str()
             .is_some_and(|value| value.contains("Git MCP")));
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn refused_shell_discovery_routes_to_filesystem_mcp() {
+        let root = env::temp_dir().join(format!(
+            "narada-structured-command-filesystem-routing-{}",
+            unique_id("test")
+        ));
+        fs::create_dir_all(&root).expect("root");
+        let state = parse_state(&[
+            "--allowed-root".into(),
+            root.to_string_lossy().to_string(),
+        ])
+        .expect("state");
+
+        let search = decide(&state, "rg", &["needle".into(), ".".into()], &root);
+        assert_eq!(search["status"], "refused");
+        assert_eq!(search["mcp_fallbacks"][0]["tool_name"], "fs_grep_search");
+        assert_eq!(search["mcp_fallbacks"][0]["arguments"]["pattern"], "needle");
+
+        let listing = decide(&state, "rg", &["--files".into()], &root);
+        assert_eq!(listing["status"], "refused");
+        assert_eq!(listing["mcp_fallbacks"][0]["tool_name"], "fs_glob_search");
 
         fs::remove_dir_all(root).expect("cleanup");
     }

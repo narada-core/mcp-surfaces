@@ -3325,11 +3325,6 @@ fn build_child_env(
 }
 
 fn attached_response(connection: &Connection, state: &LoaderState) -> Value {
-    let tools = connection
-        .tools
-        .iter()
-        .map(compact_tool_contract)
-        .collect::<Vec<_>>();
     json!({
         "schema":"narada.mcp_loader.surface_attached.v1",
         "connection_id":connection.connection_id,"logical_connection_id":connection.logical_connection_id,
@@ -3339,7 +3334,10 @@ fn attached_response(connection: &Connection, state: &LoaderState) -> Value {
         "runtime_kind":connection.runtime_kind,"runtime_requirements":connection.runtime_requirements,
         "runtime_lifecycle":runtime_lifecycle(Some(&connection.connection_id),Some(&connection.lifecycle)),
         "runtime_freshness":runtime_freshness(state),"runtime_command":connection.runtime_command,"entrypoint":connection.entrypoint,"args":connection.args,"child_invocation_kind":connection.child_invocation_kind,
-        "server_info":connection.server_info,"tools_compact":true,"tool_count":tools.len(),"tools":tools,"descriptor_digest":connection.descriptor_digest,
+        "server_info":connection.server_info,"tool_count":connection.tools.len(),
+        "tool_discovery":{"tool_name":"mcp_loader_list_tools","arguments":{"connection_id":connection.connection_id}},
+        "tool_inspection":{"tool_name":"mcp_loader_inspect_tool","required_arguments":["connection_id","tool_name"]},
+        "descriptor_digest":connection.descriptor_digest,
         "tool_contract_digest":connection.tool_contract_digest,"declared_tool_contract_digest":connection.declared_tool_contract_digest,
         "lifecycle":connection.lifecycle,"ownership":connection_ownership(connection)
     })
@@ -4382,7 +4380,9 @@ fn restart_connection(
         "connection_id":replacement.connection_id,"previous_connection_id":id,"surface_id":replacement.surface_id,
         "runtime_lifecycle":runtime_lifecycle(Some(&replacement.connection_id),Some(&replacement.lifecycle)),
         "entrypoint":replacement.entrypoint,"args":replacement.args,"termination":termination,
-        "server_info":replacement.server_info,"tools":replacement.tools
+        "server_info":replacement.server_info,"tool_count":replacement.tools.len(),
+        "tool_discovery":{"tool_name":"mcp_loader_list_tools","arguments":{"connection_id":replacement.connection_id}},
+        "tool_inspection":{"tool_name":"mcp_loader_inspect_tool","required_arguments":["connection_id","tool_name"]}
     });
     state
         .connections
