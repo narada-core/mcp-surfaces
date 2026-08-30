@@ -3400,21 +3400,23 @@ fn resume_or_open_surface(
     state: &mut LoaderState,
 ) -> Result<Value, Diagnostic> {
     let binding_id = required_string(arguments, "binding_id", "missing_binding_id")?;
-    let admitted = admitted_binding(
-        state,
-        arguments.get("site_root").and_then(Value::as_str).unwrap_or_default(),
-        &binding_id,
-        "resume_or_open",
-    )?;
-    let resolved_binding_id = admitted
+    // Resume is not an independently admitted mutation. Resolve aliases from
+    // the materialized admission envelope for identity matching, then let
+    // open_surface/attach enforce the admitted attach operation only if no
+    // live child can be reused.
+    let admitted_entry = state
+        .binding_admission
         .as_ref()
-        .and_then(|(entry, _)| entry.get("binding_id"))
+        .and_then(|envelope| admitted_binding_entry(envelope, &binding_id));
+    let resolved_binding_id = admitted_entry
+        .as_ref()
+        .and_then(|entry| entry.get("binding_id"))
         .and_then(Value::as_str)
         .unwrap_or(binding_id.as_str())
         .to_string();
-    let resolved_surface_id = admitted
+    let resolved_surface_id = admitted_entry
         .as_ref()
-        .and_then(|(entry, _)| entry.get("surface_id"))
+        .and_then(|entry| entry.get("surface_id"))
         .and_then(Value::as_str)
         .map(ToString::to_string);
     let requested_site_root = arguments
