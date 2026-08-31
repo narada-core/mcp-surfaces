@@ -86,9 +86,30 @@ function textComponent(text: string): { render: (width: number) => string[] } {
       return text.split("\n").flatMap((line) => {
         if (line.length === 0) return [""];
         const rendered: string[] = [];
-        for (let offset = 0; offset < line.length; offset += lineWidth) {
-          rendered.push(line.slice(offset, offset + lineWidth));
+        let current = "";
+        let visibleWidth = 0;
+        for (let offset = 0; offset < line.length;) {
+          if (line.charCodeAt(offset) === 0x1b) {
+            const sequence = line.slice(offset).match(/^\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))/)?.[0];
+            if (!sequence) {
+              offset += 1;
+              continue;
+            }
+            current += sequence;
+            offset += sequence.length;
+            continue;
+          }
+          const character = String.fromCodePoint(line.codePointAt(offset)!);
+          if (visibleWidth === lineWidth) {
+            rendered.push(current);
+            current = "";
+            visibleWidth = 0;
+          }
+          current += character;
+          visibleWidth += 1;
+          offset += character.length;
         }
+        if (current.length > 0 || rendered.length === 0) rendered.push(current);
         return rendered;
       });
     },

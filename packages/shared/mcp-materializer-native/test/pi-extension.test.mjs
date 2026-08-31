@@ -108,6 +108,11 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       fg(kind, text) { return `<${kind}>${text}</${kind}>`; },
     }).render(160).join('\n');
     assert.match(themedCollapsed, /<muted> — press Ctrl\+O to expand<\/muted>/);
+    const ansiCollapsedLines = registered[0].renderResult(result, { expanded: false }, {
+      fg(_kind, text) { return `\x1b[90m${text}\x1b[39m`; },
+    }).render(7);
+    assert.doesNotMatch(ansiCollapsedLines.join('\n'), /(?:^|\n)\[(?:39|90)m|(?:^|\n)m(?:$|\n)/);
+    assert.equal((ansiCollapsedLines.join('').match(/\x1b\[[0-?]*[ -/]*[@-~]/g) ?? []).length, 2);
 
     for (const [value, expected] of [
       ['stat', /file file\.md · 14k bytes/],
