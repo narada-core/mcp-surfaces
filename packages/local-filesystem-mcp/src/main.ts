@@ -10,7 +10,9 @@ import { fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
 import {
   attachPayloadSource,
+  buildOutputRefToolContent,
   listOutputResources,
+  outputShow,
   readOutputResource,
   resolveToolPayloadArgs,
 } from '@narada-core/mcp-transport';
@@ -21,6 +23,10 @@ import { RIPGREP_FIELD_SEPARATOR, grepMatchObject as buildGrepMatchObject, runRi
 
 const PROTOCOL_VERSION = '2024-11-05';
 const INLINE_RESULT_CHAR_LIMIT = 6000;
+const SEARCH_DEFAULT_MAX_RESULTS = 20;
+const SEARCH_MAX_RESULTS = 100;
+const SEARCH_DEFAULT_ITEM_TEXT_CHARS = 500;
+const SEARCH_MAX_ITEM_TEXT_CHARS = 2_000;
 const READ_RESULT_INLINE_CHAR_LIMIT = 20_000;
 const MAX_READ_LINE_LIMIT = 1000;
 const READ_BUFFER_BYTES = 64 * 1024;
@@ -517,6 +523,34 @@ export function listTools(mode: any) {
       }),
     },
     {
+      name: 'fs_search',
+      description: 'Find matching lines, matching files, or per-file counts under one allowed directory. Literal search is the safe default; choose syntax regex explicitly for regular expressions. Results have enforced item and response budgets, one authoritative items array, and a directly callable result reader when more content is materialized.',
+      inputSchema: objectSchema({
+        query: { type: 'string', description: 'Text or regular expression to find.' },
+        directory: { type: 'string', description: DIRECTORY_ARGUMENT_DESCRIPTION },
+        syntax: { type: 'string', enum: ['literal', 'regex'], default: 'literal' },
+        result_kind: { type: 'string', enum: ['matches', 'files', 'counts'], default: 'matches' },
+        file_glob: { type: 'string', description: 'Optional include glob within directory.' },
+        exclude: { type: 'array', items: { type: 'string' }, description: 'Additional glob patterns to exclude.' },
+        case: { type: 'string', enum: ['smart', 'sensitive', 'insensitive'], default: 'smart' },
+        max_results: { type: 'integer', default: SEARCH_DEFAULT_MAX_RESULTS, maximum: SEARCH_MAX_RESULTS },
+        max_inline_chars: { type: 'integer', default: INLINE_RESULT_CHAR_LIMIT, maximum: READ_RESULT_INLINE_CHAR_LIMIT },
+        max_text_chars_per_match: { type: 'integer', default: SEARCH_DEFAULT_ITEM_TEXT_CHARS, maximum: SEARCH_MAX_ITEM_TEXT_CHARS },
+        cursor: { type: 'string', description: 'Opaque continuation cursor returned by a previous fs_search call.' },
+        diagnostics: { type: 'boolean', default: false },
+        timeout_ms: { type: 'integer', description: 'Optional search timeout in milliseconds.' },
+      }, ['query']),
+    },
+    {
+      name: 'fs_search_results_read',
+      description: 'Read a bounded page from an immutable filesystem search result reference returned by fs_search or fs_grep_search.',
+      inputSchema: objectSchema({
+        ref: { type: 'string', description: 'Immutable mcp_output reference returned by a search.' },
+        offset: { type: 'integer', default: 0 },
+        limit: { type: 'integer', default: 4000, maximum: READ_RESULT_INLINE_CHAR_LIMIT },
+      }, ['ref']),
+    },
+    {
       name: 'fs_grep_search',
       description: 'Search file contents under an allowed root using ripgrep. directory is canonical scope; path remains a compatibility alias. Use glob to constrain included files and ignore/exclude to constrain omitted files. Use output_mode content for line-numbered matches; empty matches return ok with count 0.',
       inputSchema: objectSchema({
@@ -528,7 +562,7 @@ export function listTools(mode: any) {
         ignore: { type: 'array', items: { type: 'string' }, description: 'Additional glob patterns to exclude. Defaults also exclude generated dependency/build/runtime directories.' },
         exclude: { type: 'array', items: { type: 'string' }, description: 'Alias for additional glob patterns to exclude.' },
         offset: { type: 'integer', default: 0 },
-        limit: { type: 'integer', default: 80 },
+        limit: { type: 'integer', default: SEARCH_DEFAULT_MAX_RESULTS, maximum: SEARCH_MAX_RESULTS },
         timeout_ms: { type: 'integer', description: 'Optional search timeout in milliseconds.' },
         cache_policy: { type: 'string', enum: ['auto', 'snapshot', 'refresh', 'bypass'], default: 'auto', description: 'auto uses cached complete snapshots when available; snapshot materializes a reusable snapshot; refresh rebuilds and stores a snapshot; bypass does not use cached snapshots.' },
         snapshot_id: { type: 'string', description: 'Optional snapshot_id from a previous complete search response to page consistently.' },
@@ -671,7 +705,9 @@ function callTool(params: any, state: any) {
     case 'fs_glob_search': return toolResult(globSearchTool(args, state));
     case 'fs_repository_inventory': return toolResult(repositoryInventoryTool(args, state));
     case 'fs_file_metrics': return toolResult(fileMetricsTool(args, state));
-    case 'fs_grep_search': return toolResult(grepSearchTool(args, state), { grepOutputMode: stringField(args, 'output_mode') ?? 'files_with_matches' });
+    case 'fs_search': return boundedSearchToolResult(fsSearchTool(args, state), state, 'fs_search', integerField(args, 'max_inline_chars') ?? INLINE_RESULT_CHAR_LIMIT);
+    case 'fs_search_results_read': return toolResult(outputShow({ siteRoot: state.outputRoot, args }));
+    case 'fs_grep_search': return boundedSearchToolResult(grepSearchTool(args, state), state, 'fs_grep_search', INLINE_RESULT_CHAR_LIMIT, { grepOutputMode: stringField(args, 'output_mode') ?? 'files_with_matches' });
     case 'fs_doctor': return toolResult(doctorTool(state));
     case 'fs_write_file': {
       const payload = resolveFilesystemPayloadArgs(name, args, state);
@@ -1895,11 +1931,11 @@ function grepSearchTool(args: any, state: any) {
   const mode = stringField(args, 'output_mode') ?? 'files_with_matches';
   if (!['files_with_matches', 'count_matches', 'content'].includes(mode)) throw diagnosticError('grep_output_mode_unsupported', `grep_output_mode_unsupported: ${mode}`, { output_mode: mode });
   const offset = Math.max(0, integerField(args, 'offset') ?? 0);
-  const limit = Math.min(500, Math.max(1, integerField(args, 'limit') ?? 80));
+  const limit = Math.min(SEARCH_MAX_RESULTS, Math.max(1, integerField(args, 'limit') ?? SEARCH_DEFAULT_MAX_RESULTS));
   const timeoutMs = searchTimeoutMs(args);
   const cachePolicy = searchCachePolicy(args);
   const snapshotId = stringField(args, 'snapshot_id');
-  const modeArgs = mode === 'content' ? ['-n'] : mode === 'count_matches' ? ['-c'] : ['-l'];
+  const modeArgs = [...grepCaseArgs(stringField(args, 'search_case')), ...(mode === 'content' ? ['-n'] : mode === 'count_matches' ? ['-c'] : ['-l'])];
   const freshness = searchFreshness(scope.path);
   return cappedSearchResult({ state, kind: 'grep', args: { ...args, output_mode: mode, grep_scope: scope }, page: runRipgrepPage(['--field-match-separator', RIPGREP_FIELD_SEPARATOR, '--with-filename', ...modeArgs, ...scope.ripgrep_glob_args, '--', pattern, scope.path], { operation: 'fs_grep_search', noMatchStatus: 1, offset, limit, timeoutMs, freshness, cachePolicy, snapshotId, diagnosticError, env: state.env }), offset, limit, freshness, cachePolicy });
 }
@@ -1911,11 +1947,11 @@ async function grepSearchToolAsync(args: any, state: any, context: any) {
   const mode = stringField(args, 'output_mode') ?? 'files_with_matches';
   if (!['files_with_matches', 'count_matches', 'content'].includes(mode)) throw diagnosticError('grep_output_mode_unsupported', `grep_output_mode_unsupported: ${mode}`, { output_mode: mode });
   const offset = Math.max(0, integerField(args, 'offset') ?? 0);
-  const limit = Math.min(500, Math.max(1, integerField(args, 'limit') ?? 80));
+  const limit = Math.min(SEARCH_MAX_RESULTS, Math.max(1, integerField(args, 'limit') ?? SEARCH_DEFAULT_MAX_RESULTS));
   const timeoutMs = searchTimeoutMs(args);
   const cachePolicy = searchCachePolicy(args);
   const snapshotId = stringField(args, 'snapshot_id');
-  const modeArgs = mode === 'content' ? ['-n'] : mode === 'count_matches' ? ['-c'] : ['-l'];
+  const modeArgs = [...grepCaseArgs(stringField(args, 'search_case')), ...(mode === 'content' ? ['-n'] : mode === 'count_matches' ? ['-c'] : ['-l'])];
   const freshness = searchFreshness(scope.path);
   const page = await runRipgrepPageAsync(['--field-match-separator', RIPGREP_FIELD_SEPARATOR, '--with-filename', ...modeArgs, ...scope.ripgrep_glob_args, '--', pattern, scope.path], { operation: 'fs_grep_search', noMatchStatus: 1, offset, limit, timeoutMs, freshness, cachePolicy, snapshotId, diagnosticError, abortSignal: context.abortSignal, env: state.env });
   return cappedSearchResult({ state, kind: 'grep', args: { ...args, output_mode: mode, grep_scope: scope }, page, offset, limit, freshness, cachePolicy });
@@ -1960,12 +1996,182 @@ function cappedSearchResult({ state, kind, args, page, offset, limit, freshness,
     freshness,
     has_more: page.has_more,
     next_offset: nextOffset,
-    matches_format: kind === 'grep' ? 'human' : 'path',
-    matches: kind === 'grep' ? matches.map((match: any) => renderGrepMatch(match, grepMode)) : matches,
+    matches_format: kind === 'grep' ? 'structured' : 'path',
+    ...(kind === 'grep' ? {} : { matches }),
     ...(noMatchDiagnostics ? { no_match_diagnostics: noMatchDiagnostics } : {}),
     ...(kind === 'grep' ? { match_objects_authoritative: true, match_objects: matches.map((match: any) => buildGrepMatchObject(match, grepMode)) } : {}),
   };
+  if (kind === 'grep') {
+    delete value.cache_memory_bytes;
+    delete value.requested_snapshot_id;
+    delete value.freshness;
+    value.scope = {
+      requested_path: value.scope?.requested_path ?? null,
+      root: value.scope?.root ?? null,
+      path: value.scope?.path ?? null,
+      argument: value.scope?.argument ?? null,
+      include_glob: value.scope?.include_glob ?? null,
+      default_exclusions_applied: true,
+    };
+    if (value.no_match_diagnostics) delete value.no_match_diagnostics.freshness;
+  }
   return cappedToolValue({ state, value, summary: { count: value.count, count_exact: value.count_exact, scanned: value.scanned, scanned_unit: value.scanned_unit, returned: value.returned, order: value.order, cache_hit: value.cache_hit, cache_policy: value.cache_policy, snapshot_id: value.snapshot_id, snapshot_complete: value.snapshot_complete, cache_memory_bytes: value.cache_memory_bytes, page_match_bytes: value.page_match_bytes, page_match_bytes_limit: value.page_match_bytes_limit, page_matches_truncated: value.page_matches_truncated, timeout_ms: value.timeout_ms, freshness: value.freshness, matches_format: value.matches_format, has_more: value.has_more, next_offset: value.next_offset } });
+}
+
+function fsSearchTool(args: any, state: any) {
+  return buildFsSearchResult(args, grepSearchTool(fsSearchLegacyArgs(args), state));
+}
+
+async function fsSearchToolAsync(args: any, state: any, context: any) {
+  return buildFsSearchResult(args, await grepSearchToolAsync(fsSearchLegacyArgs(args), state, context));
+}
+
+function fsSearchLegacyArgs(args: any) {
+  const query = stringField(args, 'query');
+  if (!query) throw diagnosticError('fs_search_requires_query', 'fs_search_requires_query');
+  const syntax = stringField(args, 'syntax') ?? 'literal';
+  const resultKind = stringField(args, 'result_kind') ?? 'matches';
+  const caseMode = stringField(args, 'case') ?? 'smart';
+  if (!['literal', 'regex'].includes(syntax)) throw diagnosticError('fs_search_syntax_unsupported', `fs_search_syntax_unsupported: ${syntax}`);
+  if (!['matches', 'files', 'counts'].includes(resultKind)) throw diagnosticError('fs_search_result_kind_unsupported', `fs_search_result_kind_unsupported: ${resultKind}`);
+  if (!['smart', 'sensitive', 'insensitive'].includes(caseMode)) throw diagnosticError('fs_search_case_unsupported', `fs_search_case_unsupported: ${caseMode}`);
+  const cursor = decodeSearchCursor(stringField(args, 'cursor'));
+  return {
+    pattern: syntax === 'literal' ? escapeRegularExpression(query) : query,
+    directory: stringField(args, 'directory') ?? '.',
+    glob: stringField(args, 'file_glob'),
+    output_mode: resultKind === 'matches' ? 'content' : resultKind === 'files' ? 'files_with_matches' : 'count_matches',
+    exclude: stringList(args.exclude),
+    offset: cursor?.offset ?? 0,
+    limit: Math.min(SEARCH_MAX_RESULTS, Math.max(1, integerField(args, 'max_results') ?? SEARCH_DEFAULT_MAX_RESULTS)),
+    timeout_ms: integerField(args, 'timeout_ms') ?? undefined,
+    cache_policy: cursor ? 'auto' : 'snapshot',
+    snapshot_id: cursor?.snapshot_id ?? undefined,
+    search_case: caseMode,
+  };
+}
+
+function buildFsSearchResult(args: any, legacy: any) {
+  const resultKind = stringField(args, 'result_kind') ?? 'matches';
+  const syntax = stringField(args, 'syntax') ?? 'literal';
+  const caseMode = stringField(args, 'case') ?? 'smart';
+  if (!['smart', 'sensitive', 'insensitive'].includes(caseMode)) throw diagnosticError('fs_search_case_unsupported', `fs_search_case_unsupported: ${caseMode}`);
+  const textLimit = Math.min(SEARCH_MAX_ITEM_TEXT_CHARS, Math.max(50, integerField(args, 'max_text_chars_per_match') ?? SEARCH_DEFAULT_ITEM_TEXT_CHARS));
+  const objects = Array.isArray(legacy.match_objects) ? legacy.match_objects : [];
+  const items = objects.map((item: any) => compactSearchItem(item, resultKind, legacy.scope?.root, textLimit));
+  const diagnostics = booleanField(args, 'diagnostics') ? {
+    cache_hit: legacy.cache_hit,
+    cache_policy: legacy.cache_policy,
+    snapshot_id: legacy.snapshot_id,
+    snapshot_complete: legacy.snapshot_complete,
+    freshness: legacy.freshness,
+    order: legacy.order,
+    timeout_ms: legacy.timeout_ms,
+    page_match_bytes: legacy.page_match_bytes,
+    page_match_bytes_limit: legacy.page_match_bytes_limit,
+  } : null;
+  return {
+    schema: 'local.filesystem.search.v2',
+    status: legacy.page_matches_truncated > 0 ? 'partial' : 'ok',
+    result_kind: resultKind,
+    scope: {
+      directory: relativeSearchPath(legacy.scope?.root, legacy.scope?.path),
+      file_glob: legacy.scope?.include_glob ?? null,
+      default_exclusions_applied: true,
+    },
+    query: { text: stringField(args, 'query'), syntax, case: caseMode },
+    items,
+    page: {
+      returned: items.length,
+      complete: legacy.has_more !== true && legacy.page_matches_truncated === 0,
+      result_count: legacy.count ?? null,
+      result_count_exact: legacy.count_exact === true,
+      inline_chars: 0,
+      inline_char_limit: Math.min(READ_RESULT_INLINE_CHAR_LIMIT, Math.max(INLINE_RESULT_CHAR_LIMIT, integerField(args, 'max_inline_chars') ?? INLINE_RESULT_CHAR_LIMIT)),
+      clipped_items: items.filter((item: any) => item.text_complete === false).length,
+    },
+    continuation: legacy.has_more === true ? {
+      tool: 'fs_search',
+      arguments: {
+        ...searchContinuationArguments(args),
+        cursor: encodeSearchCursor({ offset: legacy.next_offset, snapshot_id: legacy.snapshot_id }),
+      },
+    } : null,
+    result_ref: null,
+    ...(diagnostics ? { diagnostics } : {}),
+  };
+}
+
+function compactSearchItem(item: any, resultKind: any, root: any, textLimit: any) {
+  const path = relativeSearchPath(root, item.path);
+  if (resultKind === 'files') return { path };
+  if (resultKind === 'counts') return { path, count: Number(item.count ?? 0) };
+  const original = String(item.text ?? '');
+  const text = original.length <= textLimit ? original : `${original.slice(0, Math.max(0, textLimit - 13))}… [clipped]`;
+  return {
+    path,
+    line: Number(item.line ?? 0),
+    text,
+    text_complete: text === original,
+    ...(text === original ? {} : { original_text_chars: original.length, returned_text_chars: text.length }),
+  };
+}
+
+function relativeSearchPath(root: any, path: any) {
+  if (typeof path !== 'string') return null;
+  if (typeof root !== 'string') return path.replace(/\\/g, '/');
+  const value = relative(root, path).replace(/\\/g, '/');
+  return value || '.';
+}
+
+function searchContinuationArguments(args: any) {
+  return {
+    query: stringField(args, 'query'),
+    directory: stringField(args, 'directory') ?? '.',
+    syntax: stringField(args, 'syntax') ?? 'literal',
+    result_kind: stringField(args, 'result_kind') ?? 'matches',
+    file_glob: stringField(args, 'file_glob') ?? undefined,
+    exclude: stringList(args.exclude),
+    case: stringField(args, 'case') ?? 'smart',
+    max_results: integerField(args, 'max_results') ?? SEARCH_DEFAULT_MAX_RESULTS,
+    max_inline_chars: integerField(args, 'max_inline_chars') ?? INLINE_RESULT_CHAR_LIMIT,
+    max_text_chars_per_match: integerField(args, 'max_text_chars_per_match') ?? SEARCH_DEFAULT_ITEM_TEXT_CHARS,
+  };
+}
+
+function escapeRegularExpression(value: any) {
+  return String(value).replace(/[.*+?^$()|[\]\\{}]/g, '\\$&');
+}
+
+function grepCaseArgs(value: any) {
+  if (value === 'sensitive') return ['--case-sensitive'];
+  if (value === 'insensitive') return ['--ignore-case'];
+  if (value === 'smart') return ['--smart-case'];
+  return [];
+}
+
+function encodeSearchCursor(value: any) {
+  return Buffer.from(JSON.stringify(value), 'utf8').toString('base64url');
+}
+
+function decodeSearchCursor(value: any) {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(Buffer.from(String(value), 'base64url').toString('utf8'));
+    if (!Number.isInteger(parsed.offset) || parsed.offset < 0 || typeof parsed.snapshot_id !== 'string') throw new Error('invalid');
+    return parsed;
+  } catch {
+    throw diagnosticError('fs_search_cursor_invalid', 'fs_search_cursor_invalid', {
+      remediation: 'Use the opaque cursor returned by fs_search without modification.',
+    });
+  }
+}
+
+function boundedSearchToolResult(value: any, state: any, toolName: any, limit: any, renderContext: any = {}) {
+  const boundedLimit = Math.min(READ_RESULT_INLINE_CHAR_LIMIT, Math.max(INLINE_RESULT_CHAR_LIMIT, Number(limit) || INLINE_RESULT_CHAR_LIMIT));
+  if (value?.schema === 'local.filesystem.search.v2' && value?.page) value.page.inline_chars = JSON.stringify(value).length;
+  if (JSON.stringify(value).length <= boundedLimit) return toolResult(value, renderContext);
+  return buildOutputRefToolContent({ siteRoot: state.outputRoot, toolName, value, limit: boundedLimit, readerTool: 'fs_search_results_read' });
 }
 
 function cappedToolValue({ state, value, summary = {} }: any) {
@@ -2676,7 +2882,9 @@ async function callToolAsync(params: any, state: any, context: any) {
     case 'fs_glob_search': return toolResult(await globSearchToolAsync(args, state, context));
     case 'fs_repository_inventory': return toolResult(await repositoryInventoryToolAsync(args, state, context));
     case 'fs_file_metrics': return toolResult(await fileMetricsToolAsync(args, state, context));
-    case 'fs_grep_search': return toolResult(await grepSearchToolAsync(args, state, context), { grepOutputMode: stringField(args, 'output_mode') ?? 'files_with_matches' });
+    case 'fs_search': return boundedSearchToolResult(await fsSearchToolAsync(args, state, context), state, 'fs_search', integerField(args, 'max_inline_chars') ?? INLINE_RESULT_CHAR_LIMIT);
+    case 'fs_search_results_read': return toolResult(outputShow({ siteRoot: state.outputRoot, args }));
+    case 'fs_grep_search': return boundedSearchToolResult(await grepSearchToolAsync(args, state, context), state, 'fs_grep_search', INLINE_RESULT_CHAR_LIMIT, { grepOutputMode: stringField(args, 'output_mode') ?? 'files_with_matches' });
     case 'fs_write_file': {
       const payload = resolveFilesystemPayloadArgs(name, args, state);
       return toolResult(attachPayloadSource(await writeFileToolAsync(payload.args, state, context), payload.payloadSource));

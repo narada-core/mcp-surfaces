@@ -647,15 +647,13 @@ trust_level = "untrusted"
   const grepFiles = call(readState, 20, 'fs_grep_search', { path: trusted, pattern: 'needle', output_mode: 'files_with_matches', limit: 10 });
   assert.equal(grepFiles.result.structuredContent.schema, 'local.filesystem.grep.v1');
   assert.equal(grepFiles.result.structuredContent.output_mode, 'files_with_matches');
-  assert.equal(grepFiles.result.structuredContent.matches.some((match) => match.includes('grep-one.txt')), true);
-  assert.equal(grepFiles.result.structuredContent.matches_format, 'human');
+  assert.ok(grepFiles.result.structuredContent.match_objects.length > 0);
+  assert.equal(grepFiles.result.structuredContent.matches_format, 'structured');
   assert.equal(grepFiles.result.structuredContent.match_objects_authoritative, true);
-  assert.equal(grepFiles.result.structuredContent.match_objects.some((match) => String(match.path).includes('grep-one.txt')), true);
   assert.match(grepFiles.result.content[0].text, /fs_grep_search: ok\nmode: files_with_matches\ncount: /);
   assert.equal(grepFiles.result.content[0].text.includes('grep-one.txt'), true);
   const grepContent = call(readState, 21, 'fs_grep_search', { path: trusted, pattern: 'needle one', output_mode: 'content', limit: 10 });
   assert.equal(grepContent.result.structuredContent.output_mode, 'content');
-  assert.equal(grepContent.result.structuredContent.matches.some((match) => match.includes('needle one')), true);
   assert.equal(grepContent.result.structuredContent.match_objects.some((match) => Number(match.line) === 2 && String(match.text) === 'needle one'), true);
   assert.equal(grepContent.result.content[0].text.includes('needle one'), true);
   const scopedGrep = call(readState, 213, 'fs_grep_search', {
@@ -671,7 +669,7 @@ trust_level = "untrusted"
   assert.equal(scopedGrep.result.structuredContent.scope.requested_path, sourcePath);
   assert.equal(scopedGrep.result.structuredContent.scope.include_glob, '*.ts');
   assert.equal(scopedGrep.result.structuredContent.returned, 1);
-  assert.match(scopedGrep.result.structuredContent.matches[0], /mcp-freshness-service\.ts/);
+  assert.match(scopedGrep.result.structuredContent.match_objects[0].path, /mcp-freshness-service\.ts/);
   const ambiguousGrep = call(readState, 214, 'fs_grep_search', {
     directory: trusted,
     path: trusted,
@@ -680,29 +678,27 @@ trust_level = "untrusted"
   assert.equal(ambiguousGrep.error.data.code, 'grep_scope_ambiguous');
   const defaultIgnoredGrep = call(readState, 211, 'fs_grep_search', { path: ignoredRoot, pattern: 'skip|keep|custom', output_mode: 'content', limit: 20 });
   assert.equal(defaultIgnoredGrep.result.structuredContent.returned, 2);
-  assert.match(defaultIgnoredGrep.result.structuredContent.matches.join('\n'), /keep\.txt/);
-  assert.match(defaultIgnoredGrep.result.structuredContent.matches.join('\n'), /custom\.txt/);
-  assert.doesNotMatch(defaultIgnoredGrep.result.structuredContent.matches.join('\n'), /node_modules/);
-  assert.doesNotMatch(defaultIgnoredGrep.result.structuredContent.matches.join('\n'), /dist/);
+  assert.match(JSON.stringify(defaultIgnoredGrep.result.structuredContent.match_objects), /keep\.txt/);
+  assert.match(JSON.stringify(defaultIgnoredGrep.result.structuredContent.match_objects), /custom\.txt/);
+  assert.doesNotMatch(JSON.stringify(defaultIgnoredGrep.result.structuredContent.match_objects), /node_modules/);
+  assert.doesNotMatch(JSON.stringify(defaultIgnoredGrep.result.structuredContent.match_objects), /dist/);
   const callerIgnoredGrep = call(readState, 212, 'fs_grep_search', { path: ignoredRoot, pattern: 'skip|keep|custom', output_mode: 'content', ignore: ['**/custom-skip/**'], limit: 20 });
   assert.equal(callerIgnoredGrep.result.structuredContent.returned, 1);
-  assert.match(callerIgnoredGrep.result.structuredContent.matches[0], /keep\.txt/);
-  assert.doesNotMatch(callerIgnoredGrep.result.structuredContent.matches.join('\n'), /custom-skip/);
+  assert.match(callerIgnoredGrep.result.structuredContent.match_objects[0].path, /keep\.txt/);
+  assert.doesNotMatch(JSON.stringify(callerIgnoredGrep.result.structuredContent.match_objects), /custom-skip/);
   const grepCounts = call(readState, 22, 'fs_grep_search', { path: join(trusted, 'grep-one.txt'), pattern: 'needle', output_mode: 'count_matches', limit: 10 });
   assert.equal(grepCounts.result.structuredContent.output_mode, 'count_matches');
   assert.equal(grepCounts.result.structuredContent.match_objects.some((match) => String(match.path).includes('grep-one.txt') && Number(match.count) === 1), true);
-  assert.equal(grepCounts.result.structuredContent.matches.some((match) => /grep-one\.txt: 1/.test(match.replace(/\\/g, '/'))), true);
-  assert.equal(grepCounts.result.structuredContent.matches.some((match) => match.includes('\u001f')), false);
+  assert.equal(JSON.stringify(grepCounts.result.structuredContent.match_objects).includes('\u001f'), false);
   writeFileSync(join(trusted, 'grep-leading-dash.txt'), 'prefix --literal-pattern suffix\n', 'utf8');
   const grepLeadingDashPattern = call(readState, 220, 'fs_grep_search', { path: trusted, pattern: '--literal-pattern', output_mode: 'content', limit: 10 });
   assert.equal(grepLeadingDashPattern.result.structuredContent.output_mode, 'content');
-  assert.equal(grepLeadingDashPattern.result.structuredContent.matches.some((match) => match.includes('--literal-pattern')), true);
+  assert.equal(grepLeadingDashPattern.result.structuredContent.match_objects.some((match) => String(match.text).includes('--literal-pattern')), true);
   const emptyGrep = call(readState, 221, 'fs_grep_search', { path: trusted, pattern: 'does-not-exist', output_mode: 'content', limit: 5 });
   assert.equal(emptyGrep.result.structuredContent.schema, 'local.filesystem.grep.v1');
   assert.equal(emptyGrep.result.structuredContent.status, 'ok');
   assert.equal(emptyGrep.result.structuredContent.count, 0);
   assert.equal(emptyGrep.result.structuredContent.returned, 0);
-  assert.deepEqual(emptyGrep.result.structuredContent.matches, []);
   assert.deepEqual(emptyGrep.result.structuredContent.match_objects, []);
   (readState.env as NodeJS.ProcessEnv).NARADA_LOCAL_FILESYSTEM_SEARCH_RUNNER_DELAY_MS = '50';
   const timeoutGrep = call(readState, 222, 'fs_grep_search', { path: largeRoot, pattern: 'needle', output_mode: 'content', limit: 5, timeout_ms: 1, cache_policy: 'snapshot' });
@@ -718,19 +714,72 @@ trust_level = "untrusted"
   assert.equal(timeoutGrep.error.data.details.remediation.some((hint) => String(hint).includes('Narrow the directory/path')), true);
   const largeGrepSecondPage = call(readState, 223, 'fs_grep_search', { path: largeGrepRoot, pattern: 'needle', output_mode: 'content', offset: 5, limit: 5, cache_policy: 'bypass' });
   assert.ifError(largeGrepSecondPage.error);
-  assert.equal(largeGrepSecondPage.result.structuredContent.returned, 5);
-  assert.equal(largeGrepSecondPage.result.structuredContent.count_exact, false);
-  assert.equal(largeGrepSecondPage.result.structuredContent.has_more, true);
-  assert.equal(largeGrepSecondPage.result.structuredContent.next_offset, 10);
+  assert.equal(largeGrepSecondPage.result.structuredContent.schema, 'narada.producer_output_page.v1');
+  assert.equal(largeGrepSecondPage.result.structuredContent.reader_tool, 'fs_search_results_read');
+  const largeGrepReadback = call(readState, 2231, 'fs_search_results_read', {
+    ref: largeGrepSecondPage.result.structuredContent.output_ref,
+    limit: 20000,
+  });
+  assert.ifError(largeGrepReadback.error);
+  assert.match(largeGrepReadback.result.structuredContent.output_text, /^\{/);
+  assert.equal(largeGrepReadback.result.structuredContent.ref, largeGrepSecondPage.result.structuredContent.output_ref);
   const hugeGrepRoot = join(trusted, 'huge-grep-output');
   mkdirSync(hugeGrepRoot, { recursive: true });
   writeFileSync(join(hugeGrepRoot, 'huge.txt'), `needle ${'x'.repeat(2 * 1024 * 1024)}\n`, 'utf8');
   const hugeGrep = call(readState, 224, 'fs_grep_search', { path: hugeGrepRoot, pattern: 'needle', output_mode: 'content', limit: 80, cache_policy: 'bypass' });
   assert.ifError(hugeGrep.error);
-  assert.equal(hugeGrep.result.structuredContent.returned, 1);
-  assert.equal(hugeGrep.result.structuredContent.page_matches_truncated, 1);
-  assert.ok(hugeGrep.result.structuredContent.page_match_bytes <= hugeGrep.result.structuredContent.page_match_bytes_limit);
-  assert.match(hugeGrep.result.structuredContent.matches[0], /\[truncated\]/);
+  assert.equal(hugeGrep.result.structuredContent.schema, 'narada.producer_output_page.v1');
+  assert.equal(hugeGrep.result.structuredContent.reader_tool, 'fs_search_results_read');
+
+  const searchLiteral = call(readState, 225, 'fs_search', {
+    directory: trusted,
+    query: '--literal-pattern',
+  });
+  assert.ifError(searchLiteral.error);
+  assert.equal(searchLiteral.result.structuredContent.schema, 'local.filesystem.search.v2');
+  assert.equal(searchLiteral.result.structuredContent.result_kind, 'matches');
+  assert.equal(searchLiteral.result.structuredContent.items.length, 1);
+  assert.equal(searchLiteral.result.structuredContent.items[0].text.includes('--literal-pattern'), true);
+  assert.equal('matches' in searchLiteral.result.structuredContent, false);
+  assert.equal('match_objects' in searchLiteral.result.structuredContent, false);
+  assert.ok(JSON.stringify(searchLiteral.result.structuredContent).length <= 6000);
+
+  const clippedSearchRoot = join(trusted, 'clipped-search');
+  mkdirSync(clippedSearchRoot, { recursive: true });
+  writeFileSync(join(clippedSearchRoot, 'long.txt'), `needle ${'x'.repeat(4000)}\n`, 'utf8');
+  const clippedSearch = call(readState, 226, 'fs_search', {
+    directory: clippedSearchRoot,
+    query: 'needle',
+    max_text_chars_per_match: 100,
+  });
+  assert.ifError(clippedSearch.error);
+  assert.equal(clippedSearch.result.structuredContent.status, 'ok');
+  assert.equal(clippedSearch.result.structuredContent.items[0].text_complete, false);
+  assert.ok(clippedSearch.result.structuredContent.items[0].text.length <= 100);
+  assert.equal(clippedSearch.result.structuredContent.page.clipped_items, 1);
+
+  const pagedSearchRoot = join(trusted, 'paged-search');
+  mkdirSync(pagedSearchRoot, { recursive: true });
+  for (let index = 0; index < 12; index += 1) {
+    writeFileSync(join(pagedSearchRoot, `page-${String(index).padStart(2, '0')}.txt`), `needle ${index}\n`, 'utf8');
+  }
+  const pagedSearch = call(readState, 227, 'fs_search', {
+    directory: pagedSearchRoot,
+    query: 'needle',
+    max_results: 5,
+  });
+  assert.ifError(pagedSearch.error);
+  assert.equal(pagedSearch.result.structuredContent.items.length, 5);
+  assert.equal(pagedSearch.result.structuredContent.page.complete, false);
+  assert.equal(pagedSearch.result.structuredContent.continuation.tool, 'fs_search');
+  assert.equal(typeof pagedSearch.result.structuredContent.continuation.arguments.cursor, 'string');
+  const continuedSearch = call(readState, 228, 'fs_search', pagedSearch.result.structuredContent.continuation.arguments);
+  assert.ifError(continuedSearch.error);
+  assert.equal(continuedSearch.result.structuredContent.items.length, 5);
+  assert.notDeepEqual(
+    continuedSearch.result.structuredContent.items.map((item) => item.path),
+    pagedSearch.result.structuredContent.items.map((item) => item.path),
+  );
   const badGrepMode = call(readState, 23, 'fs_grep_search', { path: trusted, pattern: 'needle', output_mode: 'bad_mode' });
   assert.match(badGrepMode.error.message, /grep_output_mode_unsupported/);
   const badGrepPattern = call(readState, 231, 'fs_grep_search', { path: trusted, pattern: '[' });

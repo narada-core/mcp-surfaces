@@ -63,6 +63,19 @@ export function buildGuidanceResult(args: GuidanceRecord = {}): GuidanceRecord {
       },
     },
   } : {};
+  const search = workflow === 'search' || tool === 'fs_search' || tool === 'fs_search_results_read' || tool === 'fs_grep_search' ? {
+    search: {
+      preferred_tool: 'fs_search',
+      sequence: [
+        'Call fs_search with query and an explicit directory. Literal matching and line results are the safe defaults.',
+        'Choose syntax=regex only when regular-expression behavior is intended; choose result_kind=files or counts only for those jobs.',
+        'Use returned opaque continuation arguments unchanged. If result_ref is returned, page it with fs_search_results_read.',
+        'Request diagnostics only when cache, freshness, or producer-limit behavior is part of the investigation.',
+      ],
+      bounds: { default_results: 20, default_inline_chars: 6000, default_text_chars_per_match: 500, carrier_context_defense_in_depth: 8000 },
+      compatibility: 'fs_grep_search remains available for regex-oriented legacy calls, but fs_search is the preferred agent-facing contract.',
+    },
+  } : {};
   return {
     schema: 'narada.mcp_surface.guidance.v0',
     status: 'ok',
@@ -80,6 +93,7 @@ export function buildGuidanceResult(args: GuidanceRecord = {}): GuidanceRecord {
     ...patchRecovery,
     ...repositoryInventory,
     ...fileMetrics,
+    ...search,
     first_use: [
       'Call this guidance command when the surface is unfamiliar, when a refusal/error is unclear, or before composing a multi-step workflow.',
       'Inspect policy/doctor/status tools before mutation or open-world operations.',
@@ -88,7 +102,7 @@ export function buildGuidanceResult(args: GuidanceRecord = {}): GuidanceRecord {
     ],
     tool_preference: [
       { step: 'orient', guidance: 'Use *_guidance first when uncertain, then policy/doctor/status tools.' },
-      { step: 'discover', guidance: 'Use bounded list/search/query commands for discovery; use fs_file_metrics for metadata-only line/byte counts and fs_repository_inventory for repository-oriented source/artifact discovery.' },
+      { step: 'discover', guidance: 'Use fs_search for bounded content discovery; use fs_file_metrics for metadata-only line/byte counts and fs_repository_inventory for repository-oriented source/artifact discovery.' },
       { step: 'inspect', guidance: 'Use show/read/detail commands for exact targets before mutation.' },
       { step: 'mutate', guidance: 'Only call mutation tools after policy allows it and intent, target, and expected result are explicit.' },
       { step: 'verify', guidance: 'Read back state with the owning surface after any mutation.' }
@@ -97,12 +111,15 @@ export function buildGuidanceResult(args: GuidanceRecord = {}): GuidanceRecord {
       { intent: 'First use', call: 'fs_guidance({})' },
       { intent: 'Tool-specific help', call: "fs_guidance({ tool: \"<tool_name>\" })" },
       { intent: 'Workflow-specific help', call: "fs_guidance({ workflow: \"<workflow_name>\" })" },
-      { intent: 'Repository inventory', call: 'fs_repository_inventory({ directory: ".", pattern: "**/*", limit: 100 })' }
+      { intent: 'Repository inventory', call: 'fs_repository_inventory({ directory: ".", pattern: "**/*", limit: 100 })' },
+      { intent: 'Find matching lines safely', call: 'fs_search({ query: "symbolName", directory: "packages/example/src" })' },
+      { intent: 'Intentional regular expression', call: 'fs_search({ query: "symbol(Name|Kind)", directory: "packages/example/src", syntax: "regex" })' }
     ],
     anti_patterns: [
       'Do not guess hidden state from a tool name; use doctor/status/list/show tools for evidence.',
       'Do not treat assistant text as the durable record when structuredContent is present.',
       'Do not fan out full-content fs_read_file calls when only line counts or byte sizes are needed; use fs_file_metrics with a bounded limit and page deliberately.',
+      'Do not raise max_results to compensate for an overly broad query; inspect the bounded first page, narrow scope, or follow the returned continuation.',
       'Do not bypass the owning surface with shell scripts when a governed MCP tool exists.',
       'Do not create or edit ad-hoc executable wrappers (.cmd/.bat or scripts under .ai/tmp/.ai/temp) to run commands; transient executable writes are refused. Call structured_command_start or the owning MCP surface directly. File creation is not execution evidence.',
       'Do not continue after malformed payloads, empty refs, or ambiguous target identifiers; stop and repair the input.'

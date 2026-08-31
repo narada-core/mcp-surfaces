@@ -95,6 +95,10 @@ function textComponent(text: string): { render: (width: number) => string[] } {
   };
 }
 
+function mutedText(theme: any, text: string): string {
+  return typeof theme?.fg === "function" ? theme.fg("muted", text) : text;
+}
+
 __NARADA_MCP_RESULT_PRESENTATION__
 function carrierRoutingGuidance(serverName: string, toolName: string): string {
   if (serverName === "structured-command" && toolName.startsWith("structured_command_")) {
@@ -319,12 +323,13 @@ export default function naradaMcpCarrier(pi: any): void {
                 isError: result?.isError === true,
               };
             },
-            renderResult: (result: any, options: { expanded: boolean }) => {
+            renderResult: (result: any, options: { expanded: boolean }, theme: any) => {
               const fullText = result?.details?.expandedText ?? resultText(result);
               if (options.expanded || result?.details?.collapseByDefault === false) {
                 return textComponent(fullText || JSON.stringify(result?.details ?? null));
               }
-              return textComponent(`${result?.details?.uiSummary ?? summarizeMcpResult(result, fullText)} — press Ctrl+O to expand`);
+              const summary = result?.details?.uiSummary ?? summarizeMcpResult(result, fullText);
+              return textComponent(`${summary}${mutedText(theme, " — press Ctrl+O to expand")}`);
             },
           });
         }

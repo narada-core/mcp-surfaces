@@ -120,7 +120,11 @@ function renderReadFileResult(record: any) {
 }
 
 function renderSearchResult(toolName: any, record: any, renderContext: Record<string, unknown>= {}) {
-  const matches = Array.isArray(record.matches) ? record.matches.map(String) : [];
+  const matches = Array.isArray(record.matches)
+    ? record.matches.map(String)
+    : Array.isArray(record.match_objects)
+      ? record.match_objects.map((item: any) => item.text !== undefined ? `${item.path}:${item.line}: ${item.text}` : item.count !== undefined ? `${item.path}: ${item.count}` : String(item.path))
+      : [];
   const mode = toolName === 'fs_grep_search' ? [`mode: ${record.output_mode ?? renderContext.grepOutputMode ?? 'files_with_matches'}`] : [];
   return compactLines([
     `${toolName}: ${record.status ?? 'ok'}`,

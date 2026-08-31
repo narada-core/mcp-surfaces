@@ -1,6 +1,7 @@
 # Filesystem Search: Excellent Agent Experience
 
-Status: target interaction definition and initial ATER assessment.
+Status: target interaction definition with the first implementation increment
+verified on 2026-08-31.
 
 Assessment target: `@narada-core/local-filesystem-mcp` search tools, with
 `fs_grep_search` as the current implementation and a versioned filesystem
@@ -19,6 +20,15 @@ Excellent AX is not a compact renderer over an oversized protocol result. It is
 coherent behavior across discovery, producer limits, structured results,
 transport materialization, model context, operator UI, continuation, and
 restart.
+
+The first implementation increment adds `fs_search`, one authoritative item
+array, literal-safe defaults, explicit result kinds, small count and item-text
+bounds, opaque direct continuation, on-demand diagnostics, and immutable
+readback for an oversized returned page. The compatibility
+`fs_grep_search` path now uses lower defaults and materializes oversized
+results. Cross-child-restart continuation of an unmaterialized search snapshot
+remains an explicit follow-up; process-local cursors must not be described as
+durable.
 
 ## 1. Charter
 

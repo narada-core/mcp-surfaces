@@ -104,6 +104,10 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     const smallCollapsed = registered[0].renderResult(result, { expanded: false }).render(160).join('\n');
     assert.match(smallCollapsed, /MCP result.*Ctrl\+O to expand/);
     assert.doesNotMatch(smallCollapsed, /schema_lease/);
+    const themedCollapsed = registered[0].renderResult(result, { expanded: false }, {
+      fg(kind, text) { return `<${kind}>${text}</${kind}>`; },
+    }).render(160).join('\n');
+    assert.match(themedCollapsed, /<muted> — press Ctrl\+O to expand<\/muted>/);
 
     for (const [value, expected] of [
       ['stat', /file file\.md · 14k bytes/],
