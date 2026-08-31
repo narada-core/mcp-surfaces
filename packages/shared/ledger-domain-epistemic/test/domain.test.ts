@@ -19,8 +19,8 @@ assert.equal(domain.identity.tool_prefix, 'epistemic_graph');
 assert.equal(domain.identity.error_schema_id, 'narada.epistemic.error.v1');
 
 // Every tool name carries the domain tool prefix, and the tool list is the
-// engine's generation target: 25 tools, exactly one guidance tool.
-assert.equal(domain.tools.length, 25);
+// engine's generation target: 27 tools, exactly one guidance tool.
+assert.equal(domain.tools.length, 27);
 for (const tool of domain.tools) {
   assert.ok(tool.name.startsWith(domain.identity.tool_prefix + '_'), `tool name lacks prefix: ${tool.name}`);
   assert.equal(tool.annotations.destructiveHint, false, `${tool.name} destructiveHint`);
@@ -88,6 +88,23 @@ assert.deepEqual(domain.query.communication.legacy_read_aliases, ['communication
 assert.equal(domain.query.communication.legacy_write_policy, 'reject_with_replacement');
 assert.ok(domain.tools.some((tool: any) => tool.name === 'epistemic_graph_communication_migration_preflight'));
 assert.ok(domain.tools.some((tool: any) => tool.name === 'epistemic_graph_communication_migrate'));
+assert.ok(domain.entities.core_kinds.includes('research_issue'));
+assert.ok(domain.relations.core.includes('issue_child_of'));
+assert.ok(domain.relations.core.includes('blocked_by'));
+const issueTransition = domain.tools.find((tool: any) => tool.name === 'epistemic_graph_issue_tree_transition');
+const validateIssueTransition = ajv.compile(issueTransition.inputSchema);
+assert.equal(validateIssueTransition({
+  actor: 'operator',
+  authority_basis: { kind: 'operator_direct_instruction' },
+  tree_id: 'rh-program',
+  nodes: [{ node_id: 'issue:1', title: 'Establish seam control', version: 1, score: 0.8 }],
+}), true);
+assert.equal(validateIssueTransition({
+  actor: 'operator',
+  authority_basis: { kind: 'operator_direct_instruction' },
+  tree_id: 'rh-program',
+  nodes: [{ node_id: 'issue:1', title: 'Bad state', version: 1, state: 'unknown' }],
+}), false);
 const submitReviewAdmit = domain.tools.find((tool: any) => tool.name === 'epistemic_graph_submit_review_admit');
 const validateSubmitReviewAdmit = ajv.compile(submitReviewAdmit.inputSchema);
 assert.equal(validateSubmitReviewAdmit({ payload_ref: 'mcp_payload:epistemic-submit@v1' }), true);

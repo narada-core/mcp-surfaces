@@ -57,7 +57,7 @@ Resulting layout for epistemic-graph:
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `core_kinds` | string[] | Core entity kinds: `problem`, `conjecture`, `claim`, `criticism`, `test`, `source`. |
+| `core_kinds` | string[] | Core entity kinds include `problem`, `conjecture`, `claim`, `criticism`, `test`, `source`, and the native `research_issue` workflow kind. |
 | `required_fields.always` | string[] | Fields every `entity.declare` must carry beyond `op`: `kind`, `title`. |
 | `required_fields.conditional` | object[] | Conditional requirements. One entry: `{ "when_kind": "source", "requires": ["version", "locator"] }` — a `source` entity must carry `version` and `locator`. Applies only to the `source` kind, never to extension kinds. |
 | `extension_rule` | object | Extension-kind rule: any kind outside `core_kinds` must be namespaced (must contain `:`), e.g. `cintamani:experiment`. Violations refuse with `invalid_entity_kind`. Extension kinds carry their full structured record in additional payload fields. |
@@ -66,7 +66,7 @@ Resulting layout for epistemic-graph:
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `core` | string[] | Core relations: `addresses`, `criticizes`, `tests`, `depends_on`, `derived_from`, `transforms`, `supersedes`. |
+| `core` | string[] | Core relations include `addresses`, `criticizes`, `tests`, `depends_on`, `derived_from`, `transforms`, `supersedes`, `issue_child_of`, and `blocked_by`. |
 | `extension_pattern` | string (regex) | Schema-level extension relation pattern: `^[A-Za-z][A-Za-z0-9_.-]*:[A-Za-z][A-Za-z0-9_.-]*$`, e.g. `marici:refines`. |
 | `extension_rule` | string | Validation-level rule: any relation outside `core` must be namespaced (must contain `:`); violations refuse with `invalid_relation_type`. |
 

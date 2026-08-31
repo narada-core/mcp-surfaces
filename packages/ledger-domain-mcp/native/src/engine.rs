@@ -852,6 +852,7 @@ impl Engine {
             | "sequence_claims" => Some("sequences"),
             "proposal_submit"
             | "operations_batch"
+            | "issue_tree_transition"
             | "submit_review_admit"
             | "capture_sources"
             | "proposal_read"
@@ -952,6 +953,8 @@ impl Engine {
                     .map_err(|error| self.enrich_payload_ref_refusal(error, payload_ref, name))
             }
             "operations_batch" => self.operations_batch(site_root, args),
+            "issue_tree_transition" => self.issue_tree_transition(site_root, args),
+            "issue_tree_frontier" => self.issue_tree_frontier(site_root, args),
             "submit_review_admit" => {
                 let payload_ref = args.get("payload_ref").and_then(Value::as_str);
                 let resolved = self.resolve_payload_arguments(site_root, args)?;
@@ -1670,6 +1673,133 @@ impl Engine {
             }));
         }
         Ok(receipt)
+    }
+
+    fn issue_tree_transition(&self, root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
+        let tree_id = args.get("tree_id").and_then(Value::as_str).filter(|v| !v.is_empty())
+            .ok_or_else(|| self.error("issue_tree_invalid", "tree_id is required", Value::Null))?;
+        let nodes = args.get("nodes").and_then(Value::as_array).filter(|v| !v.is_empty())
+            .ok_or_else(|| self.error("issue_tree_invalid", "nodes must be a non-empty array", Value::Null))?;
+        let mut operations = Vec::new();
+        for (index, value) in nodes.iter().enumerate() {
+            let node = value.as_object().ok_or_else(|| self.error("issue_tree_invalid", "each node must be an object", json!({"node_index":index})))?;
+            let node_id = node.get("node_id").and_then(Value::as_str).filter(|v| !v.is_empty())
+                .ok_or_else(|| self.error("issue_tree_invalid", "node_id is required", json!({"node_index":index})))?;
+            let title = node.get("title").and_then(Value::as_str).filter(|v| !v.is_empty())
+                .ok_or_else(|| self.error("issue_tree_invalid", "title is required", json!({"node_index":index})))?;
+            let version = node.get("version").and_then(Value::as_u64).filter(|v| *v > 0)
+                .ok_or_else(|| self.error("issue_tree_invalid", "version must be a positive integer", json!({"node_index":index})))?;
+            let state = node.get("state").and_then(Value::as_str).unwrap_or("active");
+            if !["active", "blocked", "disposed"].contains(&state) {
+                return Err(self.error("issue_tree_invalid", "state must be active, blocked, or disposed", json!({"node_index":index,"state":state})));
+            }
+            let disposition = node.get("disposition").and_then(Value::as_str);
+            if disposition.is_some_and(|v| !["resolved", "rejected", "deferred", "superseded", "split"].contains(&v)) {
+                return Err(self.error("issue_tree_invalid", "unsupported disposition", json!({"node_index":index,"disposition":disposition})));
+            }
+            if (state == "disposed") != disposition.is_some() {
+                return Err(self.error("issue_tree_invalid", "disposed nodes require a disposition and non-disposed nodes forbid one", json!({"node_index":index})));
+            }
+            let predecessor = node.get("predecessor_id").and_then(Value::as_str);
+            if (version == 1 && predecessor.is_some()) || (version > 1 && predecessor.is_none()) {
+                return Err(self.error("issue_tree_invalid", "version 1 forbids a predecessor; later versions require one", json!({"node_index":index,"version":version})));
+            }
+            let blockers = node.get("blocker_ids").and_then(Value::as_array).cloned().unwrap_or_default();
+            if state == "blocked" && blockers.is_empty() {
+                return Err(self.error("issue_tree_invalid", "blocked nodes require at least one blocker_id", json!({"node_index":index})));
+            }
+            let score = node.get("score").and_then(Value::as_f64).unwrap_or(0.0);
+            if !score.is_finite() || !(0.0..=1.0).contains(&score) {
+                return Err(self.error("issue_tree_invalid", "score must be finite and between 0 and 1", json!({"node_index":index})));
+            }
+            let mut entity = Map::new();
+            entity.insert("op".into(), json!("entity.declare"));
+            entity.insert("entity_id".into(), json!(node_id));
+            entity.insert("kind".into(), json!("research_issue"));
+            entity.insert("title".into(), json!(title));
+            entity.insert("version".into(), json!(version.to_string()));
+            entity.insert("tree_id".into(), json!(tree_id));
+            entity.insert("state".into(), json!(state));
+            entity.insert("score".into(), json!(score));
+            if let Some(value) = disposition { entity.insert("disposition".into(), json!(value)); }
+            if let Some(value) = node.get("rationale") { entity.insert("rationale".into(), value.clone()); }
+            operations.push(Value::Object(entity));
+            let mut add_relation = |relation_type: &str, target_id: &str| {
+                operations.push(json!({"op":"relation.declare","relation_type":relation_type,"source_id":node_id,"target_id":target_id}));
+            };
+            if let Some(value) = node.get("parent_id").and_then(Value::as_str) { add_relation("issue_child_of", value); }
+            if let Some(value) = predecessor { add_relation("supersedes", value); }
+            for blocker in blockers {
+                let id = blocker.as_str().filter(|v| !v.is_empty()).ok_or_else(|| self.error("issue_tree_invalid", "blocker_ids must contain non-empty strings", json!({"node_index":index})))?;
+                add_relation("blocked_by", id);
+            }
+            for evidence in node.get("evidence_ids").and_then(Value::as_array).cloned().unwrap_or_default() {
+                let id = evidence.as_str().filter(|v| !v.is_empty()).ok_or_else(|| self.error("issue_tree_invalid", "evidence_ids must contain non-empty strings", json!({"node_index":index})))?;
+                add_relation("derived_from", id);
+            }
+        }
+        if operations.len() as u64 > self.domain.caps.operations_per_proposal.max {
+            return Err(self.error("issue_tree_limit_exceeded", "expanded transition exceeds the proposal operation cap", json!({"expanded_operations":operations.len()})));
+        }
+        let mut proposal_args = Map::new();
+        for field in ["actor", "authority_basis", "idempotency_key", "expected_ledger_head"] {
+            if let Some(value) = args.get(field) { proposal_args.insert(field.into(), value.clone()); }
+        }
+        proposal_args.insert("operations".into(), Value::Array(operations.clone()));
+        let mut receipt = self.submit_review_admit(root, &proposal_args)?;
+        if let Some(object) = receipt.as_object_mut() {
+            object.insert("issue_tree_transition".into(), json!({
+                "schema":"narada.epistemic.issue_tree_transition.v1",
+                "tree_id":tree_id,
+                "node_count":nodes.len(),
+                "expanded_operation_count":operations.len(),
+                "atomic":true,
+                "evidence_promotion":false
+            }));
+        }
+        Ok(receipt)
+    }
+
+    fn issue_tree_frontier(&self, root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
+        self.prepare(root)?;
+        let tree_id = args.get("tree_id").and_then(Value::as_str).filter(|v| !v.is_empty())
+            .ok_or_else(|| self.error("issue_tree_invalid", "tree_id is required", Value::Null))?;
+        let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(20).clamp(1, 100) as usize;
+        let db = Connection::open(self.projection_path(root)).map_err(self.db_error("projection_open_failed"))?;
+        let mut superseded = HashSet::new();
+        let mut relation_statement = db.prepare(&format!("select target_id from {} where relation_type='supersedes'", self.relation_table))
+            .map_err(self.db_error("issue_tree_frontier_prepare_failed"))?;
+        for id in relation_statement.query_map([], |row| row.get::<_, String>(0)).map_err(self.db_error("issue_tree_frontier_failed"))? {
+            superseded.insert(id.map_err(self.db_error("issue_tree_frontier_row_failed"))?);
+        }
+        let mut statement = db.prepare(&format!("select entity_id,payload_json,event_id from {} where kind='research_issue'", self.entity_table))
+            .map_err(self.db_error("issue_tree_frontier_prepare_failed"))?;
+        let mut nodes = statement.query_map([], |row| {
+            let payload = serde_json::from_str::<Value>(&row.get::<_, String>(1)?).unwrap_or(Value::Null);
+            Ok(json!({"node_id":row.get::<_,String>(0)?,"payload":payload,"event_id":row.get::<_,String>(2)?}))
+        }).map_err(self.db_error("issue_tree_frontier_failed"))?
+          .collect::<Result<Vec<_>, _>>().map_err(self.db_error("issue_tree_frontier_row_failed"))?;
+        nodes.retain(|node| node["payload"]["tree_id"].as_str() == Some(tree_id)
+            && node["payload"]["state"].as_str() != Some("disposed")
+            && !superseded.contains(node["node_id"].as_str().unwrap_or_default()));
+        nodes.sort_by(|left, right| right["payload"]["score"].as_f64().unwrap_or(0.0)
+            .partial_cmp(&left["payload"]["score"].as_f64().unwrap_or(0.0)).unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left["node_id"].as_str().cmp(&right["node_id"].as_str())));
+        let total = nodes.len();
+        nodes.truncate(limit);
+        Ok(json!({
+            "schema":"narada.epistemic.issue_tree_frontier.v1",
+            "status":"ok",
+            "tree_id":tree_id,
+            "ledger_head":self.ledger_head(root)?,
+            "frontier":nodes,
+            "returned_count":nodes.len(),
+            "total_frontier_count":total,
+            "truncated":total > limit,
+            "ordering":"score_desc_then_node_id",
+            "selection":"non_disposed_and_not_superseded",
+            "evidence_promotion":false
+        }))
     }
 
     fn proposal_submit(&self, root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
@@ -8536,6 +8666,39 @@ mod tests {
                     .contains(".next-")),
             "incremental catch-up must not create a scratch projection"
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn issue_tree_transition_is_atomic_and_frontier_is_score_ordered() {
+        let engine = engine();
+        let root = std::env::temp_dir().join(format!("epistemic-issue-tree-{}", Uuid::new_v4()));
+        let receipt = engine.issue_tree_transition(&root, &Map::from_iter([
+            ("actor".into(), json!("tester")),
+            ("authority_basis".into(), json!({"kind":"test"})),
+            ("tree_id".into(), json!("tree:rh")),
+            ("nodes".into(), json!([
+                {"node_id":"issue:root","title":"Root issue","version":1,"score":0.2},
+                {"node_id":"issue:front","title":"Priority issue","version":1,"score":0.9,"parent_id":"issue:root"}
+            ])),
+        ])).expect("atomic issue transition");
+        assert_eq!(receipt["issue_tree_transition"]["atomic"], true);
+        assert_eq!(receipt["issue_tree_transition"]["evidence_promotion"], false);
+        let frontier = engine.issue_tree_frontier(&root, &Map::from_iter([
+            ("tree_id".into(), json!("tree:rh")),
+            ("limit".into(), json!(10)),
+        ])).expect("issue frontier");
+        assert_eq!(frontier["frontier"][0]["node_id"], "issue:front");
+        assert_eq!(frontier["evidence_promotion"], false);
+        let invalid = engine.issue_tree_transition(&root, &Map::from_iter([
+            ("actor".into(), json!("tester")),
+            ("authority_basis".into(), json!({"kind":"test"})),
+            ("tree_id".into(), json!("tree:rh")),
+            ("nodes".into(), json!([
+                {"node_id":"issue:invalid","title":"Invalid blocked issue","version":1,"state":"blocked"}
+            ])),
+        ])).expect_err("blocked issue without blockers");
+        assert_eq!(invalid["code"], "issue_tree_invalid");
         let _ = fs::remove_dir_all(root);
     }
 }

@@ -18,8 +18,13 @@ operations with their validation and reference-binding rules, ID derivation
 recipes, the disposable SQLite projection DDL and fold map, query projections,
 numeric caps, the optional feature modules (proposals, sequences,
 source_inspect, snapshot, export), the verbatim `narada.epistemic.guidance.v2`
-text, and the 24 tool definitions whose input schemas are the engine's
+text, and the tool definitions whose input schemas are the engine's
 generation target.
+
+The native research-issue profile adds typed append-only issue revisions,
+hierarchy and blocker edges, atomic transition expansion, and score-ordered
+frontier reads. Evidence links remain ordinary provenance edges and are never
+automatically promoted.
 
 The descriptor declares `narada.epistemic:communication` as the sole writable
 communication kind. Legacy `communication` and `marici:communication` values
