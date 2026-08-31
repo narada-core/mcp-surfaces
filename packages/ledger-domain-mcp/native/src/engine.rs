@@ -2657,11 +2657,16 @@ impl Engine {
         }
         let sender = message_payload.get("sender").and_then(Value::as_str);
         let recipient = message_payload.get("recipient").and_then(Value::as_str);
-        if ![sender, recipient]
-            .into_iter()
-            .flatten()
-            .any(|participant| participant == reader)
-        {
+        let mut reader_is_participant = false;
+        for participant in [sender, recipient].into_iter().flatten() {
+            if participant == reader
+                || self.participant_identities_equivalent(root, participant, &reader)?
+            {
+                reader_is_participant = true;
+                break;
+            }
+        }
+        if !reader_is_participant {
             return Err(self.error(
                 "message_reader_not_participant",
                 "reader must be the sender or recipient of the message",
@@ -2757,6 +2762,66 @@ impl Engine {
             "read_at":read_at,
             "admission":admission
         }))
+    }
+
+    fn participant_identities_equivalent(
+        &self,
+        root: &Path,
+        left: &str,
+        right: &str,
+    ) -> Result<bool, Value> {
+        if left == right {
+            return Ok(true);
+        }
+        let Some(identity) = self
+            .domain
+            .query
+            .named_queries
+            .values()
+            .filter_map(Value::as_object)
+            .find_map(|config| config.get("participant_identity"))
+            .and_then(Value::as_object)
+        else {
+            return Ok(false);
+        };
+        let Some(kind) = identity.get("kind").and_then(Value::as_str) else {
+            return Ok(false);
+        };
+        let fields = identity
+            .get("alias_fields")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        let db = Connection::open(self.projection_path(root))
+            .map_err(self.db_error("projection_open_failed"))?;
+        let mut statement = db
+            .prepare(&format!(
+                "select entity_id,payload_json from {} where kind=?1",
+                self.entity_table
+            ))
+            .map_err(self.db_error("projection_identity_prepare_failed"))?;
+        let rows = statement
+            .query_map(params![kind], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(self.db_error("projection_identity_query_failed"))?;
+        for row in rows {
+            let (entity_id, payload_json) =
+                row.map_err(self.db_error("projection_identity_row_failed"))?;
+            let payload: Value = serde_json::from_str(&payload_json).unwrap_or(Value::Null);
+            let matches = |candidate: &str| {
+                entity_id == candidate
+                    || fields.iter().any(|field| {
+                        payload.get(*field).and_then(Value::as_str) == Some(candidate)
+                    })
+            };
+            if matches(left) && matches(right) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn generic_query(&self, root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
@@ -6806,6 +6871,21 @@ mod tests {
                 "communication:canonical-recipient"
             );
         }
+        let receipt = engine
+            .message_mark_read(
+                &root,
+                &Map::from_iter([
+                    ("message_id".into(), json!("communication:canonical-recipient")),
+                    ("reader".into(), json!("marici.Kitaev")),
+                    ("actor".into(), json!("protocol-test")),
+                    (
+                        "authority_basis".into(),
+                        json!({"kind":"operator_request","summary":"identity alias regression"}),
+                    ),
+                ]),
+            )
+            .expect("canonical identity marks entity-addressed message read");
+        assert_eq!(receipt["reader"], "marici.Kitaev");
         let _ = fs::remove_dir_all(root);
     }
 
