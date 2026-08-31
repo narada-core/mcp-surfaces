@@ -432,3 +432,6 @@ repository-addressable and tests must live with the owning package.
 The Pi model-context cap is a final containment control. It does not discharge
 the filesystem producer's obligation to provide economical authoritative
 results and complete recovery.
+
+The current assessment and excellent-AX target are recorded in
+`docs/ater/fs-search-excellent-ax.md`.
