@@ -53,6 +53,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
         value.payload = "x".repeat(4227 - JSON.stringify(value).length);
         return value;
       })(),
+      oversized: { schema: "narada.epistemic.query.v2", status: "ok", payload: "x".repeat(21000) },
     };
     process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: {
       content: [{ type: "text", text: "summary without lease" }],
@@ -117,6 +118,13 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       assert.match(rendered, expected);
       assert.match(rendered, /Ctrl\+O to expand/);
     }
+
+    const oversized = await registered[0].execute('call-oversized', { value: 'oversized' }, new AbortController().signal);
+    assert.ok(oversized.content[0].text.length < 1000);
+    assert.equal(JSON.parse(oversized.content[0].text).model_visible_truncated, true);
+    assert.doesNotMatch(oversized.content[0].text, /x{100}/);
+    const oversizedExpanded = registered[0].renderResult(oversized, { expanded: true }).render(160).join('\n');
+    assert.match(oversizedExpanded, /x{100}/);
 
     const largeResult = {
       content: [{ type: 'text', text: 'x'.repeat(5000) }],

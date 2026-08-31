@@ -55,6 +55,30 @@ function preservesDeliveredContent(result: any): boolean {
     && result.content.some((block: any) => block?.type === "text" && typeof block.text === "string");
 }
 
+const MAX_MODEL_VISIBLE_RESULT_CHARS = 8_000;
+
+function boundedModelContent(result: any, content: any[], rawText: string): { content: any[]; expandedText: string | null } {
+  const fullText = resultText({ content });
+  if (fullText.length <= MAX_MODEL_VISIBLE_RESULT_CHARS) return { content, expandedText: null };
+  const structured = result?.structuredContent ?? {};
+  const reference = structured.output_ref ?? structured.ref ?? structured.details_ref ?? structured.result?.output_ref ?? null;
+  const reader = structured.reader_tool ?? structured.details_reader ?? structured.result?.reader_tool ?? null;
+  const continuation = structured.result?.next_offset ?? structured.next_offset ?? structured.continuation ?? null;
+  const summary = {
+    schema: structured.schema ?? "narada.mcp_result.bounded_projection.v1",
+    status: structured.status ?? (result?.isError === true ? "error" : "ok"),
+    full_output_char_length: fullText.length,
+    model_visible_truncated: true,
+    output_ref: reference,
+    reader_tool: reader,
+    next_offset: continuation,
+    remediation: reference && reader
+      ? `Read bounded pages with ${reader} using output_ref ${reference}.`
+      : "Retry with a smaller limit or a narrower range; the full result remains available in Pi via Ctrl+O.",
+  };
+  return { content: [{ type: "text", text: JSON.stringify(summary) }], expandedText: fullText || rawText };
+}
+
 function textComponent(text: string): { render: (width: number) => string[] } {
   return {
     render(width: number): string[] {
@@ -280,8 +304,9 @@ export default function naradaMcpCarrier(pi: any): void {
                 : Array.isArray(result?.content) && result.content.length > 0
                   ? result.content
                   : [{ type: "text", text: JSON.stringify(result ?? null) }];
+              const bounded = boundedModelContent(result, content, rawText);
               return {
-                content,
+                content: bounded.content,
                 details: {
                   mcpServer: client.config.name,
                   isError: result?.isError === true,
@@ -289,12 +314,13 @@ export default function naradaMcpCarrier(pi: any): void {
                   continuation: result?.structuredContent?.result?.next_offset ?? result?.structuredContent?.next_offset ?? null,
                   uiSummary: summarizeMcpResult(result, resultText({ content })),
                   collapseByDefault: collapseMcpResultByDefault(),
+                  expandedText: bounded.expandedText,
                 },
                 isError: result?.isError === true,
               };
             },
             renderResult: (result: any, options: { expanded: boolean }) => {
-              const fullText = resultText(result);
+              const fullText = result?.details?.expandedText ?? resultText(result);
               if (options.expanded || result?.details?.collapseByDefault === false) {
                 return textComponent(fullText || JSON.stringify(result?.details ?? null));
               }
