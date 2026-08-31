@@ -20,9 +20,15 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   } else if (message.method === "tools/list") {
     process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { tools: [{ name: "fixture_echo", description: "Echo", inputSchema: { type: "object", properties: { value: { type: "string" } }, required: ["value"] } }] } }) + "\\n");
   } else if (message.method === "tools/call") {
+    const fixtures = {
+      stat: { schema: "local.filesystem.stat.v1", path: "C:/repo/file.md", relative_path: "file.md", type: "file", size: 13558 },
+      empty_range: { schema: "local.filesystem.read.v1", relative_path: "file.md", total_lines: 250, returned_lines: 0, offset: 300, requested_start_line: 300, requested_end_line: 380 },
+      replace: { schema: "local.filesystem.str_replace_file.v1", status: "replaced", relative_path: "file.md", occurrences: 1 },
+      bridge: { schema: "narada.task.inbox.bridge.v1", status: "planned", count: 0, envelopes: [] },
+    };
     process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: {
       content: [{ type: "text", text: "summary without lease" }],
-      structuredContent: { value: message.params.arguments.value, schema_lease: "lease-fixture" }
+      structuredContent: fixtures[message.params.arguments.value] ?? { value: message.params.arguments.value, schema_lease: "lease-fixture" }
     } }) + "\\n");
   }
 });
@@ -68,6 +74,21 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       schema_lease: 'lease-fixture',
     });
     assert.doesNotMatch(result.content[0].text, /summary without lease/);
+    const smallCollapsed = registered[0].renderResult(result, { expanded: false }).render(160).join('\n');
+    assert.match(smallCollapsed, /MCP result.*Ctrl\+O to expand/);
+    assert.doesNotMatch(smallCollapsed, /schema_lease/);
+
+    for (const [value, expected] of [
+      ['stat', /file file\.md · 13,558 bytes/],
+      ['empty_range', /no lines in 300–380; file\.md has 250 lines/],
+      ['replace', /replaced 1 occurrence in file\.md/],
+      ['bridge', /planned · 0 envelopes/],
+    ]) {
+      const fixture = await registered[0].execute('call-' + value, { value }, new AbortController().signal);
+      const rendered = registered[0].renderResult(fixture, { expanded: false }).render(160).join('\n');
+      assert.match(rendered, expected);
+      assert.match(rendered, /Ctrl\+O to expand/);
+    }
 
     const largeResult = {
       content: [{ type: 'text', text: 'x'.repeat(5000) }],

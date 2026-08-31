@@ -77,11 +77,36 @@ function resultSummary(result: any, fullText: string): string {
   const path = structured?.relative_path ?? structured?.path;
   const lines = structured?.returned_lines;
   if (typeof path === "string" && typeof lines === "number") {
+    if (lines === 0 && typeof structured?.total_lines === "number") {
+      const start = structured?.requested_start_line ?? structured?.offset;
+      const end = structured?.requested_end_line;
+      const range = typeof start === "number"
+        ? `${start}${typeof end === "number" ? `–${end}` : ""}`
+        : "requested range";
+      return `no lines in ${range}; ${path} has ${structured.total_lines} lines`;
+    }
     return `read ${path} (${lines} lines)`;
+  }
+  if (structured?.schema === "local.filesystem.stat.v1" && typeof path === "string") {
+    const type = typeof structured?.type === "string" ? structured.type : "path";
+    const size = typeof structured?.size === "number"
+      ? ` · ${structured.size.toLocaleString("en-US")} bytes`
+      : "";
+    return `${type} ${path}${size}`;
+  }
+  if (structured?.schema === "local.filesystem.str_replace_file.v1" && typeof path === "string") {
+    const occurrences = typeof structured?.occurrences === "number" ? structured.occurrences : 1;
+    return `replaced ${occurrences} occurrence${occurrences === 1 ? "" : "s"} in ${path}`;
+  }
+  if (structured?.schema === "narada.task.inbox.bridge.v1") {
+    const count = typeof structured?.count === "number" ? structured.count : 0;
+    const status = typeof structured?.status === "string" ? structured.status : "ok";
+    return `${status} · ${count} envelope${count === 1 ? "" : "s"}`;
   }
   const summary = structured?.result_summary;
   const schema = summary?.schema ?? structured?.schema;
   const status = summary?.status ?? structured?.status;
+  if (typeof status === "string" && typeof path === "string") return `${status} ${path}`;
   const identity = [schema, status].filter((value) => typeof value === "string").join(": ");
   const chars = fullText.length.toLocaleString("en-US");
   return `${identity || "MCP result"} (${chars} characters)`;
@@ -90,7 +115,8 @@ function resultSummary(result: any, fullText: string): string {
 function alwaysCollapseResult(result: any): boolean {
   const structured = result?.structuredContent;
   const produced = structured?.result;
-  return structured?.result_bounded === true
+  return structured !== undefined
+    || structured?.result_bounded === true
     || produced?.result_materialized === true
     || produced?.truncated === true
     || produced?.output_truncated === true;
