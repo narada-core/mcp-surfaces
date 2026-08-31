@@ -435,3 +435,8 @@ results and complete recovery.
 
 The current assessment and excellent-AX target are recorded in
 `docs/ater/fs-search-excellent-ax.md`.
+
+The focused issue-tree traversal application is recorded in
+`docs/ater/epistemic-issue-tree-excellent-ax.md`. It covers objective-to-tree
+resolution, unique selected-leaf semantics, frontier completeness, append-only
+transition recovery, and pointer-only compaction rehydration.
