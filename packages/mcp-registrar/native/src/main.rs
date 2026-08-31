@@ -3907,18 +3907,21 @@ fn site_unbind(contract: &Value, args: &Value) -> Result<Value, String> {
 }
 
 fn write_site_registry(contract: &Value, site: &Value) -> Result<Value, String> {
-    let registry = build_site_surface_registry(contract, site)?;
+    let mut registry = build_site_surface_registry(contract, site)?;
     let path = capability_registry_path(Path::new(site["root"].as_str().unwrap_or("")));
     fs::create_dir_all(
         path.parent()
             .ok_or("registrar_site_registry_path_invalid")?,
     )
     .map_err(|error| error.to_string())?;
-    fs::write(
-        &path,
-        serde_json::to_string_pretty(&registry).map_err(|error| error.to_string())? + "\n",
-    )
-    .map_err(|error| error.to_string())?;
+    let registry_changed = preserve_existing_registry_when_semantically_equal(&path, &mut registry);
+    if registry_changed {
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&registry).map_err(|error| error.to_string())? + "\n",
+        )
+        .map_err(|error| error.to_string())?;
+    }
     let surfaces = registry["surfaces"].as_array().cloned().unwrap_or_default();
     let tools = surfaces
         .iter()
@@ -3929,8 +3932,30 @@ fn write_site_registry(contract: &Value, site: &Value) -> Result<Value, String> 
         })
         .sum::<usize>();
     Ok(
-        json!({"status":"synced","site_id":site["site_id"],"path":path_text(&path),"surface_count":surfaces.len(),"tool_count":tools}),
+        json!({"status":"synced","site_id":site["site_id"],"path":path_text(&path),"surface_count":surfaces.len(),"tool_count":tools,"registry_changed":registry_changed}),
     )
+}
+
+fn preserve_existing_registry_when_semantically_equal(path: &Path, registry: &mut Value) -> bool {
+    let Ok(existing_text) = fs::read_to_string(path) else {
+        return true;
+    };
+    let Ok(existing) = serde_json::from_str::<Value>(&existing_text) else {
+        return true;
+    };
+    let mut existing_semantic = existing.clone();
+    let mut next_semantic = registry.clone();
+    if let Some(value) = existing_semantic.as_object_mut() {
+        value.remove("generated_at");
+    }
+    if let Some(value) = next_semantic.as_object_mut() {
+        value.remove("generated_at");
+    }
+    if existing_semantic != next_semantic {
+        return true;
+    }
+    *registry = existing;
+    false
 }
 
 fn required_argument(args: &Value, name: &str, code: &str) -> Result<String, String> {
@@ -4685,8 +4710,9 @@ fn site_surface_registry_sync(contract: &Value, args: &Value) -> Result<Value, S
     let binding_refresh = refresh_site_sidecar_bindings(contract, &site).map_err(|error| {
         format!("registrar_site_binding_refresh_failed:{requested}:{error}")
     })?;
-    let registry = build_site_surface_registry(contract, &site)
+    let mut registry = build_site_surface_registry(contract, &site)
         .map_err(|error| format!("registrar_site_registry_build_failed:{requested}:{error}"))?;
+    let registry_changed = preserve_existing_registry_when_semantically_equal(&path, &mut registry);
     let parent = path
         .parent()
         .ok_or("registrar_site_registry_path_invalid")?;
@@ -4696,24 +4722,26 @@ fn site_surface_registry_sync(contract: &Value, args: &Value) -> Result<Value, S
             path_text(parent)
         )
     })?;
-    let temporary = path.with_extension(format!("json.tmp-{}", std::process::id()));
-    fs::write(
-        &temporary,
-        serde_json::to_string_pretty(&registry).map_err(|error| error.to_string())? + "\n",
-    )
-    .map_err(|error| {
-        format!(
-            "registrar_site_registry_write_failed:{}:{error}",
-            path_text(&temporary)
+    if registry_changed {
+        let temporary = path.with_extension(format!("json.tmp-{}", std::process::id()));
+        fs::write(
+            &temporary,
+            serde_json::to_string_pretty(&registry).map_err(|error| error.to_string())? + "\n",
         )
-    })?;
-    fs::rename(&temporary, &path).map_err(|error| {
-        format!(
-            "registrar_site_registry_rename_failed:{}:{}:{error}",
-            path_text(&temporary),
-            path_text(&path)
-        )
-    })?;
+        .map_err(|error| {
+            format!(
+                "registrar_site_registry_write_failed:{}:{error}",
+                path_text(&temporary)
+            )
+        })?;
+        fs::rename(&temporary, &path).map_err(|error| {
+            format!(
+                "registrar_site_registry_rename_failed:{}:{}:{error}",
+                path_text(&temporary),
+                path_text(&path)
+            )
+        })?;
+    }
     let surfaces = registry["surfaces"].as_array().cloned().unwrap_or_default();
     let tool_count = surfaces
         .iter()
@@ -4724,7 +4752,7 @@ fn site_surface_registry_sync(contract: &Value, args: &Value) -> Result<Value, S
         })
         .sum::<usize>();
     Ok(
-        json!({"schema":"narada.registrar.site_surface_registry_sync.v1","status":"synced","site_id":site["site_id"],"path":path_text(&path),"surface_count":surfaces.len(),"tool_count":tool_count,"binding_refresh":binding_refresh,"bounded":true}),
+        json!({"schema":"narada.registrar.site_surface_registry_sync.v1","status":"synced","site_id":site["site_id"],"path":path_text(&path),"surface_count":surfaces.len(),"tool_count":tool_count,"registry_changed":registry_changed,"binding_refresh":binding_refresh,"bounded":true}),
     )
 }
 
@@ -5379,6 +5407,26 @@ mod tests {
     #[test]
     fn embedded_native_contract_is_valid() {
         validate_contract(&embedded_contract()).unwrap();
+    }
+
+    #[test]
+    fn semantic_registry_equality_preserves_the_existing_generation() {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = env::temp_dir().join(format!(
+            "narada-registry-semantic-equality-{}-{suffix}.json",
+            std::process::id()
+        ));
+        let existing = json!({"generated_at":"2026-01-01T00:00:00Z","surfaces":[{"id":"one"}]});
+        fs::write(&path, serde_json::to_vec(&existing).unwrap()).unwrap();
+        let mut equivalent = json!({"generated_at":"2026-02-01T00:00:00Z","surfaces":[{"id":"one"}]});
+        assert!(!preserve_existing_registry_when_semantically_equal(&path, &mut equivalent));
+        assert_eq!(equivalent, existing);
+        let mut changed = json!({"generated_at":"2026-02-01T00:00:00Z","surfaces":[{"id":"two"}]});
+        assert!(preserve_existing_registry_when_semantically_equal(&path, &mut changed));
+        fs::remove_file(path).unwrap();
     }
 
     #[test]

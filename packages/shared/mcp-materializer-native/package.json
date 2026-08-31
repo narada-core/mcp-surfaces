@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "license": "Apache-2.0",
   "private": true,
+  "type": "module",
   "description": "Standalone native authority for deterministic, transactional carrier materialization.",
   "scripts": {
     "build:native": "cargo run --release --locked --manifest-path native/Cargo.toml -- publish --artifact-root dist/native",

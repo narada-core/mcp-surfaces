@@ -6,9 +6,31 @@ import { pathToFileURL } from 'node:url';
 import test from 'node:test';
 
 const templatePath = new URL('../assets/pi-mcp-extension.ts', import.meta.url);
+const presentationPath = new URL('../assets/mcp-result-presentation.ts', import.meta.url);
+const presentation = await import(presentationPath.href);
+
+async function materializedTemplate(servers) {
+  const [template, presentation] = await Promise.all([
+    readFile(templatePath, 'utf8'),
+    readFile(presentationPath, 'utf8'),
+  ]);
+  return template
+    .replace('__NARADA_MCP_RESULT_PRESENTATION__', presentation)
+    .replace('__NARADA_PI_MCP_SERVERS__', JSON.stringify(servers));
+}
+
+test('carrier-neutral MCP presentation uses authoritative compact quantities and grammar', () => {
+  assert.equal(presentation.compactQuantity(4227), '4.2k');
+  assert.equal(presentation.summarizeMcpResult({}, 'x'), 'MCP result (1 character)');
+  assert.equal(presentation.summarizeMcpResult({
+    structuredContent: { schema: 'narada.mcp_loader.result_page.v1', full_output_char_length: 4227 },
+  }, 'short transport text'), 'MCP loader result page · 4.2k characters');
+  assert.equal(presentation.collapseMcpResultByDefault(), true);
+});
 
 test('generated Pi extension handshakes, registers, calls, and closes admitted MCP server', async () => {
   const root = await mkdtemp(join(tmpdir(), 'narada-pi-extension-'));
+  let shutdown;
   try {
     const serverPath = join(root, 'server.mjs');
     await writeFile(serverPath, `
@@ -23,10 +45,11 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     const fixtures = {
       stat: { schema: "local.filesystem.stat.v1", path: "C:/repo/file.md", relative_path: "file.md", type: "file", size: 13558 },
       empty_range: { schema: "local.filesystem.read.v1", relative_path: "file.md", total_lines: 250, returned_lines: 0, offset: 300, requested_start_line: 300, requested_end_line: 380 },
+      empty_valid_range: { schema: "local.filesystem.read.v1", relative_path: "file.md", total_lines: 250, returned_lines: 0, offset: 200, requested_start_line: 200, requested_end_line: 200 },
       replace: { schema: "local.filesystem.str_replace_file.v1", status: "replaced", relative_path: "file.md", occurrences: 1 },
       bridge: { schema: "narada.task.inbox.bridge.v1", status: "planned", count: 0, envelopes: [] },
       generic_large: (() => {
-        const value = { schema: "narada.mcp_loader.result_page.v1", payload: "" };
+        const value = { schema: "narada.mcp_loader.result_page.v1", full_output_char_length: 4227, payload: "" };
         value.payload = "x".repeat(4227 - JSON.stringify(value).length);
         return value;
       })(),
@@ -46,10 +69,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       enabled: true,
       startupTimeoutMs: 2000,
     }];
-    const source = (await readFile(templatePath, 'utf8')).replace(
-      '__NARADA_PI_MCP_SERVERS__',
-      JSON.stringify(servers),
-    );
+    const source = await materializedTemplate(servers);
     const extensionPath = join(root, 'index.ts');
     await writeFile(extensionPath, source, 'utf8');
     const extension = (await import(pathToFileURL(extensionPath).href)).default;
@@ -68,6 +88,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       },
     };
     extension(pi);
+    shutdown = () => handlers.get('session_shutdown')?.();
     await handlers.get('session_start')?.({}, { ui: { notify() {} } });
 
     assert.equal(registered.length, 1);
@@ -84,11 +105,12 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     assert.doesNotMatch(smallCollapsed, /schema_lease/);
 
     for (const [value, expected] of [
-      ['stat', /file file\.md · 13,558 bytes/],
-      ['empty_range', /no lines in 300–380; file\.md has 250 lines/],
+      ['stat', /file file\.md · 14k bytes/],
+      ['empty_range', /range 300–380 is past EOF; file\.md has 250 lines/],
+      ['empty_valid_range', /no lines returned from 200–200; file\.md has 250 lines/],
       ['replace', /replaced 1 occurrence in file\.md/],
       ['bridge', /planned · 0 envelopes/],
-      ['generic_large', /narada\.mcp_loader\.result_page\.v1 \(4\.2k characters\)/],
+      ['generic_large', /MCP loader result page · 4\.2k characters/],
     ]) {
       const fixture = await registered[0].execute('call-' + value, { value }, new AbortController().signal);
       const rendered = registered[0].renderResult(fixture, { expanded: false }).render(160).join('\n');
@@ -106,8 +128,8 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     const expanded = registered[0].renderResult(largeResult, { expanded: true });
     assert.match(expanded.render(120).join('\n'), /x{100}/);
 
-    await handlers.get('session_shutdown')?.();
   } finally {
+    await shutdown?.();
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -151,10 +173,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   }
 });
 `, 'utf8');
-    const source = (await readFile(templatePath, 'utf8')).replace(
-      '__NARADA_PI_MCP_SERVERS__',
-      JSON.stringify([{ name: 'task-lifecycle', command: process.execPath, args: [serverPath], enabled: true, startupTimeoutMs: 2000 }]),
-    );
+    const source = await materializedTemplate([{ name: 'task-lifecycle', command: process.execPath, args: [serverPath], enabled: true, startupTimeoutMs: 2000 }]);
     const extensionPath = join(root, 'index.ts');
     await writeFile(extensionPath, source, 'utf8');
     const extension = (await import(`${pathToFileURL(extensionPath).href}?projection=1`)).default;
@@ -189,10 +208,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   }
 });
 `, 'utf8');
-    const source = (await readFile(templatePath, 'utf8')).replace(
-      '__NARADA_PI_MCP_SERVERS__',
-      JSON.stringify([{ name: 'fixture', command: process.execPath, args: [serverPath], enabled: true, startupTimeoutMs: 2000 }]),
-    );
+    const source = await materializedTemplate([{ name: 'fixture', command: process.execPath, args: [serverPath], enabled: true, startupTimeoutMs: 2000 }]);
     const extensionPath = join(root, 'index.ts');
     await writeFile(extensionPath, source, 'utf8');
     const extension = (await import(`${pathToFileURL(extensionPath).href}?budget=1`)).default;

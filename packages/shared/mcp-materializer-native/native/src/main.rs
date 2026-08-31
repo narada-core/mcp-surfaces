@@ -2406,11 +2406,15 @@ fn emit_carrier(carrier: &CarrierInput) -> Result<Vec<u8>, Failure> {
 
 fn emit_pi(carrier: &CarrierInput) -> Result<Vec<u8>, Failure> {
     const TEMPLATE: &str = include_str!("../../assets/pi-mcp-extension.ts");
+    const PRESENTATION: &str = include_str!("../../assets/mcp-result-presentation.ts");
     const PLACEHOLDER: &str = "__NARADA_PI_MCP_SERVERS__";
-    if TEMPLATE.matches(PLACEHOLDER).count() != 1 {
+    const PRESENTATION_PLACEHOLDER: &str = "__NARADA_MCP_RESULT_PRESENTATION__";
+    if TEMPLATE.matches(PLACEHOLDER).count() != 1
+        || TEMPLATE.matches(PRESENTATION_PLACEHOLDER).count() != 1
+    {
         return Err(Failure::new(
             "materializer_pi_template_invalid",
-            "Pi extension template must contain exactly one server placeholder",
+            "Pi extension template must contain exactly one server and presentation placeholder",
         ));
     }
     let servers = carrier
@@ -2433,7 +2437,10 @@ fn emit_pi(carrier: &CarrierInput) -> Result<Vec<u8>, Failure> {
         })
         .collect::<Vec<_>>();
     let encoded = serde_json::to_string(&servers).map_err(json_failure)?;
-    Ok(TEMPLATE.replace(PLACEHOLDER, &encoded).into_bytes())
+    Ok(TEMPLATE
+        .replace(PRESENTATION_PLACEHOLDER, PRESENTATION)
+        .replace(PLACEHOLDER, &encoded)
+        .into_bytes())
 }
 
 fn emit_json_carrier(carrier: &CarrierInput, field: &str) -> Result<Vec<u8>, Failure> {
