@@ -76,6 +76,7 @@ workspace is the canonical Site root, `.narada` is the control root, and
 - Root `pnpm test` runs the boundary gates and every package under this repository's `./packages/**`; linked sibling workspaces may provide dependencies but their own test suites remain owned by those repositories.
 - The root `README.md` gives repo-level framing; each package has its own `README.md` with setup details.
 - Key docs: `docs/mcp-taxonomy.md` (generic versus Narada-specific split), `docs/mcp-wiring.md` and `docs/mcp-injection-scopes.md` (how surfaces reach carriers and sites), `docs/mcp-surfaces-target-shape.md` (target architecture), `docs/mcp-runtime-memory-observation.md` (authority-bound memory attribution), `docs/mcp-output-refusal-conventions.md` (output-ref and refusal patterns).
+- Agent-facing interaction contracts are assessed through the normative Agent Tool Ergonomics Review in `docs/agent-tool-ergonomics-review.md`. Run it for new surfaces, potentially large tools, material workflow changes, and incidents involving context flooding, inaccessible results, unsafe retry, or ambiguous completion.
 - Task Lifecycle MCP runtime startup is prepared-only: run `task-lifecycle-mcp --prepare --site-root <site-root>` explicitly before attaching a stateful runtime; see `docs/task-lifecycle-preparation.md` for the readiness contract and remediation path.
 
 ## Carrier and Site MCP Fabric
@@ -146,6 +147,7 @@ Use this surface for any MCP usage friction, runtime failures, schema issues, or
 - Keep MCP tool schemas explicit and conservative: no broad shell strings, wildcard filesystem access, or implicit mutation paths.
 - Keep transport helpers generic. Do not add Narada task-domain behavior to `@narada-core/mcp-transport`.
 - Model-facing MCP tool output that can exceed a small inline envelope must pass through the shared `mcp-transport` output-ref boundary or an explicit package-owned equivalent. Large domain results should be materialized and returned with a bounded inline envelope plus a reader tool.
+- Apply `docs/agent-tool-ergonomics-review.md` when defining or materially changing agent-facing tools. Ergonomic claims must be supported by canonical tasks, measured model-visible output, use-error analysis, and executable acceptance gates.
 - Keep shared transport readers bound to one site authority scope. Do not accept raw cross-site roots or infer cross-site authority from local filesystem reachability; explicit cross-site transfer belongs to an authorized User Site or artifact/export surface. See `docs/mcp-surfaces-target-shape.md`.
 - Shared libraries such as `@narada-core/mcp-transport` live under `packages/shared/*`; runnable MCP surfaces remain top-level packages until the broader `packages/surfaces/*` migration is executed.
 - Register every package in the root `tsconfig.json` `references`; root `pnpm build` and `pnpm typecheck` only cover referenced packages.
