@@ -72,6 +72,19 @@ function textComponent(text: string): { render: (width: number) => string[] } {
   };
 }
 
+function compactCount(value: number): string {
+  if (value < 1_000) return value.toLocaleString("en-US");
+  const units = ["k", "m", "b"];
+  let scaled = value;
+  let unitIndex = -1;
+  do {
+    scaled /= 1_000;
+    unitIndex += 1;
+  } while (scaled >= 999.5 && unitIndex < units.length - 1);
+  const digits = scaled < 10 ? 1 : 0;
+  return `${Number(scaled.toFixed(digits))}${units[unitIndex]}`;
+}
+
 function resultSummary(result: any, fullText: string): string {
   const structured = result?.structuredContent;
   const path = structured?.relative_path ?? structured?.path;
@@ -108,7 +121,7 @@ function resultSummary(result: any, fullText: string): string {
   const status = summary?.status ?? structured?.status;
   if (typeof status === "string" && typeof path === "string") return `${status} ${path}`;
   const identity = [schema, status].filter((value) => typeof value === "string").join(": ");
-  const chars = fullText.length.toLocaleString("en-US");
+  const chars = compactCount(fullText.length);
   return `${identity || "MCP result"} (${chars} characters)`;
 }
 
@@ -337,7 +350,7 @@ export default function naradaMcpCarrier(pi: any): void {
                   isError: result?.isError === true,
                   structuredSchema: result?.structuredContent?.schema ?? null,
                   continuation: result?.structuredContent?.result?.next_offset ?? result?.structuredContent?.next_offset ?? null,
-                  uiSummary: resultSummary(result, rawText),
+                  uiSummary: resultSummary(result, resultText({ content })),
                   alwaysCollapse: alwaysCollapseResult(result),
                 },
                 isError: result?.isError === true,

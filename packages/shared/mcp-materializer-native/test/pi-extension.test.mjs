@@ -25,6 +25,11 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       empty_range: { schema: "local.filesystem.read.v1", relative_path: "file.md", total_lines: 250, returned_lines: 0, offset: 300, requested_start_line: 300, requested_end_line: 380 },
       replace: { schema: "local.filesystem.str_replace_file.v1", status: "replaced", relative_path: "file.md", occurrences: 1 },
       bridge: { schema: "narada.task.inbox.bridge.v1", status: "planned", count: 0, envelopes: [] },
+      generic_large: (() => {
+        const value = { schema: "narada.mcp_loader.result_page.v1", payload: "" };
+        value.payload = "x".repeat(4227 - JSON.stringify(value).length);
+        return value;
+      })(),
     };
     process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: {
       content: [{ type: "text", text: "summary without lease" }],
@@ -83,6 +88,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       ['empty_range', /no lines in 300–380; file\.md has 250 lines/],
       ['replace', /replaced 1 occurrence in file\.md/],
       ['bridge', /planned · 0 envelopes/],
+      ['generic_large', /narada\.mcp_loader\.result_page\.v1 \(4\.2k characters\)/],
     ]) {
       const fixture = await registered[0].execute('call-' + value, { value }, new AbortController().signal);
       const rendered = registered[0].renderResult(fixture, { expanded: false }).render(160).join('\n');
