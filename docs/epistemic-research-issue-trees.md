@@ -13,9 +13,10 @@ An issue node is an append-only `research_issue` entity. It carries:
 
 - `tree_id`: stable tree identity;
 - `version`: positive integer revision;
-- `state`: `active`, `blocked`, or terminal `disposed`;
+- `state`: `open`, uniquely `selected`, `blocked`, or terminal `disposed`
+  (`active` remains an input compatibility alias for `open`);
 - `score`: finite number from 0 through 1 used only for frontier ordering;
-- optional `disposition`: `resolved`, `rejected`, `deferred`,
+- optional `disposition`: `resolved`, `rejected`, `exhausted`, `deferred`,
   `superseded`, or `split`;
 - a title and optional rationale.
 
@@ -27,13 +28,28 @@ Relations are typed:
 - `derived_from` or another explicit provenance relation links evidence.
 
 A version after 1 requires exactly one predecessor. A blocked node requires at
-least one blocker. An active node cannot carry a terminal disposition. A
+least one blocker. An open or selected node cannot carry a terminal
+disposition. At most one non-superseded node in a tree may be selected. A
 disposed node must carry one. Scores rank attention; they do not assert truth.
+
+## Resume by objective
+
+`epistemic_graph_issue_tree_resume` is the ordinary entry point. It resolves a
+tree by stable ID or normalized objective and returns the selected leaf plus a
+compact scored frontier. With explicit actor and authority, `create_if_missing`
+atomically creates the tree and its selected root. Ambiguous objectives and
+missing trees are typed outcomes; neither silently chooses or mutates a tree.
+
+The default response budget is 6,000 characters and the hard caller ceiling is
+20,000. Titles and rationales are Unicode-safe clipped excerpts. Scores are
+stored on the normalized 0–1 scale and also displayed on a 0–10 scale.
 
 ## Atomic transition
 
-`epistemic_graph_issue_tree_transition` accepts one or more typed successor
-nodes and expands them into ordinary entity and relation operations. The whole
+`epistemic_graph_issue_tree_transition` accepts either an administrative node
+batch or the ordinary selected-leaf form: selected node ID, expected version,
+idempotency key, typed disposition, and optional successors. It expands the
+transition into ordinary entity and relation operations. The whole
 expansion passes through the existing immutable proposal, policy review, and
 head-CAS admission pipeline as one transaction. Either all nodes and edges are
 admitted or none are.
@@ -49,8 +65,12 @@ view. A frontier node is in the requested tree, non-terminal, and not
 superseded by another node in that tree. Blocked nodes remain visible and are
 marked blocked; they are not silently removed.
 
-The response reports the ledger head, selection rules, count semantics, and
-bounded continuation metadata. It is a projection, never mutation authority.
+The first read captures an immutable, ledger-head-bound frontier and returns a
+`result_ref`. `epistemic_graph_issue_tree_frontier_read` pages that exact
+capture even if the live graph changes; unavailable captures fail as a typed,
+retry-safe expiry rather than silently switching to a newer frontier. The
+response reports the ledger head, selection rules, exact count semantics, and
+copyable continuation arguments. It is a projection, never mutation authority.
 
 ## Evidence boundary
 

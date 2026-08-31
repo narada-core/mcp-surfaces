@@ -954,7 +954,9 @@ impl Engine {
             }
             "operations_batch" => self.operations_batch(site_root, args),
             "issue_tree_transition" => self.issue_tree_transition(site_root, args),
+            "issue_tree_resume" => self.issue_tree_resume(site_root, args),
             "issue_tree_frontier" => self.issue_tree_frontier(site_root, args),
+            "issue_tree_frontier_read" => self.issue_tree_frontier_read(site_root, args),
             "submit_review_admit" => {
                 let payload_ref = args.get("payload_ref").and_then(Value::as_str);
                 let resolved = self.resolve_payload_arguments(site_root, args)?;
@@ -1574,42 +1576,77 @@ impl Engine {
         let batches = args
             .get("batches")
             .and_then(Value::as_array)
-            .ok_or_else(|| self.error("operations_batch_required", "batches must be a non-empty array", Value::Null))?;
+            .ok_or_else(|| {
+                self.error(
+                    "operations_batch_required",
+                    "batches must be a non-empty array",
+                    Value::Null,
+                )
+            })?;
         if batches.is_empty() {
-            return Err(self.error("operations_batch_required", "batches must be a non-empty array", Value::Null));
+            return Err(self.error(
+                "operations_batch_required",
+                "batches must be a non-empty array",
+                Value::Null,
+            ));
         }
         let mut operations = Vec::new();
         let mut census = Vec::new();
         for (batch_index, batch) in batches.iter().enumerate() {
-            let batch = batch.as_object().ok_or_else(|| self.error(
-                "operations_batch_invalid",
-                "each batch must be an object",
-                json!({"batch_index":batch_index}),
-            ))?;
-            let defaults = batch.get("defaults").and_then(Value::as_object).ok_or_else(|| self.error(
-                "operations_batch_defaults_invalid",
-                "defaults must be a non-empty object",
-                json!({"batch_index":batch_index}),
-            ))?;
+            let batch = batch.as_object().ok_or_else(|| {
+                self.error(
+                    "operations_batch_invalid",
+                    "each batch must be an object",
+                    json!({"batch_index":batch_index}),
+                )
+            })?;
+            let defaults = batch
+                .get("defaults")
+                .and_then(Value::as_object)
+                .ok_or_else(|| {
+                    self.error(
+                        "operations_batch_defaults_invalid",
+                        "defaults must be a non-empty object",
+                        json!({"batch_index":batch_index}),
+                    )
+                })?;
             if defaults.is_empty() {
-                return Err(self.error("operations_batch_defaults_invalid", "defaults must be a non-empty object", json!({"batch_index":batch_index})));
+                return Err(self.error(
+                    "operations_batch_defaults_invalid",
+                    "defaults must be a non-empty object",
+                    json!({"batch_index":batch_index}),
+                ));
             }
-            let columns = batch.get("columns").and_then(Value::as_array).ok_or_else(|| self.error(
-                "operations_batch_columns_invalid",
-                "columns must be a non-empty array",
-                json!({"batch_index":batch_index}),
-            ))?;
+            let columns = batch
+                .get("columns")
+                .and_then(Value::as_array)
+                .ok_or_else(|| {
+                    self.error(
+                        "operations_batch_columns_invalid",
+                        "columns must be a non-empty array",
+                        json!({"batch_index":batch_index}),
+                    )
+                })?;
             if columns.is_empty() {
-                return Err(self.error("operations_batch_columns_invalid", "columns must be a non-empty array", json!({"batch_index":batch_index})));
+                return Err(self.error(
+                    "operations_batch_columns_invalid",
+                    "columns must be a non-empty array",
+                    json!({"batch_index":batch_index}),
+                ));
             }
             let mut names = Vec::new();
             let mut unique = std::collections::HashSet::new();
             for (column_index, column) in columns.iter().enumerate() {
-                let name = column.as_str().filter(|value| !value.is_empty()).ok_or_else(|| self.error(
-                    "operations_batch_column_invalid",
-                    "every column must be a non-empty string",
-                    json!({"batch_index":batch_index,"column_index":column_index}),
-                ))?;
+                let name = column
+                    .as_str()
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| {
+                        self.error(
+                            "operations_batch_column_invalid",
+                            "every column must be a non-empty string",
+                            json!({"batch_index":batch_index,"column_index":column_index}),
+                        )
+                    })?;
                 if !unique.insert(name.to_string()) {
                     return Err(self.error(
                         "operations_batch_column_duplicate",
@@ -1619,20 +1656,28 @@ impl Engine {
                 }
                 names.push(name.to_string());
             }
-            let rows = batch.get("rows").and_then(Value::as_array).ok_or_else(|| self.error(
-                "operations_batch_rows_invalid",
-                "rows must be a non-empty array",
-                json!({"batch_index":batch_index}),
-            ))?;
+            let rows = batch.get("rows").and_then(Value::as_array).ok_or_else(|| {
+                self.error(
+                    "operations_batch_rows_invalid",
+                    "rows must be a non-empty array",
+                    json!({"batch_index":batch_index}),
+                )
+            })?;
             if rows.is_empty() {
-                return Err(self.error("operations_batch_rows_invalid", "rows must be a non-empty array", json!({"batch_index":batch_index})));
+                return Err(self.error(
+                    "operations_batch_rows_invalid",
+                    "rows must be a non-empty array",
+                    json!({"batch_index":batch_index}),
+                ));
             }
             for (row_index, row) in rows.iter().enumerate() {
-                let cells = row.as_array().ok_or_else(|| self.error(
-                    "operations_batch_row_invalid",
-                    "each row must be an array",
-                    json!({"batch_index":batch_index,"row_index":row_index}),
-                ))?;
+                let cells = row.as_array().ok_or_else(|| {
+                    self.error(
+                        "operations_batch_row_invalid",
+                        "each row must be an array",
+                        json!({"batch_index":batch_index,"row_index":row_index}),
+                    )
+                })?;
                 if cells.len() != names.len() {
                     return Err(self.error(
                         "operations_batch_row_width_mismatch",
@@ -1656,7 +1701,12 @@ impl Engine {
             census.push(json!({"batch_index":batch_index,"row_count":rows.len(),"columns":names,"default_fields":defaults.keys().collect::<Vec<_>>() }));
         }
         let mut proposal_args = Map::new();
-        for field in ["actor", "authority_basis", "idempotency_key", "expected_ledger_head"] {
+        for field in [
+            "actor",
+            "authority_basis",
+            "idempotency_key",
+            "expected_ledger_head",
+        ] {
             if let Some(value) = args.get(field) {
                 proposal_args.insert(field.to_string(), value.clone());
             }
@@ -1664,53 +1714,372 @@ impl Engine {
         proposal_args.insert("operations".to_string(), Value::Array(operations.clone()));
         let mut receipt = self.proposal_submit(root, &proposal_args)?;
         if let Some(object) = receipt.as_object_mut() {
-            object.insert("compact_input".to_string(), json!({
-                "schema":"narada.epistemic.operations_batch_expansion.v1",
-                "batch_count":batches.len(),
-                "expanded_operation_count":operations.len(),
-                "batches":census,
-                "normalization":"defaults_then_row_columns"
-            }));
+            object.insert(
+                "compact_input".to_string(),
+                json!({
+                    "schema":"narada.epistemic.operations_batch_expansion.v1",
+                    "batch_count":batches.len(),
+                    "expanded_operation_count":operations.len(),
+                    "batches":census,
+                    "normalization":"defaults_then_row_columns"
+                }),
+            );
         }
         Ok(receipt)
     }
 
-    fn issue_tree_transition(&self, root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
-        let tree_id = args.get("tree_id").and_then(Value::as_str).filter(|v| !v.is_empty())
+    fn issue_tree_transition(
+        &self,
+        root: &Path,
+        args: &Map<String, Value>,
+    ) -> Result<Value, Value> {
+        let tree_id = args
+            .get("tree_id")
+            .and_then(Value::as_str)
+            .filter(|v| !v.is_empty())
             .ok_or_else(|| self.error("issue_tree_invalid", "tree_id is required", Value::Null))?;
-        let nodes = args.get("nodes").and_then(Value::as_array).filter(|v| !v.is_empty())
-            .ok_or_else(|| self.error("issue_tree_invalid", "nodes must be a non-empty array", Value::Null))?;
-        let mut operations = Vec::new();
-        for (index, value) in nodes.iter().enumerate() {
-            let node = value.as_object().ok_or_else(|| self.error("issue_tree_invalid", "each node must be an object", json!({"node_index":index})))?;
-            let node_id = node.get("node_id").and_then(Value::as_str).filter(|v| !v.is_empty())
-                .ok_or_else(|| self.error("issue_tree_invalid", "node_id is required", json!({"node_index":index})))?;
-            let title = node.get("title").and_then(Value::as_str).filter(|v| !v.is_empty())
-                .ok_or_else(|| self.error("issue_tree_invalid", "title is required", json!({"node_index":index})))?;
-            let version = node.get("version").and_then(Value::as_u64).filter(|v| *v > 0)
-                .ok_or_else(|| self.error("issue_tree_invalid", "version must be a positive integer", json!({"node_index":index})))?;
-            let state = node.get("state").and_then(Value::as_str).unwrap_or("active");
-            if !["active", "blocked", "disposed"].contains(&state) {
-                return Err(self.error("issue_tree_invalid", "state must be active, blocked, or disposed", json!({"node_index":index,"state":state})));
+        if !args.contains_key("nodes") {
+            let transition = args
+                .get("transition")
+                .and_then(Value::as_object)
+                .ok_or_else(|| {
+                    self.error(
+                        "issue_tree_invalid",
+                        "nodes or transition is required",
+                        Value::Null,
+                    )
+                })?;
+            let selected_id = args
+                .get("selected_node_id")
+                .and_then(Value::as_str)
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| {
+                    self.error(
+                        "issue_tree_invalid",
+                        "selected_node_id is required for an ordinary transition",
+                        Value::Null,
+                    )
+                })?;
+            let expected_version = args
+                .get("expected_node_version")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| {
+                    self.error(
+                        "issue_tree_invalid",
+                        "expected_node_version is required",
+                        Value::Null,
+                    )
+                })?;
+            let idempotency_key = args
+                .get("idempotency_key")
+                .and_then(Value::as_str)
+                .filter(|v| !v.is_empty());
+            if idempotency_key.is_none() {
+                return Err(self.error(
+                    "issue_tree_idempotency_required",
+                    "idempotency_key is required for an ordinary transition",
+                    json!({"retry_safe":true}),
+                ));
             }
+            let idempotency_key = idempotency_key.unwrap();
+            let transition_fingerprint = self.digest_value(&Value::Object(args.clone()))?;
+            let transition_receipt_path = self.proposals(root).join(format!(
+                "issue-tree-transition-{}.json",
+                safe_name(idempotency_key)
+            ));
+            if transition_receipt_path.exists() {
+                let replay = self.read_json(&transition_receipt_path)?;
+                if replay["content_fingerprint"].as_str() != Some(&transition_fingerprint) {
+                    return Err(self.error(
+                        "issue_tree_idempotency_conflict",
+                        "idempotency key already names a different transition",
+                        json!({"idempotency_key":idempotency_key}),
+                    ));
+                }
+                return Ok(replay["receipt"].clone());
+            }
+            let (frontier, selected) = self.issue_tree_frontier_nodes(root, tree_id)?;
+            let selected = selected.ok_or_else(|| {
+                self.error(
+                    "issue_tree_selected_missing",
+                    "the tree has no selected leaf",
+                    json!({"tree_id":tree_id}),
+                )
+            })?;
+            if selected["node_id"].as_str() != Some(selected_id) {
+                return Err(self.error("issue_tree_selected_conflict", "selected_node_id is stale", json!({"expected_selected_node_id":selected_id,"actual_selected_node_id":selected["node_id"],"next":{"tool":"epistemic_graph_issue_tree_resume","arguments":{"tree_id":tree_id}}})));
+            }
+            let actual_version = selected["version"]
+                .as_str()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(0);
+            if actual_version != expected_version {
+                return Err(self.error("issue_tree_version_conflict", "expected_node_version is stale", json!({"expected_node_version":expected_version,"actual_node_version":actual_version,"next":{"tool":"epistemic_graph_issue_tree_resume","arguments":{"tree_id":tree_id}}})));
+            }
+            let disposition = transition
+                .get("disposition")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    self.error(
+                        "issue_tree_invalid",
+                        "transition.disposition is required",
+                        Value::Null,
+                    )
+                })?;
+            if ![
+                "resolved",
+                "rejected",
+                "exhausted",
+                "deferred",
+                "superseded",
+                "split",
+            ]
+            .contains(&disposition)
+            {
+                return Err(self.error(
+                    "issue_tree_invalid",
+                    "unsupported transition disposition",
+                    json!({"disposition":disposition}),
+                ));
+            }
+            let disposed_id = format!("{selected_id}:v{}:{disposition}", expected_version + 1);
+            let mut nodes = vec![json!({
+                "node_id":disposed_id,
+                "title":selected["title"],
+                "version":expected_version + 1,
+                "state":"disposed",
+                "disposition":disposition,
+                "score":selected["score"],
+                "predecessor_id":selected_id,
+                "rationale":transition.get("rationale").cloned().unwrap_or(Value::Null),
+                "evidence_ids":transition.get("evidence_ids").cloned().unwrap_or_else(|| json!([]))
+            })];
+            let successors = transition
+                .get("successors")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let select_next = args
+                .get("select_next")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            for (index, successor) in successors.iter().enumerate() {
+                let object = successor.as_object().ok_or_else(|| {
+                    self.error(
+                        "issue_tree_invalid",
+                        "each successor must be an object",
+                        json!({"successor_index":index}),
+                    )
+                })?;
+                let node_id = object
+                    .get("node_id")
+                    .and_then(Value::as_str)
+                    .filter(|v| !v.is_empty())
+                    .ok_or_else(|| {
+                        self.error(
+                            "issue_tree_invalid",
+                            "successor node_id is required",
+                            json!({"successor_index":index}),
+                        )
+                    })?;
+                let title = object
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .filter(|v| !v.is_empty())
+                    .ok_or_else(|| {
+                        self.error(
+                            "issue_tree_invalid",
+                            "successor title is required",
+                            json!({"successor_index":index}),
+                        )
+                    })?;
+                nodes.push(json!({
+                    "node_id":node_id,
+                    "title":title,
+                    "version":1,
+                    "state":if select_next && index == 0 {"selected"} else {"open"},
+                    "score":object.get("score").cloned().unwrap_or(json!(0.0)),
+                    "parent_id":selected_id,
+                    "rationale":object.get("rationale").cloned().unwrap_or(Value::Null)
+                }));
+            }
+            if select_next && successors.is_empty() {
+                if let Some(next) = frontier.into_iter().find(|node| {
+                    node["node_id"].as_str() != Some(selected_id)
+                        && node["state"].as_str() == Some("open")
+                }) {
+                    let next_id = next["node_id"].as_str().unwrap_or_default();
+                    let next_version = next["version"]
+                        .as_str()
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .unwrap_or(1);
+                    nodes.push(json!({
+                        "node_id":format!("{next_id}:v{}:selected", next_version + 1),
+                        "title":next["title"],
+                        "version":next_version + 1,
+                        "state":"selected",
+                        "score":next["score"],
+                        "predecessor_id":next_id
+                    }));
+                }
+            }
+            let mut expanded = args.clone();
+            expanded.remove("transition");
+            expanded.remove("selected_node_id");
+            expanded.remove("expected_node_version");
+            expanded.remove("select_next");
+            expanded.insert("nodes".into(), Value::Array(nodes));
+            let mut receipt = self.issue_tree_transition(root, &expanded)?;
+            let resumed = self
+                .issue_tree_resume(root, &Map::from_iter([("tree_id".into(), json!(tree_id))]))?;
+            if let Some(object) = receipt.as_object_mut() {
+                object.insert("workflow".into(), json!({
+                    "schema":"narada.epistemic.issue_tree_transition_workflow.v1",
+                    "prior_selected":{"node_id":selected_id,"version":expected_version},
+                    "resulting_selected":resumed["selected"],
+                    "disposition":disposition,
+                    "resume":resumed["rehydrate_with"],
+                    "certifies_truth":false,
+                    "reconciliation":{"tool":"epistemic_graph_issue_tree_resume","arguments":{"tree_id":tree_id}}
+                }));
+            }
+            self.write_new_json(
+                &transition_receipt_path,
+                &json!({
+                    "schema":"narada.epistemic.issue_tree_transition_replay.v1",
+                    "idempotency_key":idempotency_key,
+                    "content_fingerprint":transition_fingerprint,
+                    "receipt":receipt
+                }),
+            )?;
+            return Ok(receipt);
+        }
+        let nodes = args
+            .get("nodes")
+            .and_then(Value::as_array)
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| {
+                self.error(
+                    "issue_tree_invalid",
+                    "nodes must be a non-empty array",
+                    Value::Null,
+                )
+            })?;
+        let mut operations = Vec::new();
+        let mut selected_successors = Vec::<String>::new();
+        let mut superseded_nodes = HashSet::<String>::new();
+        for (index, value) in nodes.iter().enumerate() {
+            let node = value.as_object().ok_or_else(|| {
+                self.error(
+                    "issue_tree_invalid",
+                    "each node must be an object",
+                    json!({"node_index":index}),
+                )
+            })?;
+            let node_id = node
+                .get("node_id")
+                .and_then(Value::as_str)
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| {
+                    self.error(
+                        "issue_tree_invalid",
+                        "node_id is required",
+                        json!({"node_index":index}),
+                    )
+                })?;
+            let title = node
+                .get("title")
+                .and_then(Value::as_str)
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| {
+                    self.error(
+                        "issue_tree_invalid",
+                        "title is required",
+                        json!({"node_index":index}),
+                    )
+                })?;
+            let version = node
+                .get("version")
+                .and_then(Value::as_u64)
+                .filter(|v| *v > 0)
+                .ok_or_else(|| {
+                    self.error(
+                        "issue_tree_invalid",
+                        "version must be a positive integer",
+                        json!({"node_index":index}),
+                    )
+                })?;
+            let supplied_state = node.get("state").and_then(Value::as_str).unwrap_or("open");
+            if !["active", "open", "selected", "blocked", "disposed"].contains(&supplied_state) {
+                return Err(self.error(
+                    "issue_tree_invalid",
+                    "state must be open, selected, blocked, or disposed",
+                    json!({"node_index":index,"state":supplied_state}),
+                ));
+            }
+            let state = if supplied_state == "active" {
+                "open"
+            } else {
+                supplied_state
+            };
             let disposition = node.get("disposition").and_then(Value::as_str);
-            if disposition.is_some_and(|v| !["resolved", "rejected", "deferred", "superseded", "split"].contains(&v)) {
-                return Err(self.error("issue_tree_invalid", "unsupported disposition", json!({"node_index":index,"disposition":disposition})));
+            if disposition.is_some_and(|v| {
+                ![
+                    "resolved",
+                    "rejected",
+                    "exhausted",
+                    "deferred",
+                    "superseded",
+                    "split",
+                ]
+                .contains(&v)
+            }) {
+                return Err(self.error(
+                    "issue_tree_invalid",
+                    "unsupported disposition",
+                    json!({"node_index":index,"disposition":disposition}),
+                ));
             }
             if (state == "disposed") != disposition.is_some() {
-                return Err(self.error("issue_tree_invalid", "disposed nodes require a disposition and non-disposed nodes forbid one", json!({"node_index":index})));
+                return Err(self.error(
+                    "issue_tree_invalid",
+                    "disposed nodes require a disposition and non-disposed nodes forbid one",
+                    json!({"node_index":index}),
+                ));
             }
             let predecessor = node.get("predecessor_id").and_then(Value::as_str);
             if (version == 1 && predecessor.is_some()) || (version > 1 && predecessor.is_none()) {
-                return Err(self.error("issue_tree_invalid", "version 1 forbids a predecessor; later versions require one", json!({"node_index":index,"version":version})));
+                return Err(self.error(
+                    "issue_tree_invalid",
+                    "version 1 forbids a predecessor; later versions require one",
+                    json!({"node_index":index,"version":version}),
+                ));
             }
-            let blockers = node.get("blocker_ids").and_then(Value::as_array).cloned().unwrap_or_default();
+            if state == "selected" {
+                selected_successors.push(node_id.to_string());
+            }
+            if let Some(value) = predecessor {
+                superseded_nodes.insert(value.to_string());
+            }
+            let blockers = node
+                .get("blocker_ids")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
             if state == "blocked" && blockers.is_empty() {
-                return Err(self.error("issue_tree_invalid", "blocked nodes require at least one blocker_id", json!({"node_index":index})));
+                return Err(self.error(
+                    "issue_tree_invalid",
+                    "blocked nodes require at least one blocker_id",
+                    json!({"node_index":index}),
+                ));
             }
             let score = node.get("score").and_then(Value::as_f64).unwrap_or(0.0);
             if !score.is_finite() || !(0.0..=1.0).contains(&score) {
-                return Err(self.error("issue_tree_invalid", "score must be finite and between 0 and 1", json!({"node_index":index})));
+                return Err(self.error(
+                    "issue_tree_invalid",
+                    "score must be finite and between 0 and 1",
+                    json!({"node_index":index}),
+                ));
             }
             let mut entity = Map::new();
             entity.insert("op".into(), json!("entity.declare"));
@@ -1721,85 +2090,465 @@ impl Engine {
             entity.insert("tree_id".into(), json!(tree_id));
             entity.insert("state".into(), json!(state));
             entity.insert("score".into(), json!(score));
-            if let Some(value) = disposition { entity.insert("disposition".into(), json!(value)); }
-            if let Some(value) = node.get("rationale") { entity.insert("rationale".into(), value.clone()); }
+            if let Some(value) = disposition {
+                entity.insert("disposition".into(), json!(value));
+            }
+            if let Some(value) = node.get("rationale") {
+                entity.insert("rationale".into(), value.clone());
+            }
             operations.push(Value::Object(entity));
             let mut add_relation = |relation_type: &str, target_id: &str| {
                 operations.push(json!({"op":"relation.declare","relation_type":relation_type,"source_id":node_id,"target_id":target_id}));
             };
-            if let Some(value) = node.get("parent_id").and_then(Value::as_str) { add_relation("issue_child_of", value); }
-            if let Some(value) = predecessor { add_relation("supersedes", value); }
+            if let Some(value) = node.get("parent_id").and_then(Value::as_str) {
+                add_relation("issue_child_of", value);
+            }
+            if let Some(value) = predecessor {
+                add_relation("supersedes", value);
+            }
             for blocker in blockers {
-                let id = blocker.as_str().filter(|v| !v.is_empty()).ok_or_else(|| self.error("issue_tree_invalid", "blocker_ids must contain non-empty strings", json!({"node_index":index})))?;
+                let id = blocker.as_str().filter(|v| !v.is_empty()).ok_or_else(|| {
+                    self.error(
+                        "issue_tree_invalid",
+                        "blocker_ids must contain non-empty strings",
+                        json!({"node_index":index}),
+                    )
+                })?;
                 add_relation("blocked_by", id);
             }
-            for evidence in node.get("evidence_ids").and_then(Value::as_array).cloned().unwrap_or_default() {
-                let id = evidence.as_str().filter(|v| !v.is_empty()).ok_or_else(|| self.error("issue_tree_invalid", "evidence_ids must contain non-empty strings", json!({"node_index":index})))?;
+            for evidence in node
+                .get("evidence_ids")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+            {
+                let id = evidence.as_str().filter(|v| !v.is_empty()).ok_or_else(|| {
+                    self.error(
+                        "issue_tree_invalid",
+                        "evidence_ids must contain non-empty strings",
+                        json!({"node_index":index}),
+                    )
+                })?;
                 add_relation("derived_from", id);
             }
         }
         if operations.len() as u64 > self.domain.caps.operations_per_proposal.max {
-            return Err(self.error("issue_tree_limit_exceeded", "expanded transition exceeds the proposal operation cap", json!({"expanded_operations":operations.len()})));
+            return Err(self.error(
+                "issue_tree_limit_exceeded",
+                "expanded transition exceeds the proposal operation cap",
+                json!({"expanded_operations":operations.len()}),
+            ));
+        }
+        if selected_successors.len() > 1 {
+            return Err(self.error(
+                "issue_tree_selected_conflict",
+                "one atomic transition cannot create more than one selected leaf",
+                json!({"selected_node_ids":selected_successors}),
+            ));
+        }
+        let (_, current_selected) = self.issue_tree_frontier_nodes(root, tree_id)?;
+        if let Some(current) = current_selected {
+            let current_id = current["node_id"].as_str().unwrap_or_default();
+            if !selected_successors.is_empty() && !superseded_nodes.contains(current_id) {
+                return Err(self.error("issue_tree_selected_conflict", "a new selected leaf must supersede the current selected leaf", json!({"current_selected_node_id":current_id,"proposed_selected_node_id":selected_successors.first()})));
+            }
         }
         let mut proposal_args = Map::new();
-        for field in ["actor", "authority_basis", "idempotency_key", "expected_ledger_head"] {
-            if let Some(value) = args.get(field) { proposal_args.insert(field.into(), value.clone()); }
+        for field in [
+            "actor",
+            "authority_basis",
+            "idempotency_key",
+            "expected_ledger_head",
+        ] {
+            if let Some(value) = args.get(field) {
+                proposal_args.insert(field.into(), value.clone());
+            }
         }
         proposal_args.insert("operations".into(), Value::Array(operations.clone()));
         let mut receipt = self.submit_review_admit(root, &proposal_args)?;
         if let Some(object) = receipt.as_object_mut() {
-            object.insert("issue_tree_transition".into(), json!({
-                "schema":"narada.epistemic.issue_tree_transition.v1",
-                "tree_id":tree_id,
-                "node_count":nodes.len(),
-                "expanded_operation_count":operations.len(),
-                "atomic":true,
-                "evidence_promotion":false
-            }));
+            object.insert(
+                "issue_tree_transition".into(),
+                json!({
+                    "schema":"narada.epistemic.issue_tree_transition.v1",
+                    "tree_id":tree_id,
+                    "node_count":nodes.len(),
+                    "expanded_operation_count":operations.len(),
+                    "atomic":true,
+                    "evidence_promotion":false
+                }),
+            );
         }
         Ok(receipt)
     }
 
-    fn issue_tree_frontier(&self, root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
-        self.prepare(root)?;
-        let tree_id = args.get("tree_id").and_then(Value::as_str).filter(|v| !v.is_empty())
-            .ok_or_else(|| self.error("issue_tree_invalid", "tree_id is required", Value::Null))?;
-        let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(20).clamp(1, 100) as usize;
-        let db = Connection::open(self.projection_path(root)).map_err(self.db_error("projection_open_failed"))?;
+    fn issue_tree_frontier_nodes(
+        &self,
+        root: &Path,
+        tree_id: &str,
+    ) -> Result<(Vec<Value>, Option<Value>), Value> {
+        self.rebuild_projection(root)?;
+        let db = Connection::open(self.projection_path(root))
+            .map_err(self.db_error("projection_open_failed"))?;
         let mut superseded = HashSet::new();
-        let mut relation_statement = db.prepare(&format!("select target_id from {} where relation_type='supersedes'", self.relation_table))
+        let mut relation_statement = db
+            .prepare(&format!(
+                "select target_id from {} where relation_type='supersedes'",
+                self.relation_table
+            ))
             .map_err(self.db_error("issue_tree_frontier_prepare_failed"))?;
-        for id in relation_statement.query_map([], |row| row.get::<_, String>(0)).map_err(self.db_error("issue_tree_frontier_failed"))? {
+        for id in relation_statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(self.db_error("issue_tree_frontier_failed"))?
+        {
             superseded.insert(id.map_err(self.db_error("issue_tree_frontier_row_failed"))?);
         }
-        let mut statement = db.prepare(&format!("select entity_id,payload_json,event_id from {} where kind='research_issue'", self.entity_table))
+        let mut statement = db
+            .prepare(&format!(
+                "select entity_id,payload_json,event_id from {} where kind='research_issue'",
+                self.entity_table
+            ))
             .map_err(self.db_error("issue_tree_frontier_prepare_failed"))?;
         let mut nodes = statement.query_map([], |row| {
             let payload = serde_json::from_str::<Value>(&row.get::<_, String>(1)?).unwrap_or(Value::Null);
             Ok(json!({"node_id":row.get::<_,String>(0)?,"payload":payload,"event_id":row.get::<_,String>(2)?}))
         }).map_err(self.db_error("issue_tree_frontier_failed"))?
           .collect::<Result<Vec<_>, _>>().map_err(self.db_error("issue_tree_frontier_row_failed"))?;
-        nodes.retain(|node| node["payload"]["tree_id"].as_str() == Some(tree_id)
-            && node["payload"]["state"].as_str() != Some("disposed")
-            && !superseded.contains(node["node_id"].as_str().unwrap_or_default()));
-        nodes.sort_by(|left, right| right["payload"]["score"].as_f64().unwrap_or(0.0)
-            .partial_cmp(&left["payload"]["score"].as_f64().unwrap_or(0.0)).unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| left["node_id"].as_str().cmp(&right["node_id"].as_str())));
-        let total = nodes.len();
-        nodes.truncate(limit);
+        nodes.retain(|node| {
+            node["payload"]["tree_id"].as_str() == Some(tree_id)
+                && node["payload"]["state"].as_str() != Some("disposed")
+                && !superseded.contains(node["node_id"].as_str().unwrap_or_default())
+        });
+        let clip = |value: &str, maximum: usize| {
+            let clipped = value.chars().count() > maximum;
+            let text = if clipped {
+                format!("{}…", value.chars().take(maximum).collect::<String>())
+            } else {
+                value.to_owned()
+            };
+            (text, clipped)
+        };
+        for node in &mut nodes {
+            let payload = &node["payload"];
+            let (title, title_clipped) = clip(payload["title"].as_str().unwrap_or_default(), 300);
+            let (rationale_excerpt, rationale_clipped) =
+                clip(payload["rationale"].as_str().unwrap_or_default(), 500);
+            let score = payload["score"].as_f64().unwrap_or(0.0);
+            let stored_state = payload["state"].as_str().unwrap_or("open");
+            let state = if stored_state == "active" {
+                "open"
+            } else {
+                stored_state
+            };
+            *node = json!({
+                "node_id":node["node_id"],
+                "version":payload["version"],
+                "title":title,
+                "title_clipped":title_clipped,
+                "state":state,
+                "score":score,
+                "display_score_out_of_10":(score * 100.0).round() / 10.0,
+                "disposition":payload["disposition"],
+                "rationale_excerpt":rationale_excerpt,
+                "rationale_clipped":rationale_clipped,
+                "blocker_count":payload["blockers"].as_array().map(Vec::len).unwrap_or(0),
+                "evidence_reference_count":payload["evidence_refs"].as_array().map(Vec::len).unwrap_or(0),
+                "event_id":node["event_id"]
+            });
+        }
+        nodes.sort_by(|left, right| {
+            right["score"]
+                .as_f64()
+                .unwrap_or(0.0)
+                .partial_cmp(&left["score"].as_f64().unwrap_or(0.0))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left["node_id"].as_str().cmp(&right["node_id"].as_str()))
+        });
+        let selected = nodes
+            .iter()
+            .filter(|node| node["state"].as_str() == Some("selected"))
+            .cloned()
+            .collect::<Vec<_>>();
+        if selected.len() > 1 {
+            return Err(self.error("issue_tree_selected_conflict", "more than one selected leaf exists", json!({"tree_id":tree_id,"selected_node_ids":selected.iter().map(|node|node["node_id"].clone()).collect::<Vec<_>>()})));
+        }
+        Ok((nodes, selected.into_iter().next()))
+    }
+
+    fn issue_tree_capture_path(&self, root: &Path, result_ref: &str) -> PathBuf {
+        self.runtime(root)
+            .join("issue-tree-captures")
+            .join(format!("{}.json", safe_name(result_ref)))
+    }
+
+    fn issue_tree_frontier_page(
+        &self,
+        _root: &Path,
+        capture: &Value,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Value, Value> {
+        let items = capture["items"].as_array().ok_or_else(|| {
+            self.error(
+                "issue_tree_capture_invalid",
+                "capture items are invalid",
+                Value::Null,
+            )
+        })?;
+        let page = items
+            .iter()
+            .skip(offset)
+            .take(limit)
+            .cloned()
+            .collect::<Vec<_>>();
+        let next_offset = offset + page.len();
+        let has_more = next_offset < items.len();
+        let result_ref = capture["result_ref"].as_str().unwrap_or_default();
+        let continuation = has_more.then(|| json!({"tool":"epistemic_graph_issue_tree_frontier_read","arguments":{"result_ref":result_ref,"offset":next_offset,"limit":limit}}));
         Ok(json!({
             "schema":"narada.epistemic.issue_tree_frontier.v1",
             "status":"ok",
-            "tree_id":tree_id,
-            "ledger_head":self.ledger_head(root)?,
-            "frontier":nodes,
-            "returned_count":nodes.len(),
-            "total_frontier_count":total,
-            "truncated":total > limit,
+            "tree_id":capture["tree_id"],
+            "ledger_head":capture["ledger_head"],
+            "captured_at_event":capture["captured_at_event"],
+            "frontier":{"items":page,"returned":page.len(),"complete":!has_more,"total":items.len(),"total_exact":true,"offset":offset},
+            "selected":capture["selected"],
+            "continuation":continuation,
+            "result_ref":result_ref,
             "ordering":"score_desc_then_node_id",
             "selection":"non_disposed_and_not_superseded",
-            "evidence_promotion":false
+            "certifies_truth":false,
+            "noncertification":"coordination state; not evidence"
         }))
+    }
+
+    fn issue_tree_frontier(&self, root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
+        let tree_id = args
+            .get("tree_id")
+            .and_then(Value::as_str)
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| self.error("issue_tree_invalid", "tree_id is required", Value::Null))?;
+        let limit = args
+            .get("limit")
+            .and_then(Value::as_u64)
+            .unwrap_or(20)
+            .clamp(1, 100) as usize;
+        let (nodes, selected) = self.issue_tree_frontier_nodes(root, tree_id)?;
+        let ledger_head = self.ledger_head(root)?;
+        let capture_seed =
+            serde_json::to_vec(&json!({"tree_id":tree_id,"ledger_head":ledger_head,"items":nodes}))
+                .unwrap_or_default();
+        let result_ref = format!("issue-tree-frontier:{}", &sha256(&capture_seed)[..24]);
+        let capture = json!({
+            "schema":"narada.epistemic.issue_tree_frontier_capture.v1",
+            "result_ref":result_ref,
+            "tree_id":tree_id,
+            "ledger_head":ledger_head,
+            "captured_at_event":self.ledger_files(root)?.last().and_then(|path| self.read_json(path).ok()).and_then(|event| event.get("event_id").cloned()),
+            "selected":selected,
+            "items":nodes
+        });
+        let path = self.issue_tree_capture_path(root, &result_ref);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(self.io_error("issue_tree_capture_create_failed"))?;
+        }
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&capture).unwrap_or_default(),
+        )
+        .map_err(self.io_error("issue_tree_capture_write_failed"))?;
+        self.issue_tree_frontier_page(root, &capture, 0, limit)
+    }
+
+    fn issue_tree_frontier_read(
+        &self,
+        root: &Path,
+        args: &Map<String, Value>,
+    ) -> Result<Value, Value> {
+        let result_ref = args
+            .get("result_ref")
+            .and_then(Value::as_str)
+            .filter(|v| v.starts_with("issue-tree-frontier:"))
+            .ok_or_else(|| {
+                self.error(
+                    "issue_tree_result_ref_invalid",
+                    "a valid issue-tree frontier result_ref is required",
+                    Value::Null,
+                )
+            })?;
+        let capture = self
+            .read_json(&self.issue_tree_capture_path(root, result_ref))
+            .map_err(|_| {
+                self.error(
+                    "issue_tree_result_expired",
+                    "the captured frontier is unavailable",
+                    json!({"result_ref":result_ref,"retry_safe":true}),
+                )
+            })?;
+        let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
+        let limit = args
+            .get("limit")
+            .and_then(Value::as_u64)
+            .unwrap_or(20)
+            .clamp(1, 100) as usize;
+        self.issue_tree_frontier_page(root, &capture, offset, limit)
+    }
+
+    fn issue_tree_resume(&self, root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
+        self.rebuild_projection(root)?;
+        let supplied_tree_id = args
+            .get("tree_id")
+            .and_then(Value::as_str)
+            .filter(|v| !v.is_empty());
+        let objective = args
+            .get("objective")
+            .and_then(Value::as_str)
+            .filter(|v| !v.trim().is_empty());
+        if supplied_tree_id.is_none() && objective.is_none() {
+            return Err(self.error(
+                "issue_tree_resume_invalid",
+                "tree_id or objective is required",
+                Value::Null,
+            ));
+        }
+        let db = Connection::open(self.projection_path(root))
+            .map_err(self.db_error("projection_open_failed"))?;
+        let mut trees = Vec::new();
+        let mut statement = db
+            .prepare(&format!(
+                "select entity_id,payload_json,event_id from {} where kind='research_issue_tree'",
+                self.entity_table
+            ))
+            .map_err(self.db_error("issue_tree_resume_prepare_failed"))?;
+        for row in statement.query_map([], |row| {
+            let payload = serde_json::from_str::<Value>(&row.get::<_, String>(1)?).unwrap_or(Value::Null);
+            Ok(json!({"tree_id":row.get::<_,String>(0)?,"objective":payload["objective"],"version":payload["version"],"event_id":row.get::<_,String>(2)?}))
+        }).map_err(self.db_error("issue_tree_resume_failed"))? {
+            trees.push(row.map_err(self.db_error("issue_tree_resume_row_failed"))?);
+        }
+        let normalized = objective.map(|value| value.trim().to_lowercase());
+        let mut candidates = trees
+            .into_iter()
+            .filter(|tree| {
+                supplied_tree_id
+                    .map(|id| tree["tree_id"].as_str() == Some(id))
+                    .unwrap_or(true)
+                    && normalized
+                        .as_ref()
+                        .map(|value| {
+                            tree["objective"].as_str().map(str::to_lowercase).as_ref()
+                                == Some(value)
+                        })
+                        .unwrap_or(true)
+            })
+            .collect::<Vec<_>>();
+        if candidates.len() > 1 {
+            return Err(self.error(
+                "issue_tree_objective_ambiguous",
+                "objective resolves to more than one tree",
+                json!({"candidates":candidates,"mutation_performed":false}),
+            ));
+        }
+        if candidates.is_empty() {
+            if !args
+                .get("create_if_missing")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                return Err(self.error("issue_tree_not_found", "no matching issue tree exists", json!({"tree_id":supplied_tree_id,"objective":objective,"mutation_performed":false})));
+            }
+            let objective = objective.ok_or_else(|| {
+                self.error(
+                    "issue_tree_creation_requires_objective",
+                    "objective is required when creating a tree",
+                    Value::Null,
+                )
+            })?;
+            let actor = args.get("actor").cloned().ok_or_else(|| {
+                self.error(
+                    "issue_tree_creation_authority_required",
+                    "actor is required for creation",
+                    Value::Null,
+                )
+            })?;
+            let authority = args.get("authority_basis").cloned().ok_or_else(|| {
+                self.error(
+                    "issue_tree_creation_authority_required",
+                    "authority_basis is required for creation",
+                    Value::Null,
+                )
+            })?;
+            let tree_id = supplied_tree_id.map(str::to_string).unwrap_or_else(|| {
+                format!(
+                    "issue-tree:{}",
+                    &sha256(objective.trim().to_lowercase().as_bytes())[..24]
+                )
+            });
+            let root_id = format!("{tree_id}:root:v1");
+            let mut create_args = Map::from_iter([
+                ("actor".into(), actor),
+                ("authority_basis".into(), authority),
+                (
+                    "operations".into(),
+                    json!([
+                        {"op":"entity.declare","entity_id":tree_id,"kind":"research_issue_tree","title":objective,"objective":objective,"version":"1"},
+                        {"op":"entity.declare","entity_id":root_id,"kind":"research_issue","title":objective,"tree_id":tree_id,"version":"1","state":"selected","score":1.0}
+                    ]),
+                ),
+            ]);
+            if let Some(value) = args.get("idempotency_key") {
+                create_args.insert("idempotency_key".into(), value.clone());
+            }
+            self.submit_review_admit(root, &create_args)?;
+            candidates.push(json!({"tree_id":tree_id,"objective":objective,"version":"1"}));
+        }
+        let tree = candidates.remove(0);
+        let mut frontier_args = Map::from_iter([("tree_id".into(), tree["tree_id"].clone())]);
+        if let Some(value) = args.get("max_frontier_items") {
+            frontier_args.insert("limit".into(), value.clone());
+        }
+        let frontier = self.issue_tree_frontier(root, &frontier_args)?;
+        let inline_budget = args
+            .get("max_inline_chars")
+            .and_then(Value::as_u64)
+            .unwrap_or(6000)
+            .clamp(1000, 20000) as usize;
+        let mut response = json!({
+            "schema":"narada.epistemic.issue-tree.resume.v1",
+            "status":"ok",
+            "tree":tree,
+            "selected":frontier["selected"],
+            "frontier":frontier["frontier"],
+            "continuation":frontier["continuation"],
+            "result_ref":frontier["result_ref"],
+            "ledger_head":frontier["ledger_head"],
+            "rehydrate_with":{"tool":"epistemic_graph_issue_tree_resume","arguments":{"tree_id":tree["tree_id"]}},
+            "certifies_truth":false,
+            "noncertification":"coordination state; not evidence"
+        });
+        while serde_json::to_string(&response)
+            .map(|value| value.len())
+            .unwrap_or(0)
+            > inline_budget
+        {
+            let Some(items) = response["frontier"]["items"].as_array_mut() else {
+                break;
+            };
+            if items.is_empty() {
+                break;
+            }
+            items.pop();
+            let returned = items.len();
+            response["frontier"]["returned"] = json!(returned);
+            response["frontier"]["complete"] = json!(false);
+            response["continuation"] = json!({"tool":"epistemic_graph_issue_tree_frontier_read","arguments":{"result_ref":response["result_ref"],"offset":returned,"limit":args.get("max_frontier_items").and_then(Value::as_u64).unwrap_or(20)}});
+        }
+        response["inline_budget_chars"] = json!(inline_budget);
+        response["inline_chars"] = json!(serde_json::to_string(&response)
+            .map(|value| value.len())
+            .unwrap_or(0));
+        Ok(response)
     }
 
     fn proposal_submit(&self, root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
@@ -2943,9 +3692,9 @@ impl Engine {
             let payload: Value = serde_json::from_str(&payload_json).unwrap_or(Value::Null);
             let matches = |candidate: &str| {
                 entity_id == candidate
-                    || fields.iter().any(|field| {
-                        payload.get(*field).and_then(Value::as_str) == Some(candidate)
-                    })
+                    || fields
+                        .iter()
+                        .any(|field| payload.get(*field).and_then(Value::as_str) == Some(candidate))
             };
             if matches(left) && matches(right) {
                 return Ok(true);
@@ -6584,7 +7333,8 @@ mod tests {
     #[test]
     fn compact_operation_batches_expand_into_an_ordinary_immutable_proposal() {
         let engine = engine();
-        let root = std::env::temp_dir().join(format!("epistemic-operations-batch-{}", Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("epistemic-operations-batch-{}", Uuid::new_v4()));
         let args = json!({
             "actor":"operator",
             "authority_basis":{"kind":"operator_direct_instruction"},
@@ -6953,33 +7703,35 @@ mod tests {
             engine.event_hash_field,
             None,
             None,
-            |ctx| json!({
-                "schema":engine.domain.storage.event_schema_id,
-                "sequence":ctx.sequence,
-                "event_id":ctx.event_id,
-                "previous_hash":ctx.previous_hash,
-                "operations":[
-                    {
-                        "op":"entity.declare",
-                        "entity_id":"team_member:kitaev",
-                        "kind":"team_member",
-                        "title":"marici.Kitaev",
-                        "canonical_name":"marici.Kitaev"
-                    },
-                    {
-                        "op":"entity.declare",
-                        "entity_id":"communication:canonical-recipient",
-                        "kind":"narada.epistemic:communication",
-                        "title":"Canonical recipient message",
-                        "sender":"team_member:aspect",
-                        "recipient":"team_member:kitaev",
-                        "body":"identity regression",
-                        "intent":"request",
-                        "sent_at":"2026-08-29T00:00:00Z"
-                    }
-                ],
-                "actor":"historical-fixture"
-            }),
+            |ctx| {
+                json!({
+                    "schema":engine.domain.storage.event_schema_id,
+                    "sequence":ctx.sequence,
+                    "event_id":ctx.event_id,
+                    "previous_hash":ctx.previous_hash,
+                    "operations":[
+                        {
+                            "op":"entity.declare",
+                            "entity_id":"team_member:kitaev",
+                            "kind":"team_member",
+                            "title":"marici.Kitaev",
+                            "canonical_name":"marici.Kitaev"
+                        },
+                        {
+                            "op":"entity.declare",
+                            "entity_id":"communication:canonical-recipient",
+                            "kind":"narada.epistemic:communication",
+                            "title":"Canonical recipient message",
+                            "sender":"team_member:aspect",
+                            "recipient":"team_member:kitaev",
+                            "body":"identity regression",
+                            "intent":"request",
+                            "sent_at":"2026-08-29T00:00:00Z"
+                        }
+                    ],
+                    "actor":"historical-fixture"
+                })
+            },
         )
         .expect("append identity fixture");
 
@@ -7005,7 +7757,10 @@ mod tests {
             .message_mark_read(
                 &root,
                 &Map::from_iter([
-                    ("message_id".into(), json!("communication:canonical-recipient")),
+                    (
+                        "message_id".into(),
+                        json!("communication:canonical-recipient"),
+                    ),
                     ("reader".into(), json!("marici.Kitaev")),
                     ("actor".into(), json!("protocol-test")),
                     (
@@ -8683,13 +9438,25 @@ mod tests {
             ])),
         ])).expect("atomic issue transition");
         assert_eq!(receipt["issue_tree_transition"]["atomic"], true);
-        assert_eq!(receipt["issue_tree_transition"]["evidence_promotion"], false);
-        let frontier = engine.issue_tree_frontier(&root, &Map::from_iter([
-            ("tree_id".into(), json!("tree:rh")),
-            ("limit".into(), json!(10)),
-        ])).expect("issue frontier");
-        assert_eq!(frontier["frontier"][0]["node_id"], "issue:front");
-        assert_eq!(frontier["evidence_promotion"], false);
+        assert_eq!(
+            receipt["issue_tree_transition"]["evidence_promotion"],
+            false
+        );
+        let frontier = engine
+            .issue_tree_frontier(
+                &root,
+                &Map::from_iter([
+                    ("tree_id".into(), json!("tree:rh")),
+                    ("limit".into(), json!(10)),
+                ]),
+            )
+            .expect("issue frontier");
+        assert_eq!(frontier["frontier"]["items"][0]["node_id"], "issue:front");
+        assert_eq!(frontier["certifies_truth"], false);
+        assert!(frontier["result_ref"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("issue-tree-frontier:"));
         let invalid = engine.issue_tree_transition(&root, &Map::from_iter([
             ("actor".into(), json!("tester")),
             ("authority_basis".into(), json!({"kind":"test"})),
@@ -8699,6 +9466,88 @@ mod tests {
             ])),
         ])).expect_err("blocked issue without blockers");
         assert_eq!(invalid["code"], "issue_tree_invalid");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn issue_tree_resume_creates_and_ordinary_transition_advances_selected_leaf() {
+        let engine = engine();
+        let root =
+            std::env::temp_dir().join(format!("epistemic-issue-tree-resume-{}", Uuid::new_v4()));
+        let resume_args = Map::from_iter([
+            (
+                "objective".into(),
+                json!("Resolve the excellent AX frontier"),
+            ),
+            ("create_if_missing".into(), json!(true)),
+            ("actor".into(), json!("tester")),
+            ("authority_basis".into(), json!({"kind":"test"})),
+            ("max_inline_chars".into(), json!(6000)),
+        ]);
+        let resumed = engine
+            .issue_tree_resume(&root, &resume_args)
+            .expect("create and resume tree");
+        assert_eq!(resumed["status"], "ok");
+        assert_eq!(resumed["selected"]["state"], "selected");
+        assert!(resumed["inline_chars"].as_u64().unwrap_or(u64::MAX) <= 6000);
+        let tree_id = resumed["tree"]["tree_id"]
+            .as_str()
+            .expect("tree id")
+            .to_string();
+        let selected_id = resumed["selected"]["node_id"]
+            .as_str()
+            .expect("selected id")
+            .to_string();
+        let transition = engine.issue_tree_transition(&root, &Map::from_iter([
+            ("actor".into(), json!("tester")),
+            ("authority_basis".into(), json!({"kind":"test"})),
+            ("tree_id".into(), json!(tree_id)),
+            ("selected_node_id".into(), json!(selected_id)),
+            ("expected_node_version".into(), json!(1)),
+            ("idempotency_key".into(), json!("advance-excellent-ax-v1")),
+            ("select_next".into(), json!(true)),
+            ("transition".into(), json!({
+                "disposition":"split",
+                "rationale":"Decompose the objective without promoting evidence.",
+                "successors":[{"node_id":"issue:excellent-ax:child","title":"Verify the first child frontier","score":0.8}]
+            })),
+        ])).expect("ordinary transition");
+        assert_eq!(transition["workflow"]["disposition"], "split");
+        assert_eq!(
+            transition["workflow"]["resulting_selected"]["node_id"],
+            "issue:excellent-ax:child"
+        );
+        assert_eq!(transition["workflow"]["certifies_truth"], false);
+        let replay = engine.issue_tree_transition(&root, &Map::from_iter([
+            ("actor".into(), json!("tester")),
+            ("authority_basis".into(), json!({"kind":"test"})),
+            ("tree_id".into(), json!(tree_id)),
+            ("selected_node_id".into(), json!(selected_id)),
+            ("expected_node_version".into(), json!(1)),
+            ("idempotency_key".into(), json!("advance-excellent-ax-v1")),
+            ("select_next".into(), json!(true)),
+            ("transition".into(), json!({
+                "disposition":"split",
+                "rationale":"Decompose the objective without promoting evidence.",
+                "successors":[{"node_id":"issue:excellent-ax:child","title":"Verify the first child frontier","score":0.8}]
+            })),
+        ])).expect("exact retry replays receipt");
+        assert_eq!(replay, transition);
+        let stale = engine
+            .issue_tree_transition(
+                &root,
+                &Map::from_iter([
+                    ("actor".into(), json!("tester")),
+                    ("authority_basis".into(), json!({"kind":"test"})),
+                    ("tree_id".into(), json!(tree_id)),
+                    ("selected_node_id".into(), json!(selected_id)),
+                    ("expected_node_version".into(), json!(1)),
+                    ("idempotency_key".into(), json!("stale-excellent-ax-v1")),
+                    ("transition".into(), json!({"disposition":"resolved"})),
+                ]),
+            )
+            .expect_err("stale selected leaf must fail");
+        assert_eq!(stale["code"], "issue_tree_selected_conflict");
         let _ = fs::remove_dir_all(root);
     }
 }
