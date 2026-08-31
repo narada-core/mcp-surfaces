@@ -53,6 +53,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
         value.payload = "x".repeat(4227 - JSON.stringify(value).length);
         return value;
       })(),
+      issue_tree: { schema: "narada.epistemic.issue-tree.resume.v1", status: "ok", tree: { tree_id: "tree:ax", objective: "AX", version: "3" }, selected: { node_id: "issue:selected", version: "2", title: "Selected", state: "selected", score: 0.9 }, frontier: { items: [{ node_id: "issue:selected", state: "selected", score: 0.9 }, { node_id: "issue:open", state: "open", score: 0.8 }], returned: 2, complete: true, total: 2, total_exact: true }, continuation: null, certifies_truth: false, noncertification: "coordination state; not evidence" },
       oversized: { schema: "narada.epistemic.query.v2", status: "ok", payload: "x".repeat(21000) },
     };
     process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: {
@@ -113,6 +114,20 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     }).render(7);
     assert.doesNotMatch(ansiCollapsedLines.join('\n'), /(?:^|\n)\[(?:39|90)m|(?:^|\n)m(?:$|\n)/);
     assert.equal((ansiCollapsedLines.join('').match(/\x1b\[[0-?]*[ -/]*[@-~]/g) ?? []).length, 2);
+
+    const issueTree = await registered[0].execute('call-issue-tree', { value: 'issue_tree' }, new AbortController().signal);
+    const authoritativeIssueTree = JSON.parse(issueTree.content[0].text);
+    assert.equal(authoritativeIssueTree.selected.node_id, 'issue:selected');
+    assert.deepEqual(authoritativeIssueTree.frontier.items.map((item) => item.node_id), ['issue:selected', 'issue:open']);
+    assert.equal(authoritativeIssueTree.frontier.complete, true);
+    const issueTreeCollapsed = registered[0].renderResult(issueTree, { expanded: false }).render(160).join('\n');
+    assert.match(issueTreeCollapsed, /issue tree · issue:selected selected · 1 open leaf · version 3/);
+    assert.ok(issueTreeCollapsed.length < 160);
+    const issueTreeExpanded = registered[0].renderResult(issueTree, { expanded: true }).render(1000).join('\n');
+    const expandedIssueTree = JSON.parse(issueTreeExpanded);
+    assert.deepEqual(expandedIssueTree.selected, authoritativeIssueTree.selected);
+    assert.deepEqual(expandedIssueTree.frontier, authoritativeIssueTree.frontier);
+    assert.equal(expandedIssueTree.noncertification, 'coordination state; not evidence');
 
     for (const [value, expected] of [
       ['stat', /file file\.md · 14k bytes/],

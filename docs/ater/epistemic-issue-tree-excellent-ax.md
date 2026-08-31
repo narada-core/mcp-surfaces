@@ -1,6 +1,8 @@
 # Epistemic Issue Trees: Excellent Agent Experience
 
-Status: focused ATER target interaction definition; implementation assessment pending.
+Status: Excellent AX verified by the executable A1–A24 acceptance gates on
+2026-08-31. The machine-readable assessment is
+[`epistemic-issue-tree-excellent-ax.verification.json`](epistemic-issue-tree-excellent-ax.verification.json).
 
 Assessment target: the `epistemic-graph` issue-tree workflow, currently exposed
 through `epistemic_graph_issue_tree_frontier` and
@@ -239,8 +241,9 @@ measurement:
 | Consistency | 1 | Scores and statuses differ from common traversal clients |
 | Trust and provenance | 3 | Authority, append-only history, blockers, evidence links, and nonpromotion boundary are strong |
 
-Disposition: **reassessment required**. Scores of 1 require repairs or explicit
-residual-risk acceptance before an excellent-AX claim.
+Disposition: **superseded baseline**. These provisional scores describe the
+pre-repair contract. The executable reassessment in section 16 is authoritative
+for the implemented target interaction.
 
 ## 7. Use-error and hazard register
 
@@ -617,7 +620,22 @@ Targets across I1 through I24:
 
 ## 16. Assessment and live reassessment
 
-Current assessment: **reassessment required**.
+Current assessment: **Excellent AX verified**.
+
+The black-box `issue_tree_excellent_ax` protocol suite names and executes I1
+through I24 individually. It includes concurrent creation and transition
+processes, a 143-node captured frontier reconstructed through direct paging,
+oversized Unicode fields, process restart, pointer-only rehydration, unknown
+outcome reconciliation, graph outage, exact retry, typed invalid-input
+correction, and the noncertification boundary. The materialized Pi extension
+suite compares its authoritative structured result with non-Pi JSON-RPC data
+and verifies concise collapsed plus bounded expanded projections.
+
+The checked-in verification record reports 24 of 24 corpus tasks passing,
+100% correct-first-call completion in the measured ordinary journeys, one-call
+median resume and mutation paths, zero schema inspections or generic graph
+queries, exact completeness, zero duplicated authoritative node arrays, and
+zero coordination-driven evidence promotions.
 
 The current primitives establish strong append-only authority and provenance,
 but excellent AX additionally requires objective-oriented resume, unique

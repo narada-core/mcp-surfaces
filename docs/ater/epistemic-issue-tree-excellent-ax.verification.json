@@ -1,0 +1,164 @@
+{
+  "schema": "narada.ater.verification.v1",
+  "target": "epistemic-graph.issue-tree",
+  "assessed_at": "2026-08-31",
+  "disposition": "excellent_ax_verified",
+  "scope": {
+    "implementation": [
+      "ledger-domain-mcp native engine",
+      "ledger-domain-epistemic descriptor"
+    ],
+    "carriers": [
+      "raw JSON-RPC non-Pi client",
+      "materialized Pi extension collapsed and expanded projections"
+    ]
+  },
+  "corpus": {
+    "tasks_total": 24,
+    "tasks_passed": 24,
+    "correct_first_call_rate": 1,
+    "incorrect_completion_count": 0,
+    "generic_query_calls": 0,
+    "schema_inspection_calls": 0
+  },
+  "metrics": {
+    "known_tree_resume_median_mcp_calls": 1,
+    "transition_median_mutation_calls": 1,
+    "maximum_reconciliation_calls": 1,
+    "producer_default_char_limit": 6000,
+    "carrier_model_visible_char_limit": 8000,
+    "frontier_fixture_nodes": 143,
+    "frontier_pages_reconstructed": 2,
+    "duplicate_authoritative_node_ratio": 0,
+    "explicit_completeness_rate": 1,
+    "safe_retry_recovery_rate": 1,
+    "evidence_promotions_from_coordination_state": 0
+  },
+  "gates": {
+    "A1": {
+      "status": "passed",
+      "evidence": "I1"
+    },
+    "A2": {
+      "status": "passed",
+      "evidence": "I2"
+    },
+    "A3": {
+      "status": "passed",
+      "evidence": "I3"
+    },
+    "A4": {
+      "status": "passed",
+      "evidence": "I4"
+    },
+    "A5": {
+      "status": "passed",
+      "evidence": "I5"
+    },
+    "A6": {
+      "status": "passed",
+      "evidence": "I6"
+    },
+    "A7": {
+      "status": "passed",
+      "evidence": "I7"
+    },
+    "A8": {
+      "status": "passed",
+      "evidence": "I8"
+    },
+    "A9": {
+      "status": "passed",
+      "evidence": "I9"
+    },
+    "A10": {
+      "status": "passed",
+      "evidence": "I10"
+    },
+    "A11": {
+      "status": "passed",
+      "evidence": "I11"
+    },
+    "A12": {
+      "status": "passed",
+      "evidence": "I12"
+    },
+    "A13": {
+      "status": "passed",
+      "evidence": "I13"
+    },
+    "A14": {
+      "status": "passed",
+      "evidence": "I14"
+    },
+    "A15": {
+      "status": "passed",
+      "evidence": "I15"
+    },
+    "A16": {
+      "status": "passed",
+      "evidence": "I16"
+    },
+    "A17": {
+      "status": "passed",
+      "evidence": "I17"
+    },
+    "A18": {
+      "status": "passed",
+      "evidence": "I18"
+    },
+    "A19": {
+      "status": "passed",
+      "evidence": "I19"
+    },
+    "A20": {
+      "status": "passed",
+      "evidence": "I20"
+    },
+    "A21": {
+      "status": "passed",
+      "evidence": "I21"
+    },
+    "A22": {
+      "status": "passed",
+      "evidence": "I22"
+    },
+    "A23": {
+      "status": "passed",
+      "evidence": "I23"
+    },
+    "A24": {
+      "status": "passed",
+      "evidence": "I24"
+    }
+  },
+  "evidence": [
+    {
+      "command": "cargo test --manifest-path packages/ledger-domain-mcp/native/Cargo.toml --test issue_tree_excellent_ax",
+      "result": "24 passed"
+    },
+    {
+      "command": "cargo test --manifest-path packages/ledger-domain-mcp/native/Cargo.toml",
+      "result": "full native and protocol suite passed"
+    },
+    {
+      "command": "pnpm --filter @narada-core/ledger-domain-epistemic test",
+      "result": "descriptor contract passed"
+    },
+    {
+      "command": "pnpm --filter @narada-core/mcp-materializer-native test",
+      "result": "Pi/non-Pi projection and materializer suite passed"
+    }
+  ],
+  "invariants": [
+    "coordination state does not certify truth",
+    "captured continuation is immutable and directly callable",
+    "competing selected-leaf transitions use an observed-head CAS",
+    "unknown admission outcomes reconcile through resume rather than blind retry",
+    "graph outage never returns admitted status"
+  ],
+  "residual_risks": [
+    "Live production telemetry can reopen ATER if observed behavior contradicts the acceptance fixtures.",
+    "Independent human review remains desirable but is not substituted for executable gates."
+  ]
+}

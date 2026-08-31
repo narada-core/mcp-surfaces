@@ -1799,6 +1799,7 @@ impl Engine {
                 return Ok(replay["receipt"].clone());
             }
             let (frontier, selected) = self.issue_tree_frontier_nodes(root, tree_id)?;
+            let observed_ledger_head = self.ledger_head(root)?;
             let selected = selected.ok_or_else(|| {
                 self.error(
                     "issue_tree_selected_missing",
@@ -1863,6 +1864,28 @@ impl Engine {
                 .get("select_next")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
+            let selected_successor_index = select_next
+                .then(|| {
+                    successors
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, successor)| {
+                            successor["state"].as_str().unwrap_or("open") == "open"
+                        })
+                        .max_by(|(left_index, left), (right_index, right)| {
+                            left["score"]
+                                .as_f64()
+                                .unwrap_or(0.0)
+                                .partial_cmp(&right["score"].as_f64().unwrap_or(0.0))
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                                .then_with(|| {
+                                    right["node_id"].as_str().cmp(&left["node_id"].as_str())
+                                })
+                                .then_with(|| right_index.cmp(left_index))
+                        })
+                        .map(|(index, _)| index)
+                })
+                .flatten();
             for (index, successor) in successors.iter().enumerate() {
                 let object = successor.as_object().ok_or_else(|| {
                     self.error(
@@ -1893,17 +1916,23 @@ impl Engine {
                             json!({"successor_index":index}),
                         )
                     })?;
+                let requested_state = object
+                    .get("state")
+                    .and_then(Value::as_str)
+                    .unwrap_or("open");
                 nodes.push(json!({
                     "node_id":node_id,
                     "title":title,
                     "version":1,
-                    "state":if select_next && index == 0 {"selected"} else {"open"},
+                    "state":if selected_successor_index == Some(index) {"selected"} else {requested_state},
                     "score":object.get("score").cloned().unwrap_or(json!(0.0)),
                     "parent_id":selected_id,
-                    "rationale":object.get("rationale").cloned().unwrap_or(Value::Null)
+                    "rationale":object.get("rationale").cloned().unwrap_or(Value::Null),
+                    "blocker_ids":object.get("blocker_ids").cloned().unwrap_or_else(|| json!([])),
+                    "evidence_ids":object.get("evidence_ids").cloned().unwrap_or_else(|| json!([]))
                 }));
             }
-            if select_next && successors.is_empty() {
+            if select_next && selected_successor_index.is_none() {
                 if let Some(next) = frontier.into_iter().find(|node| {
                     node["node_id"].as_str() != Some(selected_id)
                         && node["state"].as_str() == Some("open")
@@ -1929,7 +1958,33 @@ impl Engine {
             expanded.remove("expected_node_version");
             expanded.remove("select_next");
             expanded.insert("nodes".into(), Value::Array(nodes));
-            let mut receipt = self.issue_tree_transition(root, &expanded)?;
+            if !expanded.contains_key("expected_ledger_head") {
+                expanded.insert("expected_ledger_head".into(), json!(observed_ledger_head));
+            }
+            let mut receipt = match self.issue_tree_transition(root, &expanded) {
+                Ok(receipt) => receipt,
+                Err(error)
+                    if error["code"].as_str() == Some("proposal_not_admissible")
+                        && error
+                            .pointer("/details/review/status")
+                            .and_then(Value::as_str)
+                            == Some("stale") =>
+                {
+                    return Err(self.error(
+                        "issue_tree_version_conflict",
+                        "the selected leaf changed before admission",
+                        json!({
+                            "tree_id":tree_id,
+                            "selected_node_id":selected_id,
+                            "expected_node_version":expected_version,
+                            "mutation_admitted":false,
+                            "next":{"tool":"epistemic_graph_issue_tree_resume","arguments":{"tree_id":tree_id}},
+                            "cause":error
+                        }),
+                    ));
+                }
+                Err(error) => return Err(error),
+            };
             let resumed = self
                 .issue_tree_resume(root, &Map::from_iter([("tree_id".into(), json!(tree_id))]))?;
             if let Some(object) = receipt.as_object_mut() {

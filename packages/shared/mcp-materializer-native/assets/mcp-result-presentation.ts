@@ -58,6 +58,17 @@ export function summarizeMcpResult(result: any, fullText: string): string {
     const status = typeof structured?.status === 'string' ? structured.status : 'ok';
     return `${status} · ${counted(count, 'envelope')}`;
   }
+  if (structured?.schema === 'narada.epistemic.issue-tree.resume.v1') {
+    const selected = structured?.selected;
+    const selectedLabel = typeof selected?.node_id === 'string'
+      ? `${selected.node_id} selected`
+      : 'no selected leaf';
+    const open = Array.isArray(structured?.frontier?.items)
+      ? structured.frontier.items.filter((item: any) => item?.state === 'open').length
+      : 0;
+    const version = structured?.tree?.version ?? selected?.version;
+    return `issue tree · ${selectedLabel} · ${counted(open, 'open leaf', 'open leaves')}${version != null ? ` · version ${version}` : ''}`;
+  }
   const summary = structured?.result_summary;
   const schema = summary?.schema ?? structured?.schema;
   const status = summary?.status ?? structured?.status;
