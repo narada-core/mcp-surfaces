@@ -192,6 +192,7 @@ const MAX_MODEL_VISIBLE_RESULT_CHARS = 8_000;
 
 type ToolResultView = "compact" | "model-visible" | "full-output";
 const TOOL_RESULT_VIEWS: ToolResultView[] = ["compact", "model-visible", "full-output"];
+const TOOL_RESULT_VIEW_SHORTCUT = "ctrl+shift+m";
 
 function boundedModelContent(result: any, content: any[], rawText: string): { content: any[]; expandedText: string | null } {
   const fullText = resultText({ content });
@@ -257,7 +258,7 @@ function mutedText(theme: any, text: string): string {
 }
 
 function resultViewHeader(view: ToolResultView, characterCount: number, nextView: ToolResultView): string {
-  return `${view} · ${compactQuantity(characterCount)} ${characterCount === 1 ? "character" : "characters"} — ctrl+o: ${nextView}`;
+  return `${view} · ${compactQuantity(characterCount)} ${characterCount === 1 ? "character" : "characters"} — ${TOOL_RESULT_VIEW_SHORTCUT}: ${nextView}`;
 }
 
 __NARADA_MCP_RESULT_PRESENTATION__
@@ -451,7 +452,7 @@ export default function naradaMcpCarrier(pi: any): void {
     handler: (args: string, ctx: any) => naradaIdentityCommand(args, ctx),
   });
 
-  pi.registerShortcut?.("ctrl+o", {
+  pi.registerShortcut?.(TOOL_RESULT_VIEW_SHORTCUT, {
     description: "Cycle MCP tool output: compact, model-visible, full-output",
     handler: async (ctx: any) => {
       const currentIndex = TOOL_RESULT_VIEWS.indexOf(toolResultView);
@@ -689,7 +690,7 @@ export default function naradaMcpCarrier(pi: any): void {
               const summaryWithModelVisibleSize = summary.includes("model-visible")
                 ? summary
                 : `${summary} · ${modelVisibleSize}`;
-              return textComponent(mutedText(theme, `${summaryWithModelVisibleSize} — ctrl+o: ${nextView}`));
+              return textComponent(mutedText(theme, `${summaryWithModelVisibleSize} — ${TOOL_RESULT_VIEW_SHORTCUT}: ${nextView}`));
             },
           });
         }
