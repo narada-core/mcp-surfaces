@@ -65,7 +65,15 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       return;
     }
     if (message.params.name === "mcp_loader_call_binding_tool") {
-      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { structuredContent: { result: { structuredContent: { schema: "narada.epistemic.query.v1", items: [{ event_id: "ev-000000000012-a" }, { event_id: "ev-000000000015-b" }] } } } } }) + "\\n");
+      const bindingStructured = message.params.arguments?.value === "submit_review_admit_nested"
+        ? { schema: "narada.epistemic.submit_review_admit.v1", status: "admitted", submission: { proposal_id: "proposal-nested", proposal_digest: "digest-nested", content_fingerprint: "content-nested", operation_count: 2, operations: [{ op: "entity_create" }] }, review: { status: "policy_valid", review_details: { repeated: "input" } }, admission: { status: "admitted", proposal_id: "proposal-nested", ledger_head: "head-nested", event: { operations: [{ op: "entity_create" }] } }, review_gate_preserved: true, certifies_truth: false }
+        : { schema: "narada.epistemic.query.v1", items: [{ event_id: "ev-000000000012-a" }, { event_id: "ev-000000000015-b" }] };
+      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { structuredContent: { result: { structuredContent: bindingStructured } } } }) + "\\n");
+      return;
+    }
+    if (message.params.name === "fixture_echo" && message.params.arguments?.value === "submit_review_admit_nested") {
+      const fixture_nested_submit = { schema: "narada.epistemic.submit_review_admit.v1", status: "admitted", submission: { proposal_id: "proposal-nested", proposal_digest: "digest-nested", content_fingerprint: "content-nested", operation_count: 2, operations: [{ op: "entity_create" }] }, review: { status: "policy_valid", review_details: { repeated: "input" } }, admission: { status: "admitted", proposal_id: "proposal-nested", ledger_head: "head-nested", event: { operations: [{ op: "entity_create" }] } }, review_gate_preserved: true, certifies_truth: false };
+      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { structuredContent: { result: { structuredContent: fixture_nested_submit } } } }) + "\\n");
       return;
     }
     const fixtures = {
@@ -79,6 +87,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
         value.payload = "x".repeat(4227 - JSON.stringify(value).length);
         return value;
       })(),
+      query_result: { schema: "narada.epistemic.query.v2", query_mode: "datalog", query_origin: "raw", template: null, ledger_head: "secret-head", items: [{ entity_id: "claim:1", payload: { title: "Keep", detail: "answer" } }], count: 1, returned_count: 1, count_semantics: "returned_page", limit: 10, output_bytes: 321, max_output_bytes: 10000, has_more: false, next_cursor: null, normalization: { applied: true, normalized_count: 1 }, query_cost: { planner_mode: "bounded_clause_plan", datoms_loaded: 10, hard_caps: { max_datoms: 100 } } },
       inbox_query: { schema: "narada.epistemic.query.v2", query_mode: "datalog", query_origin: "named_template", template: "epistemic:inbox", ledger_head: "head", items: [{ sender: "sender-a", recipient: "recipient-b", event_id: "event-a", body: "body alpha" }, { sender: "sender-c", recipient: "recipient-b", event_id: "event-c", body: "body beta" }] },
       issue_tree: { schema: "narada.epistemic.issue-tree.resume.v1", status: "ok", tree: { tree_id: "tree:ax", objective: "AX", version: "3" }, selected: { node_id: "issue:selected", version: "2", title: "Selected", state: "selected", score: 0.9 }, frontier: { items: [{ node_id: "issue:selected", state: "selected", score: 0.9 }, { node_id: "issue:open", state: "open", score: 0.8 }], returned: 2, complete: true, total: 2, total_exact: true }, continuation: null, certifies_truth: false, noncertification: "coordination state; not evidence" },
       producer_page: { schema: "narada.producer_output_page.v1", status: "ok", output_ref: "mcp_output:fixture", reader_tool: "mcp_loader_read_result", full_output_char_length: 1234, output_text: JSON.stringify({ schema: "child.result.v1", answer: "only child output" }) },
@@ -86,6 +95,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       loader_result: { schema: "narada.mcp_loader.tool_result.v1", connection_id: "c1", surface_id: "s1", result_summary: { schema: "child.result.v1", status: "ok" }, result: { schema: "child.result.v1", answer: "only unwrapped child result" } },
       schema_lease_compact: { schema: "narada.mcp_loader.schema_lease.v1", status: "issued", connection_id: "c-compact", logical_connection_id: "logical-compact", generation_id: "generation-compact", surface_id: "surface-compact", tool_name: "surface_read", tool_schema_digest: "tool-digest", tool_contract_digest: "contract-digest", input_schema_digest: "input-digest", output_schema_digest: "output-digest", description: "Read the surface", annotations: { readOnlyHint: true }, argument_skeleton: { site_root: "x" }, minimal_valid_arguments: { site_root: "x" }, minimal_valid_arguments_status: "validated", verbose_contract_call: { tool_name: "mcp_loader_inspect_tool" }, schema_lease: "lease-compact", lease_scope: "loader_process_child_generation", transferable: false, authorization_resolution: "lease_renewed", input_contract: { type: "object", required: ["site_root"], properties: { site_root: { type: "string" } } } },
       schema_lease_verbose: { schema: "narada.mcp_loader.schema_lease.v1", status: "issued", connection_id: "c-verbose", logical_connection_id: "logical-verbose", generation_id: "generation-verbose", surface_id: "surface-verbose", tool_name: "surface_write", tool_schema_digest: "verbose-tool-digest", tool_contract_digest: "verbose-contract-digest", input_schema_digest: "verbose-input-digest", output_schema_digest: "verbose-output-digest", description: "Write the surface", annotations: { readOnlyHint: false }, argument_skeleton: { value: "x" }, minimal_valid_arguments: { value: "x" }, minimal_valid_arguments_status: "validated", verbose_contract_call: { tool_name: "mcp_loader_inspect_tool" }, schema_lease: "lease-verbose", lease_scope: "loader_process_child_generation", transferable: false, authorization_resolution: "lease_renewed", tool_contract: { name: "surface_write", description: "Write the surface", inputSchema: { type: "object", required: ["value"], properties: { value: { type: "string" } } }, annotations: { readOnlyHint: false } } },
+      structured_command: { schema: "narada.structured_command.execution_result.v0", status: "running", executed: true, pending: true, execution_ref: "execution-1", command: "pnpm", args: ["test"], working_directory: "C:/repo", started_at: "2026-09-01T00:00:00Z", timeout_ms: 900000, execution_posture: { test_scope: "noisy", expected_cost: "medium" }, test_scope: "noisy", expected_cost: "medium", stdout: "", stderr: "", stdout_truncated: false, stderr_truncated: false, timed_out: false, cancelled: false, stdout_char_length: 0, stderr_char_length: 0 },
       git_status: { schema: "narada.git.status.v1", status: "ok", working_directory: "C:/repo", repository_root: "C:/repo", branch: "main", upstream: "origin/main", ahead: 0, behind: 0, clean: true, status_entries: [{ x: " ", y: "M", path: "owned.ts", original_path: null, conflict: false }], staged: [], unstaged: ["owned.ts"], untracked: [], conflicts: [], summary: { staged_count: 0, unstaged_count: 1, untracked_count: 0, conflict_count: 0, matching_path_count: 1, clean: true }, remotes: [{ name: "origin", fetch_url: "https://secret.example/repo.git" }], push_target: { status: "resolved", remote: "origin", branch: "main", source: "upstream" }, push_remediation: null, query: { noisy: true } },
       git_add: { schema: "narada.git.add.v1", status: "ok", operation: "add", working_directory: "C:/repo", paths: ["owned.ts"], work_scope_ref: "scope-1", output: "verbose output", summary: "staged explicit paths", post_status: { schema: "narada.git.status.v1", status: "ok", repository_root: "C:/repo", branch: "main", upstream: "origin/main", ahead: 0, behind: 0, clean: true, staged: ["owned.ts"], unstaged: [], untracked: [], conflicts: [], summary: { staged_count: 1, unstaged_count: 0, untracked_count: 0, conflict_count: 0, clean: true }, remotes: [{ fetch_url: "https://secret.example" }] } },
       git_commit: { schema: "narada.git.commit.v1", status: "ok", working_directory: "C:/repo", commit: "abc123", commit_ref: "git_commit:abc123", committed_entries: [{ path: "owned.ts", secret: "omit" }], committed_files: ["owned.ts"], committed_file_count: 1, work_scope_ref: "scope-1", output: "[main abc123] message", summary: "[main abc123] message", post_status: { schema: "narada.git.status.v1", status: "ok", branch: "main", upstream: "origin/main", ahead: 1, behind: 0, clean: true, staged: [], unstaged: [], untracked: [], conflicts: [], summary: { staged_count: 0, unstaged_count: 0, untracked_count: 0, conflict_count: 0, clean: true } } },
@@ -185,6 +195,16 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     assert.deepEqual(JSON.parse(inboxQuery.content[0].text), ['body alpha', 'body beta']);
     assert.doesNotMatch(inboxQuery.content[0].text, /sender-a|recipient-b|event-a|ledger_head/);
     assert.notEqual(registered[0].renderResult(inboxQuery, { expanded: true }).render(160).join(String.fromCharCode(10)), inboxQuery.content[0].text);
+    const queryResult = await registered[0].execute('call-query-result', { value: 'query_result' }, new AbortController().signal);
+    const queryModel = JSON.parse(queryResult.content[0].text);
+    assert.deepEqual(Object.keys(queryModel).sort(), ['count', 'has_more', 'items', 'next_cursor', 'returned_count', 'schema'].sort());
+    assert.deepEqual(queryModel.items, [{ entity_id: 'claim:1', payload: { title: 'Keep', detail: 'answer' } }]);
+    assert.equal(queryModel.query_mode, undefined);
+    assert.equal(queryModel.ledger_head, undefined);
+    assert.equal(queryModel.query_cost, undefined);
+    assert.ok(queryResult.content[0].text.length < 700);
+
+
 
     const authoritativeJson = await registered[0].execute('call-authoritative-json', { value: 'authoritative_json' }, new AbortController().signal);
     const writeReceipt = await registered[0].execute('call-write-file', { value: 'write_file' }, new AbortController().signal);
@@ -200,6 +220,14 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     assert.equal(submitModel.operations, undefined);
     assert.equal(submitModel.review_details, undefined);
     assert.notEqual(registered[0].renderResult(submitReceipt, { expanded: true }).render(160).join('\n'), submitReceipt.content[0].text);
+    const nestedSubmitReceipt = await registered[0].execute('call-submit-review-admit-nested', { value: 'submit_review_admit_nested' }, new AbortController().signal);
+    const nestedSubmitModel = JSON.parse(nestedSubmitReceipt.content[0].text);
+    assert.deepEqual(Object.keys(nestedSubmitModel).sort(), ['admission_status', 'certifies_truth', 'content_fingerprint', 'ledger_head', 'operation_count', 'proposal_digest', 'proposal_id', 'review_gate_preserved', 'review_status', 'schema', 'status'].sort());
+    assert.equal(nestedSubmitModel.operations, undefined);
+    assert.equal(nestedSubmitModel.review_details, undefined);
+    assert.ok(nestedSubmitReceipt.content[0].text.length < 500);
+
+
     assert.match(authoritativeJson.content[0].text, /output_ref|reader_tool/);
     assert.equal(authoritativeJson.details.modelVisibleTruncated, false);
 
@@ -209,6 +237,16 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     assert.equal(leaseModel.binding_resolution, undefined);
     assert.equal(leaseModel.tool_contract, undefined);
     assert.notEqual(registered[0].renderResult(lease, { expanded: true }).render(160).join('\n'), lease.content[0].text);
+
+    const commandExecution = await registered[0].execute('call-structured-command', { value: 'structured_command' }, new AbortController().signal);
+    const commandModel = JSON.parse(commandExecution.content[0].text);
+    assert.deepEqual(Object.keys(commandModel).sort(), ['executed', 'execution_ref', 'pending', 'schema', 'status'].sort());
+    assert.equal(commandModel.command, undefined);
+    assert.equal(commandModel.args, undefined);
+    assert.equal(commandModel.working_directory, undefined);
+    assert.equal(commandModel.execution_posture, undefined);
+    assert.equal(commandModel.test_scope, undefined);
+    assert.ok(commandExecution.content[0].text.length < 250);
 
     const gitStatus = await registered[0].execute('call-git-status', { value: 'git_status' }, new AbortController().signal);
     const gitStatusModel = JSON.parse(gitStatus.content[0].text);

@@ -397,8 +397,78 @@ function projectGitResultForModel(value: any): any | undefined {
   return undefined;
 }
 
+function projectStructuredCommandResultForModel(value: any): any | undefined {
+  if (value?.schema !== "narada.structured_command.execution_result.v0") return undefined;
+  const projection: Record<string, any> = { schema: value.schema, status: value.status };
+  for (const field of ["executed", "pending"]) {
+    if (typeof value?.[field] === "boolean") projection[field] = value[field];
+  }
+  for (const field of ["execution_ref"]) {
+    if (typeof value?.[field] === "string") projection[field] = value[field];
+  }
+  if (typeof value?.exit_code === "number") projection.exit_code = value.exit_code;
+  for (const field of ["stdout", "stderr"]) {
+    if (typeof value?.[field] === "string" && value[field].length > 0) projection[field] = value[field];
+  }
+  for (const field of ["stdout_truncated", "stderr_truncated", "timed_out", "cancelled"]) {
+    if (value?.[field] === true) projection[field] = true;
+  }
+  for (const field of ["stdout_next_offset", "stderr_next_offset"]) {
+    if (typeof value?.[field] === "number") projection[field] = value[field];
+  }
+  for (const field of ["refusal_reasons", "remediation_hints"]) {
+    if (Array.isArray(value?.[field]) && value[field].length > 0) projection[field] = value[field];
+  }
+  return projection;
+}
+
+function projectMutationReceiptForModel(structured: any): any | undefined {
+  if (structured?.schema === "local.filesystem.write_file.v1") {
+    return {
+      schema: structured.schema,
+      status: structured.status,
+      relative_path: structured.relative_path,
+      size: structured.size,
+      sha256: structured.sha256 ?? structured.after_sha256,
+      before_sha256: structured.before_sha256,
+      after_sha256: structured.after_sha256,
+    };
+  }
+  if (structured?.schema === "narada.epistemic.submit_review_admit.v1") {
+    const submission = structured.submission ?? {};
+    const review = structured.review ?? {};
+    const admission = structured.admission ?? {};
+    return {
+      schema: structured.schema,
+      status: structured.status,
+      proposal_id: submission.proposal_id ?? admission.proposal_id,
+      proposal_digest: submission.proposal_digest,
+      content_fingerprint: submission.content_fingerprint,
+      operation_count: submission.operation_count,
+      review_status: review.status,
+      admission_status: admission.status,
+      ledger_head: admission.ledger_head ?? admission.ledger_head_digest,
+      review_gate_preserved: structured.review_gate_preserved,
+      certifies_truth: structured.certifies_truth,
+    };
+  }
+  return undefined;
+}
+
 function loaderControlPlaneProjectionForModel(value: any): any | undefined {
-  return projectSurfaceAttachedForModel(value) ?? projectGitResultForModel(value) ?? projectSchemaLeaseForModel(value) ?? projectSiteToolInventoryForModel(value);
+  return projectSurfaceAttachedForModel(value) ?? projectGitResultForModel(value) ?? projectStructuredCommandResultForModel(value) ?? projectMutationReceiptForModel(value) ?? projectEpistemicQueryForModel(value) ?? projectSchemaLeaseForModel(value) ?? projectSiteToolInventoryForModel(value);
+}
+
+function projectEpistemicQueryForModel(value: any): any | undefined {
+  if (value?.schema !== "narada.epistemic.query.v2" || !Array.isArray(value.items)) return undefined;
+  const projection: Record<string, any> = { schema: value.schema, items: value.items };
+  if (Object.prototype.hasOwnProperty.call(value, "status")) projection.status = value.status;
+  for (const field of ["count", "returned_count"]) {
+    if (typeof value[field] === "number") projection[field] = value[field];
+  }
+  if (typeof value.has_more === "boolean") projection.has_more = value.has_more;
+  if (Object.prototype.hasOwnProperty.call(value, "next_cursor")) projection.next_cursor = value.next_cursor;
+  return projection;
 }
 
 function bodyOnlyProjectionText(structured: any): string | undefined {
@@ -470,36 +540,8 @@ function controlPlaneProjectionText(structured: any): string | undefined {
 }
 
 function mutationReceiptProjectionText(structured: any): string | undefined {
-  if (structured?.schema === "local.filesystem.write_file.v1") {
-    return JSON.stringify({
-      schema: structured.schema,
-      status: structured.status,
-      relative_path: structured.relative_path,
-      size: structured.size,
-      sha256: structured.sha256 ?? structured.after_sha256,
-      before_sha256: structured.before_sha256,
-      after_sha256: structured.after_sha256,
-    });
-  }
-  if (structured?.schema === "narada.epistemic.submit_review_admit.v1") {
-    const submission = structured.submission ?? {};
-    const review = structured.review ?? {};
-    const admission = structured.admission ?? {};
-    return JSON.stringify({
-      schema: structured.schema,
-      status: structured.status,
-      proposal_id: submission.proposal_id ?? admission.proposal_id,
-      proposal_digest: submission.proposal_digest,
-      content_fingerprint: submission.content_fingerprint,
-      operation_count: submission.operation_count,
-      review_status: review.status,
-      admission_status: admission.status,
-      ledger_head: admission.ledger_head ?? admission.ledger_head_digest,
-      review_gate_preserved: structured.review_gate_preserved,
-      certifies_truth: structured.certifies_truth,
-    });
-  }
-  return undefined;
+  const projection = projectMutationReceiptForModel(structured);
+  return projection === undefined ? undefined : JSON.stringify(projection);
 }
 
 function modelContentProjection(result: any, content: any[]): any[] {
