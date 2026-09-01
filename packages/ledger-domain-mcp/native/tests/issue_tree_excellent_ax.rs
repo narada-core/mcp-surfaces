@@ -116,7 +116,15 @@ fn acceptance(case: u8) {
             let (tree, selected) = tree_and_selected(&created);
             let value = resume(&root, tree);
             assert_eq!(value["selected"]["node_id"], selected);
-            assert!(value["frontier"]["returned"].as_u64().unwrap() >= 1);
+            assert_eq!(
+                value["frontier"]["scope"],
+                "unselected alternatives; selected work is represented once in selected"
+            );
+            assert!(!value["frontier"]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["node_id"] == selected));
         }
         2 => {
             create(&root, "I2 objective");
@@ -131,7 +139,7 @@ fn acceptance(case: u8) {
                 "epistemic_graph_issue_tree_resume",
                 json!({"objective":"absent"}),
             );
-            assert_eq!(missing["code"], "issue_tree_not_found");
+            assert_eq!(missing["code"], "issue_tree_objective_not_found");
         }
         3 => {
             let barrier = Arc::new(Barrier::new(3));
@@ -366,6 +374,7 @@ fn acceptance(case: u8) {
                     values.iter().any(|v| matches!(
                         v["code"].as_str(),
                         Some("issue_tree_selected_conflict")
+                            | Some("proposal_not_admissible")
                             | Some("ledger_head_conflict")
                             | Some("ledger_head_mismatch")
                             | Some("issue_tree_version_conflict")

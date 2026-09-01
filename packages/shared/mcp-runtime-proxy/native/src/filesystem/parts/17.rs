@@ -54,7 +54,13 @@ fn walk_directory(path: &Path, root: &Path, entries: &mut Vec<String>, truncated
     }
 }
 
-fn run_rg(args: &[String], timeout: u64, operation: &str) -> Result<(Vec<String>, bool), FsError> {
+fn run_rg(
+    args: &[String],
+    timeout: u64,
+    operation: &str,
+    max_entries: usize,
+    max_bytes: usize,
+) -> Result<(Vec<String>, bool), FsError> {
     let started = std::time::Instant::now();
     let mut child = Command::new("rg")
         .args(args)
@@ -134,7 +140,8 @@ fn run_rg(args: &[String], timeout: u64, operation: &str) -> Result<(Vec<String>
                     continue;
                 }
                 bytes = bytes.saturating_add(line.len());
-                if matches.len() >= MAX_SEARCH_CAPTURE_ENTRIES || bytes > MAX_SEARCH_CAPTURE_BYTES {
+                if matches.len() >= max_entries || bytes > max_bytes {
+                    // The producer bound is deliberate: do not materialize the rest of a broad search.
                     capture_limited = true;
                     let _ = child.kill();
                     break;

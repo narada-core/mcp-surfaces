@@ -65,6 +65,15 @@ fn normalize_command(value: &str) -> String {
 }
 
 fn tool_result(state: &State, payload: Value, tool_name: &str) -> Result<Value, StructuredError> {
+    // Guidance carries its complete recovery contract in structuredContent. Keep the
+    // text projection deliberately small so clients that retain both MCP projections
+    // cannot exceed the compact-output budget by storing the same guidance twice.
+    if tool_name == "structured_command_guidance" {
+        return Ok(json!({
+            "content": [{"type": "text", "text": "Structured guidance and recovery_commands are available in structuredContent.", "annotations": {"audience": ["assistant"]}}],
+            "structuredContent": payload
+        }));
+    }
     let text = serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string());
     if text.chars().count() <= 4_000 {
         return Ok(

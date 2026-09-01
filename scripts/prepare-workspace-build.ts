@@ -299,7 +299,15 @@ function pathWithin(root: string, candidate: string): boolean {
 }
 
 function samePath(left: string, right: string): boolean {
-  return portablePath(left).toLowerCase() === portablePath(right).toLowerCase();
+  return portablePath(canonicalPath(left)).toLowerCase() === portablePath(canonicalPath(right)).toLowerCase();
+}
+
+function canonicalPath(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
 }
 
 function portablePath(path: string): string {

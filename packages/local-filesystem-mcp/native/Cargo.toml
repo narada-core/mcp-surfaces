@@ -1,0 +1,18 @@
+[package]
+name = "narada-local-filesystem-mcp"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "narada-local-filesystem-mcp"
+path = "src/main.rs"
+
+[dependencies]
+hex = "0.4"
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+time = { version = "0.3", features = ["formatting", "macros", "parsing"] }
+
+[dev-dependencies]
+serde_json = { version = "1", features = ["preserve_order"] }

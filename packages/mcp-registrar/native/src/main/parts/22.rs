@@ -13,7 +13,15 @@ fn native_artifact_entrypoint(package: &str, artifact: &str) -> Option<String> {
         .join("native");
     let pointer: Value =
         serde_json::from_str(&fs::read_to_string(native_root.join("current.json")).ok()?).ok()?;
-    let relative = pointer.get("artifacts")?.get(artifact)?.as_str()?;
+    let requested = artifact.strip_suffix(".exe").unwrap_or(artifact);
+    let names = if cfg!(windows) {
+        vec![artifact.to_string(), format!("{requested}.exe")]
+    } else {
+        vec![requested.to_string(), artifact.to_string()]
+    };
+    let relative = names
+        .iter()
+        .find_map(|name| pointer.get("artifacts")?.get(name)?.as_str())?;
     Some(
         native_root
             .join(relative)

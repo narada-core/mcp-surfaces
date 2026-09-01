@@ -88,6 +88,7 @@ SOP actions are the units of work. A mailbox admission result is a neutral sourc
 
 ```powershell
 cargo test --locked --manifest-path packages/shared/mcp-surfaces-native/native/Cargo.toml mailbox
+pnpm --filter @narada-core/mailbox-mcp test
 ```
 
 The admitted operational authority is the shared Rust surface. Node and Bun

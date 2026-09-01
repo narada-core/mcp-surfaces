@@ -42,11 +42,41 @@ pub(crate) fn validate_input_schema(
     path: &str,
 ) -> Result<(), Diagnostic> {
     let invalid = |reason: String| {
+        let keyword = reason.split(':').next().unwrap_or(reason.as_str());
+        let expected = schema
+            .get(keyword)
+            .cloned()
+            .unwrap_or_else(|| match keyword {
+                "type_mismatch" => schema.get("type").cloned().unwrap_or(Value::Null),
+                "enum_mismatch" => schema.get("enum").cloned().unwrap_or(Value::Null),
+                _ => Value::Null,
+            });
+        let property = path.rsplit(['.', '/']).next().unwrap_or(path);
+        let corrected_value = match keyword {
+            "maximum" | "minimum" => expected.clone(),
+            "maxLength" => json!("x".repeat(expected.as_u64().unwrap_or(0) as usize)),
+            "minLength" => json!("x".repeat(expected.as_u64().unwrap_or(0) as usize)),
+            "maxItems" => json!([]),
+            "maxProperties" => json!({}),
+            _ => Value::Null,
+        };
+        let corrected = json!({"operation":"replace","path":path,"value":corrected_value,"merge_into_original_arguments":true});
         Diagnostic::new(
             "input_schema_validation_failed",
-            format!("input_schema_validation_failed:{path}:{reason}"),
+            format!(
+                "input_schema_validation_failed:{path}:{reason}: expected {}; received {}",
+                expected, value
+            ),
         )
-        .with_details(json!({"path":path,"reason":reason}))
+        .with_details(json!({
+            "path":path,
+            "violated_property":property,
+            "constraint":keyword,
+            "expected":expected,
+            "received":value,
+            "reason":reason,
+            "corrected_call_template":corrected
+        }))
     };
     let type_matches = |kind: &str| match kind {
         "object" => value.is_object(),

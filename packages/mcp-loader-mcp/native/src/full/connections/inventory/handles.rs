@@ -80,7 +80,10 @@ fn compact_tool_description(tool: &Value) -> Value {
         return Value::Null;
     };
     let mut chars = description.chars();
-    let excerpt: String = chars.by_ref().take(COMPACT_TOOL_DESCRIPTION_CHARS).collect();
+    let excerpt: String = chars
+        .by_ref()
+        .take(COMPACT_TOOL_DESCRIPTION_CHARS)
+        .collect();
     if chars.next().is_some() {
         json!(format!("{excerpt}…"))
     } else {
@@ -121,6 +124,9 @@ pub(crate) fn surface_status(
         "schema".to_string(),
         json!("narada.mcp_loader.surface_status.v1"),
     );
+    // server_info is already available from the attach/open result and is not
+    // needed for bounded runtime recovery status.
+    result.remove("server_info");
     Ok(Value::Object(result))
 }
 pub(crate) fn tool_discovery_manifest(

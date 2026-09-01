@@ -45,6 +45,27 @@ export type NaradaMariciInboxPollRequest = {
 };
 
 export const NARADA_MARICI_INBOX_POLL_EVENT = "narada:mcp:marici-inbox-poll";
+const NARADA_SESSION_IDENTITY_ENTRY = "narada-session-identity.v2";
+const LEGACY_MARICI_SESSION_IDENTITY_ENTRY = "narada-marici-session-identity";
+
+type NaradaSessionIdentityState =
+  | { status: "admitted"; identity: string; sessionId: string; changedAt: string; source: "operator_slash_command" }
+  | { status: "cleared"; identity: null; sessionId: string; changedAt: string; source: "operator_slash_command" };
+
+type EffectiveNaradaIdentity = {
+  identity: string;
+  source: "operator_slash_command" | "carrier_admission";
+};
+
+function normalizeNaradaIdentity(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const identity = value.trim();
+  return identity.length > 0
+    && identity.length <= 200
+    && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(identity)
+    ? identity
+    : null;
+}
 
 const SERVERS: ServerConfig[] = __NARADA_PI_MCP_SERVERS__;
 const PROTOCOL_VERSION = "2026-07-28";
@@ -169,6 +190,9 @@ function preservesDeliveredContent(result: any): boolean {
 
 const MAX_MODEL_VISIBLE_RESULT_CHARS = 8_000;
 
+type ToolResultView = "compact" | "model-visible" | "full-output";
+const TOOL_RESULT_VIEWS: ToolResultView[] = ["compact", "model-visible", "full-output"];
+
 function boundedModelContent(result: any, content: any[], rawText: string): { content: any[]; expandedText: string | null } {
   const fullText = resultText({ content });
   if (fullText.length <= MAX_MODEL_VISIBLE_RESULT_CHARS) return { content, expandedText: null };
@@ -230,6 +254,10 @@ function textComponent(text: string): { render: (width: number) => string[] } {
 
 function mutedText(theme: any, text: string): string {
   return typeof theme?.fg === "function" ? theme.fg("muted", text) : text;
+}
+
+function resultViewHeader(view: ToolResultView, characterCount: number, nextView: ToolResultView): string {
+  return `${view} · ${compactQuantity(characterCount)} ${characterCount === 1 ? "character" : "characters"} — ctrl+o: ${nextView}`;
 }
 
 __NARADA_MCP_RESULT_PRESENTATION__
@@ -359,15 +387,105 @@ class McpClient {
 export default function naradaMcpCarrier(pi: any): void {
   let clients: McpClient[] = [];
   let started = false;
+  let toolResultView: ToolResultView = "compact";
+  let naradaSessionIdentityState: NaradaSessionIdentityState | null = null;
+
+  const currentSessionId = (ctx: any): string => String(ctx?.sessionManager?.getSessionId?.() ?? "ephemeral");
+  const effectiveNaradaIdentity = (): EffectiveNaradaIdentity | null => {
+    if (naradaSessionIdentityState?.status === "cleared") return null;
+    if (naradaSessionIdentityState?.status === "admitted") return { identity: naradaSessionIdentityState.identity, source: "operator_slash_command" };
+    const identity = normalizeNaradaIdentity(startupAuthority(SERVERS.filter(shouldBootstrapServer)).identity);
+    return identity ? { identity, source: "carrier_admission" } : null;
+  };
+  const restoreNaradaSessionIdentity = (ctx: any): void => {
+    naradaSessionIdentityState = null;
+    const sessionId = currentSessionId(ctx);
+    for (const entry of ctx?.sessionManager?.getBranch?.() ?? []) {
+      if (entry?.type !== "custom" || ![NARADA_SESSION_IDENTITY_ENTRY, LEGACY_MARICI_SESSION_IDENTITY_ENTRY].includes(entry?.customType)) continue;
+      const data = entry.data ?? {};
+      if (data.sessionId !== sessionId) continue;
+      const identity = normalizeNaradaIdentity(data.identity);
+      naradaSessionIdentityState = identity
+        ? { status: "admitted", identity, sessionId, changedAt: String(data.changedAt ?? data.admittedAt ?? ""), source: "operator_slash_command" }
+        : { status: "cleared", identity: null, sessionId, changedAt: String(data.changedAt ?? data.clearedAt ?? ""), source: "operator_slash_command" };
+    }
+    const effective = effectiveNaradaIdentity();
+    ctx?.ui?.setStatus?.("narada-session-identity", effective ? `Narada: ${effective.identity}` : undefined);
+  };
+
+  const naradaIdentityCommand = async (args: string, ctx: any, legacy = false) => {
+    if (legacy) ctx?.ui?.notify?.("/marici-identity is deprecated; use /narada-identity.", "warning");
+    const requested = args.trim();
+    if (requested === "status") {
+      const effective = effectiveNaradaIdentity();
+      ctx?.ui?.notify?.(effective ? `Mechanically admitted Narada identity: ${effective.identity} (${effective.source}).` : "No mechanically admitted Narada identity for this session.", effective ? "info" : "warning");
+      return;
+    }
+    if (requested === "clear") {
+      await ctx.waitForIdle?.();
+      naradaSessionIdentityState = { status: "cleared", identity: null, sessionId: currentSessionId(ctx), changedAt: new Date().toISOString(), source: "operator_slash_command" };
+      pi.appendEntry(NARADA_SESSION_IDENTITY_ENTRY, naradaSessionIdentityState);
+      ctx?.ui?.setStatus?.("narada-session-identity", undefined);
+      ctx?.ui?.notify?.("Cleared all mechanically admitted Narada identity for this Pi session, including carrier fallback.", "info");
+      pi.events.emit?.("narada:mcp:identity-changed", naradaSessionIdentityState);
+      return;
+    }
+    const candidate = requested.startsWith("set ") ? requested.slice(4).trim() : requested;
+    const entered = candidate || (ctx?.hasUI ? await ctx.ui.input("Narada session identity", "identity") : "");
+    if (!entered) return;
+    const identity = normalizeNaradaIdentity(entered);
+    if (!identity) {
+      ctx?.ui?.notify?.("Invalid Narada identity. Use 1-200 ASCII letters, digits, dot, underscore, or hyphen; the first character must be alphanumeric.", "error");
+      return;
+    }
+    await ctx.waitForIdle?.();
+    naradaSessionIdentityState = { status: "admitted", identity, sessionId: currentSessionId(ctx), changedAt: new Date().toISOString(), source: "operator_slash_command" };
+    pi.appendEntry(NARADA_SESSION_IDENTITY_ENTRY, naradaSessionIdentityState);
+    ctx?.ui?.setStatus?.("narada-session-identity", `Narada: ${identity}`);
+    ctx?.ui?.notify?.(`Mechanically admitted ${identity} for this Pi session. Identity does not grant task-claim, graph-mutation, or publication authority.`, "info");
+    pi.events.emit?.("narada:mcp:identity-changed", naradaSessionIdentityState);
+  };
+
+  pi.registerCommand("narada-identity", {
+    description: "Set, inspect, or clear the mechanically admitted Narada identity for this Pi session",
+    handler: (args: string, ctx: any) => naradaIdentityCommand(args, ctx),
+  });
+
+  pi.registerShortcut?.("ctrl+o", {
+    description: "Cycle MCP tool output: compact, model-visible, full-output",
+    handler: async (ctx: any) => {
+      const currentIndex = TOOL_RESULT_VIEWS.indexOf(toolResultView);
+      toolResultView = TOOL_RESULT_VIEWS[(currentIndex + 1) % TOOL_RESULT_VIEWS.length];
+      if (toolResultView === "model-visible") {
+        // Pi's public UI API exposes a boolean expansion state. Toggle through
+        // true so the host rebuilds rows even when the previous state was false.
+        ctx?.ui?.setToolsExpanded?.(true);
+        ctx?.ui?.setToolsExpanded?.(false);
+      } else {
+        ctx?.ui?.setToolsExpanded?.(toolResultView === "full-output");
+      }
+    },
+  });
+  pi.registerCommand("marici-identity", {
+    description: "Deprecated alias for /narada-identity",
+    handler: (args: string, ctx: any) => naradaIdentityCommand(args, ctx, true),
+  });
+
+  pi.on("before_agent_start", (event: any) => {
+    const effective = effectiveNaradaIdentity();
+    if (!effective) return;
+    const provenance = effective.source === "operator_slash_command" ? "The operator admitted it via /narada-identity." : "The carrier admission supplied it.";
+    return {
+      systemPrompt: `${event.systemPrompt}\n\nSession identity: ${effective.identity} is mechanically admitted for this Pi session. ${provenance} Use it as recipient, participant, or actor only where the owning surface accepts that identity. This identity does not itself grant task-claim, graph-mutation, or publication authority.`,
+    };
+  });
 
   const pollMariciInbox = async (request: NaradaMariciInboxPollRequest): Promise<void> => {
     try {
       const client = clients.find((candidate) => candidate.config.name === "mcp-loader");
       if (!client) throw new Error("mcp-loader is not attached");
-      const authority = startupAuthority(SERVERS.filter(shouldBootstrapServer));
-      if (!authority.identity || authority.identity === "anonymous" || authority.identity === "unknown") {
-        throw new Error("no mechanically admitted Marici recipient identity");
-      }
+      const recipientIdentity = effectiveNaradaIdentity()?.identity;
+      if (!recipientIdentity) throw new Error("no mechanically admitted Marici recipient identity; use /narada-identity set marici.Name");
       const inspection = await client.request("tools/call", {
         name: "mcp_loader_inspect_binding_tool",
         arguments: {
@@ -391,7 +509,7 @@ export default function naradaMcpCarrier(pi: any): void {
             schema_lease: schemaLease,
             arguments: {
               kinds: ["narada.epistemic:communication", "marici:communication", "communication"],
-              recipient: authority.identity,
+              recipient: recipientIdentity,
               after_sequence: request.sinceSequence,
               include_body: false,
               compact: true,
@@ -428,12 +546,16 @@ export default function naradaMcpCarrier(pi: any): void {
   pi.events.on(NARADA_MARICI_INBOX_POLL_EVENT, pollMariciInbox);
 
   pi.on("session_start", async (_event: unknown, ctx: any) => {
+    toolResultView = "compact";
+    restoreNaradaSessionIdentity(ctx);
     if (started) return;
     started = true;
     const nextClients: McpClient[] = [];
     let startupRuntime: StartupRuntime = { loader: "unknown", proxy: "unknown" };
     const bootstrapConfigs = SERVERS.filter(shouldBootstrapServer);
     const authority = startupAuthority(bootstrapConfigs);
+    const effective = effectiveNaradaIdentity();
+    if (effective) authority.identity = effective.identity;
     ctx?.ui?.notify?.(
       startupDiagnostic(authority, {
         mcp: "loading",
@@ -530,6 +652,8 @@ export default function naradaMcpCarrier(pi: any): void {
                   ? result.content
                   : [{ type: "text", text: JSON.stringify(result ?? null) }];
               const bounded = boundedModelContent(result, content, rawText);
+              const modelVisibleText = resultText({ content: bounded.content });
+              const fullOutputText = resultText({ content });
               return {
                 content: bounded.content,
                 details: {
@@ -537,7 +661,10 @@ export default function naradaMcpCarrier(pi: any): void {
                   isError: result?.isError === true,
                   structuredSchema: result?.structuredContent?.schema ?? null,
                   continuation: result?.structuredContent?.result?.next_offset ?? result?.structuredContent?.next_offset ?? null,
-                  uiSummary: summarizeMcpResult(result, resultText({ content })),
+                  fullOutputCharLength: fullOutputText.length,
+                  modelVisibleCharLength: modelVisibleText.length,
+                  modelVisibleTruncated: modelVisibleText.length !== fullOutputText.length,
+                  uiSummary: summarizeMcpResult(result, fullOutputText, modelVisibleText),
                   collapseByDefault: collapseMcpResultByDefault(),
                   expandedText: bounded.expandedText,
                 },
@@ -545,12 +672,24 @@ export default function naradaMcpCarrier(pi: any): void {
               };
             },
             renderResult: (result: any, options: { expanded: boolean }, theme: any) => {
-              const fullText = result?.details?.expandedText ?? resultText(result);
-              if (options.expanded || result?.details?.collapseByDefault === false) {
-                return textComponent(fullText || JSON.stringify(result?.details ?? null));
+              const modelVisibleText = resultText(result);
+              const fullText = result?.details?.expandedText ?? modelVisibleText;
+              const view: ToolResultView = toolResultView === "compact" && options.expanded
+                ? "full-output"
+                : toolResultView;
+              const nextView = TOOL_RESULT_VIEWS[(TOOL_RESULT_VIEWS.indexOf(view) + 1) % TOOL_RESULT_VIEWS.length];
+              if (view === "full-output") {
+                return textComponent(`${resultViewHeader(view, fullText.length, nextView)}\n${fullText || JSON.stringify(result?.details ?? null)}`);
               }
-              const summary = result?.details?.uiSummary ?? summarizeMcpResult(result, fullText);
-              return textComponent(mutedText(theme, `${summary} — ctrl+o to expand`));
+              if (view === "model-visible") {
+                return textComponent(`${resultViewHeader(view, modelVisibleText.length, nextView)}\n${modelVisibleText || JSON.stringify(result?.details ?? null)}`);
+              }
+              const summary = result?.details?.uiSummary ?? summarizeMcpResult(result, fullText, modelVisibleText);
+              const modelVisibleSize = `model-visible ${compactQuantity(modelVisibleText.length)} ${modelVisibleText.length === 1 ? "character" : "characters"}`;
+              const summaryWithModelVisibleSize = summary.includes("model-visible")
+                ? summary
+                : `${summary} · ${modelVisibleSize}`;
+              return textComponent(mutedText(theme, `${summaryWithModelVisibleSize} — ctrl+o: ${nextView}`));
             },
           });
         }
@@ -587,6 +726,7 @@ export default function naradaMcpCarrier(pi: any): void {
   });
 
   pi.on("session_shutdown", () => {
+    toolResultView = "compact";
     for (const client of clients) client.close();
     clients = [];
     started = false;

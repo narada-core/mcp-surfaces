@@ -124,6 +124,28 @@ impl Engine {
                 }
             }
             "message_mark_read" => self.message_mark_read(site_root, args),
+            "communication_inbox_poll" => {
+                let mut query_args = args.clone();
+                query_args.insert("template".into(), json!("epistemic:inbox"));
+                query_args.remove("phase");
+                if !query_args.contains_key("latest") { query_args.insert("latest".into(), json!(true)); }
+                let mut result = self.generic_query(site_root, &query_args)?;
+                let checkpoint = result["ledger_head"].clone();
+                let checkpoint_sequence = result["items"].as_array().into_iter().flatten()
+                    .filter_map(|item| item["event_sequence"].as_u64())
+                    .chain(args.get("after_sequence").or_else(|| args.get("since_event")).and_then(Value::as_u64))
+                    .max().unwrap_or(0);
+                if let Some(object) = result.as_object_mut() {
+                    object.insert("poll_contract".into(), json!({
+                        "phase":args.get("phase").cloned().unwrap_or_else(|| json!("unspecified")),
+                        "checkpoint_ledger_head":checkpoint,
+                        "checkpoint_after_sequence":checkpoint_sequence,
+                        "distinct_turn_boundary_checks_required":true,
+                        "next_poll":{"tool":"epistemic_graph_communication_inbox_poll","arguments":{"participant":args.get("participant").or_else(|| args.get("recipient")).cloned().unwrap_or(Value::Null),"after_sequence":checkpoint_sequence,"phase":"closing"}}
+                    }));
+                }
+                Ok(result)
+            }
             "query_batch" => self.query_batch(site_root, args),
             "team_work_overview" => self.team_work_overview(site_root, args),
             "source_inspect" => self.source_inspect(site_root, args),

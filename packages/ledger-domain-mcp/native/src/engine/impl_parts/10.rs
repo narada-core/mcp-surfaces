@@ -32,21 +32,17 @@ impl Engine {
             trees.push(row.map_err(self.db_error("issue_tree_resume_row_failed"))?);
         }
         let normalized = objective.map(|value| value.trim().to_lowercase());
-        let mut candidates = trees
-            .into_iter()
-            .filter(|tree| {
-                supplied_tree_id
-                    .map(|id| tree["tree_id"].as_str() == Some(id))
-                    .unwrap_or(true)
-                    && normalized
-                        .as_ref()
-                        .map(|value| {
-                            tree["objective"].as_str().map(str::to_lowercase).as_ref()
-                                == Some(value)
-                        })
-                        .unwrap_or(true)
-            })
-            .collect::<Vec<_>>();
+        let mut candidates = if let Some(id) = supplied_tree_id {
+            let identified = trees.iter().find(|tree| tree["tree_id"].as_str() == Some(id)).cloned();
+            if let (Some(tree), Some(supplied_objective)) = (identified.as_ref(), objective) {
+                if !tree["objective"].as_str().is_some_and(|stored| stored.trim().eq_ignore_ascii_case(supplied_objective.trim())) {
+                    return Err(self.error("issue_tree_objective_mismatch", "tree_id exists but its objective does not match the supplied objective hint", json!({"tree_id":id,"supplied_objective":supplied_objective,"stored_objective":tree["objective"],"mutation_performed":false})));
+                }
+            }
+            identified.into_iter().collect::<Vec<_>>()
+        } else {
+            trees.iter().filter(|tree| normalized.as_ref().map(|value| tree["objective"].as_str().map(|stored| stored.trim().to_lowercase()).as_ref() == Some(value)).unwrap_or(true)).cloned().collect::<Vec<_>>()
+        };
         if candidates.len() > 1 {
             return Err(self.error(
                 "issue_tree_objective_ambiguous",
@@ -55,12 +51,12 @@ impl Engine {
             ));
         }
         if candidates.is_empty() {
-            if !args
-                .get("create_if_missing")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
-                return Err(self.error("issue_tree_not_found", "no matching issue tree exists", json!({"tree_id":supplied_tree_id,"objective":objective,"mutation_performed":false})));
+            if !args.get("create_if_missing").and_then(Value::as_bool).unwrap_or(false) {
+                if supplied_tree_id.is_some() {
+                    let objective_hint_matches = normalized.as_ref().map(|needle| trees.iter().filter(|tree| tree["objective"].as_str().is_some_and(|stored| stored.trim().eq_ignore_ascii_case(needle))).map(|tree| tree["tree_id"].clone()).collect::<Vec<_>>()).unwrap_or_default();
+                    return Err(self.error("issue_tree_id_not_found", "the supplied tree_id does not exist; objective was evaluated only as a separate hint", json!({"tree_id":supplied_tree_id,"objective_hint":objective,"objective_hint_matches":objective_hint_matches,"mutation_performed":false})));
+                }
+                return Err(self.error("issue_tree_objective_not_found", "no issue tree objective matched exactly", json!({"objective":objective,"mutation_performed":false})));
             }
             let objective = objective.ok_or_else(|| {
                 self.error(
@@ -108,22 +104,39 @@ impl Engine {
             candidates.push(json!({"tree_id":tree_id,"objective":objective,"version":"1"}));
         }
         let tree = candidates.remove(0);
-        let mut frontier_args = Map::from_iter([("tree_id".into(), tree["tree_id"].clone())]);
-        if let Some(value) = args.get("max_frontier_items") {
-            frontier_args.insert("limit".into(), value.clone());
-        }
-        let frontier = self.issue_tree_frontier(root, &frontier_args)?;
-        let inline_budget = args
-            .get("max_inline_chars")
-            .and_then(Value::as_u64)
-            .unwrap_or(6000)
-            .clamp(1000, 20000) as usize;
+        let objective_match = objective.map(|supplied| json!({
+            "supplied":supplied,
+            "stored":tree["objective"],
+            "exact_normalized_match":tree["objective"].as_str().is_some_and(|stored| stored.trim().eq_ignore_ascii_case(supplied.trim())),
+            "lookup_effect":if supplied_tree_id.is_some() {"hint_only_tree_id_was_authoritative"} else {"objective_was_lookup_key"}
+        })).unwrap_or(Value::Null);
+        let tree_id = tree["tree_id"].as_str().unwrap_or_default();
+        let limit = args.get("max_frontier_items").and_then(Value::as_u64).unwrap_or(20).clamp(1, 100) as usize;
+        let (mut alternatives, selected) = self.issue_tree_frontier_nodes(root, tree_id)?;
+        let selected_id = selected.as_ref().and_then(|value| value["node_id"].as_str());
+        alternatives.retain(|item| item["node_id"].as_str() != selected_id);
+        let ledger_head = self.ledger_head(root)?;
+        let capture_seed = serde_json::to_vec(&json!({"tree_id":tree_id,"ledger_head":ledger_head,"items":alternatives,"scope":"resume_alternatives"})).unwrap_or_default();
+        let result_ref = format!("issue-tree-frontier:{}", &sha256(&capture_seed)[..24]);
+        let capture = json!({
+            "schema":"narada.epistemic.issue_tree_frontier_capture.v1","result_ref":result_ref,"tree_id":tree_id,
+            "ledger_head":ledger_head,"captured_at_event":self.ledger_files(root)?.last().and_then(|path| self.read_json(path).ok()).and_then(|event| event.get("event_id").cloned()),
+            "selected":selected,"items":alternatives,"scope":"unselected alternatives; selected work is represented once in selected"
+        });
+        let capture_path = self.issue_tree_capture_path(root, &result_ref);
+        if let Some(parent) = capture_path.parent() { fs::create_dir_all(parent).map_err(self.io_error("issue_tree_capture_create_failed"))?; }
+        fs::write(&capture_path, serde_json::to_vec_pretty(&capture).unwrap_or_default()).map_err(self.io_error("issue_tree_capture_write_failed"))?;
+        let frontier = self.issue_tree_frontier_page(root, &capture, 0, limit)?;
+        let inline_budget = args.get("max_inline_chars").and_then(Value::as_u64).unwrap_or(6000).clamp(1000, 20000) as usize;
+        let mut resume_frontier = frontier["frontier"].clone();
+        resume_frontier["scope"] = capture["scope"].clone();
         let mut response = json!({
             "schema":"narada.epistemic.issue-tree.resume.v1",
             "status":"ok",
             "tree":tree,
+            "objective_match":objective_match,
             "selected":frontier["selected"],
-            "frontier":frontier["frontier"],
+            "frontier":resume_frontier,
             "continuation":frontier["continuation"],
             "result_ref":frontier["result_ref"],
             "ledger_head":frontier["ledger_head"],
@@ -131,6 +144,15 @@ impl Engine {
             "certifies_truth":false,
             "noncertification":"coordination state; not evidence"
         });
+        if args.get("compact").and_then(Value::as_bool).unwrap_or(false) {
+            response["tree"] = json!({"tree_id":tree["tree_id"],"objective":tree["objective"],"version":tree["version"]});
+            let selected = &frontier["selected"];
+            response["selected"] = json!({"node_id":selected["node_id"],"version":selected["version"],"state":selected["state"],"event_id":selected["event_id"]});
+            if let Some(items) = response["frontier"]["items"].as_array_mut() {
+                for item in items { *item = json!({"node_id":item["node_id"],"version":item["version"],"state":item["state"],"score":item["score"],"event_id":item["event_id"]}); }
+            }
+            response["compact"] = json!(true);
+        }
         while serde_json::to_string(&response)
             .map(|value| value.len())
             .unwrap_or(0)
@@ -146,7 +168,7 @@ impl Engine {
             let returned = items.len();
             response["frontier"]["returned"] = json!(returned);
             response["frontier"]["complete"] = json!(false);
-            response["continuation"] = json!({"tool":"epistemic_graph_issue_tree_frontier_read","arguments":{"result_ref":response["result_ref"],"offset":returned,"limit":args.get("max_frontier_items").and_then(Value::as_u64).unwrap_or(20)}});
+            response["continuation"] = json!({"tool":"epistemic_graph_issue_tree_frontier_read","arguments":{"result_ref":response["result_ref"],"offset":returned,"limit":limit}});
         }
         response["inline_budget_chars"] = json!(inline_budget);
         response["inline_chars"] = json!(serde_json::to_string(&response)

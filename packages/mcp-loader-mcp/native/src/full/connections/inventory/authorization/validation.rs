@@ -22,13 +22,27 @@ pub(crate) fn validate_schema_lease(
     })?;
     let tool = child_tool_contract(connection, tool_name)?;
     let digest = child_tool_schema_digest(tool);
-    if arguments
+    let supplied_digest = arguments
         .get("tool_schema_digest")
         .or_else(|| arguments.get("tool_contract_digest"))
-        .and_then(Value::as_str)
-        == Some(digest.as_str())
-    {
+        .and_then(Value::as_str);
+    if supplied_digest == Some(digest.as_str()) {
         return Ok("digest_reused");
+    }
+    if let Some(supplied_digest) = supplied_digest {
+        return Err(Diagnostic::new(
+            "tool_contract_digest_obsolete_generation",
+            "tool_contract_digest_obsolete_generation: supplied digest does not authorize the current child generation",
+        ).with_details(json!({
+            "connection_id":connection_id,
+            "tool_name":tool_name,
+            "supplied_tool_contract_digest":supplied_digest,
+            "supplied_digest_prefix":supplied_digest.chars().take(12).collect::<String>(),
+            "current_tool_contract_digest":digest,
+            "expected_contract_identity":{"connection_id":connection_id,"generation_id":connection.generation_id,"tool_name":tool_name},
+            "current_generation_id":connection.generation_id,
+            "next_call":{"tool_name":"mcp_loader_inspect_tool","arguments":{"connection_id":connection_id,"tool_name":tool_name,"include_tool_contract":"verbose"}}
+        })));
     }
     let supplied =
         required_string(arguments, "schema_lease", "schema_lease_required").map_err(|_| {

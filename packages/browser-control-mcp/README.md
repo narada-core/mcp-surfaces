@@ -44,4 +44,5 @@ only closes this MCP connection.
 ```powershell
 cargo test --locked --manifest-path packages/shared/mcp-surfaces-native/native/Cargo.toml browser_control_authority
 cargo test --locked --manifest-path packages/shared/mcp-surfaces-native/native/Cargo.toml --test browser_control_protocol
+pnpm --filter @narada-core/browser-control-mcp test
 ```

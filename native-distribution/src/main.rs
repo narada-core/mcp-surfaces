@@ -10,16 +10,17 @@ use time::OffsetDateTime;
 
 const RUNTIME_PACKAGES: &[&str] = &[
     "narada-agent-context-mcp",
+    "narada-local-filesystem-mcp",
     "narada-ledger-domain",
     "narada-mcp-loader",
     "narada-mcp-registrar",
     "narada-mcp-lifecycle",
     "narada-mcp-materializer",
     "narada-mcp-runtime",
+    "narada-structured-command-mcp",
     "narada-mcp-surfaces-native",
 ];
-const NARADA_AGENT_RUNTIME_MANIFEST: &str =
-    "packages/agent-runtime-server/native/Cargo.toml";
+const NARADA_AGENT_RUNTIME_MANIFEST: &str = "packages/agent-runtime-server/native/Cargo.toml";
 
 #[derive(Clone, Copy)]
 struct DistributionArtifact {
@@ -33,6 +34,12 @@ const ARTIFACTS: &[DistributionArtifact] = &[
         "narada-agent-context-mcp",
         "narada-agent-context-mcp",
         "packages/agent-context-mcp/dist/native",
+        "narada.mcp_runtime_proxy.native_artifact_pointer.v1",
+    ),
+    artifact(
+        "narada-local-filesystem-mcp",
+        "narada-local-filesystem-mcp",
+        "packages/local-filesystem-mcp/dist/native",
         "narada.mcp_runtime_proxy.native_artifact_pointer.v1",
     ),
     artifact(
@@ -75,6 +82,12 @@ const ARTIFACTS: &[DistributionArtifact] = &[
         "narada-mcp-runtime",
         "narada-mcp-runtime",
         "packages/shared/mcp-runtime-proxy/dist/native",
+        "narada.mcp_runtime_proxy.native_artifact_pointer.v1",
+    ),
+    artifact(
+        "narada-structured-command-mcp",
+        "narada-structured-command-mcp",
+        "packages/structured-command-mcp/dist/native",
         "narada.mcp_runtime_proxy.native_artifact_pointer.v1",
     ),
     artifact(
@@ -673,10 +686,8 @@ mod tests {
 
     #[test]
     fn narada_source_root_resolves_from_nested_worktree() {
-        let root = std::env::temp_dir().join(format!(
-            "narada-native-source-root-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("narada-native-source-root-{}", std::process::id()));
         let source_root = root.join("src");
         let worktree_root = source_root.join("mcp-surfaces/.worktrees/worker");
         let matrix = source_root.join(
@@ -686,7 +697,10 @@ mod tests {
         std::fs::create_dir_all(matrix.parent().expect("matrix parent")).expect("narada source");
         std::fs::write(&matrix, b"{}").expect("matrix file");
 
-        assert_eq!(narada_source_root(&worktree_root).expect("source root"), source_root);
+        assert_eq!(
+            narada_source_root(&worktree_root).expect("source root"),
+            source_root
+        );
 
         std::fs::remove_dir_all(root).expect("cleanup");
     }

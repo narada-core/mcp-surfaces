@@ -4,38 +4,37 @@
   "license": "Apache-2.0",
   "type": "module",
   "scripts": {
-    "build": "tsc -b",
+    "build": "tsc -b && pnpm run build:native",
+    "build:native": "node --import tsx scripts/build-native.ts",
+    "build:postcompile": "pnpm run build:native",
     "typecheck": "tsc -b --pretty false",
-    "test": "pnpm run test:bun",
-    "test:native-dotnet": "pnpm --filter @narada-core/mcp-runtime-proxy build:native-dotnet && pnpm build && node dist/test/native-dotnet-filesystem.test.js",
-    "test:bun": "pnpm build && bun dist/test/local-filesystem-mcp.test.js && bun test dist/test/result-rendering-feedback.test.js && bun dist/test/protocol-smoke.test.js && bun dist/test/site-fabric-filesystem-e2e.test.js",
-    "test:node": "pnpm build && node dist/test/local-filesystem-mcp.test.js && node dist/test/result-rendering-feedback.test.js && node dist/test/protocol-smoke.test.js && node dist/test/site-fabric-filesystem-e2e.test.js"
+    "test": "pnpm run test:native",
+    "test:native": "cargo test --locked --manifest-path native/Cargo.toml",
+    "test:compat": "pnpm run test:native",
+    "test:bun": "pnpm run test:native",
+    "test:node": "pnpm run test:native"
   },
-  "types": "./dist/src/main.d.ts",
   "exports": {
     "./surface-definition": {
       "types": "./dist/src/surface-definition.d.ts",
       "default": "./dist/src/surface-definition.js"
-    },
-    ".": {
-      "types": "./dist/src/main.d.ts",
-      "default": "./dist/src/main.js"
-    },
-    "./policy": {
-      "types": "./dist/src/policy.d.ts",
-      "default": "./dist/src/policy.js"
     }
   },
   "dependencies": {
-    "@narada-core/mcp-fabric-contracts": "workspace:*",
-    "@narada-core/mcp-transport": "workspace:*"
+    "@narada-core/mcp-fabric-contracts": "workspace:*"
   },
   "files": [
     "dist/",
+    "native/",
     "README.md"
   ],
+  "naradaRuntimeArtifacts": {
+    "win32": ["./dist/native/current.json", "./dist/native/versions/*"],
+    "linux": ["./dist/native/current.json", "./dist/native/versions/*"],
+    "darwin": ["./dist/native/current.json", "./dist/native/versions/*"]
+  },
   "devDependencies": {
-    "@narada-core/mcp-e2e-harness": "workspace:*",
+    "@narada-core/mcp-runtime-proxy": "workspace:*",
     "@types/node": "^22.15.3",
     "typescript": "^5.8.3"
   }

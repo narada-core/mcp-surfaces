@@ -36,6 +36,15 @@ pub(crate) fn compact_child_result(value: &Value) -> Value {
     if !object.contains_key("structuredContent") {
         return value.clone();
     }
+    let content_is_authoritative = object
+        .get("structuredContent")
+        .and_then(|value| value.get("content_delivery"))
+        .and_then(|value| value.get("channel"))
+        .and_then(Value::as_str)
+        == Some("content");
+    if content_is_authoritative {
+        return value.clone();
+    }
     let mut compacted = object.clone();
     compacted.remove("content");
     Value::Object(compacted)
@@ -91,10 +100,12 @@ pub(crate) fn build_bounded_result(
             "schema":"narada.producer_output_page.v1","status":output_status(value,is_error),"truncated":true,
             "output_ref":reference,"ref":reference,"result_materialized":true,"tool_name":tool_name,
             "offset":0,"limit":inline_limit,"next_offset":next,"transport_offset":0,"transport_limit":inline_limit,
-            "transport_next_offset":next,"output_text":preview,"output_truncated":next.is_some(),"reader_tool":"mcp_loader_read_result",
+            "transport_next_offset":next,
+            "offset_semantics":{"offset":"UTF-16 character offset into this materialized JSON document","next_offset":"next transport character offset for mcp_loader_read_result","producer_offsets":"Any offset, next_offset, cursor, or page fields inside output_text belong to the child tool and must be preserved separately."},
+            "output_text":preview,"output_truncated":next.is_some(),"reader_tool":"mcp_loader_read_result",
             "site_root":connection.site_root,
             "read_command":format!("mcp_loader_read_result({{ \"ref\": \"{}\", \"offset\": 0, \"limit\": {} }})",reference,DEFAULT_OUTPUT_SHOW_CHAR_LIMIT),
-            "remediation":format!("Use mcp_loader_read_result with output_ref/ref={} to read the bounded produced JSON pages; continue with the returned next_offset.",reference),
+            "remediation":format!("Use mcp_loader_read_result with output_ref/ref={} and its transport_next_offset. Do not substitute a child result's record/page offset; preserve producer paging arguments separately.",reference),
             "inline_limit":inline_limit,"full_output_char_length":utf16_len(&full_text)
         });
         if json_byte_len(&Value::String(

@@ -4,19 +4,21 @@ Canonical local filesystem MCP server.
 
 ## Standalone Usage
 
-The supported default is the native Rust filesystem applet in
-`narada-mcp-runtime`. It has no Node, Bun, TypeScript, or package-manager runtime
-dependency. The TypeScript package remains a development/reference
-implementation and is not the native carrier authority.
+The supported runtime is the native Rust binary published by this package. It
+has no Node, Bun, TypeScript, or package-manager runtime dependency; the
+TypeScript sources only describe the surface and its generated catalog.
 
-The example below is path-agnostic. Replace the entrypoint path with the location of your installed package.
-
-Example:
+Build and run the package-owned binary:
 
 ```powershell
-cargo build --release --locked --manifest-path packages/shared/mcp-runtime-proxy/native/Cargo.toml
-<native-target>/release/narada-mcp-runtime filesystem --mode read --allowed-root <your-workspace-root>
+pnpm --filter @narada-core/local-filesystem-mcp build:native
+cargo run --release --locked --manifest-path packages/local-filesystem-mcp/native/Cargo.toml -- --mode read --allowed-root <your-workspace-root>
 ```
+
+The build publishes an immutable versioned binary and `dist/native/current.json`.
+Use `@narada-core/mcp-registrar` to inject the surface into a CLI or TUI; the
+registrar resolves the native artifact pointer and never starts the retired
+JavaScript runtime.
 
 If you want Narada to inject the surface into a CLI or TUI, use `@narada-core/mcp-registrar` to write the carrier config.
 
@@ -71,15 +73,8 @@ Behavior notes:
 - `fs_move_path`, `fs_rename_directory`, and `fs_delete_directory` support optional expected metadata guards for stale-path detection. Callers can use structured `expected`, `expected_from`, and `expected_to` objects with `mtime`, `size`, `sha256`, `tree_sha256`, and `entry_count` fields, while older flat expected fields remain accepted.
 - Tool errors use `schema: "local.filesystem.error.v1"` and normalize `details.operation` when the active tool is known.
 
-Example:
-
-```powershell
-<native-target>/release/narada-mcp-runtime filesystem --mode read --allowed-root <src-root>/narada
-```
-
 ## Verification
 
 ```powershell
-cargo test --locked --manifest-path packages/shared/mcp-runtime-proxy/native/Cargo.toml filesystem::tests
-cargo test --locked --manifest-path packages/shared/mcp-runtime-proxy/native/Cargo.toml --test filesystem_protocol
+pnpm --filter @narada-core/local-filesystem-mcp test:native
 ```

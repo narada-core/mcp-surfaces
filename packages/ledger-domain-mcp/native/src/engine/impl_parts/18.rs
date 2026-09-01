@@ -289,14 +289,15 @@ impl Engine {
                         json!({"not_exists":reply_where})
                     });
                 }
+                let order_direction = if match_value("latest").and_then(Value::as_bool).unwrap_or(false) { "desc" } else { "asc" };
                 Ok(json!({
                     "find":[{"pull":{"var":"?message","fields":fields}}],
                     "inputs":inputs,
                     "where":where_clauses,
                     "order_by":[
-                        {"term":"?sequence","direction":"asc"},
-                        {"term":"?event_id","direction":"asc"},
-                        {"term":"?message","direction":"asc"}
+                        {"term":"?sequence","direction":order_direction},
+                        {"term":"?event_id","direction":order_direction},
+                        {"term":"?message","direction":order_direction}
                     ],
                     "limit":limit,
                     "cursor":cursor

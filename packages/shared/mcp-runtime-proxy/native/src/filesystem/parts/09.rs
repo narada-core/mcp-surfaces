@@ -34,11 +34,20 @@ fn search_tool(state: &mut State, args: &Value, grep: bool) -> Result<Value, FsE
         "fs_glob_search"
     };
     let scope_arg = if grep {
-        args.get("path").and_then(Value::as_str).unwrap_or(".")
+        let directory = args.get("directory").and_then(Value::as_str);
+        let path = args.get("path").and_then(Value::as_str);
+        if directory.is_some() && path.is_some() {
+            return Err(FsError::new(
+                "grep_scope_ambiguous",
+                "grep_scope_ambiguous",
+                json!({"operation": operation, "directory": directory, "path": path, "remediation": "Pass exactly one of directory or path. directory is canonical; path remains a compatibility alias."}),
+            ));
+        }
+        directory.or(path).unwrap_or(".")
     } else {
         args.get("directory").and_then(Value::as_str).unwrap_or(".")
     };
-    let (scope, _root) = resolve_allowed(state, Some(scope_arg), operation)?;
+    let (scope, root) = resolve_allowed(state, Some(scope_arg), operation)?;
     let pattern = args.get("pattern").and_then(Value::as_str).ok_or_else(|| {
         FsError::new(
             if grep {
@@ -55,9 +64,22 @@ fn search_tool(state: &mut State, args: &Value, grep: bool) -> Result<Value, FsE
         )
     })?;
     let offset = integer(args, "offset").unwrap_or(0).max(0) as usize;
-    let limit = integer(args, "limit")
-        .unwrap_or(if grep { 80 } else { 100 })
+    let requested_limit = integer(args, "limit")
+        .unwrap_or(if grep { 30 } else { 100 })
         .clamp(1, 500) as usize;
+    let max_matches = if grep {
+        integer(args, "max_matches").unwrap_or(30).clamp(1, 100) as usize
+    } else {
+        requested_limit
+    };
+    let limit = requested_limit.min(max_matches);
+    let max_output_chars = if grep {
+        integer(args, "max_output_chars")
+            .unwrap_or(4_000)
+            .clamp(256, 20_000) as usize
+    } else {
+        MAX_SEARCH_CAPTURE_BYTES
+    };
     let cache_policy = args
         .get("cache_policy")
         .and_then(Value::as_str)
@@ -72,7 +94,23 @@ fn search_tool(state: &mut State, args: &Value, grep: bool) -> Result<Value, FsE
     let output_mode = args
         .get("output_mode")
         .and_then(Value::as_str)
-        .unwrap_or("content");
+        .unwrap_or(if grep { "files_with_matches" } else { "content" });
+    if grep && grep_pattern_matches_empty(pattern) && scope.is_file()
+        && args.get("allow_match_all").and_then(Value::as_bool) != Some(true)
+    {
+        return Err(FsError::new(
+            "grep_match_all_single_file_refused",
+            "Match-all grep on a single file is equivalent to reading the file.",
+            json!({
+                "operation": operation,
+                "pattern": pattern,
+                "path": scope_arg,
+                "replacement": {"tool": "fs_read_file_range", "arguments": {"path": scope_arg, "start_line": 1, "end_line": 100}, "note": "Choose the explicit line window required."},
+                "count_preflight": {"tool": "fs_grep_search", "arguments": {"pattern": pattern, "path": scope_arg, "output_mode": "count_matches", "allow_match_all": true, "max_matches": 1, "max_output_chars": 1_000}},
+                "override": {"allow_match_all": true, "max_matches": 30, "max_output_chars": 4_000}
+            }),
+        ));
+    }
     if grep && !["files_with_matches", "count_matches", "content"].contains(&output_mode) {
         return Err(FsError::new(
             "grep_output_mode_unsupported",
@@ -83,12 +121,17 @@ fn search_tool(state: &mut State, args: &Value, grep: bool) -> Result<Value, FsE
     let snapshot_id = args.get("snapshot_id").and_then(Value::as_str);
     let cache_key = sha256_bytes(
         format!(
-            "{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
             grep,
             scope.to_string_lossy(),
             pattern,
             output_mode,
-            args.get("ignore").cloned().unwrap_or(Value::Null)
+            args.get("ignore").cloned().unwrap_or(Value::Null),
+            args.get("exclude").cloned().unwrap_or(Value::Null),
+            args.get("glob").cloned().unwrap_or(Value::Null),
+            args.get("search_case").cloned().unwrap_or(Value::Null),
+            max_matches,
+            max_output_chars
         )
         .as_bytes(),
     );
@@ -112,10 +155,10 @@ fn search_tool(state: &mut State, args: &Value, grep: bool) -> Result<Value, FsE
             cached_snapshot = Some(id);
             (matches, complete)
         } else {
-            run_search_command(&scope, pattern, args, grep, output_mode, operation)?
+            run_search_command(&scope, pattern, args, grep, output_mode, operation, max_matches, max_output_chars)?
         }
     } else {
-        run_search_command(&scope, pattern, args, grep, output_mode, operation)?
+        run_search_command(&scope, pattern, args, grep, output_mode, operation, max_matches, max_output_chars)?
     };
     let snapshot = if let Some(snapshot) = snapshot_id {
         Some(snapshot.to_string())
@@ -165,6 +208,7 @@ fn search_tool(state: &mut State, args: &Value, grep: bool) -> Result<Value, FsE
         .cloned()
         .collect();
     let has_more = offset + page.len() < all_matches.len() || !snapshot_complete;
+    let page_match_bytes = page.iter().map(|line| line.len()).sum::<usize>();
     let mut value = Map::new();
     value.insert(
         "schema".into(),
@@ -182,9 +226,14 @@ fn search_tool(state: &mut State, args: &Value, grep: bool) -> Result<Value, FsE
     value.insert("limit".into(), json!(limit));
     value.insert("count".into(), json!(all_matches.len()));
     value.insert("count_exact".into(), json!(snapshot_complete));
+    value.insert("count_semantics".into(), json!(if snapshot_complete { "count is the exact full result count" } else { "count is the bounded matched-entry count observed so far; returned is only this page" }));
     value.insert("scanned".into(), json!(all_matches.len()));
     value.insert("scanned_unit".into(), json!("matched_entries"));
     value.insert("returned".into(), json!(page.len()));
+    if grep {
+        value.insert("max_matches".into(), json!(max_matches));
+        value.insert("max_output_chars".into(), json!(max_output_chars));
+    }
     value.insert("order".into(), json!("ripgrep_traversal"));
     value.insert("cache_hit".into(), json!(cache_hit));
     value.insert("snapshot_reused".into(), json!(snapshot_reused));
@@ -202,9 +251,9 @@ fn search_tool(state: &mut State, args: &Value, grep: bool) -> Result<Value, FsE
         "cache_memory_bytes".into(),
         json!(all_matches.iter().map(|value| value.len()).sum::<usize>()),
     );
-    value.insert("page_match_bytes".into(), Value::Null);
-    value.insert("page_match_bytes_limit".into(), json!(512 * 1024));
-    value.insert("page_matches_truncated".into(), json!(0));
+    value.insert("page_match_bytes".into(), json!(page_match_bytes));
+    value.insert("page_match_bytes_limit".into(), json!(if grep { max_output_chars } else { 512 * 1024 }));
+    value.insert("page_matches_truncated".into(), json!(if snapshot_complete { 0 } else { 1 }));
     value.insert(
         "timeout_ms".into(),
         args.get("timeout_ms")
@@ -212,6 +261,9 @@ fn search_tool(state: &mut State, args: &Value, grep: bool) -> Result<Value, FsE
             .unwrap_or(json!(SEARCH_TIMEOUT_MS)),
     );
     value.insert("freshness".into(), freshness(&scope));
+    if grep {
+        value.insert("scope".into(), json!({"requested_path": scope_arg, "root": root, "path": scope, "argument": if args.get("directory").is_some() { "directory" } else if args.get("path").is_some() { "path" } else { "default_allowed_root" }, "include_glob": args.get("glob"), "default_exclusions_applied": true}));
+    }
     value.insert("has_more".into(), json!(has_more));
     value.insert(
         "next_offset".into(),
@@ -235,14 +287,7 @@ fn search_tool(state: &mut State, args: &Value, grep: bool) -> Result<Value, FsE
         },
     );
     if grep {
-        value.insert("matches_format".into(), json!("human"));
-        value.insert(
-            "matches".into(),
-            json!(page
-                .iter()
-                .map(|line| render_grep(line, output_mode))
-                .collect::<Vec<_>>()),
-        );
+        value.insert("matches_format".into(), json!("structured"));
         value.insert("match_objects_authoritative".into(), json!(true));
         value.insert(
             "match_objects".into(),
@@ -261,7 +306,7 @@ fn search_tool(state: &mut State, args: &Value, grep: bool) -> Result<Value, FsE
             "status": "no_matches_observed",
             "cache_hit": cache_hit,
             "cache_policy": cache_policy,
-            "snapshot_complete": true,
+            "snapshot_complete": snapshot_complete,
             "freshness": value.get("freshness").cloned().unwrap_or(Value::Null),
             "stale_cache_evidence": false,
             "remediation": "No matches were returned for the current path freshness fingerprint."

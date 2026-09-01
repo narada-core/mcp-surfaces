@@ -13,6 +13,8 @@
   "tool": null,
   "first_use": [
     "Call task_lifecycle_guidance when you first see a lifecycle task, when a refusal is unclear, or before recovering from incomplete task evidence.",
+    "Turn-boundary protocol: the canonical opening and closing inbox checks belong to the admitted carrier mailbox or epistemic inbox surface. Perform two distinct inbox reads: one before substantive work and one after work before the final response.",
+    "task_lifecycle_bridge_poll is not a turn-boundary inbox check. It is an inbox-to-task materialization pass and may mutate lifecycle state unless dry_run=true.",
     "Inspect the task before mutation; claim only when authorized; submit execution notes, verification, changed-file evidence, and closeout through lifecycle tools.",
     "Use payload_ref for long companion fields and preserve structuredContent as authoritative lifecycle evidence.",
     "Use task_lifecycle_tags_update for audited site-local labels; tags are descriptive and never replace routing, authorization, priority, dependency, review, or closure state.",

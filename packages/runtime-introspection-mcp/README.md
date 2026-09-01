@@ -33,4 +33,5 @@ Run the focused Rust unit and real stdio integration proof with:
 
 ```powershell
 cargo test --locked --manifest-path packages/shared/mcp-surfaces-native/native/Cargo.toml runtime_introspection
+pnpm --filter @narada-core/runtime-introspection-mcp test
 ```

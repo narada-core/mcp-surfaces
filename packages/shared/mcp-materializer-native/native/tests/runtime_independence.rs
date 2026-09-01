@@ -483,7 +483,10 @@ fn derives_all_carriers_from_declared_site_capabilities_without_javascript() {
         admission["authority_context"]["schema"],
         "narada.carrier_authority_context.v1"
     );
-    assert_eq!(admission["authority_context"]["identity"]["status"], "anonymous");
+    assert_eq!(
+        admission["authority_context"]["identity"]["status"],
+        "anonymous"
+    );
     assert_eq!(
         admission["authority_context"]["binding_activation"],
         "capability_governed"

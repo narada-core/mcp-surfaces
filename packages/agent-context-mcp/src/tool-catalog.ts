@@ -342,7 +342,7 @@ export const TOOLS = [
   },
   {
     name: 'agent_context_rehydrate',
-    description: 'Retrieve the latest site-local checkpoint, an exact current or archived checkpoint, or bounded checkpoint history for an agent.',
+    description: 'Retrieve the latest site-local checkpoint, an exact current or archived checkpoint, or bounded checkpoint history for an agent, including an authority-preserving identity projection for agent-context, task-lifecycle actor, and epistemic-graph participant scopes.',
     inputSchema: {
       type: 'object',
       properties: {

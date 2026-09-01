@@ -1843,6 +1843,23 @@ function checkpointPayload(toolArgs: any, agentId: any, checkpointAt: any, check
   };
 }
 
+function identityScopeProjection(identityState: any, fallbackAgentId: string | null = null) {
+  const claimed = identityState?.claimed_identity?.identity ?? fallbackAgentId;
+  const authenticated = identityState?.authentication?.authenticated_identity ?? null;
+  const admitted = Boolean(claimed && authenticated === claimed);
+  return {
+    schema: 'narada.agent.identity_scope_projection.v1',
+    identity: claimed ?? null,
+    mechanically_admitted: admitted,
+    scopes: {
+      agent_context: { identity: claimed ?? null, authority: admitted ? 'authenticated' : 'unclaimable' },
+      task_lifecycle: { actor: claimed ?? null, authority: admitted ? 'identity_admitted_surface_still_enforces_claim_authority' : 'unclaimable' },
+      epistemic_graph: { participant: claimed ?? null, authority: admitted ? 'identity_admitted_graph_still_enforces_mutation_authority' : 'unclaimable' },
+    },
+    authority_nontransfer: 'Identity projection does not grant task claim, graph mutation, or publication authority.',
+  };
+}
+
 function rowToCheckpoint(row: any) {
   const payload = parseJson(row.payload_json, {});
   const identityState = payload.identity_state ?? null;
@@ -1869,6 +1886,7 @@ function rowToCheckpoint(row: any) {
     continuation_ref: payload.continuation_ref ?? null,
     continuation_projection: payload.continuation_projection ?? null,
     identity_state: identityState,
+    identity_scopes: identityScopeProjection(identityState, row.agent_id ?? null),
     payload: projectedPayload,
   };
 }

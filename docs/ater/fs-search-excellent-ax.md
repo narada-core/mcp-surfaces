@@ -292,15 +292,15 @@ only by the old adapter and canonicalized visibly.
     "default_exclusions_applied": true
   },
   "query": {
-    "text": "cappedToolValue",
+    "text": "nativeFilesystemTools",
     "syntax": "literal",
     "case": "smart"
   },
   "items": [
     {
-      "path": "packages/local-filesystem-mcp/src/main.ts",
-      "line": 1968,
-      "text": "return cappedToolValue(...)",
+      "path": "packages/local-filesystem-mcp/src/native-tool-catalog.ts",
+      "line": 9,
+      "text": "export function nativeFilesystemTools(mode: 'read' | 'write')",
       "text_complete": true
     }
   ],

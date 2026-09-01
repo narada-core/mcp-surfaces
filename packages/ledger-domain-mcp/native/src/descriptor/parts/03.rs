@@ -13,7 +13,7 @@ mod tests {
             Descriptor::load(&epistemic_descriptor_path()).expect("epistemic descriptor loads");
         assert_eq!(descriptor.schema, DESCRIPTOR_SCHEMA_ID);
         assert_eq!(descriptor.identity.tool_prefix, "epistemic_graph");
-        assert_eq!(descriptor.tools.len(), 30);
+        assert_eq!(descriptor.tools.len(), 31);
         assert!(descriptor.tools.iter().any(|tool| tool.name == "epistemic_graph_team_work_overview"));
         assert_eq!(descriptor.entities.core_kinds.len(), 10);
         assert_eq!(descriptor.relations.core.len(), 16);

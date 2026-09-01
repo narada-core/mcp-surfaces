@@ -2324,7 +2324,7 @@
   },
   {
     "name": "task_lifecycle_bridge_poll",
-    "description": "Canonical action: bridge poll (task_lifecycle_bridge_poll). Poll the inbox-to-task-lifecycle bridge: evaluate unprocessed envelopes and auto-materialize high-severity tasks.",
+    "description": "Inbox-to-task materialization action, not the canonical opening or closing turn-boundary inbox check. Evaluates unprocessed envelopes and may auto-materialize high-severity tasks; dry_run=true is identity-neutral and read-only.",
     "inputSchema": {
       "type": "object",
       "properties": {

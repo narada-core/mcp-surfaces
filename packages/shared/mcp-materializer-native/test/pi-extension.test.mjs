@@ -25,6 +25,9 @@ test('carrier-neutral MCP presentation uses authoritative compact quantities and
   assert.equal(presentation.summarizeMcpResult({
     structuredContent: { schema: 'narada.mcp_loader.result_page.v1', full_output_char_length: 4227 },
   }, 'short transport text'), 'MCP loader result page · 4.2k characters');
+  assert.equal(presentation.summarizeMcpResult({
+    structuredContent: { schema: 'narada.mcp_loader.result_page.v1', full_output_char_length: 4227 },
+  }, 'full transport text', 'model text'), 'MCP loader result page · 4.2k characters · model-visible 10 characters');
   assert.equal(presentation.collapseMcpResultByDefault(), true);
 });
 
@@ -103,6 +106,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     const registered = [];
     const notifications = [];
     const eventHandlers = new Map();
+    const shortcuts = new Map();
     const pi = {
       events: {
         on(name, handler) { eventHandlers.set(name, handler); },
@@ -113,6 +117,10 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       },
       getAllTools() {
         return [];
+      },
+      registerCommand() {},
+      registerShortcut(shortcut, options) {
+        shortcuts.set(shortcut, options);
       },
       registerTool(tool) {
         registered.push(tool);
@@ -151,12 +159,33 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     });
     assert.doesNotMatch(result.content[0].text, /summary without lease/);
     const smallCollapsed = registered[0].renderResult(result, { expanded: false }).render(160).join('\n');
-    assert.match(smallCollapsed, /MCP result.*ctrl\+o to expand/);
+    assert.match(smallCollapsed, /MCP result.*model-visible.*ctrl\+o: model-visible/);
     assert.doesNotMatch(smallCollapsed, /schema_lease/);
+    assert.equal(result.details.fullOutputCharLength, result.details.modelVisibleCharLength);
+    assert.equal(result.details.modelVisibleTruncated, false);
+
+    const shortcut = shortcuts.get('ctrl+o');
+    assert.match(shortcut.description, /compact, model-visible, full-output/);
+    const expansionStates = [];
+    await shortcut.handler({ ui: { setToolsExpanded(value) { expansionStates.push(value); } } });
+    const modelVisible = registered[0].renderResult(result, { expanded: false }).render(160).join('\n');
+    assert.match(modelVisible, /^model-visible · \d+ characters/);
+    assert.match(modelVisible, /schema_lease/);
+    assert.deepEqual(expansionStates, [true, false]);
+
+    await shortcut.handler({ ui: { setToolsExpanded(value) { expansionStates.push(value); } } });
+    const fullOutput = registered[0].renderResult(result, { expanded: false }).render(160).join('\n');
+    assert.match(fullOutput, /^full-output · \d+ characters/);
+    assert.match(fullOutput, /schema_lease/);
+    assert.deepEqual(expansionStates, [true, false, true]);
+
+    await shortcut.handler({ ui: { setToolsExpanded(value) { expansionStates.push(value); } } });
+    assert.match(registered[0].renderResult(result, { expanded: false }).render(160).join('\n'), /ctrl\+o: model-visible/);
+    assert.deepEqual(expansionStates, [true, false, true, false]);
     const themedCollapsed = registered[0].renderResult(result, { expanded: false }, {
       fg(kind, text) { return `<${kind}>${text}</${kind}>`; },
     }).render(160).join('\n');
-    assert.match(themedCollapsed, /<muted>MCP result \(.*\) — ctrl\+o to expand<\/muted>/);
+    assert.match(themedCollapsed, /<muted>MCP result \(.*\) · model-visible .* — ctrl\+o: model-visible<\/muted>/);
     const ansiCollapsedLines = registered[0].renderResult(result, { expanded: false }, {
       fg(_kind, text) { return `\x1b[90m${text}\x1b[39m`; },
     }).render(7);
@@ -172,7 +201,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     assert.match(issueTreeCollapsed, /issue tree · issue:selected selected · 1 open leaf · version 3/);
     assert.ok(issueTreeCollapsed.length < 160);
     const issueTreeExpanded = registered[0].renderResult(issueTree, { expanded: true }).render(1000).join('\n');
-    const expandedIssueTree = JSON.parse(issueTreeExpanded);
+    const expandedIssueTree = JSON.parse(issueTreeExpanded.split('\n').slice(1).join('\n'));
     assert.deepEqual(expandedIssueTree.selected, authoritativeIssueTree.selected);
     assert.deepEqual(expandedIssueTree.frontier, authoritativeIssueTree.frontier);
     assert.equal(expandedIssueTree.noncertification, 'coordination state; not evidence');
@@ -188,7 +217,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       const fixture = await registered[0].execute('call-' + value, { value }, new AbortController().signal);
       const rendered = registered[0].renderResult(fixture, { expanded: false }).render(160).join('\n');
       assert.match(rendered, expected);
-      assert.match(rendered, /ctrl\+o to expand/);
+      assert.match(rendered, /ctrl\+o: model-visible/);
     }
 
     const oversized = await registered[0].execute('call-oversized', { value: 'oversized' }, new AbortController().signal);
@@ -197,13 +226,22 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     assert.doesNotMatch(oversized.content[0].text, /x{100}/);
     const oversizedExpanded = registered[0].renderResult(oversized, { expanded: true }).render(160).join('\n');
     assert.match(oversizedExpanded, /x{100}/);
+    await shortcut.handler({ ui: { setToolsExpanded() {} } });
+    const oversizedModelVisible = registered[0].renderResult(oversized, { expanded: false }).render(160).join('\n');
+    assert.match(oversizedModelVisible, /^model-visible · [0-9.]+[kmb]? characters/);
+    assert.doesNotMatch(oversizedModelVisible, /x{100}/);
+    await shortcut.handler({ ui: { setToolsExpanded() {} } });
+    const oversizedFullOutput = registered[0].renderResult(oversized, { expanded: false }).render(160).join('\n');
+    assert.match(oversizedFullOutput, /^full-output · [0-9.]+[kmb]? characters/);
+    assert.match(oversizedFullOutput, /x{100}/);
+    await shortcut.handler({ ui: { setToolsExpanded() {} } });
 
     const largeResult = {
       content: [{ type: 'text', text: 'x'.repeat(5000) }],
       details: { uiSummary: 'fixture_echo: large fixture' },
     };
     const collapsed = registered[0].renderResult(largeResult, { expanded: false });
-    assert.match(collapsed.render(120).join('\n'), /large fixture.*ctrl\+o to expand/);
+    assert.match(collapsed.render(120).join('\n'), /large fixture.*model-visible.*ctrl\+o: model-visible/);
     assert.doesNotMatch(collapsed.render(120).join('\n'), /x{100}/);
     const expanded = registered[0].renderResult(largeResult, { expanded: true });
     assert.match(expanded.render(120).join('\n'), /x{100}/);
@@ -263,6 +301,8 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       events: { on() {}, off() {} },
       on(name, handler) { handlers.set(name, handler); },
       getAllTools() { return []; },
+      registerCommand() {},
+      registerShortcut() {},
       registerTool(tool) { registered.push(tool); },
     });
     await assert.rejects(
@@ -306,6 +346,8 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       events: { on() {}, off() {} },
       on(name, handler) { handlers.set(name, handler); },
       getAllTools() { return []; },
+      registerCommand() {},
+      registerShortcut() {},
       registerTool(tool) { registered.push(tool); },
     });
     await assert.rejects(

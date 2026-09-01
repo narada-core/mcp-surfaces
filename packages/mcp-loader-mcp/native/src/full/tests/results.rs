@@ -13,6 +13,15 @@ fn compact_child_result_removes_duplicate_text_when_structured_data_exists() {
     assert_eq!(compacted["isError"], false);
     let text_only = json!({"content":[{"type":"text","text":"only"}]});
     assert_eq!(compact_child_result(&text_only), text_only);
+
+    let authoritative_text = json!({
+        "content":[{"type":"text","text":"file body"}],
+        "structuredContent":{"schema":"local.filesystem.read.v1","content_delivery":{"channel":"content"}}
+    });
+    assert_eq!(
+        compact_child_result(&authoritative_text),
+        authoritative_text
+    );
 }
 
 #[test]
@@ -88,7 +97,9 @@ fn compact_tool_discovery_bounds_long_descriptions() {
         "description":"x".repeat(256),
         "annotations":{}
     }));
-    let description = compact["description"].as_str().expect("description excerpt");
+    let description = compact["description"]
+        .as_str()
+        .expect("description excerpt");
     assert!(description.chars().count() <= COMPACT_TOOL_DESCRIPTION_CHARS + 1);
     assert!(description.ends_with('…'));
 }

@@ -123,6 +123,11 @@
         assert_eq!(full["detail"], "full");
         assert!(full.get("state_truth_table").is_some());
         assert!(serde_json::to_string(&compact).unwrap().len() < 4_000);
+        let full_text = serde_json::to_string(&full).unwrap();
+        assert!(full_text.contains("canonical opening and closing inbox checks"));
+        assert!(full_text.contains("not a turn-boundary inbox check"));
+        let bridge = Surface::Task.tools().into_iter().find(|tool| tool["name"] == "task_lifecycle_bridge_poll").expect("bridge tool");
+        assert!(bridge["description"].as_str().unwrap().contains("not the canonical opening or closing turn-boundary inbox check"));
     }
 
     #[test]

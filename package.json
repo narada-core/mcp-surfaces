@@ -14,6 +14,8 @@
     "materialize:carrier:all": "pwsh -NoLogo -NoProfile -File ./tools/materialize-all-carriers.ps1 -NoNotification",
     "materialize:carrier:native": "cargo native-materialize",
     "build:materializer:native": "cargo native-build",
+    "generate:native-surface-catalogs": "node --import tsx scripts/generate-native-surface-catalogs.ts",
+    "generate:native-registrar-catalog": "node --import tsx scripts/update-native-registrar-catalog.ts",
     "normalize:newlines": "node scripts/check-newlines.mjs --write",
     "test:newlines": "node scripts/check-newlines.mjs",
     "install:materialize-shortcut": "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File tools/install-materialization-shortcut.ps1",

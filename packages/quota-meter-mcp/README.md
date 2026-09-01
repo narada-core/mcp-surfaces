@@ -31,8 +31,9 @@ are not in the operational path. By default the script is found at
 `QUOTA_METER_OVERLAY_SCRIPT` when it is elsewhere, and
 `QUOTA_METER_STATE_ROOT` to relocate bounded PID/position/telemetry state.
 
-## Quick start
+## Verification
 
 ```powershell
 cargo test --locked --manifest-path packages/shared/mcp-surfaces-native/native/Cargo.toml quota_meter
+pnpm --filter @narada-core/quota-meter-mcp test
 ```

@@ -10,10 +10,8 @@ This repository ships standalone MCP surfaces. A surface can run without Narada,
 ## Standalone Filesystem Example
 
 ```powershell
-pnpm --filter @narada-core/local-filesystem-mcp build
-bun <installed-package>/dist/src/main.js --mode read --allowed-root <your-workspace-root>
-# Compatibility path:
-node <installed-package>/dist/src/main.js --mode read --allowed-root <your-workspace-root>
+cargo build --release --locked --manifest-path packages/local-filesystem-mcp/native/Cargo.toml
+cargo run --release --locked --manifest-path packages/local-filesystem-mcp/native/Cargo.toml -- --mode read --allowed-root <your-workspace-root>
 ```
 
 ## Carrier Wiring Examples
@@ -29,6 +27,7 @@ Build the workspace and materialize every carrier from one coherent generation:
 ```powershell
 cargo native-package
 cargo native-materialize
+# For the complete carrier set, use: .\tools\materialize-all-carriers.ps1 -NoNotification
 ```
 
 The default `NARADA_RUNTIME_PROFILE` is `native`. The supported profiles are

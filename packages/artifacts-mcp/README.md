@@ -90,4 +90,5 @@ intended for recovery or bridging code that already has trusted metadata.
 
 ```powershell
 cargo test --locked --manifest-path packages/shared/mcp-surfaces-native/native/Cargo.toml artifact
+pnpm --filter @narada-core/artifacts-mcp test
 ```

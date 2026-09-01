@@ -41,6 +41,55 @@ fn every_public_tool_schema_is_named_closed_bounded_and_rejects_unknown_input() 
 }
 
 #[test]
+fn validation_error_reports_bound_received_value_and_corrected_call() {
+    let schema = json!({"type":"object","properties":{"max_inline_chars":{"type":"integer","maximum":20000}},"additionalProperties":false});
+    let error = validate_input_schema(&schema, &json!({"max_inline_chars":30000}), "/arguments")
+        .expect_err("oversized value must be rejected");
+    assert_eq!(error.code, "input_schema_validation_failed");
+    assert_eq!(error.details["path"], "/arguments.max_inline_chars");
+    assert_eq!(error.details["constraint"], "maximum");
+    assert_eq!(error.details["expected"], 20000);
+    assert_eq!(error.details["received"], 30000);
+    assert_eq!(
+        error.details["corrected_call_template"]["operation"],
+        "replace"
+    );
+    assert_eq!(
+        error.details["corrected_call_template"]["path"],
+        "/arguments.max_inline_chars"
+    );
+    assert_eq!(error.details["corrected_call_template"]["value"], 20000);
+    assert!(error.message.contains("expected 20000; received 30000"));
+
+    for (schema, value, expected) in [
+        (
+            json!({"type":"string","maxLength":3}),
+            json!("toolong"),
+            json!("xxx"),
+        ),
+        (
+            json!({"type":"string","minLength":5}),
+            json!("x"),
+            json!("xxxxx"),
+        ),
+        (json!({"type":"array","maxItems":0}), json!([1]), json!([])),
+        (
+            json!({"type":"object","maxProperties":0}),
+            json!({"x":1}),
+            json!({}),
+        ),
+    ] {
+        let error = validate_input_schema(&schema, &value, "/arguments/nested/value")
+            .expect_err("bound must fail");
+        assert_eq!(
+            error.details["corrected_call_template"]["path"],
+            "/arguments/nested/value"
+        );
+        assert_eq!(error.details["corrected_call_template"]["value"], expected);
+    }
+}
+
+#[test]
 fn wire_parser_refuses_oversized_framed_and_jsonl_messages() {
     let mut framed = b"Content-Length: 100\r\n\r\n{}".to_vec();
     assert_eq!(

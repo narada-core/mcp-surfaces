@@ -6,11 +6,8 @@
     "outDir": "dist",
     "tsBuildInfoFile": "dist/.tsbuildinfo"
   },
-  "include": ["src/**/*.ts", "test/**/*.ts"],
+  "include": ["src/**/*.ts"],
   "references": [
-    { "path": "../shared/mcp-transport" },
-    { "path": "../shared/mcp-telemetry" },
-    { "path": "../shared/mcp-e2e-harness" },
-    { "path": "../shared/mcp-runtime-proxy" }
+    { "path": "../shared/mcp-fabric-contracts" }
   ]
 }

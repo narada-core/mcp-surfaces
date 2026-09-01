@@ -209,19 +209,27 @@ fn list_tools(mode: &str) -> Vec<Value> {
         ),
         (
             "fs_glob_search",
-            "List files under an allowed root using ripgrep file globbing.",
-        ),
-        (
-            "fs_grep_search",
-            "Search file contents under an allowed root using ripgrep.",
+            "List files under an allowed root using ripgrep file globbing. Empty matches return ok with count 0.",
         ),
         (
             "fs_repository_inventory",
-            "Return a bounded candidate-source inventory under an allowed root.",
+            "Return a bounded candidate-source inventory under an allowed root, excluding generated runtime artifacts by default. Use git-mcp for authoritative tracked and ignored state.",
         ),
         (
             "fs_file_metrics",
             "Return bounded metadata-only file metrics under an allowed root.",
+        ),
+        (
+            "fs_search",
+            "Find matching lines, matching files, or per-file counts under one allowed directory with enforced item and response budgets.",
+        ),
+        (
+            "fs_search_results_read",
+            "Read a bounded page from an immutable filesystem search result reference.",
+        ),
+        (
+            "fs_grep_search",
+            "Search file contents under an allowed root using ripgrep with hard match and output-character budgets. Match-all patterns on a single file are refused unless allow_match_all is explicit.",
         ),
         ("fs_doctor", "Inspect local-filesystem MCP policy posture."),
         (
@@ -268,7 +276,9 @@ fn list_tools(mode: &str) -> Vec<Value> {
             "fs_read_file_range" => { properties.insert("path".into(), json!({"type":"string"})); properties.insert("start_line".into(), json!({"type":"integer","minimum":1,"maximum":10_000_000,"description":"Inclusive logical start line."})); properties.insert("end_line".into(), json!({"type":"integer","minimum":1,"maximum":10_000_000,"description":"Inclusive logical end line. Requests spanning over 1,000 lines return a bounded page; follow continuation.arguments until has_more is false."})); properties.insert("timeout_ms".into(), json!({"type":"integer","minimum":1,"maximum":60_000,"default":READ_TIMEOUT_MS})); }
             "fs_stat" => { properties.insert("path".into(), json!({"type":"string"})); properties.insert("timeout_ms".into(),json!({"type":"integer","minimum":1,"maximum":300_000,"default":60_000})); }
             "fs_glob_search" => { properties.insert("pattern".into(), json!({"type":"string"})); properties.insert("directory".into(), json!({"type":"string","default":"."})); properties.insert("ignore".into(), json!({"type":"array","items":{"type":"string"}})); properties.insert("offset".into(), json!({"type":"integer","minimum":0,"maximum":10_000_000,"default":0})); properties.insert("limit".into(), json!({"type":"integer","minimum":1,"maximum":500,"default":100})); properties.insert("timeout_ms".into(), json!({"type":"integer","minimum":1,"maximum":300_000,"default":SEARCH_TIMEOUT_MS})); properties.insert("cache_policy".into(), json!({"type":"string","enum":["auto","snapshot","refresh","bypass"],"default":"auto"})); properties.insert("snapshot_id".into(), json!({"type":"string"})); }
-            "fs_grep_search" => { properties.insert("pattern".into(), json!({"type":"string"})); properties.insert("path".into(), json!({"type":"string","default":"."})); properties.insert("output_mode".into(), json!({"type":"string","enum":["files_with_matches","count_matches","content"],"default":"content"})); properties.insert("ignore".into(), json!({"type":"array","items":{"type":"string"}})); properties.insert("offset".into(), json!({"type":"integer","minimum":0,"maximum":10_000_000,"default":0})); properties.insert("limit".into(), json!({"type":"integer","minimum":1,"maximum":500,"default":80})); properties.insert("timeout_ms".into(), json!({"type":"integer","minimum":1,"maximum":300_000,"default":SEARCH_TIMEOUT_MS})); properties.insert("cache_policy".into(), json!({"type":"string","enum":["auto","snapshot","refresh","bypass"],"default":"auto"})); properties.insert("snapshot_id".into(), json!({"type":"string"})); }
+            "fs_search" => { properties.insert("query".into(), json!({"type":"string"})); properties.insert("directory".into(), json!({"type":"string","default":"."})); properties.insert("syntax".into(), json!({"type":"string","enum":["literal","regex"],"default":"literal"})); properties.insert("result_kind".into(), json!({"type":"string","enum":["matches","files","counts"],"default":"matches"})); properties.insert("file_glob".into(), json!({"type":"string"})); properties.insert("exclude".into(), json!({"type":"array","items":{"type":"string"}})); properties.insert("case".into(), json!({"type":"string","enum":["smart","sensitive","insensitive"],"default":"smart"})); properties.insert("max_results".into(), json!({"type":"integer","minimum":1,"maximum":100,"default":20})); properties.insert("max_inline_chars".into(), json!({"type":"integer","minimum":512,"maximum":20_000,"default":6_000})); properties.insert("max_text_chars_per_match".into(), json!({"type":"integer","minimum":50,"maximum":2_000,"default":500})); properties.insert("cursor".into(), json!({"type":"string"})); properties.insert("diagnostics".into(), json!({"type":"boolean","default":false})); properties.insert("timeout_ms".into(), json!({"type":"integer","minimum":1,"maximum":300_000,"default":SEARCH_TIMEOUT_MS})); }
+            "fs_search_results_read" => { properties.insert("ref".into(), json!({"type":"string"})); properties.insert("output_ref".into(), json!({"type":"string"})); properties.insert("offset".into(), json!({"type":"integer","minimum":0,"maximum":20_000,"default":0})); properties.insert("limit".into(), json!({"type":"integer","minimum":1,"maximum":20_000,"default":4_000})); }
+            "fs_grep_search" => { properties.insert("pattern".into(), json!({"type":"string"})); properties.insert("directory".into(), json!({"type":"string","default":"."})); properties.insert("path".into(), json!({"type":"string","description":"Compatibility alias for directory."})); properties.insert("glob".into(), json!({"type":"string"})); properties.insert("output_mode".into(), json!({"type":"string","enum":["files_with_matches","count_matches","content"],"default":"files_with_matches"})); properties.insert("ignore".into(), json!({"type":"array","items":{"type":"string"}})); properties.insert("exclude".into(), json!({"type":"array","items":{"type":"string"}})); properties.insert("offset".into(), json!({"type":"integer","minimum":0,"maximum":10_000_000,"default":0})); properties.insert("limit".into(), json!({"type":"integer","minimum":1,"maximum":100,"default":30})); properties.insert("max_matches".into(), json!({"type":"integer","minimum":1,"maximum":100,"default":30})); properties.insert("max_output_chars".into(), json!({"type":"integer","minimum":256,"maximum":20_000,"default":4_000})); properties.insert("allow_match_all".into(), json!({"type":"boolean","default":false})); properties.insert("timeout_ms".into(), json!({"type":"integer","minimum":1,"maximum":300_000,"default":SEARCH_TIMEOUT_MS})); properties.insert("cache_policy".into(), json!({"type":"string","enum":["auto","snapshot","refresh","bypass"],"default":"auto"})); properties.insert("snapshot_id".into(), json!({"type":"string"})); }
             "fs_repository_inventory" => { properties.insert("pattern".into(), json!({"type":"string","default":"**/*"})); properties.insert("directory".into(), json!({"type":"string","description":"Canonical inventory scope; mutually exclusive with root."})); properties.insert("root".into(), json!({"type":"string","description":"Compatibility alias for directory; mutually exclusive with directory."})); properties.insert("ignore".into(), json!({"type":"array","items":{"type":"string"}})); properties.insert("include_generated".into(), json!({"type":"boolean","default":false})); properties.insert("offset".into(), json!({"type":"integer","minimum":0,"maximum":10_000_000,"default":0})); properties.insert("limit".into(), json!({"type":"integer","minimum":1,"maximum":500,"default":100})); properties.insert("timeout_ms".into(), json!({"type":"integer","minimum":1,"maximum":300_000,"default":SEARCH_TIMEOUT_MS})); properties.insert("cache_policy".into(), json!({"type":"string","enum":["auto","snapshot","refresh","bypass"],"default":"auto"})); properties.insert("snapshot_id".into(), json!({"type":"string"})); }
             "fs_file_metrics" => { properties.insert("pattern".into(), json!({"type":"string","default":"**/*"})); properties.insert("directory".into(), json!({"type":"string","default":"."})); properties.insert("root".into(), json!({"type":"string"})); properties.insert("ignore".into(), json!({"type":"array","items":{"type":"string"}})); properties.insert("exclude".into(), json!({"type":"array","items":{"type":"string"}})); properties.insert("offset".into(), json!({"type":"integer","minimum":0,"maximum":10_000_000,"default":0})); properties.insert("limit".into(), json!({"type":"integer","minimum":1,"maximum":100,"default":100})); properties.insert("max_bytes_per_file".into(), json!({"type":"integer","minimum":1,"maximum":1_073_741_824,"default":8_388_608})); properties.insert("max_total_scan_bytes".into(), json!({"type":"integer","minimum":1,"maximum":1_073_741_824,"default":268_435_456})); properties.insert("timeout_ms".into(), json!({"type":"integer","minimum":1,"maximum":300_000,"default":SEARCH_TIMEOUT_MS})); properties.insert("cache_policy".into(), json!({"type":"string","enum":["auto","snapshot","refresh","bypass"],"default":"auto"})); properties.insert("snapshot_id".into(), json!({"type":"string"})); }
             "fs_patch_outcome_show" => { properties.insert("operation_id".into(), json!({"type":"string"})); }
@@ -353,6 +363,8 @@ fn list_tools(mode: &str) -> Vec<Value> {
             "fs_read_file" => vec!["path"],
             "fs_read_file_range" => vec!["path", "start_line", "end_line"],
             "fs_stat" => vec!["path"],
+            "fs_search" => vec!["query"],
+            "fs_search_results_read" => vec!["ref"],
             "fs_grep_search" => vec!["pattern"],
             "fs_glob_search" => vec!["pattern"],
             "fs_patch_outcome_show" => vec!["operation_id"],

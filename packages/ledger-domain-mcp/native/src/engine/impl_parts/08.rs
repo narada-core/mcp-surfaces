@@ -241,13 +241,18 @@ impl Engine {
                             .and_then(Value::as_str)
                             == Some("stale") =>
                 {
+                    let current = self.issue_tree_resume(root, &Map::from_iter([("tree_id".into(), json!(tree_id))]))?;
                     return Err(self.error(
                         "issue_tree_version_conflict",
-                        "the selected leaf changed before admission",
+                        "the selected leaf or ledger head changed before admission",
                         json!({
                             "tree_id":tree_id,
-                            "selected_node_id":selected_id,
-                            "expected_node_version":expected_version,
+                            "requested":{"node_id":selected_id,"version":expected_version},
+                            "current":{"node_id":current["selected"]["node_id"],"version":current["selected"]["version"],"event_id":current["selected"]["event_id"],"ledger_head":current["ledger_head"]},
+                            "idempotency_key":args.get("idempotency_key").cloned().unwrap_or(Value::Null),
+                            "idempotency_key_reserved":Value::Null,
+                            "idempotency_reservation_status":"unknown_after_pre_admission_conflict",
+                            "idempotency_recovery":"Inspect canonical proposal/idempotency state or use a fresh key; input presence alone is not reservation evidence.",
                             "mutation_admitted":false,
                             "next":{"tool":"epistemic_graph_issue_tree_resume","arguments":{"tree_id":tree_id}},
                             "cause":error

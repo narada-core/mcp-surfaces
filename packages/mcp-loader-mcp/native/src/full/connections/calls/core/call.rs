@@ -73,8 +73,26 @@ pub(crate) fn call_attached_tool(
                 result
             }
             Err(mut error) => {
-                let domain_details =
+                let mut domain_details =
                     request_error_details(&error.details, "tools/call", outer_timeout);
+                if error.code.contains("timeout") || error.message.contains("timed out") {
+                    let child_alive = connection.session.alive();
+                    if let Some(details) = domain_details.as_object_mut() {
+                        details.insert(
+                            "process_disposition".into(),
+                            json!({
+                                "child_mcp_process":if child_alive {"observed_running_after_timeout"} else {"observed_exited_after_timeout"},
+                                "invoked_command_process":"unknown_to_loader",
+                                "execution_ref":"not_observed_before_timeout"
+                            }),
+                        );
+                        details.insert("recovery_action".into(), json!({
+                            "first":"If the child tool supports durable execution, query it by the execution_ref from an earlier response.",
+                            "otherwise":{"tool_name":"mcp_loader_surface_status","arguments":{"connection_id":connection.connection_id}},
+                            "warning":"Do not retry a non-idempotent call until child-side execution disposition is known."
+                        }));
+                    }
+                }
                 error.details = child_runtime_diagnostic(connection, domain_details);
                 return Err(error);
             }

@@ -141,11 +141,25 @@ fn validate_input_schema(schema: &Value, value: &Value, path: &str) -> Result<()
     let error = validator.iter_errors(value).next();
     match error {
         None => Ok(()),
-        Some(error) => Err(diagnostic(
-            "input_schema_validation_failed",
-            &format!("input_schema_validation_failed:{path}"),
-            json!({"path":path,"message":error.to_string()}),
-        )),
+        Some(error) => {
+            let instance_path = error.instance_path().to_string();
+            let schema_path = error.schema_path().to_string();
+            let full_path = format!("{path}{instance_path}");
+            let constraint = schema_path.rsplit('/').next().unwrap_or("schema");
+            let expected = schema.pointer(&schema_path).cloned().unwrap_or(Value::Null);
+            let received = value.pointer(&instance_path).cloned().unwrap_or(Value::Null);
+            let property = instance_path.rsplit('/').next().unwrap_or("arguments");
+            let corrected = if matches!(constraint, "maximum" | "minimum" | "maxLength" | "minLength" | "maxItems" | "maxProperties") {
+                json!({"arguments":{property:expected.clone()}})
+            } else {
+                json!({"arguments":format!("replace {property} with a value satisfying {constraint}")})
+            };
+            Err(diagnostic(
+                "input_schema_validation_failed",
+                &format!("input_schema_validation_failed:{full_path}:{constraint}: expected {expected}; received {received}"),
+                json!({"path":full_path,"violated_property":property,"constraint":constraint,"expected":expected,"received":received,"message":error.to_string(),"corrected_call_template":corrected}),
+            ))
+        }
     }
 }
 

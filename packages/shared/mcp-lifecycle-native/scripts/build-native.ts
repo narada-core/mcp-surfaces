@@ -11,7 +11,12 @@ const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const nativeRoot = join(packageRoot, 'native');
 const result = spawnSync('cargo', [
   'build', '--release', '--locked', '--manifest-path', join(nativeRoot, 'Cargo.toml'),
-], { cwd: packageRoot, stdio: 'inherit', windowsHide: true });
+], {
+  cwd: packageRoot,
+  env: { ...process.env, CARGO_TARGET_DIR: join(nativeRoot, 'target') },
+  stdio: 'inherit',
+  windowsHide: true,
+});
 if (result.error) throw result.error;
 if (result.status !== 0) throw new Error('mcp_lifecycle_native_build_failed:' + (result.status ?? 'signal'));
 
