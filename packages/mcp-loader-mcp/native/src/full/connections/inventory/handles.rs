@@ -80,7 +80,10 @@ fn compact_tool_description(tool: &Value) -> Value {
         return Value::Null;
     };
     let mut chars = description.chars();
-    let excerpt: String = chars.by_ref().take(COMPACT_TOOL_DESCRIPTION_CHARS).collect();
+    let excerpt: String = chars
+        .by_ref()
+        .take(COMPACT_TOOL_DESCRIPTION_CHARS)
+        .collect();
     if chars.next().is_some() {
         json!(format!("{excerpt}…"))
     } else {
