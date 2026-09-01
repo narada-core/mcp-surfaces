@@ -92,6 +92,8 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       mcp_page: { schema: "narada.mcp_output_page.v1", status: "ok", ref: "mcp_output:page", path: ".ai/tmp/mcp-outputs/workspace/page.json", full_output_char_length: 1234, output_text: JSON.stringify({ schema: "child.result.v1", answer: "only mcp output" }) },
       worker_page: { schema: "narada.worker.output_page.v1", status: "ok", ref: "worker_output:page", path: "worker.json", output_text: JSON.stringify({ schema: "child.result.v1", answer: "only worker output" }) },
       authoritative_json: { schema: "local.filesystem.read.v1", content_delivery: { format: "filesystem_read_text", channel: "content" }, relative_path: "file.json" },
+      write_file: { schema: "local.filesystem.write_file.v1", status: "written", path: "C:/site/.ai/file.md", root: "C:/site", relative_path: ".ai/file.md", size: 17, create_parent_directories: true, before_sha256: "before", after_sha256: "after", sha256: "after", content_sha256: "after", timeout_ms: 30000 },
+      submit_review_admit: { schema: "narada.epistemic.submit_review_admit.v1", status: "admitted", submission: { proposal_id: "proposal-1", proposal_digest: "digest-1", content_fingerprint: "content-1", operation_count: 4, operations: [{ op: "entity_create", title: "repeated input" }] }, review: { status: "policy_valid", review_details: { repeated: "input" } }, admission: { status: "admitted", proposal_id: "proposal-1", ledger_head: "head-1", event: { operations: [{ op: "entity_create", title: "repeated input" }] } }, review_gate_preserved: true, certifies_truth: false },
       schema_lease: { schema: "narada.mcp_loader.schema_lease.v1", status: "issued", connection_id: "c1", surface_id: "git", tool_name: "git_status", schema_lease: "lease-1", tool_schema_digest: "digest-1", input_schema_digest: "input-digest", binding_resolution: { surface_handle: "handle", runtime_lifecycle: { noisy: true } }, input_contract: { required: [], properties: ["working_directory"] }, tool_contract: { name: "git_status", inputSchema: { type: "object" } } },
       inventory: { schema: "narada.mcp_loader.site_tool_inventory_check.v1", status: "drift", observation_coverage: "partial", checked_surface_count: 3, violation_count: 1, finding_status_counts: { drift: 1 }, observation_ref: "mcp_payload:inventory", observed_tools: { git: ["tool-a", "tool-b"], worker: ["tool-c"] }, runtime_freshness: { noisy: true }, findings: [{ surface_id: "git", status: "drift", declared_count: 10, observed_count: 8, missing_from_fabric: ["tool-a"], extra_in_fabric: ["tool-z"], duplicate_declared_tools: [], duplicate_observed_tools: [], unclassified_observed_tools: [] }] },
       oversized: { schema: "narada.epistemic.query.v2", status: "ok", payload: "x".repeat(21000) },
@@ -174,6 +176,19 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     });
     assert.doesNotMatch(result.content[0].text, /summary without lease/);
     const authoritativeJson = await registered[0].execute('call-authoritative-json', { value: 'authoritative_json' }, new AbortController().signal);
+    const writeReceipt = await registered[0].execute('call-write-file', { value: 'write_file' }, new AbortController().signal);
+    const writeModel = JSON.parse(writeReceipt.content[0].text);
+    assert.deepEqual(Object.keys(writeModel).sort(), ['after_sha256', 'before_sha256', 'relative_path', 'schema', 'sha256', 'size', 'status'].sort());
+    assert.equal(writeModel.path, undefined);
+    assert.notEqual(registered[0].renderResult(writeReceipt, { expanded: true }).render(160).join('\n'), writeReceipt.content[0].text);
+
+    const submitReceipt = await registered[0].execute('call-submit-review-admit', { value: 'submit_review_admit' }, new AbortController().signal);
+    const submitModel = JSON.parse(submitReceipt.content[0].text);
+    assert.equal(submitModel.proposal_id, 'proposal-1');
+    assert.equal(submitModel.operation_count, 4);
+    assert.equal(submitModel.operations, undefined);
+    assert.equal(submitModel.review_details, undefined);
+    assert.notEqual(registered[0].renderResult(submitReceipt, { expanded: true }).render(160).join('\n'), submitReceipt.content[0].text);
     assert.match(authoritativeJson.content[0].text, /output_ref|reader_tool/);
     assert.equal(authoritativeJson.details.modelVisibleTruncated, false);
 

@@ -309,11 +309,46 @@ function controlPlaneProjectionText(structured: any): string | undefined {
   return undefined;
 }
 
+function mutationReceiptProjectionText(structured: any): string | undefined {
+  if (structured?.schema === "local.filesystem.write_file.v1") {
+    return JSON.stringify({
+      schema: structured.schema,
+      status: structured.status,
+      relative_path: structured.relative_path,
+      size: structured.size,
+      sha256: structured.sha256 ?? structured.after_sha256,
+      before_sha256: structured.before_sha256,
+      after_sha256: structured.after_sha256,
+    });
+  }
+  if (structured?.schema === "narada.epistemic.submit_review_admit.v1") {
+    const submission = structured.submission ?? {};
+    const review = structured.review ?? {};
+    const admission = structured.admission ?? {};
+    return JSON.stringify({
+      schema: structured.schema,
+      status: structured.status,
+      proposal_id: submission.proposal_id ?? admission.proposal_id,
+      proposal_digest: submission.proposal_digest,
+      content_fingerprint: submission.content_fingerprint,
+      operation_count: submission.operation_count,
+      review_status: review.status,
+      admission_status: admission.status,
+      ledger_head: admission.ledger_head ?? admission.ledger_head_digest,
+      review_gate_preserved: structured.review_gate_preserved,
+      certifies_truth: structured.certifies_truth,
+    });
+  }
+  return undefined;
+}
+
 function modelContentProjection(result: any, content: any[]): any[] {
   const structuredProjection = modelProjectionTextFromStructured(result?.structuredContent);
   if (structuredProjection !== undefined) return [{ type: "text", text: structuredProjection }];
   const controlPlaneProjection = controlPlaneProjectionText(result?.structuredContent);
   if (controlPlaneProjection !== undefined) return [{ type: "text", text: controlPlaneProjection }];
+  const mutationReceiptProjection = mutationReceiptProjectionText(result?.structuredContent);
+  if (mutationReceiptProjection !== undefined) return [{ type: "text", text: mutationReceiptProjection }];
   if (result?.structuredContent !== undefined) return content;
   for (const block of Array.isArray(content) ? content : []) {
     if (block?.type !== "text" || typeof block.text !== "string") continue;
