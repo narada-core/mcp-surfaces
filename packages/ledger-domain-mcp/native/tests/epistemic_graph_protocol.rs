@@ -846,6 +846,14 @@ fn live_inbox_suffix_filters_old_recipient_history_before_budgeting() {
     assert_eq!(result["count"], 1);
     assert_eq!(result["items"][0]["entity_id"], "communication:new");
     assert_eq!(
+        result["items"][0]["sender_identity_state"]["status"],
+        "asserted_by_actor"
+    );
+    assert_eq!(
+        result["items"][0]["sender_identity_state"]["authority_granted"],
+        false
+    );
+    assert_eq!(
         result["query_cost"]["planner_mode"],
         "indexed_subject_suffix"
     );

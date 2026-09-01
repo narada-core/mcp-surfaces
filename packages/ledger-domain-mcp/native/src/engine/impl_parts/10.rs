@@ -181,7 +181,29 @@ impl Engine {
                 json!({"count":supplied_operations.len()}),
             ));
         }
-        let operations = self.normalize_operations(supplied_operations)?;
+        let mut operations = self.normalize_operations(supplied_operations)?;
+        for operation in &mut operations {
+            let Some(object) = operation.as_object_mut() else {
+                continue;
+            };
+            if object.get("op").and_then(Value::as_str) != Some("entity.declare")
+                || object.get("kind").and_then(Value::as_str)
+                    != Some("narada.epistemic:communication")
+                || object.contains_key("sender_identity_state")
+            {
+                continue;
+            }
+            if let Some(sender) = object
+                .get("sender")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+            {
+                object.insert(
+                    "sender_identity_state".into(),
+                    Self::sender_identity_state(&actor, &sender),
+                );
+            }
+        }
         self.validate_operations(&operations, false)?;
         let expected = self.resolve_expected_ledger_head(root, args.get("expected_ledger_head"))?;
         let semantic_content = json!({"actor":actor,"authority_basis":args.get("authority_basis"),"operations":operations});

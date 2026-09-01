@@ -143,7 +143,7 @@
   },
   "query": {
     "record_kind_enum": ["assessment.record", "test_outcome.record", "sweep.record"],
-    "communication": {"canonical_kind": "narada.epistemic:communication", "legacy_read_aliases": ["communication", "marici:communication"], "legacy_read_policy": "normalize_and_disclose", "legacy_write_policy": "reject_with_replacement", "contract_version": 2, "canonicalization_operation": "entity.kind_canonicalize", "legacy_write_refusal_code": "legacy_communication_kind_write_refused", "collision_refusal_code": "communication_kind_canonicalization_collision", "required_fields": ["entity_id", "sender", "recipient", "intent", "sent_at"], "content_any_of": ["title", "body"]},
+    "communication": {"canonical_kind": "narada.epistemic:communication", "legacy_read_aliases": ["communication", "marici:communication"], "legacy_read_policy": "normalize_and_disclose", "legacy_write_policy": "reject_with_replacement", "contract_version": 2, "canonicalization_operation": "entity.kind_canonicalize", "legacy_write_refusal_code": "legacy_communication_kind_write_refused", "collision_refusal_code": "communication_kind_canonicalization_collision", "required_fields": ["entity_id", "title", "sender", "recipient", "intent", "sent_at"], "content_any_of": ["title", "body"]},
     "kind_aliases": {
       "narada.epistemic:communication": ["communication", "marici:communication"]
     },
@@ -168,7 +168,7 @@
         "participant_identity": {"kind": "team_member", "alias_fields": ["canonical_name", "title"]},
         "intent_attribute": "narada.epistemic:intent",
         "body_field": "body",
-        "fields": ["entity_id", "kind", "event_id", "event_sequence", "sender", "recipient", "intent", "sent_at", "body"]
+        "fields": ["entity_id", "kind", "event_id", "event_sequence", "sender", "sender_identity_state", "recipient", "intent", "sent_at", "body"]
       },
       "epistemic:thread": {
         "mode": "thread",
@@ -354,11 +354,12 @@
         "legacy_write_remediation": "Use narada.epistemic:communication. Domain entity kinds must be namespaced; unqualified domain kinds are schema defects, not synonyms.",
         "compatibility_lifetime": "normalize_and_disclose until a ledger-head-bound audit proves zero legacy entities and writers; disable only through an authorized contract-version transition",
         "participant_kind": "team_member",
-        "required_fields": ["stable entity identity via entity_id or local_ref", "sender", "recipient", "intent", "sent_at", "at least one of title or body"],
+        "required_fields": ["stable entity identity via entity_id or local_ref", "title", "sender", "recipient", "intent", "sent_at"],
         "intent_values": ["request", "handoff", "result", "notice", "objection", "reply", "acknowledgment"],
         "relations": ["sent_by", "addressed_to", "replies_to", "requests", "reports", "acknowledges", "promotes_to_evidence"],
         "rule": "Communication records provenance and argumentative causality, but does not become epistemic evidence unless a separate reviewed promotes_to_evidence relation is admitted.",
-        "delivery_boundary": "The epistemic graph is append-only communication provenance; mailbox delivery and read state remain separate. One communication has one mechanically admitted recipient; broadcasts use one record per recipient or explicit addressed_to relations."
+        "sender_identity": "The engine adds sender_identity_state to each new communication. It is self_claimed when sender equals proposal actor and asserted_by_actor otherwise; authentication is missing and authority_granted is false. Inbox and pull queries expose this state. Neither sent_by nor admission authenticates the sender.",
+        "delivery_boundary": "The epistemic graph is append-only communication provenance; mailbox delivery and read state remain separate. Recipient names the asserted target and does not attest that target's identity. Broadcasts use one record per recipient or explicit addressed_to relations."
       },
       "communication_example": {
         "op": "entity.declare",

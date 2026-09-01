@@ -9,6 +9,17 @@ impl Engine {
         })
     }
 
+    fn sender_identity_state(actor: &str, sender: &str) -> Value {
+        json!({
+            "schema":"narada.epistemic.sender_identity_state.v1",
+            "identity":sender,
+            "status":if actor == sender { "self_claimed" } else { "asserted_by_actor" },
+            "asserting_actor":actor,
+            "authentication":"missing",
+            "authority_granted":false
+        })
+    }
+
     pub fn new(domain: Descriptor) -> Result<Engine, String> {
         let tables = parse_ddl_tables(&domain.projection.ddl)?;
         let entity_op = &domain.id_derivation.entity.applies_to;

@@ -50,6 +50,52 @@
             guidance.pointer("/communication_model/rule"),
             Some(&json!("Communication records provenance and argumentative causality, but does not become epistemic evidence unless a separate reviewed promotes_to_evidence relation is admitted."))
         );
+        assert_eq!(
+            guidance.pointer("/communication_model/sender_identity"),
+            Some(&json!("The engine adds sender_identity_state to each new communication. It is self_claimed when sender equals proposal actor and asserted_by_actor otherwise; authentication is missing and authority_granted is false. Inbox and pull queries expose this state. Neither sent_by nor admission authenticates the sender."))
+        );
+    }
+
+    #[test]
+    fn self_claimed_actor_is_structured_and_grants_no_authority() {
+        let state = Engine::identity_state_for_event(
+            "marici.Aspect",
+            "ledger.proposal_submit",
+        );
+        assert_eq!(
+            state.pointer("/claimed_identity/identity"),
+            Some(&json!("marici.Aspect"))
+        );
+        assert_eq!(
+            state.pointer("/claimed_identity/status"),
+            Some(&json!("claimed"))
+        );
+        assert_eq!(
+            state.pointer("/claimed_identity/authority_granted"),
+            Some(&json!(false))
+        );
+        assert_eq!(
+            state.pointer("/authentication/status"),
+            Some(&json!("missing"))
+        );
+        assert_eq!(
+            state.pointer("/authority/granted"),
+            Some(&json!(false))
+        );
+        let self_claim = Engine::sender_identity_state("marici.Aspect", "marici.Aspect");
+        assert_eq!(
+            self_claim.pointer("/status"),
+            Some(&json!("self_claimed"))
+        );
+        assert_eq!(
+            self_claim.pointer("/authority_granted"),
+            Some(&json!(false))
+        );
+        let third_party = Engine::sender_identity_state("carrier", "marici.Aspect");
+        assert_eq!(
+            third_party.pointer("/status"),
+            Some(&json!("asserted_by_actor"))
+        );
     }
 
     #[test]
