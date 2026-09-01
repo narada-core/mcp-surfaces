@@ -190,6 +190,9 @@ function preservesDeliveredContent(result: any): boolean {
 
 const MAX_MODEL_VISIBLE_RESULT_CHARS = 8_000;
 
+type ToolResultView = "compact" | "model-visible" | "full-output";
+const TOOL_RESULT_VIEWS: ToolResultView[] = ["compact", "model-visible", "full-output"];
+
 function boundedModelContent(result: any, content: any[], rawText: string): { content: any[]; expandedText: string | null } {
   const fullText = resultText({ content });
   if (fullText.length <= MAX_MODEL_VISIBLE_RESULT_CHARS) return { content, expandedText: null };
@@ -251,6 +254,10 @@ function textComponent(text: string): { render: (width: number) => string[] } {
 
 function mutedText(theme: any, text: string): string {
   return typeof theme?.fg === "function" ? theme.fg("muted", text) : text;
+}
+
+function resultViewHeader(view: ToolResultView, characterCount: number, nextView: ToolResultView): string {
+  return `${view} · ${compactQuantity(characterCount)} ${characterCount === 1 ? "character" : "characters"} — ctrl+o: ${nextView}`;
 }
 
 __NARADA_MCP_RESULT_PRESENTATION__
@@ -380,6 +387,7 @@ class McpClient {
 export default function naradaMcpCarrier(pi: any): void {
   let clients: McpClient[] = [];
   let started = false;
+  let toolResultView: ToolResultView = "compact";
   let naradaSessionIdentityState: NaradaSessionIdentityState | null = null;
 
   const currentSessionId = (ctx: any): string => String(ctx?.sessionManager?.getSessionId?.() ?? "ephemeral");
@@ -441,6 +449,22 @@ export default function naradaMcpCarrier(pi: any): void {
   pi.registerCommand("narada-identity", {
     description: "Set, inspect, or clear the mechanically admitted Narada identity for this Pi session",
     handler: (args: string, ctx: any) => naradaIdentityCommand(args, ctx),
+  });
+
+  pi.registerShortcut?.("ctrl+o", {
+    description: "Cycle MCP tool output: compact, model-visible, full-output",
+    handler: async (ctx: any) => {
+      const currentIndex = TOOL_RESULT_VIEWS.indexOf(toolResultView);
+      toolResultView = TOOL_RESULT_VIEWS[(currentIndex + 1) % TOOL_RESULT_VIEWS.length];
+      if (toolResultView === "model-visible") {
+        // Pi's public UI API exposes a boolean expansion state. Toggle through
+        // true so the host rebuilds rows even when the previous state was false.
+        ctx?.ui?.setToolsExpanded?.(true);
+        ctx?.ui?.setToolsExpanded?.(false);
+      } else {
+        ctx?.ui?.setToolsExpanded?.(toolResultView === "full-output");
+      }
+    },
   });
   pi.registerCommand("marici-identity", {
     description: "Deprecated alias for /narada-identity",
@@ -522,6 +546,7 @@ export default function naradaMcpCarrier(pi: any): void {
   pi.events.on(NARADA_MARICI_INBOX_POLL_EVENT, pollMariciInbox);
 
   pi.on("session_start", async (_event: unknown, ctx: any) => {
+    toolResultView = "compact";
     restoreNaradaSessionIdentity(ctx);
     if (started) return;
     started = true;
@@ -627,6 +652,8 @@ export default function naradaMcpCarrier(pi: any): void {
                   ? result.content
                   : [{ type: "text", text: JSON.stringify(result ?? null) }];
               const bounded = boundedModelContent(result, content, rawText);
+              const modelVisibleText = resultText({ content: bounded.content });
+              const fullOutputText = resultText({ content });
               return {
                 content: bounded.content,
                 details: {
@@ -634,7 +661,10 @@ export default function naradaMcpCarrier(pi: any): void {
                   isError: result?.isError === true,
                   structuredSchema: result?.structuredContent?.schema ?? null,
                   continuation: result?.structuredContent?.result?.next_offset ?? result?.structuredContent?.next_offset ?? null,
-                  uiSummary: summarizeMcpResult(result, resultText({ content })),
+                  fullOutputCharLength: fullOutputText.length,
+                  modelVisibleCharLength: modelVisibleText.length,
+                  modelVisibleTruncated: modelVisibleText.length !== fullOutputText.length,
+                  uiSummary: summarizeMcpResult(result, fullOutputText, modelVisibleText),
                   collapseByDefault: collapseMcpResultByDefault(),
                   expandedText: bounded.expandedText,
                 },
@@ -642,12 +672,24 @@ export default function naradaMcpCarrier(pi: any): void {
               };
             },
             renderResult: (result: any, options: { expanded: boolean }, theme: any) => {
-              const fullText = result?.details?.expandedText ?? resultText(result);
-              if (options.expanded || result?.details?.collapseByDefault === false) {
-                return textComponent(fullText || JSON.stringify(result?.details ?? null));
+              const modelVisibleText = resultText(result);
+              const fullText = result?.details?.expandedText ?? modelVisibleText;
+              const view: ToolResultView = toolResultView === "compact" && options.expanded
+                ? "full-output"
+                : toolResultView;
+              const nextView = TOOL_RESULT_VIEWS[(TOOL_RESULT_VIEWS.indexOf(view) + 1) % TOOL_RESULT_VIEWS.length];
+              if (view === "full-output") {
+                return textComponent(`${resultViewHeader(view, fullText.length, nextView)}\n${fullText || JSON.stringify(result?.details ?? null)}`);
               }
-              const summary = result?.details?.uiSummary ?? summarizeMcpResult(result, fullText);
-              return textComponent(mutedText(theme, `${summary} — ctrl+o to expand`));
+              if (view === "model-visible") {
+                return textComponent(`${resultViewHeader(view, modelVisibleText.length, nextView)}\n${modelVisibleText || JSON.stringify(result?.details ?? null)}`);
+              }
+              const summary = result?.details?.uiSummary ?? summarizeMcpResult(result, fullText, modelVisibleText);
+              const modelVisibleSize = `model-visible ${compactQuantity(modelVisibleText.length)} ${modelVisibleText.length === 1 ? "character" : "characters"}`;
+              const summaryWithModelVisibleSize = summary.includes("model-visible")
+                ? summary
+                : `${summary} · ${modelVisibleSize}`;
+              return textComponent(mutedText(theme, `${summaryWithModelVisibleSize} — ctrl+o: ${nextView}`));
             },
           });
         }
@@ -684,6 +726,7 @@ export default function naradaMcpCarrier(pi: any): void {
   });
 
   pi.on("session_shutdown", () => {
+    toolResultView = "compact";
     for (const client of clients) client.close();
     clients = [];
     started = false;
