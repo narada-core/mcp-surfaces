@@ -76,11 +76,12 @@ pub(crate) fn call_attached_tool(
                 let mut domain_details =
                     request_error_details(&error.details, "tools/call", outer_timeout);
                 if error.code.contains("timeout") || error.message.contains("timed out") {
+                    let child_alive = connection.session.alive();
                     if let Some(details) = domain_details.as_object_mut() {
                         details.insert(
                             "process_disposition".into(),
                             json!({
-                                "child_mcp_process":"still_running",
+                                "child_mcp_process":if child_alive {"observed_running_after_timeout"} else {"observed_exited_after_timeout"},
                                 "invoked_command_process":"unknown_to_loader",
                                 "execution_ref":"not_observed_before_timeout"
                             }),

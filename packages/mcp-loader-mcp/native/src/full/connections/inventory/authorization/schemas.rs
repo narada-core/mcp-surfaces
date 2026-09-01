@@ -69,6 +69,50 @@ pub(crate) fn apply_contract_mode(
     }
 }
 
+fn minimal_schema_value(schema: &Value) -> Value {
+    if let Some(value) = schema.get("default") {
+        return value.clone();
+    }
+    if let Some(value) = schema
+        .get("enum")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+    {
+        return value.clone();
+    }
+    match schema.get("type").and_then(Value::as_str) {
+        Some("object") => {
+            let mut result = Map::new();
+            if let (Some(required), Some(properties)) = (
+                schema.get("required").and_then(Value::as_array),
+                schema.get("properties").and_then(Value::as_object),
+            ) {
+                for name in required.iter().filter_map(Value::as_str) {
+                    if let Some(child) = properties.get(name) {
+                        result.insert(name.into(), minimal_schema_value(child));
+                    }
+                }
+            }
+            let minimum = schema.get("minProperties").and_then(Value::as_u64).unwrap_or(0) as usize;
+            while result.len() < minimum {
+                result.insert(format!("required_property_{}", result.len() + 1), json!("<required value>"));
+            }
+            Value::Object(result)
+        }
+        Some("array") => {
+            let item = minimal_schema_value(schema.get("items").unwrap_or(&Value::Null));
+            Value::Array(vec![item; schema.get("minItems").and_then(Value::as_u64).unwrap_or(1) as usize])
+        }
+        Some("string") => json!("<required string>"),
+        Some("integer") | Some("number") => {
+            schema.get("minimum").cloned().unwrap_or_else(|| json!(0))
+        }
+        Some("boolean") => json!(false),
+        Some("null") => Value::Null,
+        _ => Value::Null,
+    }
+}
+
 pub(crate) fn inspect_attached_tool(
     arguments: &JsonObject,
     state: &LoaderState,
@@ -92,7 +136,12 @@ pub(crate) fn inspect_attached_tool(
         Some(Value::Bool(false)) => "false",
         Some(Value::String(mode)) if mode == "compact" => "compact",
         Some(Value::String(mode)) if mode == "verbose" => "verbose",
-        _ => return Err(Diagnostic::new("include_tool_contract_invalid", "include_tool_contract must be false, compact, or verbose")),
+        _ => {
+            return Err(Diagnostic::new(
+                "include_tool_contract_invalid",
+                "include_tool_contract must be false, compact, or verbose",
+            ))
+        }
     };
     let mut result = json!({
         "schema": "narada.mcp_loader.schema_lease.v1",
@@ -108,6 +157,8 @@ pub(crate) fn inspect_attached_tool(
         "output_schema_digest": sha256(&stable_json(&output_schema)),
         "description": tool.get("description").cloned().unwrap_or(Value::Null),
         "annotations": tool.get("annotations").cloned().unwrap_or(Value::Null),
+        "minimal_valid_arguments":minimal_schema_value(&input_schema),
+        "verbose_contract_call":{"tool_name":"mcp_loader_inspect_tool","arguments":{"connection_id":connection.connection_id,"tool_name":tool_name,"include_tool_contract":"verbose"}},
         "schema_lease": schema_lease_token(state, connection, &tool_name, &tool_schema_digest),
         "lease_scope": "loader_process_child_generation",
         "transferable": false

@@ -582,7 +582,7 @@ trust_level = "untrusted"
   assert.ok(Number(pagedGlob.result.structuredContent.scanned) < 20);
   assert.equal(pagedGlob.result.structuredContent.scanned_unit, 'matched_entries');
   assert.match(pagedGlob.result.content[0].text, /fs_glob_search: ok/);
-  assert.match(pagedGlob.result.content[0].text, /count_semantics: count is the bounded matched-entry count observed so far; returned is only this page/);
+  assert.match(pagedGlob.result.content[0].text, /count_semantics: full count is unknown because capture stopped at a producer bound; returned is only this page/);
   assert.match(pagedGlob.result.content[0].text, /next_call: fs_glob_search/);
   assert.equal(pagedGlob.result.structuredContent.continuation.arguments.offset, 5);
   assert.equal(pagedGlob.result.structuredContent.continuation.arguments.limit, 5);

@@ -436,7 +436,7 @@
       "description":"Canonical bounded opening/closing turn-boundary communication inbox read. This is distinct from task_lifecycle_bridge_poll, which materializes inbox envelopes into tasks.",
       "class":"core","feature":null,
       "annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true},
-      "inputSchema":{"type":"object","properties":{"recipient":{"type":"string","minLength":1},"participant":{"type":"string","minLength":1},"after_sequence":{"type":"integer","minimum":0},"since_event":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":100,"default":20},"include_body":{"type":"boolean","default":true},"read_state":{"type":"string","enum":["all","read","unread"],"default":"all"},"reply_state":{"type":"string","enum":["all","replied","unreplied"],"default":"all"},"expected_ledger_head":{"type":["string","null"]}},"additionalProperties":false}
+      "inputSchema":{"type":"object","properties":{"recipient":{"type":"string","minLength":1},"participant":{"type":"string","minLength":1},"after_sequence":{"type":"integer","minimum":0},"since_event":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":100,"default":20},"include_body":{"type":"boolean","default":true},"read_state":{"type":"string","enum":["all","read","unread"],"default":"all"},"reply_state":{"type":"string","enum":["all","replied","unreplied"],"default":"all"},"latest":{"type":"boolean","default":true,"description":"Return newest matching messages first."},"phase":{"type":"string","enum":["opening","closing"],"description":"Declares which distinct turn-boundary inbox check this call performs."},"expected_ledger_head":{"type":["string","null"]}},"additionalProperties":false}
     },
     {
       "name": "epistemic_graph_query",
@@ -540,7 +540,8 @@
         "authority_basis":{"type":"object","minProperties":1},
         "idempotency_key":{"type":"string","minLength":1},
         "max_frontier_items":{"type":"integer","minimum":1,"maximum":100,"default":20},
-        "max_inline_chars":{"type":"integer","minimum":1000,"maximum":20000,"default":6000}
+        "max_inline_chars":{"type":"integer","minimum":1000,"maximum":20000,"default":6000},
+        "compact":{"type":"boolean","default":false,"description":"Return only stable tree identity, selected checkpoint, and compact alternative frontier fields."}
       },"anyOf":[{"required":["tree_id"]},{"required":["objective"]}],"additionalProperties":false}
     },
     {

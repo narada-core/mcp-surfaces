@@ -139,7 +139,7 @@ fn acceptance(case: u8) {
                 "epistemic_graph_issue_tree_resume",
                 json!({"objective":"absent"}),
             );
-            assert_eq!(missing["code"], "issue_tree_not_found");
+            assert_eq!(missing["code"], "issue_tree_objective_not_found");
         }
         3 => {
             let barrier = Arc::new(Barrier::new(3));

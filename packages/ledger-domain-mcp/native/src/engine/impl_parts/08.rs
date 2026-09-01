@@ -250,7 +250,9 @@ impl Engine {
                             "requested":{"node_id":selected_id,"version":expected_version},
                             "current":{"node_id":current["selected"]["node_id"],"version":current["selected"]["version"],"event_id":current["selected"]["event_id"],"ledger_head":current["ledger_head"]},
                             "idempotency_key":args.get("idempotency_key").cloned().unwrap_or(Value::Null),
-                            "idempotency_key_reserved":args.get("idempotency_key").is_some(),
+                            "idempotency_key_reserved":Value::Null,
+                            "idempotency_reservation_status":"unknown_after_pre_admission_conflict",
+                            "idempotency_recovery":"Inspect canonical proposal/idempotency state or use a fresh key; input presence alone is not reservation evidence.",
                             "mutation_admitted":false,
                             "next":{"tool":"epistemic_graph_issue_tree_resume","arguments":{"tree_id":tree_id}},
                             "cause":error

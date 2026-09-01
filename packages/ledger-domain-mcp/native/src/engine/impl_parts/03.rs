@@ -127,7 +127,19 @@ impl Engine {
             "communication_inbox_poll" => {
                 let mut query_args = args.clone();
                 query_args.insert("template".into(), json!("epistemic:inbox"));
-                self.query(site_root, &query_args)
+                if !query_args.contains_key("latest") { query_args.insert("latest".into(), json!(true)); }
+                let mut result = self.query(site_root, &query_args)?;
+                let checkpoint = result["ledger_head"].clone();
+                let last_sequence = result["last_sequence"].clone();
+                if let Some(object) = result.as_object_mut() {
+                    object.insert("poll_contract".into(), json!({
+                        "phase":args.get("phase").cloned().unwrap_or_else(|| json!("unspecified")),
+                        "checkpoint_ledger_head":checkpoint,
+                        "distinct_turn_boundary_checks_required":true,
+                        "next_poll":{"tool":"epistemic_graph_communication_inbox_poll","arguments":{"participant":args.get("participant").or_else(|| args.get("recipient")).cloned().unwrap_or(Value::Null),"after_sequence":last_sequence,"phase":"closing"}}
+                    }));
+                }
+                Ok(result)
             }
             "query_batch" => self.query_batch(site_root, args),
             "team_work_overview" => self.team_work_overview(site_root, args),

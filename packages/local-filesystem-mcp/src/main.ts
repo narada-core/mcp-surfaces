@@ -1971,7 +1971,7 @@ function cappedSearchResult({ state, kind, args, page, offset, limit, freshness,
     remediation: 'No matches were returned for the current path freshness fingerprint. If files are known to exist, retry with cache_policy="refresh" or cache_policy="bypass" and verify the directory/pattern pair.',
   } : null;
   const continuationArguments = Object.fromEntries(
-    ['directory', 'path', 'pattern', 'ignore', 'output_mode', 'search_case', 'include_glob', 'timeout_ms']
+    ['directory', 'path', 'pattern', 'glob', 'ignore', 'exclude', 'output_mode', 'search_case', 'timeout_ms']
       .filter((key) => args[key] !== undefined)
       .map((key) => [key, args[key]]),
   );
@@ -1992,7 +1992,9 @@ function cappedSearchResult({ state, kind, args, page, offset, limit, freshness,
     count_exact: page.count_exact,
     count_semantics: page.count_exact
       ? 'count is the exact full result count'
-      : 'count is the bounded matched-entry count observed so far; returned is only this page',
+      : page.count === null
+        ? 'full count is unknown because capture stopped at a producer bound; returned is only this page'
+        : 'count is the bounded matched-entry count observed so far; returned is only this page',
     scanned: page.scanned,
     scanned_unit: 'matched_entries',
     returned: matches.length,
