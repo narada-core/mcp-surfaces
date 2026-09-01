@@ -147,6 +147,13 @@
             .to_string();
         assert_eq!(resumed["frontier"]["scope"], "unselected alternatives; selected work is represented once in selected");
         assert!(!resumed["frontier"]["items"].as_array().unwrap().iter().any(|item| item["node_id"] == selected_id));
+        let hinted = engine.issue_tree_resume(&root, &Map::from_iter([
+            ("tree_id".into(), json!(tree_id.clone())),
+            ("objective".into(), json!("A paraphrase that is not the stored objective")),
+        ])).expect("tree id remains authoritative when objective is only a hint");
+        assert_eq!(hinted["tree"]["tree_id"], tree_id);
+        assert_eq!(hinted["objective_match"]["exact_normalized_match"], false);
+        assert_eq!(hinted["objective_match"]["lookup_effect"], "hint_only_tree_id_was_authoritative");
         let transition = engine.issue_tree_transition(&root, &Map::from_iter([
             ("actor".into(), json!("tester")),
             ("authority_basis".into(), json!({"kind":"test"})),

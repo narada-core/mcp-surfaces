@@ -432,6 +432,13 @@
       "inputSchema": {"type": "object", "required": ["actor", "authority_basis"], "properties": {"actor": {"type": "string", "minLength": 1}, "authority_basis": {"type": "object", "minProperties": 1}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}, "cursor": {"type": ["string", "null"]}}, "additionalProperties": false}
     },
     {
+      "name":"epistemic_graph_communication_inbox_poll",
+      "description":"Canonical bounded opening/closing turn-boundary communication inbox read. This is distinct from task_lifecycle_bridge_poll, which materializes inbox envelopes into tasks.",
+      "class":"core","feature":null,
+      "annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true},
+      "inputSchema":{"type":"object","properties":{"recipient":{"type":"string","minLength":1},"participant":{"type":"string","minLength":1},"after_sequence":{"type":"integer","minimum":0},"since_event":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":100,"default":20},"include_body":{"type":"boolean","default":true},"read_state":{"type":"string","enum":["all","read","unread"],"default":"all"},"reply_state":{"type":"string","enum":["all","replied","unreplied"],"default":"all"},"expected_ledger_head":{"type":["string","null"]}},"additionalProperties":false}
+    },
+    {
       "name": "epistemic_graph_query",
       "description": "Run a bounded legacy entity/record query, a descriptor-owned inbox or thread template, or a constrained Datalog-like query over normalized datoms. Caller max_datoms, max_results, and timeout_ms are soft budgets capped by descriptor hard ceilings; opaque cursors resume ordered pages; query_cost reports effective budgets and planner mode. Privileged escalation is accepted only when descriptor-owned maintenance authority exists.",
       "class": "core",

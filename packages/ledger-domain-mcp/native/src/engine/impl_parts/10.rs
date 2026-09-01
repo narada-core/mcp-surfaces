@@ -37,14 +37,10 @@ impl Engine {
             .filter(|tree| {
                 supplied_tree_id
                     .map(|id| tree["tree_id"].as_str() == Some(id))
-                    .unwrap_or(true)
-                    && normalized
+                    .unwrap_or_else(|| normalized
                         .as_ref()
-                        .map(|value| {
-                            tree["objective"].as_str().map(str::to_lowercase).as_ref()
-                                == Some(value)
-                        })
-                        .unwrap_or(true)
+                        .map(|value| tree["objective"].as_str().map(str::to_lowercase).as_ref() == Some(value))
+                        .unwrap_or(true))
             })
             .collect::<Vec<_>>();
         if candidates.len() > 1 {
@@ -108,6 +104,12 @@ impl Engine {
             candidates.push(json!({"tree_id":tree_id,"objective":objective,"version":"1"}));
         }
         let tree = candidates.remove(0);
+        let objective_match = objective.map(|supplied| json!({
+            "supplied":supplied,
+            "stored":tree["objective"],
+            "exact_normalized_match":tree["objective"].as_str().is_some_and(|stored| stored.trim().eq_ignore_ascii_case(supplied.trim())),
+            "lookup_effect":if supplied_tree_id.is_some() {"hint_only_tree_id_was_authoritative"} else {"objective_was_lookup_key"}
+        })).unwrap_or(Value::Null);
         let mut frontier_args = Map::from_iter([("tree_id".into(), tree["tree_id"].clone())]);
         if let Some(value) = args.get("max_frontier_items") {
             frontier_args.insert("limit".into(), value.clone());
@@ -137,6 +139,7 @@ impl Engine {
             "schema":"narada.epistemic.issue-tree.resume.v1",
             "status":"ok",
             "tree":tree,
+            "objective_match":objective_match,
             "selected":frontier["selected"],
             "frontier":resume_frontier,
             "continuation":frontier["continuation"],

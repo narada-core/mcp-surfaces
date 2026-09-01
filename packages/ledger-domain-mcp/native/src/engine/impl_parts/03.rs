@@ -124,6 +124,11 @@ impl Engine {
                 }
             }
             "message_mark_read" => self.message_mark_read(site_root, args),
+            "communication_inbox_poll" => {
+                let mut query_args = args.clone();
+                query_args.insert("template".into(), json!("epistemic:inbox"));
+                self.query(site_root, &query_args)
+            }
             "query_batch" => self.query_batch(site_root, args),
             "team_work_overview" => self.team_work_overview(site_root, args),
             "source_inspect" => self.source_inspect(site_root, args),

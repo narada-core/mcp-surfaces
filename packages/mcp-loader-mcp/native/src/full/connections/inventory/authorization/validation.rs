@@ -37,9 +37,11 @@ pub(crate) fn validate_schema_lease(
             "connection_id":connection_id,
             "tool_name":tool_name,
             "supplied_tool_contract_digest":supplied_digest,
+            "supplied_digest_prefix":supplied_digest.chars().take(12).collect::<String>(),
             "current_tool_contract_digest":digest,
+            "expected_contract_identity":{"connection_id":connection_id,"generation_id":connection.generation_id,"tool_name":tool_name},
             "current_generation_id":connection.generation_id,
-            "next_call":{"tool_name":"mcp_loader_inspect_tool","arguments":{"connection_id":connection_id,"tool_name":tool_name}}
+            "next_call":{"tool_name":"mcp_loader_inspect_tool","arguments":{"connection_id":connection_id,"tool_name":tool_name,"include_tool_contract":"verbose"}}
         })));
     }
     let supplied =
