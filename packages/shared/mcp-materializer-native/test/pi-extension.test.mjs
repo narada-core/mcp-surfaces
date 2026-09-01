@@ -87,6 +87,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
         value.payload = "x".repeat(4227 - JSON.stringify(value).length);
         return value;
       })(),
+      team_work_overview: { schema: "narada.epistemic.team_work_overview.v1", status: "ok", mode: "detailed", query_origin: "named_template", template: "epistemic:team-work-overview", ledger_head: "secret-head", ledger_sequence: 42, items: [{ tree_id: "tree:1", objective: "Objective", member: "agent-a", status: "blocked", leaf: { node_id: "leaf:1", title: "Leaf", noisy: "omit" }, latest_attributable_transition: "2026-09-01T00:00:00Z", attribution_basis: "canonical", freshness: { classification: "fresh", rule: "bounded" }, blocker_count: 1, directed_handoff_count: 2, live_presence: { claimed: false, capability: "unavailable", reason: "omit" }, noisy: "omit" }], returned: 1, limit: 10, has_more: false, next_cursor: null, coverage: { queried_members: ["agent-a"], queried_trees: ["tree:1"], complete: true, total_matching: 1, omitted_count: 0, unattributed_active_tree_count: 0, partial_evidence_classes: [], unavailable_evidence_classes: ["live_process_heartbeat"], noisy: "omit" }, semantics: { frontier: "unresolved only; never ownership or current activity", communications: "coordination and attribution only; never scientific evidence", live_presence: "not claimed without a separate typed heartbeat capability" }, bounded: true },
       query_result: { schema: "narada.epistemic.query.v2", query_mode: "datalog", query_origin: "raw", template: null, ledger_head: "secret-head", items: [{ entity_id: "claim:1", payload: { title: "Keep", detail: "answer" } }], count: 1, returned_count: 1, count_semantics: "returned_page", limit: 10, output_bytes: 321, max_output_bytes: 10000, has_more: false, next_cursor: null, normalization: { applied: true, normalized_count: 1 }, query_cost: { planner_mode: "bounded_clause_plan", datoms_loaded: 10, hard_caps: { max_datoms: 100 } } },
       inbox_query: { schema: "narada.epistemic.query.v2", query_mode: "datalog", query_origin: "named_template", template: "epistemic:inbox", ledger_head: "head", items: [{ sender: "sender-a", recipient: "recipient-b", event_id: "event-a", body: "body alpha" }, { sender: "sender-c", recipient: "recipient-b", event_id: "event-c", body: "body beta" }] },
       issue_tree: { schema: "narada.epistemic.issue-tree.resume.v1", status: "ok", tree: { tree_id: "tree:ax", objective: "AX", version: "3" }, selected: { node_id: "issue:selected", version: "2", title: "Selected", state: "selected", score: 0.9 }, frontier: { items: [{ node_id: "issue:selected", state: "selected", score: 0.9 }, { node_id: "issue:open", state: "open", score: 0.8 }], returned: 2, complete: true, total: 2, total_exact: true }, continuation: null, certifies_truth: false, noncertification: "coordination state; not evidence" },
@@ -247,6 +248,18 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     assert.equal(commandModel.execution_posture, undefined);
     assert.equal(commandModel.test_scope, undefined);
     assert.ok(commandExecution.content[0].text.length < 250);
+
+    const teamOverview = await registered[0].execute('call-team-work-overview', { value: 'team_work_overview' }, new AbortController().signal);
+    const teamModel = JSON.parse(teamOverview.content[0].text);
+    assert.deepEqual(Object.keys(teamModel).sort(), ['coverage', 'has_more', 'items', 'limit', 'mode', 'next_cursor', 'returned', 'schema', 'semantics', 'status'].sort());
+    assert.equal(teamModel.query_origin, undefined);
+    assert.equal(teamModel.template, undefined);
+    assert.equal(teamModel.ledger_head, undefined);
+    assert.equal(teamModel.coverage.queried_members, undefined);
+    assert.equal(teamModel.items[0].noisy, undefined);
+    assert.equal(teamModel.items[0].live_presence.reason, undefined);
+    assert.deepEqual(teamModel.items[0].freshness, { classification: 'fresh', rule: 'bounded' });
+    assert.ok(teamOverview.content[0].text.length < 1200);
 
     const gitStatus = await registered[0].execute('call-git-status', { value: 'git_status' }, new AbortController().signal);
     const gitStatusModel = JSON.parse(gitStatus.content[0].text);

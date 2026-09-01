@@ -456,7 +456,7 @@ function projectMutationReceiptForModel(structured: any): any | undefined {
 }
 
 function loaderControlPlaneProjectionForModel(value: any): any | undefined {
-  return projectSurfaceAttachedForModel(value) ?? projectGitResultForModel(value) ?? projectStructuredCommandResultForModel(value) ?? projectMutationReceiptForModel(value) ?? projectEpistemicQueryForModel(value) ?? projectSchemaLeaseForModel(value) ?? projectSiteToolInventoryForModel(value);
+  return projectSurfaceAttachedForModel(value) ?? projectGitResultForModel(value) ?? projectStructuredCommandResultForModel(value) ?? projectMutationReceiptForModel(value) ?? projectEpistemicQueryForModel(value) ?? projectTeamWorkOverviewForModel(value) ?? projectSchemaLeaseForModel(value) ?? projectSiteToolInventoryForModel(value);
 }
 
 function projectEpistemicQueryForModel(value: any): any | undefined {
@@ -468,6 +468,54 @@ function projectEpistemicQueryForModel(value: any): any | undefined {
   }
   if (typeof value.has_more === "boolean") projection.has_more = value.has_more;
   if (Object.prototype.hasOwnProperty.call(value, "next_cursor")) projection.next_cursor = value.next_cursor;
+  return projection;
+}
+
+function projectTeamWorkOverviewForModel(value: any): any | undefined {
+  if (value?.schema !== "narada.epistemic.team_work_overview.v1" || !Array.isArray(value.items)) return undefined;
+  const projectItem = (item: any): any => {
+    const row: Record<string, any> = {};
+    for (const field of ["tree_id", "objective", "member", "status", "leaf", "latest_attributable_transition", "attribution_basis", "blocker_count", "directed_handoff_count"]) {
+      if (Object.prototype.hasOwnProperty.call(item ?? {}, field)) row[field] = item[field];
+    }
+    if (item?.freshness && typeof item.freshness === "object") {
+      row.freshness = {};
+      for (const field of ["classification", "rule"]) {
+        if (typeof item.freshness[field] === "string") row.freshness[field] = item.freshness[field];
+      }
+    }
+    if (item?.live_presence && typeof item.live_presence === "object") {
+      row.live_presence = {};
+      for (const field of ["claimed", "capability"]) {
+        if (Object.prototype.hasOwnProperty.call(item.live_presence, field)) row.live_presence[field] = item.live_presence[field];
+      }
+    }
+    return row;
+  };
+  const projection: Record<string, any> = { schema: value.schema, status: value.status, items: value.items.map(projectItem) };
+  if (typeof value.mode === "string") projection.mode = value.mode;
+  for (const field of ["returned", "limit"]) {
+    if (typeof value[field] === "number") projection[field] = value[field];
+  }
+  if (typeof value.has_more === "boolean") projection.has_more = value.has_more;
+  if (Object.prototype.hasOwnProperty.call(value, "next_cursor")) projection.next_cursor = value.next_cursor;
+  if (value.coverage && typeof value.coverage === "object") {
+    const coverage: Record<string, any> = {};
+    for (const field of ["complete", "total_matching", "omitted_count", "unattributed_active_tree_count"]) {
+      if (Object.prototype.hasOwnProperty.call(value.coverage, field)) coverage[field] = value.coverage[field];
+    }
+    for (const field of ["partial_evidence_classes", "unavailable_evidence_classes"]) {
+      if (Array.isArray(value.coverage[field]) && value.coverage[field].length > 0) coverage[field] = value.coverage[field];
+    }
+    if (Object.keys(coverage).length > 0) projection.coverage = coverage;
+  }
+  if (value.semantics && typeof value.semantics === "object") {
+    const semantics: Record<string, any> = {};
+    for (const field of ["frontier", "communications", "live_presence"]) {
+      if (typeof value.semantics[field] === "string") semantics[field] = value.semantics[field];
+    }
+    if (Object.keys(semantics).length > 0) projection.semantics = semantics;
+  }
   return projection;
 }
 
