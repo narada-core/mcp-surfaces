@@ -81,6 +81,10 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       })(),
       issue_tree: { schema: "narada.epistemic.issue-tree.resume.v1", status: "ok", tree: { tree_id: "tree:ax", objective: "AX", version: "3" }, selected: { node_id: "issue:selected", version: "2", title: "Selected", state: "selected", score: 0.9 }, frontier: { items: [{ node_id: "issue:selected", state: "selected", score: 0.9 }, { node_id: "issue:open", state: "open", score: 0.8 }], returned: 2, complete: true, total: 2, total_exact: true }, continuation: null, certifies_truth: false, noncertification: "coordination state; not evidence" },
       producer_page: { schema: "narada.producer_output_page.v1", status: "ok", output_ref: "mcp_output:fixture", reader_tool: "mcp_loader_read_result", full_output_char_length: 1234, output_text: JSON.stringify({ schema: "child.result.v1", answer: "only child output" }) },
+      loader_page: { schema: "narada.mcp_loader.tool_result.v1", status: "ok", result_summary: { schema: "child.result.v1", status: "ok" }, result: { schema: "narada.producer_output_page.v1", status: "ok", output_ref: "mcp_output:nested", reader_tool: "mcp_loader_read_result", full_output_char_length: 1234, output_text: JSON.stringify({ schema: "child.result.v1", answer: "only nested child output" }) } },
+      loader_result: { schema: "narada.mcp_loader.tool_result.v1", connection_id: "c1", surface_id: "s1", result_summary: { schema: "child.result.v1", status: "ok" }, result: { schema: "child.result.v1", answer: "only unwrapped child result" } },
+      mcp_page: { schema: "narada.mcp_output_page.v1", status: "ok", ref: "mcp_output:page", path: ".ai/tmp/mcp-outputs/workspace/page.json", full_output_char_length: 1234, output_text: JSON.stringify({ schema: "child.result.v1", answer: "only mcp output" }) },
+      worker_page: { schema: "narada.worker.output_page.v1", status: "ok", ref: "worker_output:page", path: "worker.json", output_text: JSON.stringify({ schema: "child.result.v1", answer: "only worker output" }) },
       oversized: { schema: "narada.epistemic.query.v2", status: "ok", payload: "x".repeat(21000) },
     };
     process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: {
@@ -159,12 +163,21 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       schema_lease: 'lease-fixture',
     });
     assert.doesNotMatch(result.content[0].text, /summary without lease/);
-    const producerPage = await registered[0].execute('call-producer-page', { value: 'producer_page' }, new AbortController().signal);
-    assert.deepEqual(JSON.parse(producerPage.content[0].text), { schema: 'child.result.v1', answer: 'only child output' });
-    assert.doesNotMatch(producerPage.content[0].text, /output_ref|reader_tool|full_output_char_length/);
-    assert.ok(producerPage.details.fullOutputCharLength > producerPage.details.modelVisibleCharLength);
-    const producerPageFull = registered[0].renderResult(producerPage, { expanded: true }).render(160).join('\n');
-    assert.match(producerPageFull, /output_ref|reader_tool/);
+    for (const [value, answer] of [
+      ['producer_page', 'only child output'],
+      ['loader_page', 'only nested child output'],
+      ['loader_result', 'only unwrapped child result'],
+      ['mcp_page', 'only mcp output'],
+      ['worker_page', 'only worker output'],
+    ]) {
+      const page = await registered[0].execute(`call-${value}`, { value }, new AbortController().signal);
+      assert.deepEqual(JSON.parse(page.content[0].text), { schema: 'child.result.v1', answer });
+      assert.doesNotMatch(page.content[0].text, /output_ref|reader_tool|full_output_char_length|result_summary/);
+      assert.equal(page.details.modelVisibleTruncated, false);
+      assert.ok(page.details.fullOutputCharLength > page.details.modelVisibleCharLength);
+      const pageFull = registered[0].renderResult(page, { expanded: true }).render(160).join('\n');
+      assert.notEqual(pageFull, page.content[0].text);
+    }
     const smallCollapsed = registered[0].renderResult(result, { expanded: false }).render(160).join('\n');
     assert.match(smallCollapsed, /MCP result.*model-visible.*f8: model-visible/);
     assert.doesNotMatch(smallCollapsed, /schema_lease/);

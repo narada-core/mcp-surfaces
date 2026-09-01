@@ -182,22 +182,40 @@ function resultText(result: any): string {
     .join("\n");
 }
 
-function outputProjectionText(result: any): string | null {
-  const structured = result?.structuredContent;
-  const candidates = [structured, structured?.result, structured?.result?.result];
-  for (const candidate of candidates) {
-    const schema = candidate?.schema;
-    if ((schema === "narada.producer_output_page.v1" || schema === "narada.mcp_loader.result_page.v1")
-      && typeof candidate?.output_text === "string") {
-      return candidate.output_text;
-    }
+function isOutputPage(value: any): boolean {
+  const schema = value?.schema;
+  return schema === "narada.mcp_loader.result_page.v1"
+    || (typeof schema === "string" && schema.endsWith("output_page.v1"));
+}
+
+function modelProjectionTextFromStructured(structured: any): string | undefined {
+  if (structured?.schema === "narada.mcp_loader.tool_result.v1") {
+    const child = structured.result?.structuredContent ?? structured.result;
+    if (child === undefined) return undefined;
+    return isOutputPage(child) && typeof child.output_text === "string"
+      ? child.output_text
+      : JSON.stringify(child);
   }
-  return null;
+  const candidates = [structured, structured?.result, structured?.result?.structuredContent, structured?.result?.result];
+  for (const candidate of candidates) {
+    if (isOutputPage(candidate) && typeof candidate?.output_text === "string") return candidate.output_text;
+  }
+  return undefined;
 }
 
 function modelContentProjection(result: any, content: any[]): any[] {
-  const outputText = outputProjectionText(result);
-  return outputText === null ? content : [{ type: "text", text: outputText }];
+  const structuredProjection = modelProjectionTextFromStructured(result?.structuredContent);
+  if (structuredProjection !== undefined) return [{ type: "text", text: structuredProjection }];
+  for (const block of Array.isArray(content) ? content : []) {
+    if (block?.type !== "text" || typeof block.text !== "string") continue;
+    try {
+      const textProjection = modelProjectionTextFromStructured(JSON.parse(block.text));
+      if (textProjection !== undefined) return [{ type: "text", text: textProjection }];
+    } catch {
+      // Non-JSON text remains the authoritative projection for this result.
+    }
+  }
+  return content;
 }
 
 function preservesDeliveredContent(result: any): boolean {
@@ -218,10 +236,10 @@ function boundedModelContent(
   content: any[],
   rawText: string,
   fullOutputText: string,
-): { content: any[]; expandedText: string | null } {
+): { content: any[]; expandedText: string | null; truncated: boolean } {
   const modelText = resultText({ content });
   if (modelText.length <= MAX_MODEL_VISIBLE_RESULT_CHARS) {
-    return { content, expandedText: fullOutputText !== modelText ? fullOutputText : null };
+    return { content, expandedText: fullOutputText !== modelText ? fullOutputText : null, truncated: false };
   }
   const structured = result?.structuredContent ?? {};
   const reference = structured.output_ref ?? structured.ref ?? structured.details_ref ?? structured.result?.output_ref ?? null;
@@ -239,7 +257,7 @@ function boundedModelContent(
       ? `Read bounded pages with ${reader} using output_ref ${reference}.`
       : "Retry with a smaller limit or a narrower range; the full result remains available in Pi via Ctrl+O.",
   };
-  return { content: [{ type: "text", text: JSON.stringify(summary) }], expandedText: fullOutputText || rawText };
+  return { content: [{ type: "text", text: JSON.stringify(summary) }], expandedText: fullOutputText || rawText, truncated: true };
 }
 
 function textComponent(text: string): { render: (width: number) => string[] } {
@@ -696,7 +714,7 @@ export default function naradaMcpCarrier(pi: any): void {
                   continuation: result?.structuredContent?.result?.next_offset ?? result?.structuredContent?.next_offset ?? null,
                   fullOutputCharLength: fullOutputText.length,
                   modelVisibleCharLength: modelVisibleText.length,
-                  modelVisibleTruncated: modelVisibleText.length !== fullOutputText.length,
+                  modelVisibleTruncated: bounded.truncated,
                   uiSummary: summarizeMcpResult(result, fullOutputText, modelVisibleText),
                   collapseByDefault: collapseMcpResultByDefault(),
                   expandedText: bounded.expandedText,

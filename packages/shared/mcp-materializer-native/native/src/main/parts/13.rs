@@ -158,6 +158,9 @@ mod tests {
         assert!(source.contains("pi.registerTool"));
         assert!(source.contains("Array.isArray(result?.content) && result.content.length > 0"));
         assert!(source.contains("result?.structuredContent !== undefined"));
+        assert!(source.contains("modelProjectionTextFromStructured"));
+        assert!(source.contains("narada.mcp_loader.tool_result.v1"));
+        assert!(source.contains("endsWith(\"output_page.v1\")"));
         assert!(source.contains("MAX_BOOTSTRAP_SCHEMA_CHARS"));
         assert!(source.contains("pi.registerCommand(\"marici-identity\""));
         assert!(source.contains("Mechanically admitted Narada identity"));
