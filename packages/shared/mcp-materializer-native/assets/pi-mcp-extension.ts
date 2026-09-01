@@ -192,7 +192,8 @@ const MAX_MODEL_VISIBLE_RESULT_CHARS = 8_000;
 
 type ToolResultView = "compact" | "model-visible" | "full-output";
 const TOOL_RESULT_VIEWS: ToolResultView[] = ["compact", "model-visible", "full-output"];
-const TOOL_RESULT_VIEW_SHORTCUT = "ctrl+shift+m";
+const TOOL_RESULT_VIEW_SHORTCUT = "f8";
+const TOOL_RESULT_VIEW_SHORTCUT_ALIASES = ["f8", "ctrl+shift+m"];
 
 function boundedModelContent(result: any, content: any[], rawText: string): { content: any[]; expandedText: string | null } {
   const fullText = resultText({ content });
@@ -452,21 +453,24 @@ export default function naradaMcpCarrier(pi: any): void {
     handler: (args: string, ctx: any) => naradaIdentityCommand(args, ctx),
   });
 
-  pi.registerShortcut?.(TOOL_RESULT_VIEW_SHORTCUT, {
-    description: "Cycle MCP tool output: compact, model-visible, full-output",
-    handler: async (ctx: any) => {
-      const currentIndex = TOOL_RESULT_VIEWS.indexOf(toolResultView);
-      toolResultView = TOOL_RESULT_VIEWS[(currentIndex + 1) % TOOL_RESULT_VIEWS.length];
-      if (toolResultView === "model-visible") {
-        // Pi's public UI API exposes a boolean expansion state. Toggle through
-        // true so the host rebuilds rows even when the previous state was false.
-        ctx?.ui?.setToolsExpanded?.(true);
-        ctx?.ui?.setToolsExpanded?.(false);
-      } else {
-        ctx?.ui?.setToolsExpanded?.(toolResultView === "full-output");
-      }
-    },
-  });
+  const cycleToolResultView = async (ctx: any): Promise<void> => {
+    const currentIndex = TOOL_RESULT_VIEWS.indexOf(toolResultView);
+    toolResultView = TOOL_RESULT_VIEWS[(currentIndex + 1) % TOOL_RESULT_VIEWS.length];
+    if (toolResultView === "model-visible") {
+      // Pi's public UI API exposes a boolean expansion state. Toggle through
+      // true so the host rebuilds rows even when the previous state was false.
+      ctx?.ui?.setToolsExpanded?.(true);
+      ctx?.ui?.setToolsExpanded?.(false);
+    } else {
+      ctx?.ui?.setToolsExpanded?.(toolResultView === "full-output");
+    }
+  };
+  for (const shortcut of TOOL_RESULT_VIEW_SHORTCUT_ALIASES) {
+    pi.registerShortcut?.(shortcut, {
+      description: "Cycle MCP tool output: compact, model-visible, full-output",
+      handler: cycleToolResultView,
+    });
+  }
   pi.registerCommand("marici-identity", {
     description: "Deprecated alias for /narada-identity",
     handler: (args: string, ctx: any) => naradaIdentityCommand(args, ctx, true),
