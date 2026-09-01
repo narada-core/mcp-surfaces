@@ -160,9 +160,9 @@ mod tests {
         assert!(source.contains("result?.structuredContent !== undefined"));
         assert!(source.contains("MAX_BOOTSTRAP_SCHEMA_CHARS"));
         assert!(source.contains("pi.registerCommand(\"marici-identity\""));
-        assert!(source.contains("operator mechanically admitted"));
-        assert!(source.contains("NARADA_MARICI_SESSION_IDENTITY_ENTRY"));
-        assert!(source.contains("use /marici-identity marici.Name"));
+        assert!(source.contains("Mechanically admitted Narada identity"));
+        assert!(source.contains("NARADA_SESSION_IDENTITY_ENTRY"));
+        assert!(source.contains("use /narada-identity set marici.Name"));
         assert!(!source.contains("__NARADA_PI_MCP_SERVERS__"));
     }
 

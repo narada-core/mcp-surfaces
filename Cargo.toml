@@ -3,6 +3,7 @@ resolver = "2"
 members = [
   "native-distribution",
   "packages/agent-context-mcp/native",
+  "packages/local-filesystem-mcp/native",
   "packages/ledger-domain-mcp/native",
   "packages/mcp-loader-mcp/native",
   "packages/media-operations-mcp/native",
@@ -14,6 +15,7 @@ members = [
   "packages/shared/mcp-materializer-native/native",
   "packages/shared/mcp-runtime-proxy/native",
   "packages/shared/mcp-surfaces-native/native",
+  "packages/structured-command-mcp/native",
 ]
 exclude = [
   "packages/shared/mcp-e2e-harness/native",

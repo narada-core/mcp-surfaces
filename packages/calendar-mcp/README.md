@@ -37,4 +37,5 @@ Calendar telemetry is optional and disabled unless the site enables `.ai/mcp-tel
 
 ```powershell
 cargo test --locked --manifest-path packages/shared/mcp-surfaces-native/native/Cargo.toml calendar
+pnpm --filter @narada-core/calendar-mcp test
 ```

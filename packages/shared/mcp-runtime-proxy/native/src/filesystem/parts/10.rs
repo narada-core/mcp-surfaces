@@ -18,6 +18,8 @@ fn run_search_command(
     grep: bool,
     output_mode: &str,
     operation: &str,
+    max_entries: usize,
+    max_bytes: usize,
 ) -> Result<(Vec<String>, bool), FsError> {
     let mut rg_args = Vec::new();
     if grep {
@@ -43,6 +45,18 @@ fn run_search_command(
         rg_args.push("-g".to_string());
         rg_args.push(pattern.to_string());
     }
+    if grep {
+        match args.get("search_case").and_then(Value::as_str) {
+            Some("sensitive") => rg_args.push("--case-sensitive".to_string()),
+            Some("insensitive") => rg_args.push("--ignore-case".to_string()),
+            Some("smart") => rg_args.push("--smart-case".to_string()),
+            _ => {}
+        }
+        if let Some(glob) = args.get("glob").and_then(Value::as_str) {
+            rg_args.push("-g".to_string());
+            rg_args.push(glob.to_string());
+        }
+    }
     let ignores = if grep {
         DEFAULT_GREP_IGNORES
     } else {
@@ -52,10 +66,12 @@ fn run_search_command(
         rg_args.push("-g".to_string());
         rg_args.push(format!("!{ignore}"));
     }
-    if let Some(extra) = args.get("ignore").and_then(Value::as_array) {
-        for ignore in extra.iter().filter_map(Value::as_str) {
-            rg_args.push("-g".to_string());
-            rg_args.push(format!("!{ignore}"));
+    for key in ["ignore", "exclude"] {
+        if let Some(extra) = args.get(key).and_then(Value::as_array) {
+            for ignore in extra.iter().filter_map(Value::as_str) {
+                rg_args.push("-g".to_string());
+                rg_args.push(format!("!{ignore}"));
+            }
         }
     }
     if grep {
@@ -73,6 +89,8 @@ fn run_search_command(
             .and_then(Value::as_u64)
             .unwrap_or(SEARCH_TIMEOUT_MS),
         operation,
+        max_entries,
+        max_bytes,
     )?;
     Ok((
         matches

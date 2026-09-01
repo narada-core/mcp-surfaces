@@ -141,7 +141,7 @@ impl FsError {
 
 pub fn run(args: &[String]) -> Result<(), String> {
     let mut state = parse_state(args)?;
-    let server_name = format!("local-filesystem-{}-native", state.mode);
+    let server_name = format!("local-filesystem-{}", state.mode);
     let stdin = io::stdin();
     let mut reader = BufReader::new(stdin.lock());
     let stdout = io::stdout();

@@ -24,6 +24,7 @@ Review revision: `eeb464249eda123f844997481aaaf26d3b7a5880`
 | `packages/ledger-domain-mcp` | `@narada-core/ledger-domain-mcp` | Generic `narada.ledger-domain.v1` engine hosting one static domain descriptor as an event-ledger MCP surface. | [README](../packages/ledger-domain-mcp/README.md) |
 | `packages/local-filesystem-mcp` | `@narada-core/local-filesystem-mcp` | Governed local filesystem inspection and mutation. | [README](../packages/local-filesystem-mcp/README.md) |
 | `packages/mailbox-mcp` | `@narada-core/mailbox-mcp` | Mailbox synchronization, admission, events, and bounded local projection reads. | [README](../packages/mailbox-mcp/README.md) |
+| `packages/media-operations-mcp` | `@narada-core/media-operations-mcp` | Native CLI and MCP client for bounded media operations. | [README](../packages/media-operations-mcp/README.md) |
 | `packages/mcp-loader-mcp` | `@narada-core/mcp-loader-mcp` | Policy-gated runtime attachment and proxying. | [README](../packages/mcp-loader-mcp/README.md) |
 | `packages/mcp-registrar` | `@narada-core/mcp-registrar` | Native Rust Site and carrier surface binding; checked-in native contract is authoritative. | [README](../packages/mcp-registrar/README.md) |
 | `packages/nars-session-mcp` | `@narada-core/nars-session-mcp` | Governed input and bounded readback for existing NARS sessions. | [README](../packages/nars-session-mcp/README.md) |
@@ -55,6 +56,7 @@ Review revision: `eeb464249eda123f844997481aaaf26d3b7a5880`
 | `packages/shared/mcp-fabric-compiler` | `@narada-core/mcp-fabric-compiler` | Manifest and carrier projection compiler. | [README](../packages/shared/mcp-fabric-compiler/README.md) |
 | `packages/shared/mcp-fabric-contracts` | `@narada-core/mcp-fabric-contracts` | Versioned descriptor, manifest, projection, and reconciliation contracts. | [README](../packages/shared/mcp-fabric-contracts/README.md) |
 | `packages/shared/mcp-lifecycle-native` | `@narada-core/mcp-lifecycle-native` | Shared Rust lifecycle authority and native task/work MCP adapters. | [README](../packages/shared/mcp-lifecycle-native/README.md) |
+| `packages/shared/mcp-materialization-contract-native` | `@narada-core/mcp-materialization-contract-native` | Shared Rust carrier-materialization ownership and fingerprint contract. | [README](../packages/shared/mcp-materialization-contract-native/README.md) |
 | `packages/shared/mcp-materializer-native` | `@narada-core/mcp-materializer-native` | Deterministic transactional native all-carrier materialization authority. | [README](../packages/shared/mcp-materializer-native/README.md) |
 | `packages/shared/mcp-protocol` | `@narada-core/mcp-protocol` | Shared dual-era MCP negotiation and result helpers. | [README](../packages/shared/mcp-protocol/README.md) |
 | `packages/shared/mcp-runtime-client` | `@narada-core/mcp-runtime-client` | Bounded production client for invoking Site MCP fabric surfaces. | [README](../packages/shared/mcp-runtime-client/README.md) |

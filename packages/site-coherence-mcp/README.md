@@ -14,6 +14,7 @@ This surface is read-only. It does not mutate site continuity state or perform o
 
 ```powershell
 cargo test --locked --manifest-path packages/shared/mcp-surfaces-native/native/Cargo.toml site_coherence
+pnpm --filter @narada-core/site-coherence-mcp test
 ```
 
 ## Telemetry

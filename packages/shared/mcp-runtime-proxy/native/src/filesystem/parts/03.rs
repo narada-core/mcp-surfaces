@@ -29,9 +29,11 @@ fn call_tool(state: &mut State, params: &Value) -> Result<Value, FsError> {
         "fs_read_file_range" => read_file(state, args, true),
         "fs_stat" => stat_tool(state, args),
         "fs_glob_search" => search_tool(state, args, false),
-        "fs_grep_search" => search_tool(state, args, true),
         "fs_repository_inventory" => repository_inventory(state, args),
         "fs_file_metrics" => file_metrics(state, args),
+        "fs_search" => fs_search_tool(state, args),
+        "fs_search_results_read" => fs_search_results_read(state, args),
+        "fs_grep_search" => search_tool(state, args, true),
         "fs_doctor" => Ok(doctor(state)),
         "fs_patch_outcome_show" => patch_outcome(state, args),
         "fs_write_file" => write_file(state, args),
@@ -55,6 +57,9 @@ fn call_tool(state: &mut State, params: &Value) -> Result<Value, FsError> {
     }
     if let (Some(source), Some(object)) = (payload_source, value.as_object_mut()) {
         object.insert("payload_source".into(), source);
+    }
+    if matches!(name, "fs_search" | "fs_grep_search") {
+        return Ok(bounded_search_tool_result(state, name, value, args));
     }
     Ok(tool_result(value))
 }

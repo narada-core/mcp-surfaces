@@ -39,6 +39,7 @@ proper or the admitted carrier.
 ```powershell
 cargo test --locked --manifest-path packages/shared/mcp-surfaces-native/native/Cargo.toml cloudflare_carrier_authority
 cargo test --locked --manifest-path packages/shared/mcp-surfaces-native/native/Cargo.toml --test cloudflare_carrier_protocol
+pnpm --filter @narada-core/cloudflare-carrier-mcp test
 ```
 
 The Rust protocol test uses bounded loopback carrier and projection fixtures.

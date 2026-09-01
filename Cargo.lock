@@ -974,6 +974,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "narada-local-filesystem-mcp"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "serde_json",
+ "sha2",
+ "time",
+]
+
+[[package]]
 name = "narada-mcp-event-ledger"
 version = "0.1.0"
 dependencies = [
@@ -1104,6 +1114,17 @@ name = "narada-native-dist"
 version = "0.1.0"
 dependencies = [
  "narada-mcp-materialization-contract",
+ "serde_json",
+ "sha2",
+ "time",
+]
+
+[[package]]
+name = "narada-structured-command-mcp"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "narada-mcp-fabric-contracts",
  "serde_json",
  "sha2",
  "time",

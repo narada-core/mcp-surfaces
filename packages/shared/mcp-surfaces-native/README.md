@@ -21,7 +21,7 @@ its regime is specified in
 
 The `epistemic-graph` tool workflow, authority boundary, snapshot pagination
 contract, and failure posture are documented in
-[docs/epistemic-graph.md](docs/epistemic-graph.md); the descriptor format is
+[docs/ledger-domain-descriptor.md](../../../docs/ledger-domain-descriptor.md); the descriptor format is
 specified in
 [docs/ledger-domain-descriptor.md](../../../docs/ledger-domain-descriptor.md).
 

@@ -20,12 +20,13 @@ All input schemas are closed and bounded. Caller-supplied filesystem roots and e
 
 Local projection uses the materialized Site root and identity environment. User Site projection reads admitted Site roots from the User Site registry. `NARADA_NARS_SESSION_ALLOW_STEER=1` admits steer; it is disabled otherwise. Credentials and provider execution are outside this surface.
 
-## Validation
+## Verification
 
 The default package test exercises the native implementation:
 
 ```powershell
 cargo test --locked --manifest-path packages/shared/mcp-surfaces-native/native/Cargo.toml nars_
+pnpm --filter @narada-core/nars-session-mcp test
 ```
 
 Legacy TypeScript/Bun/Node scripts remain only for explicit compatibility comparison and are not runtime-authority evidence.

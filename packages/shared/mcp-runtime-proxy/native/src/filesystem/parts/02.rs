@@ -177,7 +177,7 @@ fn initialize(_request: &Value, mode: &str) -> Value {
     json!({
         "protocolVersion": PROTOCOL_VERSION,
         "capabilities": {"tools": {}, "resources": {}, "prompts": {}, "completions": {}, "logging": {}},
-        "serverInfo": {"name": format!("local-filesystem-{mode}-native"), "version": "0.1.0"}
+        "serverInfo": {"name": format!("local-filesystem-{mode}"), "version": "0.1.0"}
     })
 }
 

@@ -195,6 +195,7 @@ launch policy and are not falsely claimed by this test.
 
 ```powershell
 cargo test --locked --manifest-path packages/agent-context-mcp/native/Cargo.toml
+pnpm --filter @narada-core/agent-context-mcp test
 ```
 
 The package's TypeScript suites cover the retained compatibility

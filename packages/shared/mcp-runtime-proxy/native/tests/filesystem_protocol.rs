@@ -120,7 +120,11 @@ fn filesystem_public_protocol_is_complete_bounded_paged_recoverable_and_native()
         .iter()
         .filter_map(|tool| tool["name"].as_str())
         .collect();
-    assert_eq!(names.len(), 18);
+    // fs_search and fs_search_results_read are part of the current preferred
+    // search contract, in addition to the legacy fs_grep_search surface.
+    assert_eq!(names.len(), 20);
+    assert!(names.contains(&"fs_search"));
+    assert!(names.contains(&"fs_search_results_read"));
     assert!(names.contains(&"fs_apply_patch"));
     for tool in tools {
         assert!(tool["inputSchema"]["title"].is_string(), "{}", tool["name"]);

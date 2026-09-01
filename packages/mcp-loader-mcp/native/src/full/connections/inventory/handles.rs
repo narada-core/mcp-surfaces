@@ -121,6 +121,9 @@ pub(crate) fn surface_status(
         "schema".to_string(),
         json!("narada.mcp_loader.surface_status.v1"),
     );
+    // server_info is already available from the attach/open result and is not
+    // needed for bounded runtime recovery status.
+    result.remove("server_info");
     Ok(Value::Object(result))
 }
 pub(crate) fn tool_discovery_manifest(

@@ -374,6 +374,7 @@ fn acceptance(case: u8) {
                     values.iter().any(|v| matches!(
                         v["code"].as_str(),
                         Some("issue_tree_selected_conflict")
+                            | Some("proposal_not_admissible")
                             | Some("ledger_head_conflict")
                             | Some("ledger_head_mismatch")
                             | Some("issue_tree_version_conflict")

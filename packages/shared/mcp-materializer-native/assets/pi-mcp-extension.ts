@@ -45,18 +45,26 @@ export type NaradaMariciInboxPollRequest = {
 };
 
 export const NARADA_MARICI_INBOX_POLL_EVENT = "narada:mcp:marici-inbox-poll";
-const NARADA_MARICI_SESSION_IDENTITY_ENTRY = "narada-marici-session-identity";
+const NARADA_SESSION_IDENTITY_ENTRY = "narada-session-identity.v2";
+const LEGACY_MARICI_SESSION_IDENTITY_ENTRY = "narada-marici-session-identity";
 
-type MariciSessionIdentity = {
+type NaradaSessionIdentityState =
+  | { status: "admitted"; identity: string; sessionId: string; changedAt: string; source: "operator_slash_command" }
+  | { status: "cleared"; identity: null; sessionId: string; changedAt: string; source: "operator_slash_command" };
+
+type EffectiveNaradaIdentity = {
   identity: string;
-  sessionId: string;
-  admittedAt: string;
-  source: "operator_slash_command";
+  source: "operator_slash_command" | "carrier_admission";
 };
 
-function normalizeMariciIdentity(value: string): string | null {
+function normalizeNaradaIdentity(value: unknown): string | null {
+  if (typeof value !== "string") return null;
   const identity = value.trim();
-  return /^marici\.[A-Za-z][A-Za-z0-9_-]{0,119}$/.test(identity) ? identity : null;
+  return identity.length > 0
+    && identity.length <= 200
+    && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(identity)
+    ? identity
+    : null;
 }
 
 const SERVERS: ServerConfig[] = __NARADA_PI_MCP_SERVERS__;
@@ -372,70 +380,79 @@ class McpClient {
 export default function naradaMcpCarrier(pi: any): void {
   let clients: McpClient[] = [];
   let started = false;
-  let mariciSessionIdentity: MariciSessionIdentity | null = null;
+  let naradaSessionIdentityState: NaradaSessionIdentityState | null = null;
 
   const currentSessionId = (ctx: any): string => String(ctx?.sessionManager?.getSessionId?.() ?? "ephemeral");
-  const effectiveMariciIdentity = (): string | null => {
-    if (mariciSessionIdentity) return mariciSessionIdentity.identity;
-    const identity = startupAuthority(SERVERS.filter(shouldBootstrapServer)).identity;
-    return normalizeMariciIdentity(identity);
+  const effectiveNaradaIdentity = (): EffectiveNaradaIdentity | null => {
+    if (naradaSessionIdentityState?.status === "cleared") return null;
+    if (naradaSessionIdentityState?.status === "admitted") return { identity: naradaSessionIdentityState.identity, source: "operator_slash_command" };
+    const identity = normalizeNaradaIdentity(startupAuthority(SERVERS.filter(shouldBootstrapServer)).identity);
+    return identity ? { identity, source: "carrier_admission" } : null;
   };
-  const restoreMariciSessionIdentity = (ctx: any): void => {
-    mariciSessionIdentity = null;
+  const restoreNaradaSessionIdentity = (ctx: any): void => {
+    naradaSessionIdentityState = null;
     const sessionId = currentSessionId(ctx);
     for (const entry of ctx?.sessionManager?.getBranch?.() ?? []) {
-      if (entry?.type !== "custom" || entry?.customType !== NARADA_MARICI_SESSION_IDENTITY_ENTRY) continue;
+      if (entry?.type !== "custom" || ![NARADA_SESSION_IDENTITY_ENTRY, LEGACY_MARICI_SESSION_IDENTITY_ENTRY].includes(entry?.customType)) continue;
       const data = entry.data ?? {};
       if (data.sessionId !== sessionId) continue;
-      mariciSessionIdentity = data.identity === null ? null : {
-        identity: normalizeMariciIdentity(String(data.identity ?? "")) ?? "",
-        sessionId,
-        admittedAt: String(data.admittedAt ?? ""),
-        source: "operator_slash_command",
-      };
-      if (!mariciSessionIdentity.identity) mariciSessionIdentity = null;
+      const identity = normalizeNaradaIdentity(data.identity);
+      naradaSessionIdentityState = identity
+        ? { status: "admitted", identity, sessionId, changedAt: String(data.changedAt ?? data.admittedAt ?? ""), source: "operator_slash_command" }
+        : { status: "cleared", identity: null, sessionId, changedAt: String(data.changedAt ?? data.clearedAt ?? ""), source: "operator_slash_command" };
     }
-    ctx?.ui?.setStatus?.("narada-marici-identity", mariciSessionIdentity ? `Marici: ${mariciSessionIdentity.identity}` : undefined);
+    const effective = effectiveNaradaIdentity();
+    ctx?.ui?.setStatus?.("narada-session-identity", effective ? `Narada: ${effective.identity}` : undefined);
   };
 
+  const naradaIdentityCommand = async (args: string, ctx: any, legacy = false) => {
+    if (legacy) ctx?.ui?.notify?.("/marici-identity is deprecated; use /narada-identity.", "warning");
+    const requested = args.trim();
+    if (requested === "status") {
+      const effective = effectiveNaradaIdentity();
+      ctx?.ui?.notify?.(effective ? `Mechanically admitted Narada identity: ${effective.identity} (${effective.source}).` : "No mechanically admitted Narada identity for this session.", effective ? "info" : "warning");
+      return;
+    }
+    if (requested === "clear") {
+      await ctx.waitForIdle?.();
+      naradaSessionIdentityState = { status: "cleared", identity: null, sessionId: currentSessionId(ctx), changedAt: new Date().toISOString(), source: "operator_slash_command" };
+      pi.appendEntry(NARADA_SESSION_IDENTITY_ENTRY, naradaSessionIdentityState);
+      ctx?.ui?.setStatus?.("narada-session-identity", undefined);
+      ctx?.ui?.notify?.("Cleared all mechanically admitted Narada identity for this Pi session, including carrier fallback.", "info");
+      pi.events.emit?.("narada:mcp:identity-changed", naradaSessionIdentityState);
+      return;
+    }
+    const candidate = requested.startsWith("set ") ? requested.slice(4).trim() : requested;
+    const entered = candidate || (ctx?.hasUI ? await ctx.ui.input("Narada session identity", "identity") : "");
+    if (!entered) return;
+    const identity = normalizeNaradaIdentity(entered);
+    if (!identity) {
+      ctx?.ui?.notify?.("Invalid Narada identity. Use 1-200 ASCII letters, digits, dot, underscore, or hyphen; the first character must be alphanumeric.", "error");
+      return;
+    }
+    await ctx.waitForIdle?.();
+    naradaSessionIdentityState = { status: "admitted", identity, sessionId: currentSessionId(ctx), changedAt: new Date().toISOString(), source: "operator_slash_command" };
+    pi.appendEntry(NARADA_SESSION_IDENTITY_ENTRY, naradaSessionIdentityState);
+    ctx?.ui?.setStatus?.("narada-session-identity", `Narada: ${identity}`);
+    ctx?.ui?.notify?.(`Mechanically admitted ${identity} for this Pi session. Identity does not grant task-claim, graph-mutation, or publication authority.`, "info");
+    pi.events.emit?.("narada:mcp:identity-changed", naradaSessionIdentityState);
+  };
+
+  pi.registerCommand("narada-identity", {
+    description: "Set, inspect, or clear the mechanically admitted Narada identity for this Pi session",
+    handler: (args: string, ctx: any) => naradaIdentityCommand(args, ctx),
+  });
   pi.registerCommand("marici-identity", {
-    description: "Mechanically admit, inspect, or clear the Marici identity for this Pi session",
-    handler: async (args: string, ctx: any) => {
-      const requested = args.trim();
-      if (requested === "status") {
-        const identity = effectiveMariciIdentity();
-        ctx?.ui?.notify?.(identity ? `Mechanically admitted Marici identity: ${identity}` : "No mechanically admitted Marici identity for this session.", identity ? "info" : "warning");
-        return;
-      }
-      if (requested === "clear") {
-        mariciSessionIdentity = null;
-        pi.appendEntry(NARADA_MARICI_SESSION_IDENTITY_ENTRY, { identity: null, sessionId: currentSessionId(ctx), clearedAt: new Date().toISOString(), source: "operator_slash_command" });
-        ctx?.ui?.setStatus?.("narada-marici-identity", undefined);
-        ctx?.ui?.notify?.("Cleared the mechanically admitted Marici identity for this Pi session.", "info");
-        pi.events.emit?.("narada:mcp:marici-identity-changed", { identity: null, sessionId: currentSessionId(ctx) });
-        return;
-      }
-      const entered = requested || (ctx?.hasUI ? await ctx.ui.input("Marici session identity", "marici.Name") : "");
-      if (!entered) return;
-      const identity = normalizeMariciIdentity(entered);
-      if (!identity) {
-        ctx?.ui?.notify?.("Invalid Marici identity. Expected marici.Name using letters, digits, underscore, or hyphen.", "error");
-        return;
-      }
-      const admitted: MariciSessionIdentity = { identity, sessionId: currentSessionId(ctx), admittedAt: new Date().toISOString(), source: "operator_slash_command" };
-      mariciSessionIdentity = admitted;
-      pi.appendEntry(NARADA_MARICI_SESSION_IDENTITY_ENTRY, admitted);
-      ctx?.ui?.setStatus?.("narada-marici-identity", `Marici: ${identity}`);
-      ctx?.ui?.notify?.(`Mechanically admitted ${identity} for this Pi session. Identity does not grant task-claim, graph-mutation, or publication authority.`, "info");
-      pi.events.emit?.("narada:mcp:marici-identity-changed", admitted);
-    },
+    description: "Deprecated alias for /narada-identity",
+    handler: (args: string, ctx: any) => naradaIdentityCommand(args, ctx, true),
   });
 
   pi.on("before_agent_start", (event: any) => {
-    const identity = effectiveMariciIdentity();
-    if (!identity) return;
+    const effective = effectiveNaradaIdentity();
+    if (!effective) return;
+    const provenance = effective.source === "operator_slash_command" ? "The operator admitted it via /narada-identity." : "The carrier admission supplied it.";
     return {
-      systemPrompt: `${event.systemPrompt}\n\nSession identity: The operator mechanically admitted ${identity} for this Pi session via /marici-identity. Use it as the Marici recipient, participant, or actor identity when a named identity is required. This identity assignment does not itself grant task-claim, graph-mutation, or publication authority.`,
+      systemPrompt: `${event.systemPrompt}\n\nSession identity: ${effective.identity} is mechanically admitted for this Pi session. ${provenance} Use it as recipient, participant, or actor only where the owning surface accepts that identity. This identity does not itself grant task-claim, graph-mutation, or publication authority.`,
     };
   });
 
@@ -443,8 +460,8 @@ export default function naradaMcpCarrier(pi: any): void {
     try {
       const client = clients.find((candidate) => candidate.config.name === "mcp-loader");
       if (!client) throw new Error("mcp-loader is not attached");
-      const recipientIdentity = effectiveMariciIdentity();
-      if (!recipientIdentity) throw new Error("no mechanically admitted Marici recipient identity; use /marici-identity marici.Name");
+      const recipientIdentity = effectiveNaradaIdentity()?.identity;
+      if (!recipientIdentity) throw new Error("no mechanically admitted Marici recipient identity; use /narada-identity set marici.Name");
       const inspection = await client.request("tools/call", {
         name: "mcp_loader_inspect_binding_tool",
         arguments: {
@@ -505,14 +522,15 @@ export default function naradaMcpCarrier(pi: any): void {
   pi.events.on(NARADA_MARICI_INBOX_POLL_EVENT, pollMariciInbox);
 
   pi.on("session_start", async (_event: unknown, ctx: any) => {
-    restoreMariciSessionIdentity(ctx);
+    restoreNaradaSessionIdentity(ctx);
     if (started) return;
     started = true;
     const nextClients: McpClient[] = [];
     let startupRuntime: StartupRuntime = { loader: "unknown", proxy: "unknown" };
     const bootstrapConfigs = SERVERS.filter(shouldBootstrapServer);
     const authority = startupAuthority(bootstrapConfigs);
-    if (mariciSessionIdentity) authority.identity = mariciSessionIdentity.identity;
+    const effective = effectiveNaradaIdentity();
+    if (effective) authority.identity = effective.identity;
     ctx?.ui?.notify?.(
       startupDiagnostic(authority, {
         mcp: "loading",

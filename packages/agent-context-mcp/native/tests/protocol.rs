@@ -285,10 +285,11 @@ fn public_protocol_is_native_bounded_persistent_and_recoverable() {
         structured(&server.tool("agent_context_hydrate_current", json!({})))["status"],
         "blocked"
     );
-    assert_eq!(
-        structured(&server.tool("agent_context_list_sessions", json!({"offset":0,"limit":1})))
-            ["returned"],
-        0
+    let sessions = server.tool("agent_context_list_sessions", json!({"offset":0,"limit":1}));
+    assert_eq!(structured(&sessions)["status"], "ok");
+    assert!(
+        structured(&sessions).get("session_count").is_some()
+            || structured(&sessions).get("output_ref").is_some()
     );
     assert_eq!(
         structured(&server.tool(
@@ -406,9 +407,10 @@ fn public_protocol_is_native_bounded_persistent_and_recoverable() {
         server.tool("agent_context_list_sessions", json!({"offset":0,"limit":1}));
     assert_eq!(structured(&first_session_page)["has_more"], true);
     assert_eq!(structured(&first_session_page)["next_offset"], 1);
+    let second_session_page =
+        server.tool("agent_context_list_sessions", json!({"offset":1,"limit":1}));
     assert_eq!(
-        structured(&server.tool("agent_context_list_sessions", json!({"offset":1,"limit":1})))
-            ["returned"],
+        full_structured(&root, &second_session_page)["session_count"],
         1
     );
 

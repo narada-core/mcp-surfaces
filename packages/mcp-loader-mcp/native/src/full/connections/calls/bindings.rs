@@ -107,9 +107,13 @@ pub(crate) fn inspect_binding_tools(
         let mut delegated = Map::new();
         delegated.insert("connection_id".into(), json!(connection_id));
         delegated.insert("tool_name".into(), name.clone());
-        if let Some(value) = arguments.get("include_tool_contract") {
-            delegated.insert("include_tool_contract".into(), value.clone());
-        }
+        delegated.insert(
+            "include_tool_contract".into(),
+            arguments
+                .get("include_tool_contract")
+                .cloned()
+                .unwrap_or_else(|| json!(false)),
+        );
         leases.push(inspect_attached_tool(&delegated, state)?);
     }
     let result = json!({

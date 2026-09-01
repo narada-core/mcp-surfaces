@@ -146,7 +146,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
                     continue;
                 }
                 if let Some(response) =
-                    protocol::preflight_response(&request, "structured-command-native")
+                    protocol::preflight_response(&request, "structured-command-mcp")
                 {
                     write_message(&mut writer, &response, framed)
                         .map_err(|error| error.to_string())?;
@@ -165,7 +165,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
                         let response = protocol::modernize_response(
                             &request,
                             response,
-                            "structured-command-native",
+                            "structured-command-mcp",
                         );
                         let _ = response_tx.send(Event::Response(response, framed, key));
                     });
@@ -174,7 +174,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
                         protocol::modernize_response(
                             &request,
                             response,
-                            "structured-command-native",
+                            "structured-command-mcp",
                         )
                     })
                 {

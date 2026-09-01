@@ -11,3 +11,15 @@ narada-media youtube clip https://youtu.be/VIDEO --start 30 --end 45 --wait --ou
 narada-media x download https://x.com/user/status/ID --wait --output .
 narada-media mcp
 ```
+
+## Tools
+
+- `youtube inspect`, `youtube transcript`, and `youtube clip` for bounded YouTube metadata, transcript, and clip operations.
+- `x download` for bounded X media download operations.
+- `mcp` for the stdio MCP client mode.
+
+## Verification
+
+```powershell
+pnpm --filter @narada-core/media-operations-mcp test
+```

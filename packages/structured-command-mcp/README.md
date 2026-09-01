@@ -2,7 +2,10 @@
 
 Structured, policy-gated local command execution MCP surface.
 
-This package executes commands as argv arrays, not shell strings. It is intended for bounded, auditable command execution under explicit root and command policy.
+The package-owned Rust binary executes commands as argv arrays, not shell strings.
+It is intended for bounded, auditable command execution under explicit root and
+command policy. TypeScript is used only for the surface descriptor and generated
+catalog; it is not a runtime authority.
 
 ## Boundary
 
@@ -40,6 +43,7 @@ The server validates:
 - `structured_command_input_create`: create a scoped structured command input ref for later execution.
 - `structured_command_output_show`: page large stdout/stderr payloads by output ref.
 - `structured_command_execution_policy_inspect`: inspect roots, command admission, blocked commands, limits, and default allowed commands.
+- `structured_command_start`: start a durable known-slow command and return an execution ref for polling.
 - `structured_command_powershell_parse_check`: parse-check one `.ps1` file under an allowed root without admitting arbitrary `pwsh -Command` text.
 - `structured_command_elevated_window_execute`: launch a policy-approved command in a visible elevated UAC window (Windows only; output is not captured).
 
@@ -93,8 +97,8 @@ When an audit log directory is configured, command decisions and executions are 
 ## Run
 
 ```powershell
-pnpm --filter @narada-core/structured-command-mcp build
-node packages/structured-command-mcp/dist/src/main.js --allowed-root <src-root> --allow-command node --allow-command git
+pnpm --filter @narada-core/structured-command-mcp build:native
+cargo run --release --locked --manifest-path packages/structured-command-mcp/native/Cargo.toml -- --allowed-root <src-root> --allow-command node --allow-command git
 ```
 
 ## Agent Guidance
@@ -104,5 +108,5 @@ Agents should use package-specific MCP surfaces when available. Use this surface
 ## Verification
 
 ```powershell
-pnpm --filter @narada-core/structured-command-mcp test
+pnpm --filter @narada-core/structured-command-mcp test:native
 ```
