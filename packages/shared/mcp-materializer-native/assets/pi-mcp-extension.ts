@@ -255,6 +255,14 @@ function bodyOnlyProjectionText(structured: any): string | undefined {
   return JSON.stringify(structured.items.map((item: any) => typeof item?.body === "string" ? item.body : ""));
 }
 
+function structuredCommandProjectionForModel(value: any): any | undefined {
+  if (value?.schema !== "narada.structured_command.execution_result.v0") return undefined;
+  const projection: any = { schema: value.schema, status: value.status, executed: value.executed, pending: value.pending, exit_code: value.exit_code, execution_ref: value.execution_ref, stdout: value.stdout, stderr: value.stderr, stdout_truncated: value.stdout_truncated, stderr_truncated: value.stderr_truncated, timed_out: value.timed_out, cancelled: value.cancelled };
+  if (Array.isArray(value.refusal_reasons) && value.refusal_reasons.length > 0) projection.refusal_reasons = value.refusal_reasons;
+  if (Array.isArray(value.remediation_hints) && value.remediation_hints.length > 0) projection.remediation_hints = value.remediation_hints;
+  return projection;
+}
+
 function modelProjectionTextFromStructured(structured: any): string | undefined {
   if (structured?.schema === "narada.mcp_loader.tool_result.v1") {
     const child = structured.result?.structuredContent ?? structured.result;
@@ -262,6 +270,8 @@ function modelProjectionTextFromStructured(structured: any): string | undefined 
     const bodyOnly = bodyOnlyProjectionText(child);
     if (bodyOnly !== undefined) return bodyOnly;
     if (isOutputPage(child) && typeof child.output_text === "string") return child.output_text;
+    const commandProjection = structuredCommandProjectionForModel(child);
+    if (commandProjection !== undefined) return JSON.stringify(commandProjection);
     return JSON.stringify(loaderControlPlaneProjectionForModel(child) ?? child);
   }
   const candidates = [structured, structured?.result, structured?.result?.structuredContent, structured?.result?.result];
@@ -269,6 +279,8 @@ function modelProjectionTextFromStructured(structured: any): string | undefined 
     const bodyOnly = bodyOnlyProjectionText(candidate);
     if (bodyOnly !== undefined) return bodyOnly;
     if (isOutputPage(candidate) && typeof candidate?.output_text === "string") return candidate.output_text;
+    const commandProjection = structuredCommandProjectionForModel(candidate);
+    if (commandProjection !== undefined) return JSON.stringify(commandProjection);
     const controlPlaneProjection = loaderControlPlaneProjectionForModel(candidate);
     if (controlPlaneProjection !== undefined) return JSON.stringify(controlPlaneProjection);
   }
