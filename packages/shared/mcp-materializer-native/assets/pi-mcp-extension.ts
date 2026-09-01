@@ -206,6 +206,7 @@ function modelProjectionTextFromStructured(structured: any): string | undefined 
 function modelContentProjection(result: any, content: any[]): any[] {
   const structuredProjection = modelProjectionTextFromStructured(result?.structuredContent);
   if (structuredProjection !== undefined) return [{ type: "text", text: structuredProjection }];
+  if (result?.structuredContent !== undefined) return content;
   for (const block of Array.isArray(content) ? content : []) {
     if (block?.type !== "text" || typeof block.text !== "string") continue;
     try {

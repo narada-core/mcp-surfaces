@@ -85,11 +85,13 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       loader_result: { schema: "narada.mcp_loader.tool_result.v1", connection_id: "c1", surface_id: "s1", result_summary: { schema: "child.result.v1", status: "ok" }, result: { schema: "child.result.v1", answer: "only unwrapped child result" } },
       mcp_page: { schema: "narada.mcp_output_page.v1", status: "ok", ref: "mcp_output:page", path: ".ai/tmp/mcp-outputs/workspace/page.json", full_output_char_length: 1234, output_text: JSON.stringify({ schema: "child.result.v1", answer: "only mcp output" }) },
       worker_page: { schema: "narada.worker.output_page.v1", status: "ok", ref: "worker_output:page", path: "worker.json", output_text: JSON.stringify({ schema: "child.result.v1", answer: "only worker output" }) },
+      authoritative_json: { schema: "local.filesystem.read.v1", content_delivery: { format: "filesystem_read_text", channel: "content" }, relative_path: "file.json" },
       oversized: { schema: "narada.epistemic.query.v2", status: "ok", payload: "x".repeat(21000) },
     };
+    const requestedValue = message.params.arguments.value;
     process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: {
-      content: [{ type: "text", text: "summary without lease" }],
-      structuredContent: fixtures[message.params.arguments.value] ?? { value: message.params.arguments.value, schema_lease: "lease-fixture" }
+      content: [{ type: "text", text: requestedValue === "authoritative_json" ? JSON.stringify(fixtures.producer_page) : "summary without lease" }],
+      structuredContent: fixtures[requestedValue] ?? { value: requestedValue, schema_lease: "lease-fixture" }
     } }) + "\\n");
   }
 });
@@ -163,6 +165,10 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       schema_lease: 'lease-fixture',
     });
     assert.doesNotMatch(result.content[0].text, /summary without lease/);
+    const authoritativeJson = await registered[0].execute('call-authoritative-json', { value: 'authoritative_json' }, new AbortController().signal);
+    assert.match(authoritativeJson.content[0].text, /output_ref|reader_tool/);
+    assert.equal(authoritativeJson.details.modelVisibleTruncated, false);
+
     for (const [value, answer] of [
       ['producer_page', 'only child output'],
       ['loader_page', 'only nested child output'],
