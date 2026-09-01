@@ -188,17 +188,124 @@ function isOutputPage(value: any): boolean {
     || (typeof schema === "string" && schema.endsWith("output_page.v1"));
 }
 
+function projectSchemaLeaseForModel(value: any): any | undefined {
+  if (value?.schema !== "narada.mcp_loader.schema_lease.v1") return undefined;
+  const projection: Record<string, any> = {
+    schema: value.schema,
+    status: value.status,
+    tool_name: value.tool_name,
+    schema_lease: value.schema_lease,
+  };
+  if (Object.prototype.hasOwnProperty.call(value, "connection_id")) {
+    projection.connection_id = value.connection_id;
+  }
+  if (Object.prototype.hasOwnProperty.call(value, "surface_id")) {
+    projection.surface_id = value.surface_id;
+  }
+  if (Object.prototype.hasOwnProperty.call(value, "input_contract")) {
+    projection.input_contract = value.input_contract;
+  } else if (Object.prototype.hasOwnProperty.call(value, "tool_contract")) {
+    projection.tool_contract = value.tool_contract;
+  }
+  return projection;
+}
+
+function projectSiteToolInventoryFindingForModel(value: any): any {
+  const projection: Record<string, any> = {};
+  for (const field of [
+    "surface_id",
+    "status",
+    "declared_count",
+    "observed_count",
+    "missing_from_fabric",
+    "extra_in_fabric",
+    "duplicate_declared_tools",
+    "duplicate_observed_tools",
+    "unclassified_observed_tools",
+  ]) {
+    if (Object.prototype.hasOwnProperty.call(value ?? {}, field)) projection[field] = value[field];
+  }
+  return projection;
+}
+
+function projectSiteToolInventoryForModel(value: any): any | undefined {
+  if (value?.schema !== "narada.mcp_loader.site_tool_inventory_check.v1") return undefined;
+  const projection: Record<string, any> = {
+    schema: value.schema,
+    status: value.status,
+    checked_surface_count: value.checked_surface_count,
+    violation_count: value.violation_count,
+    observation_ref: value.observation_ref,
+  };
+  if (Object.prototype.hasOwnProperty.call(value, "finding_status_counts")) {
+    projection.finding_status_counts = value.finding_status_counts;
+  }
+  if (Array.isArray(value.findings)) {
+    projection.findings = value.findings.map(projectSiteToolInventoryFindingForModel);
+  }
+  return projection;
+}
+
+function loaderControlPlaneProjectionForModel(value: any): any | undefined {
+  return projectSchemaLeaseForModel(value) ?? projectSiteToolInventoryForModel(value);
+}
+
 function modelProjectionTextFromStructured(structured: any): string | undefined {
   if (structured?.schema === "narada.mcp_loader.tool_result.v1") {
     const child = structured.result?.structuredContent ?? structured.result;
     if (child === undefined) return undefined;
-    return isOutputPage(child) && typeof child.output_text === "string"
-      ? child.output_text
-      : JSON.stringify(child);
+    if (isOutputPage(child) && typeof child.output_text === "string") return child.output_text;
+    return JSON.stringify(loaderControlPlaneProjectionForModel(child) ?? child);
   }
   const candidates = [structured, structured?.result, structured?.result?.structuredContent, structured?.result?.result];
   for (const candidate of candidates) {
     if (isOutputPage(candidate) && typeof candidate?.output_text === "string") return candidate.output_text;
+    const controlPlaneProjection = loaderControlPlaneProjectionForModel(candidate);
+    if (controlPlaneProjection !== undefined) return JSON.stringify(controlPlaneProjection);
+  }
+  return undefined;
+}
+
+function controlPlaneProjectionText(structured: any): string | undefined {
+  if (structured?.schema === "narada.mcp_loader.schema_lease.v1") {
+    const projection: any = {
+      schema: structured.schema,
+      status: structured.status,
+      tool_name: structured.tool_name,
+      schema_lease: structured.schema_lease,
+    };
+    for (const key of ["connection_id", "surface_id"]) {
+      if (typeof structured[key] === "string") projection[key] = structured[key];
+    }
+    if (structured.input_contract !== undefined) projection.input_contract = structured.input_contract;
+    if (structured.tool_contract !== undefined) projection.tool_contract = structured.tool_contract;
+    return JSON.stringify(projection);
+  }
+  if (structured?.schema === "narada.mcp_loader.site_tool_inventory_check.v1") {
+    const findings = Array.isArray(structured.findings)
+      ? structured.findings.map((finding: any) => {
+          const concise: any = {
+            surface_id: finding.surface_id,
+            status: finding.status,
+            declared_count: finding.declared_count,
+            observed_count: finding.observed_count,
+          };
+          for (const key of ["missing_from_fabric", "extra_in_fabric", "duplicate_declared_tools", "duplicate_observed_tools", "unclassified_observed_tools"]) {
+            if (Array.isArray(finding[key]) && finding[key].length > 0) concise[key] = finding[key];
+          }
+          return concise;
+        })
+      : [];
+    return JSON.stringify({
+      schema: structured.schema,
+      status: structured.status,
+      observation_coverage: structured.observation_coverage,
+      checked_surface_count: structured.checked_surface_count,
+      violation_count: structured.violation_count,
+      finding_status_counts: structured.finding_status_counts,
+      observation_ref: structured.observation_ref,
+      findings,
+    });
   }
   return undefined;
 }
@@ -206,6 +313,8 @@ function modelProjectionTextFromStructured(structured: any): string | undefined 
 function modelContentProjection(result: any, content: any[]): any[] {
   const structuredProjection = modelProjectionTextFromStructured(result?.structuredContent);
   if (structuredProjection !== undefined) return [{ type: "text", text: structuredProjection }];
+  const controlPlaneProjection = controlPlaneProjectionText(result?.structuredContent);
+  if (controlPlaneProjection !== undefined) return [{ type: "text", text: controlPlaneProjection }];
   if (result?.structuredContent !== undefined) return content;
   for (const block of Array.isArray(content) ? content : []) {
     if (block?.type !== "text" || typeof block.text !== "string") continue;
