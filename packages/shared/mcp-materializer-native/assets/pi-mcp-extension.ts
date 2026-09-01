@@ -182,6 +182,24 @@ function resultText(result: any): string {
     .join("\n");
 }
 
+function outputProjectionText(result: any): string | null {
+  const structured = result?.structuredContent;
+  const candidates = [structured, structured?.result, structured?.result?.result];
+  for (const candidate of candidates) {
+    const schema = candidate?.schema;
+    if ((schema === "narada.producer_output_page.v1" || schema === "narada.mcp_loader.result_page.v1")
+      && typeof candidate?.output_text === "string") {
+      return candidate.output_text;
+    }
+  }
+  return null;
+}
+
+function modelContentProjection(result: any, content: any[]): any[] {
+  const outputText = outputProjectionText(result);
+  return outputText === null ? content : [{ type: "text", text: outputText }];
+}
+
 function preservesDeliveredContent(result: any): boolean {
   return result?.structuredContent?.content_delivery?.format === "filesystem_read_text"
     && Array.isArray(result?.content)
@@ -195,9 +213,16 @@ const TOOL_RESULT_VIEWS: ToolResultView[] = ["compact", "model-visible", "full-o
 const TOOL_RESULT_VIEW_SHORTCUT = "f8";
 const TOOL_RESULT_VIEW_SHORTCUT_ALIASES = ["f8", "ctrl+shift+m"];
 
-function boundedModelContent(result: any, content: any[], rawText: string): { content: any[]; expandedText: string | null } {
-  const fullText = resultText({ content });
-  if (fullText.length <= MAX_MODEL_VISIBLE_RESULT_CHARS) return { content, expandedText: null };
+function boundedModelContent(
+  result: any,
+  content: any[],
+  rawText: string,
+  fullOutputText: string,
+): { content: any[]; expandedText: string | null } {
+  const modelText = resultText({ content });
+  if (modelText.length <= MAX_MODEL_VISIBLE_RESULT_CHARS) {
+    return { content, expandedText: fullOutputText !== modelText ? fullOutputText : null };
+  }
   const structured = result?.structuredContent ?? {};
   const reference = structured.output_ref ?? structured.ref ?? structured.details_ref ?? structured.result?.output_ref ?? null;
   const reader = structured.reader_tool ?? structured.details_reader ?? structured.result?.reader_tool ?? null;
@@ -205,7 +230,7 @@ function boundedModelContent(result: any, content: any[], rawText: string): { co
   const summary = {
     schema: structured.schema ?? "narada.mcp_result.bounded_projection.v1",
     status: structured.status ?? (result?.isError === true ? "error" : "ok"),
-    full_output_char_length: fullText.length,
+    full_output_char_length: fullOutputText.length,
     model_visible_truncated: true,
     output_ref: reference,
     reader_tool: reader,
@@ -214,7 +239,7 @@ function boundedModelContent(result: any, content: any[], rawText: string): { co
       ? `Read bounded pages with ${reader} using output_ref ${reference}.`
       : "Retry with a smaller limit or a narrower range; the full result remains available in Pi via Ctrl+O.",
   };
-  return { content: [{ type: "text", text: JSON.stringify(summary) }], expandedText: fullText || rawText };
+  return { content: [{ type: "text", text: JSON.stringify(summary) }], expandedText: fullOutputText || rawText };
 }
 
 function textComponent(text: string): { render: (width: number) => string[] } {
@@ -658,9 +683,10 @@ export default function naradaMcpCarrier(pi: any): void {
                 : Array.isArray(result?.content) && result.content.length > 0
                   ? result.content
                   : [{ type: "text", text: JSON.stringify(result ?? null) }];
-              const bounded = boundedModelContent(result, content, rawText);
-              const modelVisibleText = resultText({ content: bounded.content });
               const fullOutputText = resultText({ content });
+              const modelContent = modelContentProjection(result, content);
+              const bounded = boundedModelContent(result, modelContent, rawText, fullOutputText);
+              const modelVisibleText = resultText({ content: bounded.content });
               return {
                 content: bounded.content,
                 details: {
