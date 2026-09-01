@@ -246,8 +246,53 @@ function projectSiteToolInventoryForModel(value: any): any | undefined {
   return projection;
 }
 
+function projectSurfaceAttachedForModel(value: any): any | undefined {
+  if (value?.schema !== "narada.mcp_loader.surface_attached.v1") return undefined;
+  const projection: Record<string, any> = {
+    schema: value.schema,
+    status: value.status,
+    connection_id: value.connection_id,
+    logical_connection_id: value.logical_connection_id,
+    generation_id: value.generation_id,
+    site_root: value.site_root,
+    surface_id: value.surface_id,
+    binding_id: value.binding_id,
+    runtime_kind: value.runtime_kind,
+    tool_count: value.tool_count,
+  };
+  if (value.server_info && typeof value.server_info === "object") {
+    projection.server_info = {};
+    for (const field of ["name", "version"]) {
+      if (typeof value.server_info[field] === "string") projection.server_info[field] = value.server_info[field];
+    }
+  }
+  if (value.tool_discovery && typeof value.tool_discovery === "object") {
+    projection.tool_discovery = {};
+    if (typeof value.tool_discovery.tool_name === "string") projection.tool_discovery.tool_name = value.tool_discovery.tool_name;
+  }
+  if (value.tool_inspection && typeof value.tool_inspection === "object") {
+    projection.tool_inspection = {};
+    if (Array.isArray(value.tool_inspection.required_arguments)) projection.tool_inspection.required_arguments = value.tool_inspection.required_arguments;
+  }
+  const lifecycle = value.runtime_lifecycle;
+  if (lifecycle && typeof lifecycle === "object") {
+    projection.runtime_lifecycle = {};
+    for (const field of ["managed_by", "restartable", "restartability_status", "restart_scope", "session_restart_required"]) {
+      if (Object.prototype.hasOwnProperty.call(lifecycle, field)) projection.runtime_lifecycle[field] = lifecycle[field];
+    }
+  }
+  const freshness = value.runtime_freshness;
+  if (freshness && typeof freshness === "object") {
+    projection.runtime_freshness = {};
+    for (const field of ["status", "reload_required"]) {
+      if (Object.prototype.hasOwnProperty.call(freshness, field)) projection.runtime_freshness[field] = freshness[field];
+    }
+  }
+  return projection;
+}
+
 function loaderControlPlaneProjectionForModel(value: any): any | undefined {
-  return projectSchemaLeaseForModel(value) ?? projectSiteToolInventoryForModel(value);
+  return projectSurfaceAttachedForModel(value) ?? projectSchemaLeaseForModel(value) ?? projectSiteToolInventoryForModel(value);
 }
 
 function bodyOnlyProjectionText(structured: any): string | undefined {
