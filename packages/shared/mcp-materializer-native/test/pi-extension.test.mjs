@@ -79,6 +79,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
         value.payload = "x".repeat(4227 - JSON.stringify(value).length);
         return value;
       })(),
+      inbox_query: { schema: "narada.epistemic.query.v2", query_mode: "datalog", query_origin: "named_template", template: "epistemic:inbox", ledger_head: "head", items: [{ sender: "sender-a", recipient: "recipient-b", event_id: "event-a", body: "body alpha" }, { sender: "sender-c", recipient: "recipient-b", event_id: "event-c", body: "body beta" }] },
       issue_tree: { schema: "narada.epistemic.issue-tree.resume.v1", status: "ok", tree: { tree_id: "tree:ax", objective: "AX", version: "3" }, selected: { node_id: "issue:selected", version: "2", title: "Selected", state: "selected", score: 0.9 }, frontier: { items: [{ node_id: "issue:selected", state: "selected", score: 0.9 }, { node_id: "issue:open", state: "open", score: 0.8 }], returned: 2, complete: true, total: 2, total_exact: true }, continuation: null, certifies_truth: false, noncertification: "coordination state; not evidence" },
       producer_page: { schema: "narada.producer_output_page.v1", status: "ok", output_ref: "mcp_output:fixture", reader_tool: "mcp_loader_read_result", full_output_char_length: 1234, output_text: JSON.stringify({ schema: "child.result.v1", answer: "only child output" }) },
       loader_page: { schema: "narada.mcp_loader.tool_result.v1", status: "ok", result_summary: { schema: "child.result.v1", status: "ok" }, result: { schema: "narada.producer_output_page.v1", status: "ok", output_ref: "mcp_output:nested", reader_tool: "mcp_loader_read_result", full_output_char_length: 1234, output_text: JSON.stringify({ schema: "child.result.v1", answer: "only nested child output" }) } },
@@ -175,6 +176,11 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       schema_lease: 'lease-fixture',
     });
     assert.doesNotMatch(result.content[0].text, /summary without lease/);
+    const inboxQuery = await registered[0].execute('call-inbox-query', { value: 'inbox_query' }, new AbortController().signal);
+    assert.deepEqual(JSON.parse(inboxQuery.content[0].text), ['body alpha', 'body beta']);
+    assert.doesNotMatch(inboxQuery.content[0].text, /sender-a|recipient-b|event-a|ledger_head/);
+    assert.notEqual(registered[0].renderResult(inboxQuery, { expanded: true }).render(160).join(String.fromCharCode(10)), inboxQuery.content[0].text);
+
     const authoritativeJson = await registered[0].execute('call-authoritative-json', { value: 'authoritative_json' }, new AbortController().signal);
     const writeReceipt = await registered[0].execute('call-write-file', { value: 'write_file' }, new AbortController().signal);
     const writeModel = JSON.parse(writeReceipt.content[0].text);

@@ -250,15 +250,24 @@ function loaderControlPlaneProjectionForModel(value: any): any | undefined {
   return projectSchemaLeaseForModel(value) ?? projectSiteToolInventoryForModel(value);
 }
 
+function bodyOnlyProjectionText(structured: any): string | undefined {
+  if (structured?.schema !== "narada.epistemic.query.v2" || structured.template !== "epistemic:inbox" || !Array.isArray(structured.items)) return undefined;
+  return JSON.stringify(structured.items.map((item: any) => typeof item?.body === "string" ? item.body : ""));
+}
+
 function modelProjectionTextFromStructured(structured: any): string | undefined {
   if (structured?.schema === "narada.mcp_loader.tool_result.v1") {
     const child = structured.result?.structuredContent ?? structured.result;
     if (child === undefined) return undefined;
+    const bodyOnly = bodyOnlyProjectionText(child);
+    if (bodyOnly !== undefined) return bodyOnly;
     if (isOutputPage(child) && typeof child.output_text === "string") return child.output_text;
     return JSON.stringify(loaderControlPlaneProjectionForModel(child) ?? child);
   }
   const candidates = [structured, structured?.result, structured?.result?.structuredContent, structured?.result?.result];
   for (const candidate of candidates) {
+    const bodyOnly = bodyOnlyProjectionText(candidate);
+    if (bodyOnly !== undefined) return bodyOnly;
     if (isOutputPage(candidate) && typeof candidate?.output_text === "string") return candidate.output_text;
     const controlPlaneProjection = loaderControlPlaneProjectionForModel(candidate);
     if (controlPlaneProjection !== undefined) return JSON.stringify(controlPlaneProjection);
