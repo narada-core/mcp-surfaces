@@ -1,3 +1,5 @@
+import { compactGuidanceResult } from '@narada-core/mcp-fabric-contracts';
+
 export type GuidanceRecord = Record<string, unknown>;
 export type GuidanceToolDefinition = GuidanceRecord & { name: string; description: string; inputSchema: GuidanceRecord; annotations: GuidanceRecord; outputSchema: GuidanceRecord };
 
@@ -8,7 +10,7 @@ const PURPOSE = 'Register NARS session artifacts and present renderable artifact
 export function buildGuidanceResult(args: GuidanceRecord = {}): GuidanceRecord {
   const workflow = typeof args.workflow === 'string' && args.workflow.trim() ? args.workflow.trim() : null;
   const tool = typeof args.tool === 'string' && args.tool.trim() ? args.tool.trim() : null;
-  return {
+  return compactGuidanceResult({
     schema: 'narada.mcp_surface.guidance.v0',
     status: 'ok',
     surface_id: SURFACE_ID,
@@ -51,7 +53,7 @@ export function buildGuidanceResult(args: GuidanceRecord = {}): GuidanceRecord {
       'NARS remains authoritative for source path admission, artifact ids, content-type policy, metadata, and serving.',
       'This surface can ask NARS to present an artifact, but NARS remains the event emitter and projection authority.'
     ]
-  };
+  });
 }
 
 export function guidanceToolDefinition(name: string = GUIDANCE_TOOL, description: string = 'Show model-facing operating guidance for artifacts MCP workflows.'): GuidanceToolDefinition {

@@ -1,3 +1,5 @@
+import { compactGuidanceResult } from '@narada-core/mcp-fabric-contracts';
+
 export const NARS_SESSION_GUIDANCE_SCHEMA = 'narada.nars_session_mcp.guidance.v1';
 
 export function guidanceToolDefinition() {
@@ -21,7 +23,7 @@ export function guidanceToolDefinition() {
 }
 
 export function buildGuidanceResult() {
-  return {
+  return compactGuidanceResult({
     schema: NARS_SESSION_GUIDANCE_SCHEMA,
     status: 'ok',
     purpose: 'Deliver bounded, authorized input to an already-existing NARS session and read back authoritative admission, liveness, request-state, and terminal evidence.',
@@ -54,5 +56,5 @@ export function buildGuidanceResult() {
       'On stale authority refusal, rediscover the session and require an explicit current session_id.',
       'On missing health or event endpoint, repair the carrier launch/session registration rather than bypassing the authority runtime.',
     ],
-  };
+  });
 }

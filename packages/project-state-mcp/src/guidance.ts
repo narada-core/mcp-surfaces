@@ -1,3 +1,5 @@
+import { compactGuidanceResult } from '@narada-core/mcp-fabric-contracts';
+
 export type GuidanceRecord = Record<string, unknown>;
 export type GuidanceToolDefinition = GuidanceRecord & {
   name: string;
@@ -14,7 +16,7 @@ const PURPOSE = 'Read-only inspection of a site-owned virtual project-state regi
 export function buildGuidanceResult(args: GuidanceRecord = {}): GuidanceRecord {
   const workflow = typeof args.workflow === 'string' && args.workflow.trim() ? args.workflow.trim() : null;
   const tool = typeof args.tool === 'string' && args.tool.trim() ? args.tool.trim() : null;
-  return {
+  return compactGuidanceResult({
     schema: 'narada.mcp_surface.guidance.v0',
     status: 'ok',
     surface_id: SURFACE_ID,
@@ -62,7 +64,7 @@ export function buildGuidanceResult(args: GuidanceRecord = {}): GuidanceRecord {
       'The site-owned SQL snapshot remains the authored authority.',
       'The surface is virtual-only and grants no physical, supplier, external-evidence, qualification, or flight credit.',
     ],
-  };
+  });
 }
 
 export function guidanceToolDefinition(): GuidanceToolDefinition {

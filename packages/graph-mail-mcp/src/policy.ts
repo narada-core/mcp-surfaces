@@ -7,6 +7,43 @@ const DEFAULT_GRAPH_BASE_URL = 'https://graph.microsoft.com/v1.0';
 
 type GraphMailRecord = Record<string, unknown>;
 
+function auditIdentityState(event: GraphMailRecord): GraphMailRecord {
+  if (event.identity_state && typeof event.identity_state === 'object') return event;
+  const claimed = typeof event.claimed_identity === 'string' && event.claimed_identity.trim()
+    ? event.claimed_identity.trim()
+    : typeof process.env.NARADA_CLAIMED_IDENTITY === 'string' && process.env.NARADA_CLAIMED_IDENTITY.trim()
+      ? process.env.NARADA_CLAIMED_IDENTITY.trim()
+      : typeof process.env.NARADA_AGENT_ID === 'string' && process.env.NARADA_AGENT_ID.trim()
+        ? process.env.NARADA_AGENT_ID.trim()
+        : null;
+  const authenticated = typeof process.env.NARADA_AUTHENTICATED_IDENTITY === 'string' && process.env.NARADA_AUTHENTICATED_IDENTITY.trim()
+    ? process.env.NARADA_AUTHENTICATED_IDENTITY.trim()
+    : null;
+  const authority = event.authority && typeof event.authority === 'object'
+    ? event.authority
+    : { status: 'not_evaluated', operation: null, granted: false, evidence_refs: [] };
+  return {
+    ...event,
+    identity_state: {
+      schema: 'narada.agent.identity_state.v1',
+      claimed_identity: {
+        identity: claimed,
+        status: claimed ? 'claimed' : 'unclaimed',
+        source: claimed ? (event.claimed_identity ? 'caller_assertion' : 'carrier_environment') : null,
+        asserted_at: claimed ? new Date().toISOString() : null,
+        evidence_refs: [],
+        authority_granted: false,
+      },
+      authentication: {
+        status: authenticated ? 'authenticated' : 'missing',
+        authenticated_identity: authenticated,
+        evidence_refs: [],
+      },
+      authority,
+    },
+  };
+}
+
 export type GraphMailPolicy = {
   site_root: string;
   graph_base_url: string;
@@ -124,6 +161,6 @@ export function recordGraphMailAudit(siteRootInput: string, event: GraphMailReco
   appendFileSync(auditPath, `${JSON.stringify({
     schema: 'narada.graph_mail_mcp.audit.v1',
     recorded_at: new Date().toISOString(),
-    ...event,
+    ...auditIdentityState(event),
   })}\n`);
 }

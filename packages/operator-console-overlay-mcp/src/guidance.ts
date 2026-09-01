@@ -1,3 +1,5 @@
+import { compactGuidanceResult } from '@narada-core/mcp-fabric-contracts';
+
 export type GuidanceRecord = Record<string, unknown>;
 
 export type GuidanceToolDefinition = GuidanceRecord & {
@@ -18,7 +20,7 @@ export function buildGuidanceResult(
 ): GuidanceRecord {
   const workflow = typeof args.workflow === 'string' && args.workflow.trim() ? args.workflow.trim() : null;
   const tool = typeof args.tool === 'string' && args.tool.trim() ? args.tool.trim() : null;
-  return {
+  return compactGuidanceResult({
     schema: 'narada.mcp_surface.guidance.v0',
     status: 'ok',
     surface_id: SURFACE_ID,
@@ -70,7 +72,7 @@ export function buildGuidanceResult(
       'The surface launches only that fixed entrypoint with a bounded argument set.',
       'The Operator Console runtime owns local Router/Console readiness and lifecycle; the Router, console backend, browser, and agent sessions retain their respective domain boundaries.',
     ],
-  };
+  });
 }
 
 export function guidanceToolDefinition(

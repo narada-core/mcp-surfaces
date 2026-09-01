@@ -23,6 +23,7 @@
     "test:documentation": "pnpm run test:documentation:bun",
     "test:documentation:bun": "bun test test/documentation-consistency.test.ts",
     "test:documentation:node": "node --import tsx --test test/documentation-consistency.test.ts",
+    "test:all-surface-output-bounds": "pnpm exec tsc -b --pretty false && node --import tsx --test test/all-surface-output-bounds.test.ts && pnpm --filter @narada-core/mcp-surfaces-native build:native && node packages/shared/mcp-surfaces-native/scripts/verify-native-protocol.mjs --output-bounds-only && pnpm --filter @narada-core/mcp-loader-mcp test:native:harness",
     "test:build-availability-boundary": "pnpm run test:build-availability-boundary:bun",
     "test:build-availability-boundary:bun": "bun test test/build-availability-boundary.test.ts",
     "test:build-availability-boundary:node": "node --import tsx --test test/build-availability-boundary.test.ts",

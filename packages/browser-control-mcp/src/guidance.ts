@@ -1,3 +1,5 @@
+import { compactGuidanceResult } from '@narada-core/mcp-fabric-contracts';
+
 export type GuidanceRecord = Record<string, unknown>;
 
 export type GuidanceToolDefinition = GuidanceRecord & {
@@ -14,7 +16,7 @@ const GUIDANCE_TOOL = 'browser_control_guidance';
 export function buildGuidanceResult(args: GuidanceRecord = {}): GuidanceRecord {
   const workflow = typeof args.workflow === 'string' && args.workflow.trim() ? args.workflow.trim() : null;
   const tool = typeof args.tool === 'string' && args.tool.trim() ? args.tool.trim() : null;
-  return {
+  return compactGuidanceResult({
     schema: 'narada.mcp_surface.guidance.v0',
     status: 'ok',
     surface_id: SURFACE_ID,
@@ -63,7 +65,7 @@ export function buildGuidanceResult(args: GuidanceRecord = {}): GuidanceRecord {
       'This surface exposes only bounded DOM, accessibility, screenshot, and input primitives.',
       'The CDP endpoint must be loopback and is used only to connect to the selected target.',
     ],
-  };
+  });
 }
 
 export function guidanceToolDefinition(

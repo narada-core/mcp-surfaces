@@ -1,3 +1,5 @@
+import { compactGuidanceResult } from '@narada-core/mcp-fabric-contracts';
+
 export type GuidanceRecord = Record<string, unknown>;
 export type GuidanceToolDefinition = GuidanceRecord & { name: string; description: string; inputSchema: GuidanceRecord; annotations: GuidanceRecord; outputSchema: GuidanceRecord };
 
@@ -76,7 +78,7 @@ export function buildGuidanceResult(args: GuidanceRecord = {}): GuidanceRecord {
       compatibility: 'fs_grep_search remains available for regex-oriented legacy calls, but fs_search is the preferred agent-facing contract.',
     },
   } : {};
-  return {
+  return compactGuidanceResult({
     schema: 'narada.mcp_surface.guidance.v0',
     status: 'ok',
     surface_id: SURFACE_ID,
@@ -146,7 +148,7 @@ export function buildGuidanceResult(args: GuidanceRecord = {}): GuidanceRecord {
       'The owning MCP surface remains authoritative for state and enforcement.',
       'fs_repository_inventory is a bounded filesystem view; use git-mcp for authoritative tracked and ignored state.'
     ]
-  };
+  });
 }
 
 export function guidanceToolDefinition(name: string = GUIDANCE_TOOL, description: string = 'Show model-facing operating guidance for ' + SURFACE_ID + ' MCP workflows.'): GuidanceToolDefinition {

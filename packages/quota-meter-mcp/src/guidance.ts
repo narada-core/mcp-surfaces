@@ -1,3 +1,5 @@
+import { compactGuidanceResult } from '@narada-core/mcp-fabric-contracts';
+
 export type GuidanceRecord = Record<string, unknown>;
 export type GuidanceToolDefinition = GuidanceRecord & {
   name: string;
@@ -14,7 +16,7 @@ const PURPOSE = 'Host-level quota-meter glide status and transparent overlay lif
 export function buildGuidanceResult(args: GuidanceRecord = {}, state?: { quotaMeterRoot: string; stateRoot: string }): GuidanceRecord {
   const workflow = typeof args.workflow === 'string' && args.workflow.trim() ? args.workflow.trim() : null;
   const tool = typeof args.tool === 'string' && args.tool.trim() ? args.tool.trim() : null;
-  return {
+  return compactGuidanceResult({
     schema: 'narada.mcp_surface.guidance.v0',
     status: 'ok',
     surface_id: SURFACE_ID,
@@ -58,7 +60,7 @@ export function buildGuidanceResult(args: GuidanceRecord = {}, state?: { quotaMe
       'Provider authentication, token refresh, and quota interpretation remain owned by quota-meter and native provider CLIs.',
       'The surface does not provide arbitrary shell, filesystem, or process-control access.',
     ],
-  };
+  });
 }
 
 export function guidanceToolDefinition(name: string = GUIDANCE_TOOL, description = 'Show model-facing operating guidance for quota-meter MCP workflows.'): GuidanceToolDefinition {
