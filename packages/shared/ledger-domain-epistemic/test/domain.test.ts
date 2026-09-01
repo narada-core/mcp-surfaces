@@ -19,8 +19,8 @@ assert.equal(domain.identity.tool_prefix, 'epistemic_graph');
 assert.equal(domain.identity.error_schema_id, 'narada.epistemic.error.v1');
 
 // Every tool name carries the domain tool prefix, and the tool list is the
-// engine's generation target: 29 tools, exactly one guidance tool.
-assert.equal(domain.tools.length, 29);
+// engine's generation target: 30 tools, exactly one guidance tool.
+assert.equal(domain.tools.length, 30);
 for (const tool of domain.tools) {
   assert.ok(tool.name.startsWith(domain.identity.tool_prefix + '_'), `tool name lacks prefix: ${tool.name}`);
   assert.equal(tool.annotations.destructiveHint, false, `${tool.name} destructiveHint`);
@@ -68,12 +68,15 @@ assert.equal(validateQueryInput({ template: 'inbox' }), true);
 assert.equal(validateQueryInput({ template: 'inbox', match: { participant: 'marici.Nima' } }), true);
 assert.equal(validateQueryInput({ template: 'thread', root: 'communication:root' }), true);
 assert.equal(validateQueryInput({ template: 'thread' }), true);
+assert.equal(validateQueryInput({ template: 'epistemic:team-work-overview', member_ids: ['marici.Nima'], statuses: ['active'] }), true);
 const validateBatchInput = ajv.compile(batchTool.inputSchema);
 assert.equal(validateBatchInput({ queries: [{ query: validRawQuery, template: 'inbox' }] }), true);
 assert.equal(
   validateBatchInput({ queries: [{ template: 'inbox', match: { participant: 'marici.Nima' } }] }),
   true,
 );
+assert.equal(validateBatchInput({ queries: [{ template: 'epistemic:team-work-overview', tree_ids: ['tree:rh'], statuses: ['blocked'] }] }), true);
+assert.equal(domain.query.named_queries['epistemic:team-work-overview'].canonical_members.length, 10);
 assert.equal(domain.query.max_one_of_values, 64);
 assert.equal(domain.query.max_predicate_depth, 8);
 
@@ -112,6 +115,12 @@ assert.equal(validateIssueResume({ tree_id: 'tree:rh' }), true);
 assert.equal(validateIssueResume({ objective: 'Resolve RH programme', create_if_missing: false }), true);
 assert.equal(validateIssueResume({}), false);
 assert.ok(domain.tools.some((tool: any) => tool.name === 'epistemic_graph_issue_tree_frontier_read'));
+const teamOverview = domain.tools.find((tool: any) => tool.name === 'epistemic_graph_team_work_overview');
+assert.equal(teamOverview.annotations.readOnlyHint, true);
+const validateTeamOverview = ajv.compile(teamOverview.inputSchema);
+assert.equal(validateTeamOverview({ member_ids: ['marici.Nima'], tree_ids: ['tree:rh'], statuses: ['active'], compact: false }), true);
+assert.equal(validateTeamOverview({ member_ids: ['anonymous'] }), true);
+assert.equal(validateTeamOverview({ statuses: ['present'] }), false);
 const submitReviewAdmit = domain.tools.find((tool: any) => tool.name === 'epistemic_graph_submit_review_admit');
 const validateSubmitReviewAdmit = ajv.compile(submitReviewAdmit.inputSchema);
 assert.equal(validateSubmitReviewAdmit({ payload_ref: 'mcp_payload:epistemic-submit@v1' }), true);
@@ -149,5 +158,9 @@ assert.equal(domain.guidance.fields.minimal_example.tool, 'epistemic_graph_submi
 assert.equal(domain.guidance.fields.minimal_example.arguments.operations[0].op, 'entity.declare');
 assert.equal(domain.guidance.fields.minimal_example.arguments.operations[2].op, 'relation.declare');
 assert.ok(domain.guidance.fields.concurrency_rule.includes('ledger_head'));
+assert.ok(domain.guidance.fields.read_routing.some((route: any) => route.tool === 'epistemic_graph_team_work_overview'));
+assert.ok(domain.guidance.fields.read_routing.some((route: any) => route.tool === 'epistemic_graph_issue_tree_frontier'));
+assert.ok(domain.guidance.fields.read_routing.some((route: any) => route.tool === 'epistemic_graph_neighborhood'));
+assert.ok(domain.guidance.fields.read_routing.some((route: any) => route.tool === 'epistemic_graph_snapshot'));
 
 console.log('ledger-domain-epistemic tests passed');
