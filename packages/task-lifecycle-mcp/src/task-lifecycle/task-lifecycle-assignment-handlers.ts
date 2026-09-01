@@ -1,5 +1,6 @@
 type TaskLifecyclePayload = Record<string, unknown>;
 import { inspectSupersededTaskGuard } from './task-lineage-guards.js';
+import { buildTaskLifecycleIdentityState } from './task-lifecycle-routing-roster.js';
 
 type GenericEngineerClaimAuthorityArgs = {
   args: TaskLifecyclePayload;
@@ -102,6 +103,12 @@ export function createTaskLifecycleAssignmentHandlers({
           pre_claim_warnings: [mismatchAuthority.preferred_agent_warning],
           remediation: 'Retry the claim with authority_basis: { kind: "operator_direct_instruction" | "directed_obligation" | "task_owner_handoff", summary: "..." }.',
           preferred_agent_warning: mismatchAuthority.preferred_agent_warning,
+          identity_state: buildTaskLifecycleIdentityState({
+            agentId,
+            operation: 'task_lifecycle.claim',
+            status: 'denied',
+            authorityBasis: mismatchAuthority.authority_basis,
+          }),
           schema: 'narada.task.claim.preferred_agent_authority.v0',
           ...(intentWarning ? { intent_recording_warning: intentWarning } : {}),
         }, true);
@@ -122,7 +129,17 @@ export function createTaskLifecycleAssignmentHandlers({
           }],
         }, true);
       }
-      const result: TaskLifecyclePayload = { status: 'claimed', assignment_id: serviceResult.assignment_id, task_number: taskNumber };
+      const result: TaskLifecyclePayload = {
+        status: 'claimed',
+        assignment_id: serviceResult.assignment_id,
+        task_number: taskNumber,
+        identity_state: buildTaskLifecycleIdentityState({
+          agentId,
+          operation: 'task_lifecycle.claim',
+          status: 'authorized',
+          authorityBasis: genericEngineerAuthority.authority_basis ?? mismatchAuthority.authority_basis,
+        }),
+      };
       if (genericEngineerAuthority.status === 'ok') {
         result.role_mismatch_authority = genericEngineerAuthority.authority_basis;
         result.role_claim_warning = genericEngineerAuthority.role_claim_warning;

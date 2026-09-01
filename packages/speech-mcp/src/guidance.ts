@@ -1,6 +1,8 @@
 import { listCapabilityCatalog } from '@narada-core/provider-registry';
 import type { SpeechState } from './state.js';
 
+import { compactGuidanceResult } from '@narada-core/mcp-fabric-contracts';
+
 export type GuidanceRecord = Record<string, unknown>;
 export type GuidanceToolDefinition = GuidanceRecord & { name: string; description: string; inputSchema: GuidanceRecord; annotations: GuidanceRecord; outputSchema: GuidanceRecord };
 
@@ -11,7 +13,7 @@ const PURPOSE = "Host-level TTS, bounded capture, transcription, and prompt-resp
 export function buildGuidanceResult(args: GuidanceRecord = {}, state?: SpeechState): GuidanceRecord {
   const workflow = typeof args.workflow === 'string' && args.workflow.trim() ? args.workflow.trim() : null;
   const tool = typeof args.tool === 'string' && args.tool.trim() ? args.tool.trim() : null;
-  return {
+  return compactGuidanceResult({
     schema: 'narada.mcp_surface.guidance.v0',
     status: 'ok',
     surface_id: SURFACE_ID,
@@ -75,7 +77,7 @@ export function buildGuidanceResult(args: GuidanceRecord = {}, state?: SpeechSta
       'Guidance does not weaken policy, authorize mutation, or replace tool schemas.',
       'The owning MCP surface remains authoritative for state and enforcement.'
     ]
-  };
+  });
 }
 
 export function guidanceToolDefinition(name: string = GUIDANCE_TOOL, description: string = 'Show model-facing operating guidance for ' + SURFACE_ID + ' MCP workflows.'): GuidanceToolDefinition {

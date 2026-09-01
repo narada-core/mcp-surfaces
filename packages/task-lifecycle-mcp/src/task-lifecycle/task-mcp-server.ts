@@ -86,6 +86,7 @@ import {
   writeMcpRestartRequest,
 } from '../mcp-freshness-service.js';
 import { agentExistsWithRole, checkTaskRoleEligibilityLocal, resolveAgentRole, resolveAgentRoleWithDiagnostics, roleExistsInRoster } from './agent-role-resolution.js';
+import { buildTaskLifecycleIdentityState } from './task-lifecycle-routing-roster.js';
 import { createTaskLifecycleHandlerRegistry } from './task-lifecycle-handler-registry.js';
 import { createTaskLifecycleAdminHandlers } from './task-lifecycle-admin-handlers.js';
 import { createTaskLifecycleReadHandlers } from './task-lifecycle-read-handlers.js';
@@ -635,7 +636,15 @@ function listDueRecurringDefinitions(taskStore: any, now : any= new Date()) {
 }
 
 function recordBlockedTaskReport({ store, report }: any) {
-  const reportJson = JSON.stringify(report);
+  const reportWithIdentity = {
+    ...report,
+    identity_state: report.identity_state ?? buildTaskLifecycleIdentityState({
+      agentId: report.agent_id,
+      operation: 'task_lifecycle.report_blocked',
+      status: 'authorized',
+    }),
+  };
+  const reportJson = JSON.stringify(reportWithIdentity);
   const agentIdentityRefJson = taskAgentIdentityRefJson(report.agent_id, { siteId: process.env.NARADA_SITE_ID ?? null });
   if (store.upsertReportRecord) {
     store.upsertReportRecord({

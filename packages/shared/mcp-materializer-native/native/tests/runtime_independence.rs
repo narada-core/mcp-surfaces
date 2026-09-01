@@ -155,7 +155,7 @@ fn materializes_every_supported_carrier_kind_without_javascript_runtime_environm
             "codex_plugin_overrides": { "github@openai-curated-remote": false },
             "trust_projects": [root.path()],
             "servers": [{
-                "name": "narada-site-test-local-filesystem",
+                "name": if *kind == "pi" { "mcp-loader" } else { "narada-site-test-local-filesystem" },
                 "command": root.path().join("narada-mcp-runtime.exe").to_string_lossy(),
                 "args": [
                     "proxy", "--surface-id", "local-filesystem",

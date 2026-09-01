@@ -1,9 +1,40 @@
 use crate::full::*;
 
+fn guidance_next_call(workflow: Option<&str>, tool: Option<&str>) -> Value {
+    let requested = tool.or(workflow).unwrap_or_default().to_ascii_lowercase();
+    if requested.contains("site") || requested.contains("discover") || requested.contains("attach") || requested.contains("activate") || requested.contains("git") {
+        return json!({
+            "tool_name":"mcp_loader_list_site_surfaces",
+            "arguments":{"site_root":"<site_root>"},
+            "reason":"Resolve the admitted binding before opening or calling a surface."
+        });
+    }
+    if requested.contains("call") || requested.contains("operate") {
+        return json!({
+            "tool_name":"mcp_loader_call_binding_tool",
+            "arguments":{"site_root":"<site_root>","binding_id":"<binding_id>","tool_name":"<child_tool>","arguments":{}},
+            "reason":"Use the canonical binding path for a reconnect-safe child call."
+        });
+    }
+    json!({
+        "tool_name":"mcp_loader_policy_inspect",
+        "arguments":{},
+        "reason":"Inspect loader policy before selecting or attaching a surface."
+    })
+}
+
 pub(crate) fn guidance_result(arguments: &JsonObject, state: &LoaderState) -> Value {
     let workflow = value_string(arguments.get("workflow"));
     let tool = value_string(arguments.get("tool"));
-    json!({
+    let include_details = arguments
+        .get("include_details")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let include_runtime = arguments
+        .get("include_runtime_metadata")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mut result = json!({
         "schema":"narada.mcp_surface.guidance.v0",
         "status":"ok",
         "surface_id":"mcp-loader",
@@ -12,6 +43,8 @@ pub(crate) fn guidance_result(arguments: &JsonObject, state: &LoaderState) -> Va
         "requested":{"workflow":workflow,"tool":tool},
         "runtime_lifecycle":runtime_lifecycle(None,None),
         "runtime_freshness":runtime_freshness(state),
+        "compact":!include_details,
+        "next_call":guidance_next_call(workflow.as_deref(),tool.as_deref()),
         "tool_call_timeout":{
             "tool":"mcp_loader_call_tool","nested_argument":"arguments.timeout_ms",
             "policy_default_ms":DEFAULT_TOOL_CALL_TIMEOUT_MS,"request_max_ms":MAX_TOOL_TIMEOUT_MS,
@@ -77,5 +110,26 @@ pub(crate) fn guidance_result(arguments: &JsonObject, state: &LoaderState) -> Va
             "The loader binds children to the requested Site root and does not let an ambient caller Site root override it.",
             "Process ownership is limited to direct children spawned by this loader run."
         ]
-    })
+    });
+    if !include_details {
+        let object = result.as_object_mut().expect("guidance result object");
+        for key in ["runtime_lifecycle", "runtime_freshness", "tool_call_timeout", "tool_preference", "examples", "anti_patterns", "recovery", "feedback"] {
+            object.remove(key);
+        }
+        object.insert("first_use".into(), json!([
+            "Inspect policy, then resolve the explicit Site binding.",
+            "Prefer mcp_loader_call_binding_tool with the canonical binding_id.",
+            "Inspect child tools and lease one exact contract before calling."
+        ]));
+        object.insert("boundaries".into(), json!([
+            "Site discovery does not create authority.",
+            "The loader supervises children but does not own their domain policy.",
+            "Use only explicitly admitted bindings and declared execution adapters."
+        ]));
+    }
+    if include_runtime {
+        result["runtime_lifecycle"] = runtime_lifecycle(None, None);
+        result["runtime_freshness"] = runtime_freshness(state);
+    }
+    result
 }

@@ -4,12 +4,13 @@ Policy-gated runtime attachment and proxying for MCP surfaces admitted by a Site
 
 ## Guidance
 
-Use `mcp_loader_guidance` for model-facing orientation, workflow selection,
-recovery guidance, and loader boundaries. Use `mcp_loader_list_tools` or
+Use `mcp_loader_guidance` for compact model-facing orientation, workflow
+selection, and the next actionable call. Pass `include_details: true` for the
+extended workflow guidance, and `include_runtime_metadata: true` only when
+lifecycle or freshness evidence is material. Use `mcp_loader_list_tools` or
 `mcp_loader_tool_discovery_manifest` only for compact discovery. Bulk schema
 projection is intentionally unavailable. Inspect one named tool to receive its
-exact contract and generation-bound lease. Use `include_runtime_metadata: true`
-only when lifecycle evidence is material.
+exact contract and generation-bound lease.
 
 Every proxied child invocation requires a generation-bound schema lease.
 Inspect an attached tool with `mcp_loader_inspect_tool`, or inspect a
@@ -43,6 +44,10 @@ The loader's own public tools are:
   `mcp_loader_inspect_tool`, `mcp_loader_inspect_binding_tool`,
   `mcp_loader_call_tool`, and `mcp_loader_call_surface_tool`.
 - `mcp_loader_runtime_observation` and `mcp_loader_process_ownership`.
+
+`mcp_loader_list_site_surfaces` returns compact binding IDs and directly usable
+`mcp_loader_open_surface` next calls by default. Pass `include_surface_details:
+true` when declared command, args, or environment-variable details are needed.
 
 The exact child tool schemas remain owned by each attached surface and are
 discovered through the loader's tools/list projections.

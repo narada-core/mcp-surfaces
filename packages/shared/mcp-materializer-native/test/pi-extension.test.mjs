@@ -33,6 +33,8 @@ test('generated Pi extension handshakes, registers, calls, and closes admitted M
   let shutdown;
   try {
     const serverPath = join(root, 'server.mjs');
+    const admissionPath = join(root, 'admission.json');
+    await writeFile(admissionPath, JSON.stringify({ authority_context: { identity: { agent_id: "marici.Nima" } } }), 'utf8');
     await writeFile(serverPath, `
 import { createInterface } from "node:readline";
 createInterface({ input: process.stdin }).on("line", (line) => {
@@ -40,8 +42,29 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   if (message.method === "initialize") {
     process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { protocolVersion: "2026-07-28", capabilities: { tools: {} }, serverInfo: { name: "fixture", version: "1" } } }) + "\\n");
   } else if (message.method === "tools/list") {
-    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { tools: [{ name: "fixture_echo", description: "Echo", inputSchema: { type: "object", properties: { value: { type: "string" } }, required: ["value"] } }] } }) + "\\n");
+    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { tools: [
+      { name: "fixture_echo", description: "Echo", inputSchema: { type: "object", properties: { value: { type: "string" } }, required: ["value"] } },
+      { name: "mcp_loader_runtime_status", inputSchema: { type: "object", properties: {} } },
+      { name: "mcp_runtime_proxy_status", inputSchema: { type: "object", properties: {} } },
+    ] } }) + "\\n");
   } else if (message.method === "tools/call") {
+    const runtimeStatus = message.params.name === "mcp_loader_runtime_status"
+      ? { schema: "narada.mcp_loader.runtime_status.v1", status: "ok", runtime_freshness: { status: "current" } }
+      : message.params.name === "mcp_runtime_proxy_status"
+        ? { schema: "narada.mcp_runtime_proxy.status.v1", status: "ok", runtime_freshness: { status: "current" } }
+        : null;
+    if (runtimeStatus) {
+      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { structuredContent: runtimeStatus } }) + "\\n");
+      return;
+    }
+    if (message.params.name === "mcp_loader_inspect_binding_tool") {
+      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { structuredContent: { schema_lease: "query-lease" } } }) + "\\n");
+      return;
+    }
+    if (message.params.name === "mcp_loader_call_binding_tool") {
+      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { structuredContent: { result: { structuredContent: { schema: "narada.epistemic.query.v1", items: [{ event_id: "ev-000000000012-a" }, { event_id: "ev-000000000015-b" }] } } } } }) + "\\n");
+      return;
+    }
     const fixtures = {
       stat: { schema: "local.filesystem.stat.v1", path: "C:/repo/file.md", relative_path: "file.md", type: "file", size: 13558 },
       empty_range: { schema: "local.filesystem.read.v1", relative_path: "file.md", total_lines: 250, returned_lines: 0, offset: 300, requested_start_line: 300, requested_end_line: 380 },
@@ -65,9 +88,9 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 `, 'utf8');
 
     const servers = [{
-      name: 'fixture',
+      name: 'mcp-loader',
       command: process.execPath,
-      args: [serverPath],
+      args: [serverPath, '--binding-admission-path', admissionPath],
       enabled: true,
       startupTimeoutMs: 2000,
     }];
@@ -78,7 +101,13 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 
     const handlers = new Map();
     const registered = [];
+    const notifications = [];
+    const eventHandlers = new Map();
     const pi = {
+      events: {
+        on(name, handler) { eventHandlers.set(name, handler); },
+        off(name) { eventHandlers.delete(name); },
+      },
       on(name, handler) {
         handlers.set(name, handler);
       },
@@ -91,9 +120,28 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     };
     extension(pi);
     shutdown = () => handlers.get('session_shutdown')?.();
-    await handlers.get('session_start')?.({}, { ui: { notify() {} } });
+    await handlers.get('session_start')?.({}, { ui: { notify(message, level) { notifications.push({ message, level }); } } });
 
-    assert.equal(registered.length, 1);
+    assert.match(notifications[0].message, /mcp=loading/);
+    assert.match(notifications[1].message, /mcp=attached/);
+    assert.match(notifications[1].message, /loader=current/);
+    assert.match(notifications[1].message, /proxy=current/);
+    assert.match(notifications[1].message, /restart_owner=none/);
+    assert.match(notifications[1].message, /identity=marici\.Nima/);
+    const inboxPoll = await new Promise((resolve, reject) => eventHandlers.get('narada:mcp:marici-inbox-poll')({
+      siteRoot: 'C:/Users/andrey/src/marici',
+      sinceSequence: 10,
+      requestId: 'fixture-poll',
+      resolve,
+      reject,
+    }));
+    assert.deepEqual(inboxPoll, {
+      count: 2,
+      previousCursor: 10,
+      newCursor: 15,
+      source: 'epistemic_graph_communication',
+    });
+    assert.equal(registered.length, 3);
     assert.equal(registered[0].name, 'fixture_echo');
     assert.deepEqual(registered[0].parameters.required, ['value']);
     const result = await registered[0].execute('call-1', { value: 'hello' }, new AbortController().signal);
@@ -103,12 +151,12 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     });
     assert.doesNotMatch(result.content[0].text, /summary without lease/);
     const smallCollapsed = registered[0].renderResult(result, { expanded: false }).render(160).join('\n');
-    assert.match(smallCollapsed, /MCP result.*Ctrl\+O to expand/);
+    assert.match(smallCollapsed, /MCP result.*ctrl\+o to expand/);
     assert.doesNotMatch(smallCollapsed, /schema_lease/);
     const themedCollapsed = registered[0].renderResult(result, { expanded: false }, {
       fg(kind, text) { return `<${kind}>${text}</${kind}>`; },
     }).render(160).join('\n');
-    assert.match(themedCollapsed, /<muted> — press Ctrl\+O to expand<\/muted>/);
+    assert.match(themedCollapsed, /<muted>MCP result \(.*\) — ctrl\+o to expand<\/muted>/);
     const ansiCollapsedLines = registered[0].renderResult(result, { expanded: false }, {
       fg(_kind, text) { return `\x1b[90m${text}\x1b[39m`; },
     }).render(7);
@@ -140,7 +188,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       const fixture = await registered[0].execute('call-' + value, { value }, new AbortController().signal);
       const rendered = registered[0].renderResult(fixture, { expanded: false }).render(160).join('\n');
       assert.match(rendered, expected);
-      assert.match(rendered, /Ctrl\+O to expand/);
+      assert.match(rendered, /ctrl\+o to expand/);
     }
 
     const oversized = await registered[0].execute('call-oversized', { value: 'oversized' }, new AbortController().signal);
@@ -155,7 +203,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       details: { uiSummary: 'fixture_echo: large fixture' },
     };
     const collapsed = registered[0].renderResult(largeResult, { expanded: false });
-    assert.match(collapsed.render(120).join('\n'), /large fixture.*Ctrl\+O to expand/);
+    assert.match(collapsed.render(120).join('\n'), /large fixture.*ctrl\+o to expand/);
     assert.doesNotMatch(collapsed.render(120).join('\n'), /x{100}/);
     const expanded = registered[0].renderResult(largeResult, { expanded: true });
     assert.match(expanded.render(120).join('\n'), /x{100}/);
@@ -173,10 +221,9 @@ test('generated Pi extension qualifies flat-namespace collisions deterministical
   assert.match(source, /qualified tool name collision/);
 });
 
-test('generated Pi extension hides agent context from a naked carrier', async () => {
+test('generated Pi extension eagerly bootstraps only mcp-loader', async () => {
   const source = await readFile(templatePath, 'utf8');
-  assert.match(source, /config\.name !== "agent-context"/);
-  assert.match(source, /NARADA_CARRIER_SESSION_ADMISSION_RECEIPT/);
+  assert.match(source, /config\.name === "mcp-loader"/);
   assert.match(source, /SERVERS\.filter\(shouldBootstrapServer\)/);
 });
 
@@ -186,7 +233,7 @@ test('generated Pi extension routes Git away from structured-command', async () 
   assert.match(source, /activate <site-id>-git/);
 });
 
-test('generated Pi extension projects task lifecycle to its bounded bridge tool', async () => {
+test('generated Pi extension does not eagerly bootstrap task lifecycle', async () => {
   const root = await mkdtemp(join(tmpdir(), 'narada-pi-lifecycle-projection-'));
   try {
     const serverPath = join(root, 'server.mjs');
@@ -211,13 +258,22 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     const extension = (await import(`${pathToFileURL(extensionPath).href}?projection=1`)).default;
     const handlers = new Map();
     const registered = [];
+    const notifications = [];
     extension({
+      events: { on() {}, off() {} },
       on(name, handler) { handlers.set(name, handler); },
       getAllTools() { return []; },
       registerTool(tool) { registered.push(tool); },
     });
-    await handlers.get('session_start')?.({}, { ui: { notify() {} } });
-    assert.deepEqual(registered.map((tool) => tool.name), ['task_lifecycle_bridge_poll']);
+    await assert.rejects(
+      handlers.get('session_start')?.({}, { ui: { notify(message, level) { notifications.push({ message, level }); } } }),
+      /No admitted MCP server completed startup/,
+    );
+    assert.match(notifications[0].message, /mcp=loading/);
+    assert.match(notifications[1].message, /mcp=failed/);
+    assert.match(notifications[1].message, /restart_owner=session_then_carrier_or_runtime_supervisor/);
+    assert.match(notifications[1].message, /retry the session restart/);
+    assert.deepEqual(registered.map((tool) => tool.name), []);
     await handlers.get('session_shutdown')?.();
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -240,13 +296,14 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   }
 });
 `, 'utf8');
-    const source = await materializedTemplate([{ name: 'fixture', command: process.execPath, args: [serverPath], enabled: true, startupTimeoutMs: 2000 }]);
+    const source = await materializedTemplate([{ name: 'mcp-loader', command: process.execPath, args: [serverPath], enabled: true, startupTimeoutMs: 2000 }]);
     const extensionPath = join(root, 'index.ts');
     await writeFile(extensionPath, source, 'utf8');
     const extension = (await import(`${pathToFileURL(extensionPath).href}?budget=1`)).default;
     const handlers = new Map();
     const registered = [];
     extension({
+      events: { on() {}, off() {} },
       on(name, handler) { handlers.set(name, handler); },
       getAllTools() { return []; },
       registerTool(tool) { registered.push(tool); },

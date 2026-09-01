@@ -56,6 +56,19 @@ pub(crate) fn schema_lease_digest(
     })))
 }
 
+pub(crate) fn apply_contract_mode(
+    result: &mut Value,
+    mode: &str,
+    input_schema: &Value,
+    tool: &Value,
+) {
+    if mode == "compact" {
+        result["input_contract"] = compact_input_contract(input_schema);
+    } else if mode == "verbose" {
+        result["tool_contract"] = tool.clone();
+    }
+}
+
 pub(crate) fn inspect_attached_tool(
     arguments: &JsonObject,
     state: &LoaderState,
@@ -74,6 +87,13 @@ pub(crate) fn inspect_attached_tool(
         .or_else(|| tool.get("output_schema"))
         .cloned()
         .unwrap_or(Value::Null);
+    let contract_mode = match arguments.get("include_tool_contract") {
+        None => "compact",
+        Some(Value::Bool(false)) => "false",
+        Some(Value::String(mode)) if mode == "compact" => "compact",
+        Some(Value::String(mode)) if mode == "verbose" => "verbose",
+        _ => return Err(Diagnostic::new("include_tool_contract_invalid", "include_tool_contract must be false, compact, or verbose")),
+    };
     let mut result = json!({
         "schema": "narada.mcp_loader.schema_lease.v1",
         "status": "issued",
@@ -88,18 +108,11 @@ pub(crate) fn inspect_attached_tool(
         "output_schema_digest": sha256(&stable_json(&output_schema)),
         "description": tool.get("description").cloned().unwrap_or(Value::Null),
         "annotations": tool.get("annotations").cloned().unwrap_or(Value::Null),
-        "input_contract": compact_input_contract(&input_schema),
         "schema_lease": schema_lease_token(state, connection, &tool_name, &tool_schema_digest),
         "lease_scope": "loader_process_child_generation",
         "transferable": false
     });
     result["authorization_resolution"] = json!("lease_renewed");
-    if arguments
-        .get("include_tool_contract")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        result["tool_contract"] = tool.clone();
-    }
+    apply_contract_mode(&mut result, contract_mode, &input_schema, tool);
     Ok(result)
 }

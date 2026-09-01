@@ -38,11 +38,11 @@ function startLoader(root: string) {
       if (!waiter) continue;
       pending.delete(message.id);
       if (message.error) waiter.reject(new Error(JSON.stringify(message.error)));
-      else waiter.resolve(message.result?.structuredContent ?? message.result);
+      else waiter.resolve(message.result);
     }
   });
   let nextId = 1;
-  const call = (method: string, params: Record<string, unknown>) => new Promise<any>((resolvePromise, reject) => {
+  const callRaw = (method: string, params: Record<string, unknown>) => new Promise<any>((resolvePromise, reject) => {
     const id = nextId++;
     pending.set(id, { resolve: resolvePromise, reject });
     child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
@@ -52,7 +52,9 @@ function startLoader(root: string) {
       reject(new Error(`timeout:${method}`));
     }, 10000).unref();
   });
-  return { child, call };
+  const call = (method: string, params: Record<string, unknown>) =>
+    callRaw(method, params).then((result) => result?.structuredContent ?? result);
+  return { child, call, callRaw };
 }
 
 function writeFabric(root: string, servers: Record<string, unknown>) {
@@ -203,6 +205,106 @@ test('native loader attaches native_entrypoint and native_applet children', asyn
         assert.equal(detached.termination.classification, 'expected_protocol_detach');
         assert.equal(detached.termination.child_exit_is_crash, false);
       }
+    }
+    loader.child.kill();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+const COMPACT_OUTPUT_LIMIT = 8_000;
+const DEFAULT_OUTPUT_LIMIT = 32_000;
+
+function assertToolOutputBounded(toolName: string, envelope: any, compact = true) {
+  const structured = envelope?.structuredContent ?? envelope;
+  const structuredLength = JSON.stringify(structured).length;
+  const text = envelope?.content?.map((item: any) => item.text ?? '').join('') ?? '';
+  const limit = compact ? COMPACT_OUTPUT_LIMIT : DEFAULT_OUTPUT_LIMIT;
+  assert.ok(structuredLength <= limit, `${toolName} structuredContent is ${structuredLength} characters (limit ${limit})`);
+  assert.ok(text.length <= limit, `${toolName} text content is ${text.length} characters (limit ${limit})`);
+  return structured;
+}
+
+test('native loader default command outputs stay bounded and actionable', async (t) => {
+  if (!existsSync(loaderExecutable)) {
+    t.skip('native loader artifact is not built; run pnpm build:native first');
+    return;
+  }
+  if (!existsSync(runtimeExecutable) || !existsSync(taskExecutable)) {
+    t.skip('native runtime proxy artifact is not built; run the workspace native build first');
+    return;
+  }
+
+  const root = mkdtempSync(join(tmpdir(), 'narada-loader-output-bounds-'));
+  writeFabric(root, {
+    'native-entrypoint': {
+      command: runtimeExecutable,
+      args: ['proxy', '--surface-id', 'native-entrypoint', '--child-command', taskExecutable, '--entrypoint', taskExecutable, '--child-invocation-kind', 'native_entrypoint', '--', '--site-root', root],
+    },
+  });
+  const loader = startLoader(root);
+  const connections = new Set<string>();
+  try {
+    await loader.callRaw('initialize', { protocolVersion: '2024-11-05' });
+    const call = async (name: string, args: Record<string, unknown> = {}, compact = true) => {
+      const envelope = await loader.callRaw('tools/call', { name, arguments: args });
+      const result = assertToolOutputBounded(name, envelope, compact);
+      if (typeof result?.connection_id === 'string') connections.add(result.connection_id);
+      return result;
+    };
+
+    await call('mcp_loader_guidance');
+    await call('mcp_loader_runtime_status', {}, false);
+    await call('mcp_loader_policy_inspect');
+    await call('mcp_loader_connection_inventory', { compact: true });
+    await call('mcp_loader_process_ownership');
+    await call('mcp_loader_owned_port_lookup', { port: 1 });
+    await call('mcp_loader_list_site_surfaces', { site_root: root });
+    await call('mcp_loader_site_fabric_diagnostics', { site_root: root });
+    await call('mcp_loader_site_tool_inventory_check', { site_root: root, surface_ids: ['native-entrypoint'] });
+    await call('mcp_loader_surface_handle_inventory');
+
+    const attached = await call('mcp_loader_attach_surface', { site_root: root, binding_id: 'native-entrypoint', surface_id: 'native-entrypoint' });
+    const opened = await call('mcp_loader_open_surface', { site_root: root, binding_id: 'native-entrypoint', surface_id: 'native-entrypoint' });
+    await call('mcp_loader_resume_or_open_surface', { site_root: root, binding_id: 'native-entrypoint', surface_id: 'native-entrypoint' });
+    await call('mcp_loader_runtime_observation', { connection_id: opened.connection_id, carrier_kind: 'test' });
+    await call('mcp_loader_list_tools', { connection_id: opened.connection_id });
+    const inspection = await call('mcp_loader_inspect_tool', { connection_id: opened.connection_id, tool_name: 'task_lifecycle_guidance' });
+    await call('mcp_loader_inspect_binding_tool', { site_root: root, binding_id: 'native-entrypoint', tool_name: 'task_lifecycle_guidance' });
+    await call('mcp_loader_inspect_binding_tools', { site_root: root, binding_id: 'native-entrypoint', tool_names: ['task_lifecycle_guidance'] });
+    await call('mcp_loader_surface_status', { connection_id: opened.connection_id });
+    await call('mcp_loader_tool_discovery_manifest', { connection_id: opened.connection_id });
+
+    const childArguments = {
+      site_root: root,
+      binding_id: 'native-entrypoint',
+      surface_id: 'native-entrypoint',
+      tool_name: 'task_lifecycle_guidance',
+      tool_contract_digest: inspection.tool_contract_digest,
+      arguments: {},
+    };
+    const called = await call('mcp_loader_call_tool', {
+      connection_id: opened.connection_id,
+      tool_name: 'task_lifecycle_guidance',
+      tool_contract_digest: inspection.tool_contract_digest,
+      arguments: {},
+    }, false);
+    await call('mcp_loader_call_surface_tool', {
+      surface_handle: opened.surface_handle,
+      tool_name: 'task_lifecycle_guidance',
+      tool_contract_digest: inspection.tool_contract_digest,
+      arguments: {},
+    }, false);
+    await call('mcp_loader_call_binding_tool', childArguments, false);
+    if (typeof called?.details_ref === 'string') {
+      await call('mcp_loader_read_result', { connection_id: opened.connection_id, ref: called.details_ref, limit: 4000 });
+    }
+
+    const restarted = await call('mcp_loader_surface_restart', { connection_id: attached.connection_id, reason: 'output bounds test' }, false);
+    await call('mcp_loader_detach', { connection_id: restarted.connection_id }, false);
+    connections.delete(restarted.connection_id);
+  } finally {
+    for (const connection_id of connections) {
+      await loader.call('tools/call', { name: 'mcp_loader_detach', arguments: { connection_id } }).catch(() => undefined);
     }
     loader.child.kill();
     rmSync(root, { recursive: true, force: true });

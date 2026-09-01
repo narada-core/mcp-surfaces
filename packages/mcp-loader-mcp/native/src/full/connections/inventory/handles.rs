@@ -73,11 +73,25 @@ pub(crate) fn list_attached_tools(
     Ok(result)
 }
 
+pub(crate) const COMPACT_TOOL_DESCRIPTION_CHARS: usize = 48;
+
+fn compact_tool_description(tool: &Value) -> Value {
+    let Some(description) = tool.get("description").and_then(Value::as_str) else {
+        return Value::Null;
+    };
+    let mut chars = description.chars();
+    let excerpt: String = chars.by_ref().take(COMPACT_TOOL_DESCRIPTION_CHARS).collect();
+    if chars.next().is_some() {
+        json!(format!("{excerpt}…"))
+    } else {
+        json!(excerpt)
+    }
+}
+
 pub(crate) fn compact_tool_contract(tool: &Value) -> Value {
     json!({
         "name": tool.get("name").cloned().unwrap_or(Value::Null),
-        "description": tool.get("description").cloned().unwrap_or(Value::Null),
-        "annotations": tool.get("annotations").cloned().unwrap_or(Value::Null)
+        "description": compact_tool_description(tool)
     })
 }
 
@@ -119,13 +133,11 @@ pub(crate) fn tool_discovery_manifest(
         .iter()
         .map(|tool| {
             json!({
-                "canonical_name":tool.get("name").and_then(Value::as_str).unwrap_or_default(),
-                "callable_name":tool.get("name").and_then(Value::as_str).unwrap_or_default(),
-                "generated_aliases":[]
+                "canonical_name":tool.get("name").and_then(Value::as_str).unwrap_or_default()
             })
         })
         .collect();
-    let mut result = json!({"schema":"narada.mcp_loader.tool_discovery_manifest.v1","connection_id":connection.connection_id,"surface_id":connection.surface_id,"compact":true,"tool_count":tools.len(),"alias_policy":{"canonical_name_source":"tools/list.name","generated_aliases_authoritative":false,"guidance":"Use canonical_name/callable_name for directives and tool calls. Client-generated aliases should be treated as compatibility UI labels only. Obtain an exact schema only by inspecting one named tool and receiving its schema lease."},"tools":tools});
+    let mut result = json!({"schema":"narada.mcp_loader.tool_discovery_manifest.v1","connection_id":connection.connection_id,"surface_id":connection.surface_id,"compact":true,"tool_count":tools.len(),"alias_policy":{"canonical_name_source":"tools/list.name","generated_aliases_authoritative":false,"guidance":"Use canonical_name for directives and tool calls. Client-generated aliases are compatibility UI labels only. Inspect one named tool for its exact schema and lease."},"tools":tools});
     if arguments
         .get("include_runtime_metadata")
         .and_then(Value::as_bool)

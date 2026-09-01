@@ -2,6 +2,33 @@ import { randomUUID } from 'crypto';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'path';
 
+export function buildTaskLifecycleIdentityState({ agentId, operation, status = 'not_evaluated', evidenceRefs = [], authorityBasis = null }: any) {
+  const identity = typeof agentId === 'string' && agentId.trim() ? agentId.trim() : null;
+  const granted = status === 'authorized';
+  return {
+    schema: 'narada.agent.identity_state.v1',
+    claimed_identity: {
+      identity,
+      status: identity ? 'claimed' : 'unclaimed',
+      source: identity ? 'task_lifecycle_request' : null,
+      asserted_at: identity ? new Date().toISOString() : null,
+      evidence_refs: Array.isArray(evidenceRefs) ? evidenceRefs : [],
+      authority_granted: false,
+    },
+    authentication: {
+      status: 'missing',
+      authenticated_identity: null,
+      evidence_refs: [],
+    },
+    authority: {
+      status: status === 'denied' ? 'denied' : granted ? 'authorized' : 'not_evaluated',
+      operation: operation ?? null,
+      granted,
+      evidence_refs: authorityBasis?.summary ? [authorityBasis.summary] : (Array.isArray(evidenceRefs) ? evidenceRefs : []),
+    },
+  };
+}
+
 export function readTaskRouting(store: any, taskId: any, spec : any= null) {
   let rolePref = null;
   try {
@@ -107,6 +134,28 @@ export function recordClaimIntent({ store, lifecycle, taskNumber, agentId, statu
     confirmation_json: JSON.stringify({
       authority_basis: authorityBasis ?? null,
       preferred_agent_warning: preferredAgentWarning ?? null,
+      identity_state: {
+        schema: 'narada.agent.identity_state.v1',
+        claimed_identity: {
+          identity: agentId,
+          status: 'claimed',
+          source: 'task_lifecycle_claim_request',
+          asserted_at: now,
+          evidence_refs: [],
+          authority_granted: false,
+        },
+        authentication: {
+          status: 'missing',
+          authenticated_identity: null,
+          evidence_refs: [],
+        },
+        authority: {
+          status: status === 'claimed' ? 'authorized' : 'denied',
+          operation: 'task_lifecycle.claim',
+          granted: status === 'claimed',
+          evidence_refs: [],
+        },
+      },
     }),
     warnings_json: preferredAgentWarning ? JSON.stringify([preferredAgentWarning]) : null,
     updated_at: now,

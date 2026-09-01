@@ -16,6 +16,42 @@ fn compact_child_result_removes_duplicate_text_when_structured_data_exists() {
 }
 
 #[test]
+fn site_surface_text_projection_exposes_compact_bindings_and_next_calls() {
+    let rendered = render_result(&json!({
+        "schema":"narada.mcp_loader.site_surfaces.v1",
+        "status":"ok",
+        "site_root":"C:/site",
+        "compact":true,
+        "surface_count":1,
+        "surfaces":[{
+            "surface_id":"git",
+            "binding_id":"site-git",
+            "command":"hidden-command",
+            "next_call":{"tool_name":"mcp_loader_open_surface","arguments":{"site_root":"C:/site","binding_id":"site-git"}}
+        }]
+    }));
+    assert!(rendered.contains("binding_id: site-git"));
+    assert!(rendered.contains("next_call: mcp_loader_open_surface"));
+    assert!(!rendered.contains("hidden-command"));
+}
+
+#[test]
+fn guidance_text_projection_exposes_actionable_next_call() {
+    let rendered = render_result(&json!({
+        "schema":"narada.mcp_surface.guidance.v0",
+        "status":"ok",
+        "purpose":"Attach admitted MCP surfaces.",
+        "requested":{"workflow":"activate","tool":null},
+        "compact":true,
+        "next_call":{"tool_name":"mcp_loader_list_site_surfaces","arguments":{"site_root":"<site_root>"}},
+        "first_use":["Resolve the explicit Site binding."],
+        "boundaries":["Discovery does not create authority."]
+    }));
+    assert!(rendered.contains("next_call: mcp_loader_list_site_surfaces"));
+    assert!(rendered.contains("Resolve the explicit Site binding."));
+}
+
+#[test]
 fn schema_lease_text_projection_includes_invocation_token() {
     let rendered = render_result(&json!({
         "schema":"narada.mcp_loader.schema_lease.v1",
@@ -43,6 +79,52 @@ fn child_tool_discovery_cannot_project_schemas() {
     assert_eq!(compact["name"], "large_query");
     assert!(compact.get("inputSchema").is_none());
     assert!(compact.get("input_schema").is_none());
+}
+
+#[test]
+fn compact_tool_discovery_bounds_long_descriptions() {
+    let compact = compact_tool_contract(&json!({
+        "name":"large_tool",
+        "description":"x".repeat(256),
+        "annotations":{}
+    }));
+    let description = compact["description"].as_str().expect("description excerpt");
+    assert!(description.chars().count() <= COMPACT_TOOL_DESCRIPTION_CHARS + 1);
+    assert!(description.ends_with('…'));
+}
+
+#[test]
+fn schema_lease_contract_modes_control_projection_size() {
+    let input_schema = json!({
+        "type":"object",
+        "properties":{"value":{"type":"string"}},
+        "additionalProperties":false
+    });
+    let tool = json!({
+        "name":"echo",
+        "description":"Echo a value",
+        "inputSchema":input_schema
+    });
+
+    for mode in ["false", "compact", "verbose"] {
+        let mut result = json!({"schema":"narada.mcp_loader.schema_lease.v1"});
+        apply_contract_mode(&mut result, mode, &input_schema, &tool);
+        match mode {
+            "false" => {
+                assert!(result.get("input_contract").is_none());
+                assert!(result.get("tool_contract").is_none());
+            }
+            "compact" => {
+                assert_eq!(result["input_contract"]["properties"], json!(["value"]));
+                assert!(result.get("tool_contract").is_none());
+            }
+            "verbose" => {
+                assert_eq!(result["tool_contract"], tool);
+                assert!(result.get("input_contract").is_none());
+            }
+            _ => unreachable!(),
+        }
+    }
 }
 
 #[test]

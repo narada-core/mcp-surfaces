@@ -23,6 +23,10 @@ pub(crate) fn list_site_surfaces(
         .get("include_runtime_metadata")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let include_details = arguments
+        .get("include_surface_details")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let mut surfaces = Vec::new();
     for (server_id, server) in servers {
         let surface_id = server
@@ -62,10 +66,15 @@ pub(crate) fn list_site_surfaces(
             .unwrap_or_default();
         let requirements = surface_requirements(Some(&server));
         let mut surface = json!({
-            "binding_id":if binding_id.is_empty(){Value::Null}else{json!(binding_id)},"surface_id":surface_id,"server_name":server_id,"command":server.get("command").cloned().unwrap_or(Value::Null),
-            "args":server.get("args").cloned().unwrap_or_else(|| json!([])),"env_vars":env_vars,
-            "runtime_requirements":requirements
+            "binding_id":if binding_id.is_empty(){Value::Null}else{json!(binding_id)},"surface_id":surface_id,"server_name":server_id,
+            "runtime_requirements":requirements,
+            "next_call":{"tool_name":"mcp_loader_open_surface","arguments":{"site_root":site_root,"binding_id":binding_id,"surface_id":surface_id}}
         });
+        if include_details {
+            surface["command"] = server.get("command").cloned().unwrap_or(Value::Null);
+            surface["args"] = server.get("args").cloned().unwrap_or_else(|| json!([]));
+            surface["env_vars"] = json!(env_vars);
+        }
         if include_runtime {
             surface["runtime_lifecycle"] = runtime_lifecycle(None, None);
         }
@@ -76,7 +85,7 @@ pub(crate) fn list_site_surfaces(
             .and_then(Value::as_str)
             .cmp(&right.get("surface_id").and_then(Value::as_str))
     });
-    let mut result = json!({"schema":"narada.mcp_loader.site_surfaces.v1","site_root":site_root,"surfaces":surfaces});
+    let mut result = json!({"schema":"narada.mcp_loader.site_surfaces.v1","status":"ok","compact":!include_details,"site_root":site_root,"surface_count":surfaces.len(),"surfaces":surfaces});
     if include_runtime {
         result["runtime_freshness"] = runtime_freshness(state);
     }

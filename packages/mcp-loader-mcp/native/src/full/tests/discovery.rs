@@ -25,6 +25,18 @@ fn loader_discovery_defaults_to_compact_metadata_and_exposes_resume() {
         find("mcp_loader_call_surface_tool")["inputSchema"]["required"],
         json!(["surface_handle", "tool_name"])
     );
+    assert_eq!(
+        find("mcp_loader_guidance")["inputSchema"]["properties"]["include_details"]["default"],
+        false
+    );
+    assert_eq!(
+        find("mcp_loader_guidance")["inputSchema"]["properties"]["include_runtime_metadata"]["default"],
+        false
+    );
+    assert_eq!(
+        find("mcp_loader_list_site_surfaces")["inputSchema"]["properties"]["include_surface_details"]["default"],
+        false
+    );
     for name in [
         "mcp_loader_list_site_surfaces",
         "mcp_loader_open_surface",
@@ -42,6 +54,31 @@ fn loader_discovery_defaults_to_compact_metadata_and_exposes_resume() {
     assert!(find("mcp_loader_tool_discovery_manifest")
         .pointer("/inputSchema/properties/compact")
         .is_none());
+    for name in [
+        "mcp_loader_inspect_tool",
+        "mcp_loader_inspect_binding_tool",
+        "mcp_loader_inspect_binding_tools",
+    ] {
+        let mode = &find(name)["inputSchema"]["properties"]["include_tool_contract"];
+        assert_eq!(mode["type"], json!(["boolean", "string"]));
+        assert_eq!(mode["enum"], json!([false, "compact", "verbose"]));
+        assert_eq!(mode["default"], "compact");
+        let arguments = if name == "mcp_loader_inspect_binding_tools" {
+            json!({"site_root":"C:/site","binding_id":"binding-1","tool_names":["echo"]})
+        } else if name == "mcp_loader_inspect_binding_tool" {
+            json!({"site_root":"C:/site","binding_id":"binding-1","tool_name":"echo"})
+        } else {
+            json!({"connection_id":"connection-1","tool_name":"echo"})
+        };
+        for value in [json!(false), json!("compact"), json!("verbose")] {
+            let mut call = arguments.as_object().cloned().unwrap();
+            call.insert("include_tool_contract".into(), value);
+            assert!(validate_input_schema(&find(name)["inputSchema"], &json!(call), "arguments").is_ok());
+        }
+        let mut invalid = arguments.as_object().cloned().unwrap();
+        invalid.insert("include_tool_contract".into(), json!(true));
+        assert!(validate_input_schema(&find(name)["inputSchema"], &json!(invalid), "arguments").is_err());
+    }
 }
 
 #[test]

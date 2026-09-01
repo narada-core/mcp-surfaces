@@ -22,7 +22,9 @@ function requireLocalNativeArtifact(root, artifactName) {
   if (!existsSync(artifact)) throw new Error(`native_surface_artifact_path_missing:${artifact}`);
   return artifact;
 }
-const paritySlice = process.argv[2] ?? process.env.NARADA_PARITY_SLICE ?? 'all';
+const outputBoundsOnly = process.argv.includes('--output-bounds-only');
+const outputBoundObservations = [];
+const paritySlice = outputBoundsOnly ? 'all' : (process.argv[2] ?? process.env.NARADA_PARITY_SLICE ?? 'all');
 let controlPlaneReady = false;
 function resolveNaradaRoot(workspaceRoot) {
   return resolve(process.env.NARADA_ROOT ?? resolve(workspaceRoot, '..', 'narada'));
@@ -90,15 +92,8 @@ if (!existsSync(executable)) {
   throw new Error(`native_protocol_executable_missing:${executable}`);
 }
 
-function run(surface) {
-  const requests = [
-    { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05' } },
-    { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} },
-    { jsonrpc: '2.0', id: 3, method: 'server/discover', params: modernMeta },
-    { jsonrpc: '2.0', id: 4, method: 'tools/list', params: modernMeta },
-    { jsonrpc: '2.0', id: 5, method: 'initialize', params: modernMeta },
-  ];
-  const result = spawnSync(executable, ['--surface-id', surface, '--site-root', packageRoot], {
+function runRequests(surface, requests, siteRoot = packageRoot) {
+  const result = spawnSync(executable, ['--surface-id', surface, '--site-root', siteRoot], {
     input: requests.map((request) => JSON.stringify(request)).join('\n') + '\n',
     encoding: 'utf8',
     timeout: 10_000,
@@ -112,12 +107,75 @@ function run(surface) {
   return lines.map((line) => JSON.parse(line));
 }
 
+function run(surface) {
+  return runRequests(surface, [
+    { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05' } },
+    { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} },
+    { jsonrpc: '2.0', id: 3, method: 'server/discover', params: modernMeta },
+    { jsonrpc: '2.0', id: 4, method: 'tools/list', params: modernMeta },
+    { jsonrpc: '2.0', id: 5, method: 'initialize', params: modernMeta },
+  ]);
+}
+
+function probeArguments(tool, root) {
+  const schema = tool.inputSchema ?? {};
+  const properties = schema.properties ?? {};
+  const argumentsValue = {};
+  for (const [name, property] of Object.entries(properties)) {
+    if (name === 'limit') argumentsValue[name] = 1;
+    else if (name === 'offset') argumentsValue[name] = 0;
+    else if (property.default !== undefined) argumentsValue[name] = property.default;
+    else if (Array.isArray(property.enum) && property.enum.length > 0) argumentsValue[name] = property.enum[0];
+    else if (property.type === 'boolean') argumentsValue[name] = false;
+    else if (property.type === 'integer' || property.type === 'number') argumentsValue[name] = name === 'offset' ? 0 : 1;
+    else if (property.type === 'array') argumentsValue[name] = [];
+    else if (property.type === 'object') argumentsValue[name] = {};
+    else if (property.type === 'string') argumentsValue[name] = name.includes('root') || name.includes('path') ? root : name === 'folder' ? '\\' : 'output-bounds-probe';
+  }
+  return argumentsValue;
+}
+
+function verifyToolOutputBounds(surface, tools) {
+  const root = mkdtempSync(join(tmpdir(), `narada-native-output-bounds-${surface}-`));
+  try {
+    const requests = tools.map((tool, index) => ({
+      jsonrpc: '2.0', id: `probe-${index}`, method: 'tools/call',
+      params: {
+        name: tool.name,
+        arguments: tool.annotations?.readOnlyHint === true ? probeArguments(tool, root) : { __output_bounds_probe__: true },
+      },
+    }));
+    const responses = runRequests(surface, requests, root);
+    for (const [index, response] of responses.entries()) {
+      const tool = tools[index];
+      const limit = String(tool.name).endsWith('_guidance') ? 8 * 1024 : 64 * 1024;
+      const projections = [
+        ['envelope', response],
+        ['structuredContent', response.result?.structuredContent ?? response.error ?? response],
+        ['text', response.result?.content?.map((item) => String(item.text ?? '')).join('') ?? ''],
+      ];
+      const sizes = {};
+      for (const [projection, value] of projections) {
+        const size = Buffer.byteLength(typeof value === 'string' ? value : JSON.stringify(value), 'utf8');
+        sizes[projection] = size;
+        if (size > limit) {
+          throw new Error(`${surface}/${tool.name}/${projection}:output_exceeds_${limit}_bytes:${size}`);
+        }
+      }
+      outputBoundObservations.push({ surface, command: tool.name, envelope: sizes.envelope, structured: sizes.structuredContent, text: sizes.text, limit });
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+}
+
 for (const surface of surfaces) {
   const responses = run(surface);
   const byId = new Map(responses.map((response) => [response.id, response]));
   if (byId.get(1)?.result?.protocolVersion !== '2024-11-05') throw new Error(`${surface}:legacy_initialize_version_mismatch`);
   const legacyTools = byId.get(2)?.result?.tools;
   if (!Array.isArray(legacyTools) || legacyTools.length === 0) throw new Error(`${surface}:legacy_tools_list_missing`);
+  verifyToolOutputBounds(surface, legacyTools);
   const discover = byId.get(3)?.result;
   if (discover?.resultType !== 'complete' || !discover.supportedVersions?.includes('2026-07-28')) throw new Error(`${surface}:modern_discovery_incomplete`);
   const modernTools = byId.get(4)?.result;
@@ -2614,7 +2672,7 @@ function runSchedulerParity() {
   }
 }
 
-const runSlice = (slice, callback) => paritySlice === 'all' || paritySlice === slice ? callback() : { status: 'skipped' };
+const runSlice = (slice, callback) => outputBoundsOnly ? { status: 'skipped' } : (paritySlice === 'all' || paritySlice === slice ? callback() : { status: 'skipped' });
 const mailboxParity = runSlice('mailbox', runMailboxParity);
 const mailboxOutboxMutationParity = runSlice('mailbox', runMailboxOutboxMutationParity);
 const mailboxReconciliationParity = runSlice('mailbox', runMailboxReconciliationParity);
@@ -2646,6 +2704,7 @@ const browserControlParity = runSlice('browser-control', runBrowserControlParity
 const quotaMeterParity = runSlice('quota-meter', runQuotaMeterParity);
 const narsSessionParity = runSlice('nars-session', runNarsSessionParity);
 const schedulerParity = runSlice('scheduler', runSchedulerParity);
+if (process.env.NARADA_OUTPUT_BOUNDS_REPORT === '1') console.table(outputBoundObservations);
 process.stdout.write(JSON.stringify({
   schema: 'narada.mcp_surfaces_native.protocol_parity.v1',
   status: 'passed',
@@ -2653,6 +2712,7 @@ process.stdout.write(JSON.stringify({
   legacy: '2024-11-05',
   modern: '2026-07-28',
   defaults_changed: false,
+  output_bounds: { status: 'passed', compact_bytes: 8192, default_bytes: 65536, projections: ['envelope', 'structuredContent', 'text'] },
   mailbox_parity: mailboxParity,
   mailbox_outbox_mutation_parity: mailboxOutboxMutationParity,
   mailbox_reconciliation_parity: mailboxReconciliationParity,

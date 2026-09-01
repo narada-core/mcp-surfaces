@@ -4,6 +4,22 @@ import { z } from 'zod/v4';
 export const MCP_FABRIC_SCHEMA_VERSION = '2.0' as const;
 export const MCP_FABRIC_SCHEMA_MAJOR = 2;
 
+const COMPACT_GUIDANCE_ARRAY_LIMIT = 3;
+
+/** Keep default guidance model-visible without discarding the authoritative contract. */
+export function compactGuidanceResult<T extends Record<string, unknown>>(record: T): T {
+  const compact = { ...record } as Record<string, unknown>;
+  for (const key of ['path_resolution', 'workflows', 'tool_inventory', 'examples', 'anti_patterns', 'recovery', 'feedback', 'tool_call_timeout']) {
+    delete compact[key];
+  }
+  for (const key of ['first_use', 'tool_preference', 'boundaries']) {
+    const value = compact[key];
+    if (Array.isArray(value)) compact[key] = value.slice(0, COMPACT_GUIDANCE_ARRAY_LIMIT);
+  }
+  compact.compact = true;
+  return compact as T;
+}
+
 const IdentifierSchema = z.string().trim().min(1).regex(/^[a-z0-9][a-z0-9._-]*$/);
 const EnvironmentVariableSchema = z.string().trim().regex(/^[A-Za-z_][A-Za-z0-9_]*$/);
 const HeaderNameSchema = z.string().trim().regex(/^[A-Za-z0-9][A-Za-z0-9_-]*$/);

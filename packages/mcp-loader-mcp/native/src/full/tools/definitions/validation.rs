@@ -48,20 +48,23 @@ pub(crate) fn validate_input_schema(
         )
         .with_details(json!({"path":path,"reason":reason}))
     };
-    if let Some(expected) = schema.get("type").and_then(Value::as_str) {
-        let matches = match expected {
-            "object" => value.is_object(),
-            "array" => value.is_array(),
-            "string" => value.is_string(),
-            "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
-            "number" => value.is_number(),
-            "boolean" => value.is_boolean(),
-            "null" => value.is_null(),
-            _ => true,
-        };
-        if !matches {
-            return Err(invalid("type_mismatch".into()));
-        }
+    let type_matches = |kind: &str| match kind {
+        "object" => value.is_object(),
+        "array" => value.is_array(),
+        "string" => value.is_string(),
+        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+        "number" => value.is_number(),
+        "boolean" => value.is_boolean(),
+        "null" => value.is_null(),
+        _ => true,
+    };
+    let matches = match schema.get("type") {
+        Some(Value::String(expected)) => type_matches(expected),
+        Some(Value::Array(expected)) => expected.iter().filter_map(Value::as_str).any(type_matches),
+        _ => true,
+    };
+    if !matches {
+        return Err(invalid("type_mismatch".into()));
     }
     if let Some(allowed) = schema.get("enum").and_then(Value::as_array) {
         if !allowed.contains(value) {
