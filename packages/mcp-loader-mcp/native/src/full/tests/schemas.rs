@@ -51,10 +51,42 @@ fn validation_error_reports_bound_received_value_and_corrected_call() {
     assert_eq!(error.details["expected"], 20000);
     assert_eq!(error.details["received"], 30000);
     assert_eq!(
-        error.details["corrected_call_template"]["arguments"]["max_inline_chars"],
-        20000
+        error.details["corrected_call_template"]["operation"],
+        "replace"
     );
+    assert_eq!(
+        error.details["corrected_call_template"]["path"],
+        "/arguments.max_inline_chars"
+    );
+    assert_eq!(error.details["corrected_call_template"]["value"], 20000);
     assert!(error.message.contains("expected 20000; received 30000"));
+
+    for (schema, value, expected) in [
+        (
+            json!({"type":"string","maxLength":3}),
+            json!("toolong"),
+            json!("xxx"),
+        ),
+        (
+            json!({"type":"string","minLength":5}),
+            json!("x"),
+            json!("xxxxx"),
+        ),
+        (json!({"type":"array","maxItems":0}), json!([1]), json!([])),
+        (
+            json!({"type":"object","maxProperties":0}),
+            json!({"x":1}),
+            json!({}),
+        ),
+    ] {
+        let error = validate_input_schema(&schema, &value, "/arguments/nested/value")
+            .expect_err("bound must fail");
+        assert_eq!(
+            error.details["corrected_call_template"]["path"],
+            "/arguments/nested/value"
+        );
+        assert_eq!(error.details["corrected_call_template"]["value"], expected);
+    }
 }
 
 #[test]

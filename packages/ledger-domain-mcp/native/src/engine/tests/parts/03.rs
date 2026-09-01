@@ -79,6 +79,21 @@
         assert_eq!(canonical["normalization"]["applied"], true);
         assert_eq!(canonical["normalization"]["normalized_count"], 1);
 
+        let poll = engine.call_tool(
+            "epistemic_graph_communication_inbox_poll",
+            &Map::from_iter([
+                ("participant".into(), json!("marici.Benincasa")),
+                ("phase".into(), json!("opening")),
+                ("limit".into(), json!(1)),
+            ]),
+            &root,
+        ).expect("opening poll");
+        assert_eq!(poll["items"].as_array().unwrap().len(), 1);
+        assert_eq!(poll["items"][0]["entity_id"], "communication:canonical");
+        let checkpoint = poll["poll_contract"]["checkpoint_after_sequence"].as_u64().expect("numeric checkpoint");
+        assert!(checkpoint > 0, "poll={poll}");
+        assert_eq!(poll["poll_contract"]["next_poll"]["arguments"]["after_sequence"], checkpoint);
+
         let preflight = engine
             .communication_migration_preflight(&root, &Map::new())
             .expect("migration preflight");

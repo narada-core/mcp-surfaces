@@ -359,6 +359,10 @@ try {
   assert.equal(rehydrateBody.payload.site_id, 'narada.revolution');
   assert.deepEqual(rehydrateBody.continuation_ref, { ...continuationRef, sha256: continuationRef.sha256.toLowerCase() });
   assert.deepEqual(rehydrateBody.continuation, checkpointBody.continuation);
+  assert.equal(rehydrateBody.identity_scopes.schema, 'narada.agent.identity_scope_projection.v1');
+  assert.equal(rehydrateBody.identity_scopes.scopes.task_lifecycle.actor, 'narada-revolution.resident');
+  assert.equal(rehydrateBody.identity_scopes.scopes.epistemic_graph.participant, 'narada-revolution.resident');
+  assert.match(rehydrateBody.identity_scopes.authority_nontransfer, /does not grant task claim/);
   writeMessage({ jsonrpc: '2.0', id: 11, method: 'tools/call', params: { name: 'agent_context_continuation_export', arguments: { agent_id: 'narada-revolution.resident' } } });
   const initialExport = await waitFor(11);
   assert.equal(initialExport.error, undefined);

@@ -54,15 +54,13 @@ pub(crate) fn validate_input_schema(
         let property = path.rsplit(['.', '/']).next().unwrap_or(path);
         let corrected_value = match keyword {
             "maximum" | "minimum" => expected.clone(),
-            "maxLength" => json!(format!("<string with at most {} characters>", expected)),
-            "minLength" => json!(format!("<string with at least {} characters>", expected)),
-            "maxItems" => json!([format!("<array containing at most {} items>", expected)]),
-            "maxProperties" => {
-                json!({"<object>":format!("retain at most {} properties", expected)})
-            }
-            _ => json!(format!("<value satisfying {keyword}>")),
+            "maxLength" => json!("x".repeat(expected.as_u64().unwrap_or(0) as usize)),
+            "minLength" => json!("x".repeat(expected.as_u64().unwrap_or(0) as usize)),
+            "maxItems" => json!([]),
+            "maxProperties" => json!({}),
+            _ => Value::Null,
         };
-        let corrected = json!({"arguments":{property:corrected_value}});
+        let corrected = json!({"operation":"replace","path":path,"value":corrected_value,"merge_into_original_arguments":true});
         Diagnostic::new(
             "input_schema_validation_failed",
             format!(

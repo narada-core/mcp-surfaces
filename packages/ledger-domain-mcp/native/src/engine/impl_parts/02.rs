@@ -22,7 +22,7 @@ impl Engine {
                 }),
                 "since_event" | "after_sequence" | "max_depth" | "max_datoms" | "max_results"
                 | "timeout_ms" => value.as_u64().is_some(),
-                "include_body" => value.is_boolean(),
+                "include_body" | "latest" => value.is_boolean(),
                 "limit" => value.as_u64().is_some_and(|limit| limit > 0),
                 "cursor" => value.is_null() || value.is_string() || value.is_object(),
                 _ => true,
@@ -81,6 +81,7 @@ impl Engine {
                 "intent",
                 "read_state",
                 "reply_state",
+                "latest",
                 "match",
                 "limit",
                 "cursor",

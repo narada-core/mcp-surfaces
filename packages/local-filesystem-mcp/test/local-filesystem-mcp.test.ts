@@ -1127,6 +1127,8 @@ trust_level = "untrusted"
     patch: `--- a/patch-header.txt\t2026-06-02\n+++ b/patch-header.txt\t2026-06-02\n@@ -1 +1 @@\n-old\n+new\n`,
   });
   assert.equal(headerPatchResponse.result.structuredContent.status, 'patched');
+  assert.equal(headerPatchResponse.result.structuredContent.patch_authority.kind, 'admitted_owned_text_patch');
+  assert.equal(headerPatchResponse.result.structuredContent.patch_authority.allowed_root_enforced, true);
   assert.equal(readFileSync(join(trusted, 'patch-header.txt'), 'utf8'), 'new\n');
 
   const applyPatchGrammar = call(writeState, 35, 'fs_apply_patch', {

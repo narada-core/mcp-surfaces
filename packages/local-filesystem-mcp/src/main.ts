@@ -2535,7 +2535,12 @@ function applyPatchTool(args: any, state: any) {
   }
   const outcome = { schema: 'local.filesystem.apply_patch.outcome.v1', status: 'patched', operation_id: operationId, patch_sha256: patchSha256, mutation_started: true, rollback_performed: false, recovery_count: recoveryCount, finished_at: new Date().toISOString(), changed_files: changed };
   writePatchOutcome(state, operationId, outcome);
-  return { schema: 'local.filesystem.apply_patch.v1', status: 'patched', operation_id: operationId, changed_files: changed, recovery_count: recoveryCount, timeout_ms: timeoutMs, outcome_reader: { tool: 'fs_patch_outcome_show', operation_id: operationId } };
+  return {
+    schema: 'local.filesystem.apply_patch.v1', status: 'patched', operation_id: operationId,
+    patch_authority: { kind: 'admitted_owned_text_patch', owner_surface: 'local-filesystem', allowed_root_enforced: true, expected_sha256_enforced_when_supplied: true, cross_locus_authority: false },
+    changed_files: changed, recovery_count: recoveryCount, timeout_ms: timeoutMs,
+    outcome_reader: { tool: 'fs_patch_outcome_show', operation_id: operationId },
+  };
 }
 
 function patchOutcomeShowTool(args: any, state: any) {

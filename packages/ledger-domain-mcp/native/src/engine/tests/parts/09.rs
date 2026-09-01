@@ -147,13 +147,18 @@
             .to_string();
         assert_eq!(resumed["frontier"]["scope"], "unselected alternatives; selected work is represented once in selected");
         assert!(!resumed["frontier"]["items"].as_array().unwrap().iter().any(|item| item["node_id"] == selected_id));
-        let hinted = engine.issue_tree_resume(&root, &Map::from_iter([
+        let mismatch = engine.issue_tree_resume(&root, &Map::from_iter([
             ("tree_id".into(), json!(tree_id.clone())),
-            ("objective".into(), json!("A paraphrase that is not the stored objective")),
-        ])).expect("tree id remains authoritative when objective is only a hint");
-        assert_eq!(hinted["tree"]["tree_id"], tree_id);
-        assert_eq!(hinted["objective_match"]["exact_normalized_match"], false);
-        assert_eq!(hinted["objective_match"]["lookup_effect"], "hint_only_tree_id_was_authoritative");
+            ("objective".into(), json!("A different objective")),
+        ])).expect_err("known tree with a different objective must be diagnosed");
+        assert_eq!(mismatch["code"], "issue_tree_objective_mismatch");
+        assert_eq!(mismatch["details"]["tree_id"], tree_id);
+        let unknown = engine.issue_tree_resume(&root, &Map::from_iter([
+            ("tree_id".into(), json!("issue-tree:unknown")),
+            ("objective".into(), json!("Resolve the excellent AX frontier")),
+        ])).expect_err("unknown id must not silently resolve by objective");
+        assert_eq!(unknown["code"], "issue_tree_id_not_found");
+        assert_eq!(unknown["details"]["objective_hint_matches"][0], tree_id);
         let compact = engine.issue_tree_resume(&root, &Map::from_iter([
             ("tree_id".into(), json!(tree_id.clone())), ("compact".into(), json!(true)),
         ])).expect("compact resume");

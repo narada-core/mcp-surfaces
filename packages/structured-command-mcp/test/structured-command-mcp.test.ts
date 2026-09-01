@@ -847,6 +847,10 @@ assert.equal(failedLargeStdoutCall.result.structuredContent.stdout_char_length, 
 assert.equal(failedLargeStdoutCall.result.structuredContent.stdout, 'x'.repeat(1000));
 assert.equal(failedLargeStdoutCall.result.structuredContent.stderr, 'not ok 1 - failure before payload\n');
 assert.match(failedLargeStdoutCall.result.structuredContent.execution_ref, /^structured_command_execution:/);
+assert.equal(failedLargeStdoutCall.result.structuredContent.owned_artifact.owner_surface, 'structured-command');
+assert.equal(failedLargeStdoutCall.result.structuredContent.owned_artifact.artifact_ref, failedLargeStdoutCall.result.structuredContent.execution_ref);
+assert.equal(failedLargeStdoutCall.result.structuredContent.owned_artifact.result_schema, 'narada.structured_command.execution_result.v0');
+assert.equal(failedLargeStdoutCall.result.structuredContent.owned_artifact.streams.stdout, 'persisted');
 assert.equal(failedLargeStdoutCall.result.structuredContent.stdout_next_offset, 1000);
 
 const failedStdoutPage = await rpc({

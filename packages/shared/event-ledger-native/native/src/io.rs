@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::ErrorSchema;
 
@@ -51,12 +52,30 @@ pub fn write_replace_json(schema: ErrorSchema, path: &Path, value: &Value) -> Re
 
 /// Write raw bytes with `create_new` + `sync_all`; refuses to overwrite.
 pub fn write_new(schema: ErrorSchema, path: &Path, bytes: &[u8]) -> Result<(), Value> {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temporary = path.with_extension(format!("pending-{}-{nonce}", std::process::id()));
     let mut file = OpenOptions::new()
         .create_new(true)
         .write(true)
-        .open(path)
-        .map_err(schema.io_error("immutable_record_exists"))?;
-    file.write_all(bytes)
-        .map_err(schema.io_error("record_write_failed"))?;
-    file.sync_all().map_err(schema.io_error("record_sync_failed"))
+        .open(&temporary)
+        .map_err(schema.io_error("record_stage_create_failed"))?;
+    if let Err(error) = file
+        .write_all(bytes)
+        .map_err(schema.io_error("record_write_failed"))
+        .and_then(|_| {
+            file.sync_all()
+                .map_err(schema.io_error("record_sync_failed"))
+        })
+    {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    drop(file);
+    let publish =
+        fs::hard_link(&temporary, path).map_err(schema.io_error("immutable_record_exists"));
+    let _ = fs::remove_file(&temporary);
+    publish
 }

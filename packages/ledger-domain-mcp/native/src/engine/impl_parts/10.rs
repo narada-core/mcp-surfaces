@@ -32,18 +32,17 @@ impl Engine {
             trees.push(row.map_err(self.db_error("issue_tree_resume_row_failed"))?);
         }
         let normalized = objective.map(|value| value.trim().to_lowercase());
-        let mut candidates = trees
-            .iter()
-            .filter(|tree| {
-                supplied_tree_id
-                    .map(|id| tree["tree_id"].as_str() == Some(id))
-                    .unwrap_or_else(|| normalized
-                        .as_ref()
-                        .map(|value| tree["objective"].as_str().map(str::to_lowercase).as_ref() == Some(value))
-                        .unwrap_or(true))
-            })
-            .cloned()
-            .collect::<Vec<_>>();
+        let mut candidates = if let Some(id) = supplied_tree_id {
+            let identified = trees.iter().find(|tree| tree["tree_id"].as_str() == Some(id)).cloned();
+            if let (Some(tree), Some(supplied_objective)) = (identified.as_ref(), objective) {
+                if !tree["objective"].as_str().is_some_and(|stored| stored.trim().eq_ignore_ascii_case(supplied_objective.trim())) {
+                    return Err(self.error("issue_tree_objective_mismatch", "tree_id exists but its objective does not match the supplied objective hint", json!({"tree_id":id,"supplied_objective":supplied_objective,"stored_objective":tree["objective"],"mutation_performed":false})));
+                }
+            }
+            identified.into_iter().collect::<Vec<_>>()
+        } else {
+            trees.iter().filter(|tree| normalized.as_ref().map(|value| tree["objective"].as_str().map(|stored| stored.trim().to_lowercase()).as_ref() == Some(value)).unwrap_or(true)).cloned().collect::<Vec<_>>()
+        };
         if candidates.len() > 1 {
             return Err(self.error(
                 "issue_tree_objective_ambiguous",
