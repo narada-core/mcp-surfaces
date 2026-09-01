@@ -1970,6 +1970,17 @@ function cappedSearchResult({ state, kind, args, page, offset, limit, freshness,
     stale_cache_evidence: false,
     remediation: 'No matches were returned for the current path freshness fingerprint. If files are known to exist, retry with cache_policy="refresh" or cache_policy="bypass" and verify the directory/pattern pair.',
   } : null;
+  const continuationArguments = Object.fromEntries(
+    ['directory', 'path', 'pattern', 'ignore', 'output_mode', 'search_case', 'include_glob', 'timeout_ms']
+      .filter((key) => args[key] !== undefined)
+      .map((key) => [key, args[key]]),
+  );
+  if (nextOffset !== null) {
+    continuationArguments.offset = nextOffset;
+    continuationArguments.limit = limit;
+    continuationArguments.cache_policy = page.snapshot_id ? 'snapshot' : (page.cache_policy ?? cachePolicy);
+    if (page.snapshot_id) continuationArguments.snapshot_id = page.snapshot_id;
+  }
   const value = {
     schema: `local.filesystem.${kind}.v1`,
     status: 'ok',
@@ -1979,6 +1990,9 @@ function cappedSearchResult({ state, kind, args, page, offset, limit, freshness,
     limit,
     count: page.count,
     count_exact: page.count_exact,
+    count_semantics: page.count_exact
+      ? 'count is the exact full result count'
+      : 'count is the bounded matched-entry count observed so far; returned is only this page',
     scanned: page.scanned,
     scanned_unit: 'matched_entries',
     returned: matches.length,
@@ -1996,6 +2010,11 @@ function cappedSearchResult({ state, kind, args, page, offset, limit, freshness,
     freshness,
     has_more: page.has_more,
     next_offset: nextOffset,
+    continuation: nextOffset === null ? null : {
+      tool_name: kind === 'glob' ? 'fs_glob_search' : 'fs_grep_search',
+      arguments: continuationArguments,
+      offset_semantics: 'record offset within the preserved search snapshot; not a materialized-output character offset',
+    },
     matches_format: kind === 'grep' ? 'structured' : 'path',
     ...(kind === 'grep' ? {} : { matches }),
     ...(noMatchDiagnostics ? { no_match_diagnostics: noMatchDiagnostics } : {}),

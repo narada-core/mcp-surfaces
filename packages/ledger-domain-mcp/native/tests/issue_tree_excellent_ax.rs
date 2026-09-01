@@ -116,7 +116,15 @@ fn acceptance(case: u8) {
             let (tree, selected) = tree_and_selected(&created);
             let value = resume(&root, tree);
             assert_eq!(value["selected"]["node_id"], selected);
-            assert!(value["frontier"]["returned"].as_u64().unwrap() >= 1);
+            assert_eq!(
+                value["frontier"]["scope"],
+                "unselected alternatives; selected work is represented once in selected"
+            );
+            assert!(!value["frontier"]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["node_id"] == selected));
         }
         2 => {
             create(&root, "I2 objective");

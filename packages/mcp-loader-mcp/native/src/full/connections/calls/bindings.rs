@@ -112,7 +112,7 @@ pub(crate) fn inspect_binding_tools(
         }
         leases.push(inspect_attached_tool(&delegated, state)?);
     }
-    Ok(json!({
+    let result = json!({
         "schema":"narada.mcp_loader.schema_lease_batch.v1",
         "status":"issued",
         "connection_id":connection_id,
@@ -125,7 +125,18 @@ pub(crate) fn inspect_binding_tools(
             "canonical_binding_id":opened.get("canonical_binding_id").cloned().unwrap_or_else(|| arguments.get("binding_id").cloned().unwrap_or(Value::Null)),
             "binding_id_canonicalized":opened.get("binding_id_canonicalized").cloned().unwrap_or_else(|| json!(false))
         }
-    }))
+    });
+    if utf16_len(&pretty_json(&result)) > DEFAULT_LOADER_RESULT_INLINE_LIMIT {
+        return Ok(build_bounded_result(
+            state,
+            &connection_id,
+            "mcp_loader_inspect_binding_tools",
+            &result,
+            false,
+        )?["structuredContent"]
+            .clone());
+    }
+    Ok(result)
 }
 
 pub(crate) fn call_binding_tool(

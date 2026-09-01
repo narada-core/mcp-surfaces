@@ -118,12 +118,27 @@ impl Engine {
             .and_then(Value::as_u64)
             .unwrap_or(6000)
             .clamp(1000, 20000) as usize;
+        let selected_id = frontier["selected"]["node_id"].as_str().map(str::to_string);
+        let mut resume_frontier = frontier["frontier"].clone();
+        let selected_was_in_page = resume_frontier["items"].as_array_mut().map(|items| {
+            let before = items.len();
+            items.retain(|item| item["node_id"].as_str() != selected_id.as_deref());
+            before != items.len()
+        }).unwrap_or(false);
+        if selected_was_in_page {
+            let returned = resume_frontier["items"].as_array().map(Vec::len).unwrap_or(0);
+            resume_frontier["returned"] = json!(returned);
+            if let Some(total) = resume_frontier["total"].as_u64() {
+                resume_frontier["total"] = json!(total.saturating_sub(1));
+            }
+        }
+        resume_frontier["scope"] = json!("unselected alternatives; selected work is represented once in selected");
         let mut response = json!({
             "schema":"narada.epistemic.issue-tree.resume.v1",
             "status":"ok",
             "tree":tree,
             "selected":frontier["selected"],
-            "frontier":frontier["frontier"],
+            "frontier":resume_frontier,
             "continuation":frontier["continuation"],
             "result_ref":frontier["result_ref"],
             "ledger_head":frontier["ledger_head"],
@@ -146,7 +161,8 @@ impl Engine {
             let returned = items.len();
             response["frontier"]["returned"] = json!(returned);
             response["frontier"]["complete"] = json!(false);
-            response["continuation"] = json!({"tool":"epistemic_graph_issue_tree_frontier_read","arguments":{"result_ref":response["result_ref"],"offset":returned,"limit":args.get("max_frontier_items").and_then(Value::as_u64).unwrap_or(20)}});
+            let capture_offset = returned + usize::from(selected_was_in_page);
+            response["continuation"] = json!({"tool":"epistemic_graph_issue_tree_frontier_read","arguments":{"result_ref":response["result_ref"],"offset":capture_offset,"limit":args.get("max_frontier_items").and_then(Value::as_u64).unwrap_or(20)}});
         }
         response["inline_budget_chars"] = json!(inline_budget);
         response["inline_chars"] = json!(serde_json::to_string(&response)

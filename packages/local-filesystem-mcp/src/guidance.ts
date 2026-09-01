@@ -78,7 +78,7 @@ export function buildGuidanceResult(args: GuidanceRecord = {}): GuidanceRecord {
       compatibility: 'fs_grep_search remains available for regex-oriented legacy calls, but fs_search is the preferred agent-facing contract.',
     },
   } : {};
-  return compactGuidanceResult({
+  return compactFilesystemGuidance({
     schema: 'narada.mcp_surface.guidance.v0',
     status: 'ok',
     surface_id: SURFACE_ID,
@@ -149,6 +149,13 @@ export function buildGuidanceResult(args: GuidanceRecord = {}): GuidanceRecord {
       'fs_repository_inventory is a bounded filesystem view; use git-mcp for authoritative tracked and ignored state.'
     ]
   });
+}
+
+function compactFilesystemGuidance<T extends Record<string, any>>(record: T): T {
+  const pathResolution = record.path_resolution;
+  const compact = compactGuidanceResult(record);
+  (compact as Record<string, any>).path_resolution = pathResolution;
+  return compact;
 }
 
 export function guidanceToolDefinition(name: string = GUIDANCE_TOOL, description: string = 'Show model-facing operating guidance for ' + SURFACE_ID + ' MCP workflows.'): GuidanceToolDefinition {

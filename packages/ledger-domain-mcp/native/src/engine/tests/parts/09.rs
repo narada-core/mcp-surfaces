@@ -145,6 +145,8 @@
             .as_str()
             .expect("selected id")
             .to_string();
+        assert_eq!(resumed["frontier"]["scope"], "unselected alternatives; selected work is represented once in selected");
+        assert!(!resumed["frontier"]["items"].as_array().unwrap().iter().any(|item| item["node_id"] == selected_id));
         let transition = engine.issue_tree_transition(&root, &Map::from_iter([
             ("actor".into(), json!("tester")),
             ("authority_basis".into(), json!({"kind":"test"})),

@@ -562,6 +562,11 @@ fn live_query_inbox_thread_cursor_and_error_envelopes() {
                     "budget_escalation":{"role":"maintenance","evidence":"caller-authored"}
                 }),
             ),
+            tool(
+                4,
+                "epistemic_graph_issue_tree_resume",
+                json!({"tree_id":"tree:validation","max_inline_chars":30000}),
+            ),
         ],
     );
     assert!(
@@ -591,6 +596,19 @@ fn live_query_inbox_thread_cursor_and_error_envelopes() {
     assert_eq!(
         response(&budget_controls, 3)["error"]["data"]["code"],
         "query_budget_escalation_unavailable"
+    );
+    let bound_error = &response(&budget_controls, 4)["error"]["data"];
+    assert_eq!(bound_error["code"], "input_schema_validation_failed");
+    assert_eq!(
+        bound_error["details"]["path"],
+        "/arguments/max_inline_chars"
+    );
+    assert_eq!(bound_error["details"]["constraint"], "maximum");
+    assert_eq!(bound_error["details"]["expected"], 20000);
+    assert_eq!(bound_error["details"]["received"], 30000);
+    assert_eq!(
+        bound_error["details"]["corrected_call_template"]["arguments"]["max_inline_chars"],
+        20000
     );
 
     let page_two = run(

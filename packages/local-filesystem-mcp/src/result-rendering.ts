@@ -131,6 +131,7 @@ function renderSearchResult(toolName: any, record: any, renderContext: Record<st
     ...mode,
     `count: ${record.count ?? 'unknown'}`,
     `count_exact: ${record.count_exact ?? true}`,
+    record.count_semantics !== undefined ? `count_semantics: ${record.count_semantics}` : null,
     record.scanned_unit === 'matched_entries' && record.scanned !== undefined ? `matched_entries_scanned: ${record.scanned}` : record.scanned !== undefined ? `scanned: ${record.scanned}` : null,
     record.scanned_unit !== undefined ? `scanned_unit: ${record.scanned_unit}` : null,
     `returned: ${record.returned ?? matches.length}`,
@@ -147,6 +148,8 @@ function renderSearchResult(toolName: any, record: any, renderContext: Record<st
     record.match_objects_authoritative !== undefined ? `match_objects_authoritative: ${record.match_objects_authoritative}` : null,
     `has_more: ${record.has_more ?? false}`,
     `next_offset: ${record.next_offset ?? 'null'}`,
+    record.continuation?.tool_name ? `next_call: ${record.continuation.tool_name}(${JSON.stringify(record.continuation.arguments)})` : null,
+    record.continuation?.offset_semantics ? `offset_semantics: ${record.continuation.offset_semantics}` : null,
     'matches:',
     ...matches,
   ]);
