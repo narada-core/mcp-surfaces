@@ -278,7 +278,6 @@ function controlPlaneProjectionText(structured: any): string | undefined {
       if (typeof structured[key] === "string") projection[key] = structured[key];
     }
     if (structured.input_contract !== undefined) projection.input_contract = structured.input_contract;
-    if (structured.tool_contract !== undefined) projection.tool_contract = structured.tool_contract;
     return JSON.stringify(projection);
   }
   if (structured?.schema === "narada.mcp_loader.site_tool_inventory_check.v1") {

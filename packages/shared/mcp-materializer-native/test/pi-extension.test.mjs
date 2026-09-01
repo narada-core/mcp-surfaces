@@ -179,8 +179,9 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 
     const lease = await registered[0].execute('call-schema-lease', { value: 'schema_lease' }, new AbortController().signal);
     const leaseModel = JSON.parse(lease.content[0].text);
-    assert.deepEqual(Object.keys(leaseModel).sort(), ['connection_id', 'input_contract', 'schema', 'schema_lease', 'status', 'surface_id', 'tool_contract', 'tool_name'].sort());
+    assert.deepEqual(Object.keys(leaseModel).sort(), ['connection_id', 'input_contract', 'schema', 'schema_lease', 'status', 'surface_id', 'tool_name'].sort());
     assert.equal(leaseModel.binding_resolution, undefined);
+    assert.equal(leaseModel.tool_contract, undefined);
     assert.notEqual(registered[0].renderResult(lease, { expanded: true }).render(160).join('\n'), lease.content[0].text);
 
     const inventory = await registered[0].execute('call-inventory', { value: 'inventory' }, new AbortController().signal);
