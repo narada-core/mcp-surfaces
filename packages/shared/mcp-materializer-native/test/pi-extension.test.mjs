@@ -86,6 +86,10 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       loader_result: { schema: "narada.mcp_loader.tool_result.v1", connection_id: "c1", surface_id: "s1", result_summary: { schema: "child.result.v1", status: "ok" }, result: { schema: "child.result.v1", answer: "only unwrapped child result" } },
       schema_lease_compact: { schema: "narada.mcp_loader.schema_lease.v1", status: "issued", connection_id: "c-compact", logical_connection_id: "logical-compact", generation_id: "generation-compact", surface_id: "surface-compact", tool_name: "surface_read", tool_schema_digest: "tool-digest", tool_contract_digest: "contract-digest", input_schema_digest: "input-digest", output_schema_digest: "output-digest", description: "Read the surface", annotations: { readOnlyHint: true }, argument_skeleton: { site_root: "x" }, minimal_valid_arguments: { site_root: "x" }, minimal_valid_arguments_status: "validated", verbose_contract_call: { tool_name: "mcp_loader_inspect_tool" }, schema_lease: "lease-compact", lease_scope: "loader_process_child_generation", transferable: false, authorization_resolution: "lease_renewed", input_contract: { type: "object", required: ["site_root"], properties: { site_root: { type: "string" } } } },
       schema_lease_verbose: { schema: "narada.mcp_loader.schema_lease.v1", status: "issued", connection_id: "c-verbose", logical_connection_id: "logical-verbose", generation_id: "generation-verbose", surface_id: "surface-verbose", tool_name: "surface_write", tool_schema_digest: "verbose-tool-digest", tool_contract_digest: "verbose-contract-digest", input_schema_digest: "verbose-input-digest", output_schema_digest: "verbose-output-digest", description: "Write the surface", annotations: { readOnlyHint: false }, argument_skeleton: { value: "x" }, minimal_valid_arguments: { value: "x" }, minimal_valid_arguments_status: "validated", verbose_contract_call: { tool_name: "mcp_loader_inspect_tool" }, schema_lease: "lease-verbose", lease_scope: "loader_process_child_generation", transferable: false, authorization_resolution: "lease_renewed", tool_contract: { name: "surface_write", description: "Write the surface", inputSchema: { type: "object", required: ["value"], properties: { value: { type: "string" } } }, annotations: { readOnlyHint: false } } },
+      git_status: { schema: "narada.git.status.v1", status: "ok", working_directory: "C:/repo", repository_root: "C:/repo", branch: "main", upstream: "origin/main", ahead: 0, behind: 0, clean: true, status_entries: [{ x: " ", y: "M", path: "owned.ts", original_path: null, conflict: false }], staged: [], unstaged: ["owned.ts"], untracked: [], conflicts: [], summary: { staged_count: 0, unstaged_count: 1, untracked_count: 0, conflict_count: 0, matching_path_count: 1, clean: true }, remotes: [{ name: "origin", fetch_url: "https://secret.example/repo.git" }], push_target: { status: "resolved", remote: "origin", branch: "main", source: "upstream" }, push_remediation: null, query: { noisy: true } },
+      git_add: { schema: "narada.git.add.v1", status: "ok", operation: "add", working_directory: "C:/repo", paths: ["owned.ts"], work_scope_ref: "scope-1", output: "verbose output", summary: "staged explicit paths", post_status: { schema: "narada.git.status.v1", status: "ok", repository_root: "C:/repo", branch: "main", upstream: "origin/main", ahead: 0, behind: 0, clean: true, staged: ["owned.ts"], unstaged: [], untracked: [], conflicts: [], summary: { staged_count: 1, unstaged_count: 0, untracked_count: 0, conflict_count: 0, clean: true }, remotes: [{ fetch_url: "https://secret.example" }] } },
+      git_commit: { schema: "narada.git.commit.v1", status: "ok", working_directory: "C:/repo", commit: "abc123", commit_ref: "git_commit:abc123", committed_entries: [{ path: "owned.ts", secret: "omit" }], committed_files: ["owned.ts"], committed_file_count: 1, work_scope_ref: "scope-1", output: "[main abc123] message", summary: "[main abc123] message", post_status: { schema: "narada.git.status.v1", status: "ok", branch: "main", upstream: "origin/main", ahead: 1, behind: 0, clean: true, staged: [], unstaged: [], untracked: [], conflicts: [], summary: { staged_count: 0, unstaged_count: 0, untracked_count: 0, conflict_count: 0, clean: true } } },
+      git_push: { schema: "narada.git.push.v1", status: "ok", working_directory: "C:/repo", remote: "origin", branch: "main", commit: "abc123", commit_ref: "git_commit:abc123", work_scope_ref: "scope-1", output: "To origin", summary: "To origin", post_status: { schema: "narada.git.status.v1", noisy: true } },
       surface_attached: { schema: "narada.mcp_loader.surface_attached.v1", status: "attached", connection_id: "c-attach", logical_connection_id: "logical-attach", generation_id: "generation-attach", site_root: "C:/repo", surface_id: "git", binding_id: "repo-git", admission_envelope_id: "ambient", binding_digest: "binding-digest", authority_epoch: 4, runtime_kind: "native", runtime_requirements: ["none"], runtime_lifecycle: { schema: "narada.mcp_loader.runtime_lifecycle.v1", managed_by: "mcp-loader", restartable: true, restartability_status: "available", restart_scope: "attached_child_process", session_restart_required: false, guidance: "long lifecycle guidance", actions: { inspect: { tool_name: "mcp_loader_surface_status" } }, loader_restart_action: { tool_name: "restart_mcp_loader_process" } }, runtime_freshness: { schema: "narada.mcp_loader.runtime_freshness.v1", status: "current", reload_required: false, process_started_at: "2026-09-01T00:00:00Z", runtime_entrypoint: { path: "C:/long/path.exe" }, source_files: [{ name: "source" }], reasons: [] }, runtime_command: "C:/long/runtime.exe", entrypoint: "C:/long/entrypoint.exe", args: ["--secret-looking-arg"], child_invocation_kind: "native_applet", server_info: { name: "git-mcp", version: "0.1.0", extra: "omit" }, tool_count: 24, tool_discovery: { tool_name: "mcp_loader_list_tools", arguments: { connection_id: "c-attach" }, extra: "omit" }, tool_inspection: { required_arguments: ["connection_id", "tool_name"], extra: "omit" }, descriptor_digest: "descriptor-digest", tool_contract_digest: "contract-digest", declared_tool_contract_digest: "declared-digest", lifecycle: { mode: "replayable", reason: "long reason" }, ownership: { owner: "mcp-loader", owner_pid: 12345 } },
       site_inventory: (() => {
         const observed = Array.from({ length: 600 }, (_, index) => "surface_tool_" + index);
@@ -205,6 +209,36 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     assert.equal(leaseModel.binding_resolution, undefined);
     assert.equal(leaseModel.tool_contract, undefined);
     assert.notEqual(registered[0].renderResult(lease, { expanded: true }).render(160).join('\n'), lease.content[0].text);
+
+    const gitStatus = await registered[0].execute('call-git-status', { value: 'git_status' }, new AbortController().signal);
+    const gitStatusModel = JSON.parse(gitStatus.content[0].text);
+    assert.deepEqual(Object.keys(gitStatusModel).sort(), ['ahead', 'behind', 'branch', 'clean', 'conflicts', 'repository_root', 'schema', 'staged', 'status', 'summary', 'untracked', 'unstaged', 'upstream'].sort());
+    assert.equal(gitStatusModel.working_directory, undefined);
+    assert.equal(gitStatusModel.status_entries, undefined);
+    assert.equal(gitStatusModel.remotes, undefined);
+    assert.equal(gitStatusModel.push_target, undefined);
+    assert.ok(gitStatus.content[0].text.length < 700);
+
+    const gitAdd = await registered[0].execute('call-git-add', { value: 'git_add' }, new AbortController().signal);
+    const gitAddModel = JSON.parse(gitAdd.content[0].text);
+    assert.deepEqual(Object.keys(gitAddModel).sort(), ['operation', 'paths', 'post_status', 'schema', 'status', 'summary', 'work_scope_ref'].sort());
+    assert.equal(gitAddModel.output, undefined);
+    assert.equal(gitAddModel.post_status.remotes, undefined);
+    assert.ok(gitAdd.content[0].text.length < 900);
+
+    const gitCommit = await registered[0].execute('call-git-commit', { value: 'git_commit' }, new AbortController().signal);
+    const gitCommitModel = JSON.parse(gitCommit.content[0].text);
+    assert.deepEqual(Object.keys(gitCommitModel).sort(), ['commit', 'committed_file_count', 'committed_files', 'post_status', 'schema', 'status', 'summary', 'work_scope_ref'].sort());
+    assert.equal(gitCommitModel.committed_entries, undefined);
+    assert.equal(gitCommitModel.output, undefined);
+    assert.ok(gitCommit.content[0].text.length < 700);
+
+    const gitPush = await registered[0].execute('call-git-push', { value: 'git_push' }, new AbortController().signal);
+    const gitPushModel = JSON.parse(gitPush.content[0].text);
+    assert.deepEqual(Object.keys(gitPushModel).sort(), ['branch', 'commit', 'remote', 'schema', 'status', 'summary', 'work_scope_ref'].sort());
+    assert.equal(gitPushModel.output, undefined);
+    assert.equal(gitPushModel.post_status, undefined);
+    assert.ok(gitPush.content[0].text.length < 300);
 
     const attached = await registered[0].execute('call-surface-attached', { value: 'surface_attached' }, new AbortController().signal);
     const attachedModel = JSON.parse(attached.content[0].text);

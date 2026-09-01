@@ -291,8 +291,114 @@ function projectSurfaceAttachedForModel(value: any): any | undefined {
   return projection;
 }
 
+function compactGitSummary(value: any): any {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object") return undefined;
+  const summary: Record<string, any> = {};
+  for (const field of ["staged_count", "unstaged_count", "untracked_count", "conflict_count", "matching_path_count", "clean"]) {
+    if (Object.prototype.hasOwnProperty.call(value, field)) summary[field] = value[field];
+  }
+  return Object.keys(summary).length > 0 ? summary : undefined;
+}
+
+function copyGitDiagnostic(value: any, projection: Record<string, any>): void {
+  for (const field of ["error", "message", "reason", "remediation"]) {
+    if (typeof value?.[field] === "string") projection[field] = value[field];
+  }
+  if (value?.push_remediation && typeof value.push_remediation === "object") {
+    const remediation: Record<string, any> = {};
+    for (const field of ["status", "reason", "action", "message"]) {
+      if (typeof value.push_remediation[field] === "string") remediation[field] = value.push_remediation[field];
+    }
+    if (Object.keys(remediation).length > 0) projection.push_remediation = remediation;
+  }
+}
+
+function compactGitStatusProjection(value: any): any {
+  const projection: Record<string, any> = { schema: value.schema, status: value.status };
+  for (const field of ["repository_root", "branch", "upstream", "ahead", "behind", "clean"]) {
+    if (Object.prototype.hasOwnProperty.call(value ?? {}, field)) projection[field] = value[field];
+  }
+  for (const field of ["staged", "unstaged", "untracked", "conflicts"]) {
+    if (Array.isArray(value?.[field])) projection[field] = value[field];
+  }
+  const summary = compactGitSummary(value?.summary);
+  if (summary !== undefined) projection.summary = summary;
+  if (value?.push_target && typeof value.push_target === "object" && value.push_target.status !== "resolved") {
+    const target: Record<string, any> = {};
+    for (const field of ["status", "remote", "branch", "source"]) {
+      if (typeof value.push_target[field] === "string") target[field] = value.push_target[field];
+    }
+    if (Object.keys(target).length > 0) projection.push_target = target;
+  }
+  copyGitDiagnostic(value, projection);
+  return projection;
+}
+
+function projectGitResultForModel(value: any): any | undefined {
+  const schema = value?.schema;
+  if (schema === "narada.git.status.v1") return compactGitStatusProjection(value);
+  if (schema === "narada.git.add.v1" || schema === "narada.git.unstage.v1") {
+    const projection: Record<string, any> = { schema, status: value.status };
+    for (const field of ["operation", "paths", "work_scope_ref"]) {
+      if (Array.isArray(value?.[field]) || typeof value?.[field] === "string") projection[field] = value[field];
+    }
+    const summary = compactGitSummary(value?.summary);
+    if (summary !== undefined) projection.summary = summary;
+    if (value?.post_status && typeof value.post_status === "object") projection.post_status = compactGitStatusProjection(value.post_status);
+    copyGitDiagnostic(value, projection);
+    return projection;
+  }
+  if (schema === "narada.git.commit.v1") {
+    const projection: Record<string, any> = { schema, status: value.status };
+    for (const field of ["commit", "work_scope_ref"]) {
+      if (typeof value?.[field] === "string") projection[field] = value[field];
+    }
+    for (const field of ["committed_files"]) {
+      if (Array.isArray(value?.[field])) projection[field] = value[field];
+    }
+    if (typeof value?.committed_file_count === "number") projection.committed_file_count = value.committed_file_count;
+    const summary = compactGitSummary(value?.summary);
+    if (summary !== undefined) projection.summary = summary;
+    if (value?.post_status && typeof value.post_status === "object") projection.post_status = compactGitStatusProjection(value.post_status);
+    copyGitDiagnostic(value, projection);
+    return projection;
+  }
+  if (schema === "narada.git.push.v1") {
+    const projection: Record<string, any> = { schema, status: value.status };
+    for (const field of ["remote", "branch", "commit", "work_scope_ref"]) {
+      if (typeof value?.[field] === "string") projection[field] = value[field];
+    }
+    const summary = compactGitSummary(value?.summary);
+    if (summary !== undefined) projection.summary = summary;
+    copyGitDiagnostic(value, projection);
+    return projection;
+  }
+  if (schema === "narada.git.work_scope.v1") {
+    const projection: Record<string, any> = { schema, status: value.status };
+    for (const field of ["work_scope_ref", "owner_id", "authority", "expires_at"]) {
+      if (typeof value?.[field] === "string") projection[field] = value[field];
+    }
+    if (Array.isArray(value?.allowed_paths)) projection.allowed_paths = value.allowed_paths;
+    if (typeof value?.mutation_started === "boolean") projection.mutation_started = value.mutation_started;
+    copyGitDiagnostic(value, projection);
+    return projection;
+  }
+  if (schema === "narada.git.work_scope_end.v1") {
+    const projection: Record<string, any> = { schema, status: value.status };
+    for (const field of ["work_scope_ref", "owner_id"]) {
+      if (typeof value?.[field] === "string") projection[field] = value[field];
+    }
+    if (Array.isArray(value?.released_paths)) projection.released_paths = value.released_paths;
+    if (typeof value?.mutation_started === "boolean") projection.mutation_started = value.mutation_started;
+    copyGitDiagnostic(value, projection);
+    return projection;
+  }
+  return undefined;
+}
+
 function loaderControlPlaneProjectionForModel(value: any): any | undefined {
-  return projectSurfaceAttachedForModel(value) ?? projectSchemaLeaseForModel(value) ?? projectSiteToolInventoryForModel(value);
+  return projectSurfaceAttachedForModel(value) ?? projectGitResultForModel(value) ?? projectSchemaLeaseForModel(value) ?? projectSiteToolInventoryForModel(value);
 }
 
 function bodyOnlyProjectionText(structured: any): string | undefined {
