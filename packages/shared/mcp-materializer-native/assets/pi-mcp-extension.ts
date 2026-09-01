@@ -485,6 +485,8 @@ export default function naradaMcpCarrier(pi: any): void {
     };
   });
 
+  const MARICI_INBOX_PAGE_SIZE = 100;
+  const MARICI_INBOX_MAX_PAGES = 41;
   const pollMariciInbox = async (request: NaradaMariciInboxPollRequest): Promise<void> => {
     try {
       const client = clients.find((candidate) => candidate.config.name === "mcp-loader");
@@ -504,7 +506,7 @@ export default function naradaMcpCarrier(pi: any): void {
       if (typeof schemaLease !== "string" || !schemaLease) throw new Error("epistemic graph query lease unavailable");
       const sequences: number[] = [];
       let count = 0;
-      for (let page = 0; page < 16; page += 1) {
+      for (let page = 0; page < MARICI_INBOX_MAX_PAGES; page += 1) {
         const called = await client.request("tools/call", {
           name: "mcp_loader_call_binding_tool",
           arguments: {
@@ -518,8 +520,8 @@ export default function naradaMcpCarrier(pi: any): void {
               after_sequence: request.sinceSequence,
               include_body: false,
               compact: true,
-              limit: 256,
-              offset: page * 256,
+              limit: MARICI_INBOX_PAGE_SIZE,
+              offset: page * MARICI_INBOX_PAGE_SIZE,
             },
           },
         }, 15_000);
@@ -534,8 +536,8 @@ export default function naradaMcpCarrier(pi: any): void {
             ? Number(item.event_id.match(/^ev-(\d+)-/)?.[1] ?? NaN)
             : NaN)
           .filter((value: number) => Number.isSafeInteger(value) && value >= 0));
-        if (query.items.length < 256) break;
-        if (page === 15) throw new Error("Marici inbox count exceeded the 4096-message polling bound");
+        if (query.items.length < MARICI_INBOX_PAGE_SIZE) break;
+        if (page + 1 >= MARICI_INBOX_MAX_PAGES) throw new Error("Marici inbox count exceeded the 4096-message polling bound");
       }
       const newCursor = sequences.length > 0 ? Math.max(request.sinceSequence, ...sequences) : request.sinceSequence;
       request.resolve({

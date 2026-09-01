@@ -252,6 +252,13 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   }
 });
 
+test('generated Pi extension respects the epistemic inbox query limit', async () => {
+  const source = await readFile(templatePath, 'utf8');
+  assert.match(source, /MARICI_INBOX_PAGE_SIZE = 100/);
+  assert.match(source, /limit: MARICI_INBOX_PAGE_SIZE/);
+  assert.match(source, /MARICI_INBOX_MAX_PAGES = 41/);
+});
+
 test('generated Pi extension qualifies flat-namespace collisions deterministically', async () => {
   const source = await readFile(templatePath, 'utf8');
   assert.match(source, /serverPrefix.*replace/);
