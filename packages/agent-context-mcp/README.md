@@ -159,6 +159,16 @@ persisted Orientation Manifest generation.
 
 Use `agent_context_continuation_read` to verify the selected reference, artifact size, artifact SHA-256, and the embedded canonical continuation content hash. `agent_context_hydrate_current` includes the same result as `portable_continuation`; stale projections are reported with `status: stale` while live checkpoint hydration remains available.
 
+## Identity state
+
+Session starts, checkpoints, orientation readbacks, and session listings carry
+`identity_state` with three independent parts: `claimed_identity`,
+`authentication`, and operation-local `authority`. A caller may retain a
+claimed identity when authentication is missing; claims are never authority
+and cannot authorize lifecycle, graph, or ledger mutations. Owner-issued
+admission evidence may authenticate a claim, while each operation still needs
+its own authority decision.
+
 ## Agent guidance
 
 Occupants consume the exact admitted generation through the one-tool ceremony;

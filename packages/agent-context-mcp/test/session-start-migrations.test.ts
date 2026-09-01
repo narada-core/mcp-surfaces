@@ -86,8 +86,12 @@ function columnNames(dbPath: any, table: any) {
   assert.deepEqual(started.compatibility_facade.persisted_records, [
     'orientation_manifest_generations',
     'orientation_brief_generations',
+    'identity_state_records',
     'agent_start_events',
   ]);
+  assert.equal(started.identity_state.claimed_identity.identity, 'fixture.resident');
+  assert.equal(started.identity_state.authentication.status, 'authenticated');
+  assert.equal(started.identity_state.authority.granted, false);
 
   const dbPath = join(siteRoot, '.ai', 'state', 'agent-context.sqlite');
   const tables = tableNames(dbPath);
@@ -101,6 +105,7 @@ function columnNames(dbPath: any, table: any) {
     'agent_events',
     'codex_session_admissions',
     'orientation_manifest_generations',
+    'identity_state_records',
   ]) {
     assert.equal(tables.has(table), true, `missing table: ${table}`);
   }
@@ -112,7 +117,7 @@ function columnNames(dbPath: any, table: any) {
   }
 
   const db = new DatabaseSync(dbPath, { readOnly: true });
-  const eventRow = db.prepare('SELECT event_id, identity_id, status FROM agent_start_events WHERE event_id = ?')
+  const eventRow = db.prepare('SELECT event_id, identity_id, status, claimed_identity_json, authentication_json, authority_json FROM agent_start_events WHERE event_id = ?')
     .get(started.agent_start_event);
   const proposalRow = db.prepare('SELECT proposal_id FROM proposal_records WHERE event_id = ?')
     .get(started.agent_start_event);
@@ -125,6 +130,9 @@ function columnNames(dbPath: any, table: any) {
   assert.ok(manifestRow);
   assert.equal(eventRow.identity_id, 'fixture.resident');
   assert.equal(eventRow.status, 'materialized');
+  assert.equal(JSON.parse(String(eventRow.claimed_identity_json)).identity, 'fixture.resident');
+  assert.equal(JSON.parse(String(eventRow.authentication_json)).status, 'authenticated');
+  assert.equal(JSON.parse(String(eventRow.authority_json)).granted, false);
   assert.equal(manifestRow.admission_receipt_ref, started.admission_receipt_ref);
   assert.equal('proposal_id' in started, false);
 

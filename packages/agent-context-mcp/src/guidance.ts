@@ -1,3 +1,5 @@
+import { compactGuidanceResult } from '@narada-core/mcp-fabric-contracts';
+
 export type GuidanceRecord = Record<string, unknown>;
 export type GuidanceToolDefinition = GuidanceRecord & { name: string; description: string; inputSchema: GuidanceRecord; annotations: GuidanceRecord; outputSchema: GuidanceRecord };
 
@@ -8,7 +10,7 @@ const PURPOSE = "Enforced Carrier-entry orientation through one exact inline bri
 export function buildGuidanceResult(args: GuidanceRecord = {}): GuidanceRecord {
   const workflow = typeof args.workflow === 'string' && args.workflow.trim() ? args.workflow.trim() : null;
   const tool = typeof args.tool === 'string' && args.tool.trim() ? args.tool.trim() : null;
-  return {
+  return compactGuidanceResult({
     schema: 'narada.mcp_surface.guidance.v0',
     status: 'ok',
     surface_id: SURFACE_ID,
@@ -74,7 +76,7 @@ export function buildGuidanceResult(args: GuidanceRecord = {}): GuidanceRecord {
       'Carrier Session Authority owns admission; the Orientation Manifest package owns shared contracts and pure compilation.',
       'This surface owns only its bounded adapter, persistence/readback, diagnostics, and checkpoint operations.'
     ]
-  };
+  });
 }
 
 export function guidanceToolDefinition(name: string = GUIDANCE_TOOL, description: string = 'Show model-facing operating guidance for ' + SURFACE_ID + ' MCP workflows.'): GuidanceToolDefinition {

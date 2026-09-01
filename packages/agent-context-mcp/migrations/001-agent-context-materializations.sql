@@ -23,8 +23,33 @@ CREATE TABLE IF NOT EXISTS agent_start_events (
   created_at TEXT NOT NULL,
   status TEXT NOT NULL,
   resume_command TEXT,
-  bootstrap_artifact_uri TEXT
+  bootstrap_artifact_uri TEXT,
+  claimed_identity_json TEXT,
+  authentication_json TEXT,
+  authority_json TEXT
 );
+
+CREATE TABLE IF NOT EXISTS identity_state_records (
+  record_id TEXT PRIMARY KEY,
+  event_id TEXT,
+  session_id TEXT,
+  claimed_identity_json TEXT NOT NULL,
+  authentication_json TEXT NOT NULL,
+  authority_json TEXT NOT NULL,
+  recorded_at TEXT NOT NULL
+);
+
+CREATE TRIGGER IF NOT EXISTS identity_state_records_no_update
+BEFORE UPDATE ON identity_state_records
+BEGIN
+  SELECT RAISE(ABORT, 'identity_state_records_append_only_no_update');
+END;
+
+CREATE TRIGGER IF NOT EXISTS identity_state_records_no_delete
+BEFORE DELETE ON identity_state_records
+BEGIN
+  SELECT RAISE(ABORT, 'identity_state_records_append_only_no_delete');
+END;
 
 CREATE TABLE IF NOT EXISTS execution_context_materializations (
   materialization_id TEXT PRIMARY KEY,

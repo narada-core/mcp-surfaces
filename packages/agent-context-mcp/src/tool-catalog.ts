@@ -239,6 +239,24 @@ export const TOOLS = [
       type: 'object',
       properties: {
         hint: { type: 'string' },
+        claimed_identity: {
+          anyOf: [
+            { type: 'string', minLength: 1 },
+            {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                identity: { type: 'string', minLength: 1 },
+                value: { type: 'string', minLength: 1 },
+                source: { type: 'string', minLength: 1 },
+                evidence_refs: { type: 'array', items: { type: 'string', minLength: 1 } },
+                asserted_at: { type: 'string' },
+              },
+              required: ['identity'],
+            },
+          ],
+          description: 'A caller/runtime identity claim. This is recorded independently and never grants authority.',
+        },
         admission_receipt: CARRIER_SESSION_ADMISSION_RECEIPT_JSON_SCHEMA,
       },
     },
@@ -250,6 +268,10 @@ export const TOOLS = [
       type: 'object',
       properties: {
         identity: { type: 'string' },
+        claimed_identity: {
+          anyOf: [{ type: 'string', minLength: 1 }, { type: 'object', additionalProperties: true }],
+          description: 'Identity claim recorded separately from authentication and authority.',
+        },
         runtime: { type: 'string' },
         cwd: { type: 'string' },
         dry_run: { type: 'boolean' },
@@ -267,6 +289,10 @@ export const TOOLS = [
       type: 'object',
       properties: {
         agent_id: { type: 'string' },
+        claimed_identity: {
+          anyOf: [{ type: 'string', minLength: 1 }, { type: 'object', additionalProperties: true }],
+          description: 'Identity claim recorded in the checkpoint; it does not authenticate or authorize the operation.',
+        },
         session_id: { type: 'string' },
         active_task: { type: 'object' },
         files_touched: { type: 'array', items: { type: 'string' } },

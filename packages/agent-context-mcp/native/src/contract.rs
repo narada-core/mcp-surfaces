@@ -47,9 +47,18 @@ pub fn validate_call(tools: &[Value], params: &Value) -> Result<(String, Value),
         .iter()
         .find(|tool| tool.get("name").and_then(Value::as_str) == Some(&name))
         .ok_or_else(|| format!("agent_context_native_tool_not_exposed:{name}"))?;
+    let mut arguments_for_validation = arguments.clone();
+    if name == "agent_context_hydrate_current" || name == "agent_context_whoami" {
+        if let Some(object) = arguments_for_validation.as_object_mut() {
+            // Compatibility-only identity/diagnostic switches are intentionally
+            // not part of the public schema, matching the TypeScript adapter.
+            object.remove("checkpoint_startup");
+            object.remove("claimed_identity");
+        }
+    }
     validate_schema(
         tool.get("inputSchema").unwrap_or(&Value::Null),
-        &arguments,
+        &arguments_for_validation,
         "arguments",
     )?;
     Ok((name, arguments))

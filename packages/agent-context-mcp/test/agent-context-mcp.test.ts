@@ -333,6 +333,13 @@ try {
     checkpointBody.continuation.content_hash,
     createHash('sha256').update(JSON.stringify(continuationForHash), 'utf8').digest('hex'),
   );
+  const checkpointDb = new DatabaseSync(join(siteRoot, '.ai', 'state', 'agent-context.sqlite'), { readOnly: true });
+  const identityRecord: any = checkpointDb.prepare('SELECT event_id, claimed_identity_json, authentication_json, authority_json FROM identity_state_records WHERE event_id = ?').get(checkpointBody.checkpoint_id);
+  checkpointDb.close();
+  assert.equal(identityRecord?.event_id, checkpointBody.checkpoint_id);
+  assert.equal(JSON.parse(identityRecord.claimed_identity_json).identity, agentId);
+  assert.equal(JSON.parse(identityRecord.authentication_json).status, 'missing');
+  assert.equal(JSON.parse(identityRecord.authority_json).granted, false);
   writeMessage({ jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'agent_context_checkpoint', arguments: { agent_id: 'narada-revolution.resident', continuation_ref: { ...continuationRef, sha256: 'B'.repeat(64) } } } });
   const invalidContinuationRef = await waitFor(7);
   assert.equal(invalidContinuationRef.error.code, -32000);

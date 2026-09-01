@@ -23,6 +23,7 @@ import {
   orientationRequiredReadPageEnd,
   renderExactContinuityReadMaterial,
 } from './orientation-read-material.js';
+import { assertClaimMatchesAuthenticatedIdentity, buildIdentityState } from './identity-state.js';
 export {
   ORIENTATION_REQUIRED_READ_MAX_TOTAL_PAGES,
   ORIENTATION_REQUIRED_READ_PAGE_BYTES,
@@ -401,7 +402,8 @@ export function listAgentStartSessions({
   `).get(params);
   const totalCount: any = Number(totalRow?.total_count ?? 0);
   const rows: any = db.prepare(`
-    SELECT event_id, identity_id, runtime, created_at, status, resume_command, bootstrap_artifact_uri
+    SELECT event_id, identity_id, runtime, created_at, status, resume_command, bootstrap_artifact_uri,
+           claimed_identity_json, authentication_json, authority_json
     FROM agent_start_events
     ${where}
     ORDER BY created_at DESC, event_id DESC
@@ -450,6 +452,9 @@ function normalizeIsoDateFilter(value: any, fieldName: any) {
 
 function sessionRowToProjection(row: any, asOf: any) {
   const startedAt: any = new Date(row.created_at);
+  const claimedIdentity: any = parseJsonValue(row.claimed_identity_json, null);
+  const authentication: any = parseJsonValue(row.authentication_json, { status: 'missing', authenticated_identity: null, evidence_refs: [] });
+  const authority: any = parseJsonValue(row.authority_json, { status: 'not_evaluated', operation: null, granted: false, evidence_refs: [] });
   const seconds: any = Number.isNaN(startedAt.getTime())
     ? null
     : Math.max(0, Math.floor((asOf.getTime() - startedAt.getTime()) / 1000));
@@ -462,6 +467,11 @@ function sessionRowToProjection(row: any, asOf: any) {
     created_at: row.created_at,
     resume_command: row.resume_command ?? null,
     bootstrap_artifact_uri: row.bootstrap_artifact_uri ?? null,
+    claimed_identity: claimedIdentity,
+    authenticated_identity: authentication.authenticated_identity ?? null,
+    authentication,
+    authority,
+    identity_state: { schema: 'narada.agent.identity_state.v1', claimed_identity: claimedIdentity ?? { identity: null, status: 'unclaimed', source: null, asserted_at: null, evidence_refs: [], authority_granted: false }, authentication, authority },
     duration_estimate: {
       seconds,
       basis: 'elapsed_since_start_no_end_event',
@@ -762,6 +772,9 @@ export function ensureAgentStartEventCompatibility(db: any) {
   addColumn('admission_receipt_ref', 'TEXT');
   addColumn('authority_epoch', 'INTEGER');
   addColumn('orientation_manifest_id', 'TEXT');
+  addColumn('claimed_identity_json', 'TEXT');
+  addColumn('authentication_json', 'TEXT');
+  addColumn('authority_json', 'TEXT');
 
   if (columns.has('identity')) {
     db.prepare("UPDATE agent_start_events SET identity_id = identity WHERE identity_id IS NULL AND identity IS NOT NULL").run();
@@ -778,6 +791,28 @@ export function ensureAgentStartEventCompatibility(db: any) {
   db.prepare("UPDATE agent_start_events SET status = 'materialized' WHERE status IS NULL").run();
 
   db.exec(`
+    CREATE TABLE IF NOT EXISTS identity_state_records (
+      record_id TEXT PRIMARY KEY,
+      event_id TEXT,
+      session_id TEXT,
+      claimed_identity_json TEXT NOT NULL,
+      authentication_json TEXT NOT NULL,
+      authority_json TEXT NOT NULL,
+      recorded_at TEXT NOT NULL
+    );
+
+    CREATE TRIGGER IF NOT EXISTS identity_state_records_no_update
+    BEFORE UPDATE ON identity_state_records
+    BEGIN
+      SELECT RAISE(ABORT, 'identity_state_records_append_only_no_update');
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS identity_state_records_no_delete
+    BEFORE DELETE ON identity_state_records
+    BEGIN
+      SELECT RAISE(ABORT, 'identity_state_records_append_only_no_delete');
+    END;
+
     CREATE TABLE IF NOT EXISTS execution_context_materializations (
       materialization_id TEXT PRIMARY KEY,
       event_id TEXT NOT NULL,
@@ -1175,6 +1210,7 @@ export function materializeAgentSessionStart({
   exactCheckpointId = null,
   exactWork = null,
   exactWorkTaskNumber = null,
+  claimedIdentity = null,
 } : any= {}) {
   if (!siteRoot) {
     throw new Error('siteRoot is required');
@@ -1189,7 +1225,7 @@ export function materializeAgentSessionStart({
   );
 
   if (dryRun) {
-    return buildDryRunResult({ siteRoot, identity, runtime, dbPath, cwd, rosterCheck });
+    return buildDryRunResult({ siteRoot, identity, runtime, dbPath, cwd, rosterCheck, claimedIdentity });
   }
   if (exactCheckpoint !== null && exactCheckpointId !== null) {
     throw new Error('agent_context_exact_checkpoint_source_ambiguous');
@@ -1251,6 +1287,7 @@ export function materializeAgentSessionStart({
       rosterCheck,
       admissionReceipt: admitted,
       compilation,
+      claimedIdentity,
     });
   } finally {
     db.close();
@@ -1265,11 +1302,20 @@ export function writeSessionMaterialization(db: any, {
   rosterCheck,
   admissionReceipt,
   compilation,
+  claimedIdentity = null,
   withinTransaction = false,
 }: any) {
   assertManifestBoundToAdmission(compilation?.manifest, admissionReceipt);
   const manifest: any = compilation.manifest;
   const now: any = manifest.generated_at;
+  const identityState: any = buildIdentityState({
+    claimed_identity: claimedIdentity ?? { identity, source: 'carrier_session_admission_receipt' },
+    claimed_identity_source: claimedIdentity == null ? 'carrier_session_admission_receipt' : undefined,
+    authenticated_identity: admissionReceipt.agent_identity.local_agent_id,
+    authentication_evidence_refs: [admissionReceipt.receipt_id, admissionReceipt.authority_readback_ref],
+    now,
+  });
+  assertClaimMatchesAuthenticatedIdentity(identityState);
   const eventId: any = 'evt-' + now.replace(/[:.]/g, '-').replace('T', '_').slice(0, 19)
     + '_' + randomUUID().slice(0, 8);
   const eventStatus: any = manifest.delivery === 'deliverable'
@@ -1335,8 +1381,9 @@ export function writeSessionMaterialization(db: any, {
       INSERT INTO agent_start_events (
         event_id, identity_id, runtime, created_at, status, resume_command,
         bootstrap_artifact_uri, carrier_session_id, admission_receipt_ref,
-        authority_epoch, orientation_manifest_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        authority_epoch, orientation_manifest_id, claimed_identity_json,
+        authentication_json, authority_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       eventId,
       identity,
@@ -1349,6 +1396,23 @@ export function writeSessionMaterialization(db: any, {
       admissionReceipt.receipt_id,
       admissionReceipt.coordinate.authority_epoch,
       manifest.manifest_id,
+      JSON.stringify(identityState.claimed_identity),
+      JSON.stringify(identityState.authentication),
+      JSON.stringify(identityState.authority),
+    );
+    db.prepare(`
+      INSERT INTO identity_state_records (
+        record_id, event_id, session_id, claimed_identity_json,
+        authentication_json, authority_json, recorded_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      'identity_' + randomUUID().replace(/-/g, ''),
+      eventId,
+      admissionReceipt.coordinate.carrier_session_id,
+      JSON.stringify(identityState.claimed_identity),
+      JSON.stringify(identityState.authentication),
+      JSON.stringify(identityState.authority),
+      now,
     );
   };
 
@@ -1366,11 +1430,17 @@ export function writeSessionMaterialization(db: any, {
       persisted_records: [
         'orientation_manifest_generations',
         ...(brief ? ['orientation_brief_generations'] : []),
+        'identity_state_records',
         'agent_start_events',
       ],
     },
     agent_start_event: eventId,
     identity,
+    claimed_identity: identityState.claimed_identity,
+    authenticated_identity: identityState.authentication.authenticated_identity,
+    authentication: identityState.authentication,
+    authority: identityState.authority,
+    identity_state: identityState,
     role: rosterCheck.role,
     role_binding: rosterCheck.role_binding,
     runtime_request: runtime,
@@ -2355,12 +2425,22 @@ function runTransaction(db: any, fn: any) {
   }
 }
 
-function buildDryRunResult({ siteRoot, identity, runtime, dbPath, cwd, rosterCheck }: any) {
+function buildDryRunResult({ siteRoot, identity, runtime, dbPath, cwd, rosterCheck, claimedIdentity = null }: any) {
+  const identityState: any = buildIdentityState({
+    claimed_identity: claimedIdentity ?? identity,
+    claimed_identity_source: claimedIdentity == null ? 'caller_assertion' : undefined,
+    now: null,
+  });
   return {
     schema: 'narada.agent_context.session_start.v1',
     status: 'dry_run',
     authority_claimed: false,
     identity,
+    claimed_identity: identityState.claimed_identity,
+    authenticated_identity: identityState.authentication.authenticated_identity,
+    authentication: identityState.authentication,
+    authority: identityState.authority,
+    identity_state: identityState,
     role: rosterCheck.role,
     role_binding: rosterCheck.role_binding,
     runtime_request: runtime,

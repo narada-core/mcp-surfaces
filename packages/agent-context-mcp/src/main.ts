@@ -51,6 +51,11 @@ import {
   resolveAgentContextLawPath,
 } from './orientation-manifest.js';
 import { continuationProjectionState } from './continuation-projection.js';
+import {
+  assertClaimMatchesAuthenticatedIdentity,
+  buildIdentityState,
+  identityStateFromEnvironment,
+} from './identity-state.js';
 
 const SERVER_VERSION = '0.1.0';
 const PROTOCOL_VERSION = '2026-04-18';
@@ -820,6 +825,28 @@ function ensureCheckpointTables(db: any) {
 
     CREATE INDEX IF NOT EXISTS idx_checkpoint_history_agent
       ON agent_checkpoint_history(agent_id, archived_at DESC);
+
+    CREATE TABLE IF NOT EXISTS identity_state_records (
+      record_id TEXT PRIMARY KEY,
+      event_id TEXT,
+      session_id TEXT,
+      claimed_identity_json TEXT NOT NULL,
+      authentication_json TEXT NOT NULL,
+      authority_json TEXT NOT NULL,
+      recorded_at TEXT NOT NULL
+    );
+
+    CREATE TRIGGER IF NOT EXISTS identity_state_records_no_update
+    BEFORE UPDATE ON identity_state_records
+    BEGIN
+      SELECT RAISE(ABORT, 'identity_state_records_append_only_no_update');
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS identity_state_records_no_delete
+    BEFORE DELETE ON identity_state_records
+    BEGIN
+      SELECT RAISE(ABORT, 'identity_state_records_append_only_no_delete');
+    END;
   `);
 }
 
@@ -831,6 +858,7 @@ function doctor() {
       'agent_checkpoints',
       'agent_checkpoint_history',
       'orientation_manifest_generations',
+      'identity_state_records',
     ].map((table: any) => ({
       table,
       exists: !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table),
@@ -862,6 +890,7 @@ function startSession(toolArgs: any) {
     admissionReceipt: evidence.admission_receipt,
     activationReceipt: evidence.activation_receipt,
     generatedAt: toolArgs.generated_at ?? null,
+    claimedIdentity: toolArgs.claimed_identity ?? null,
   });
 }
 
@@ -925,6 +954,21 @@ function checkpoint(toolArgs: any) {
       JSON.stringify(arrayValue(toolArgs.open_questions)),
       toolArgs.git_head ?? null,
       JSON.stringify(payload)
+    );
+    const checkpointSessionId = toolArgs.session_id ?? process.env.NARADA_AGENT_START_EVENT_ID ?? null;
+    db.prepare(`
+      INSERT INTO identity_state_records (
+        record_id, event_id, session_id, claimed_identity_json,
+        authentication_json, authority_json, recorded_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      'identity_' + randomUUID().replace(/-/g, ''),
+      checkpointId,
+      checkpointSessionId,
+      JSON.stringify(payload.identity_state.claimed_identity),
+      JSON.stringify(payload.identity_state.authentication),
+      JSON.stringify(payload.identity_state.authority),
+      now,
     );
 
     return {
@@ -1177,9 +1221,22 @@ function resolveExactOrientationEvidence(toolArgs: any = {}) {
 function whoami(toolArgs: any = {}) {
   const evidence: any = resolveExactOrientationEvidence(toolArgs);
   if (!evidence.admission_receipt) {
+    const identityState: any = identityStateFromEnvironment({
+      claimedIdentity: toolArgs.claimed_identity,
+      now: new Date().toISOString(),
+    });
     return {
       schema: 'narada.agent_context.identity_resolution.v1',
-      status: 'blocked',
+      status: identityState.claimed_identity.status === 'claimed' ? 'claimed' : 'blocked',
+      identity: identityState.claimed_identity.identity,
+      canonical_agent_id: null,
+      confidence: identityState.claimed_identity.status === 'claimed' ? 'claimed_only' : null,
+      source: identityState.claimed_identity.source,
+      claimed_identity: identityState.claimed_identity,
+      authenticated_identity: identityState.authentication.authenticated_identity,
+      authentication: identityState.authentication,
+      authority: identityState.authority,
+      identity_state: identityState,
       reason: 'agent_context_exact_admission_receipt_required',
       rejected_fallbacks: ['latest_checkpoint', 'latest_start_event', 'identity_name_inference'],
     };
@@ -1193,6 +1250,21 @@ function whoami(toolArgs: any = {}) {
     carrierSessionId: process.env.NARADA_CARRIER_SESSION_ID ?? null,
     observedAt: new Date().toISOString(),
   });
+  const identityState: any = buildIdentityState({
+    claimed_identity: toolArgs.claimed_identity
+      ?? process.env.NARADA_CLAIMED_IDENTITY
+      ?? process.env.NARADA_AGENT_ID
+      ?? { identity, source: 'carrier_session_admission_receipt' },
+    claimed_identity_source: toolArgs.claimed_identity == null
+      && !process.env.NARADA_CLAIMED_IDENTITY
+      && !process.env.NARADA_AGENT_ID
+      ? 'carrier_session_admission_receipt'
+      : undefined,
+    authenticated_identity: admitted.agent_identity.local_agent_id,
+    authentication_evidence_refs: [admitted.receipt_id, admitted.authority_readback_ref],
+    now: new Date().toISOString(),
+  });
+  assertClaimMatchesAuthenticatedIdentity(identityState);
   return {
     schema: 'narada.agent_context.identity_resolution.v1',
     status: 'ok',
@@ -1200,6 +1272,11 @@ function whoami(toolArgs: any = {}) {
     canonical_agent_id: admitted.agent_identity.canonical_agent_id,
     confidence: 'exact',
     source: 'carrier_session_admission_receipt',
+    claimed_identity: identityState.claimed_identity,
+    authenticated_identity: identityState.authentication.authenticated_identity,
+    authentication: identityState.authentication,
+    authority: identityState.authority,
+    identity_state: identityState,
     admission_receipt_ref: admitted.receipt_id,
     carrier_session: admitted.coordinate,
     authority_readback_ref: admitted.authority_readback_ref,
@@ -1422,14 +1499,30 @@ function occupantReadProgress(progress: any) {
   };
 }
 
+function orientationIdentityState(packet: any) {
+  const identity: any = packet.orientation_brief?.agent_identity?.local_agent_id ?? null;
+  return buildIdentityState({
+    claimed_identity: identity ? { identity, source: 'carrier_session_admission_receipt' } : null,
+    claimed_identity_source: identity ? 'carrier_session_admission_receipt' : undefined,
+    authenticated_identity: identity,
+    authentication_evidence_refs: packet.admission_receipt_ref ? [packet.admission_receipt_ref] : [],
+    now: packet.orientation_brief?.generated_at ?? null,
+  });
+}
+
 function occupantReadyResult(packet: any, acknowledgementRef: any = null) {
   const orientation: any = buildOrientationReadyProjection(packet.orientation_brief);
+  const identityState: any = orientationIdentityState(packet);
   return {
     schema: 'narada.agent_context.orientation_ready.v1',
     status: 'ready',
     source_mutation: false,
     local_persistence: true,
     ordinary_work_gate: 'open',
+    identity_state: identityState,
+    claimed_identity: identityState.claimed_identity,
+    authentication: identityState.authentication,
+    authority: identityState.authority,
     orientation,
     manifest_ref: packet.manifest_ref,
     acknowledgement_ref: acknowledgementRef ?? packet.acknowledgement_ref,
@@ -1440,11 +1533,16 @@ function occupantReadyResult(packet: any, acknowledgementRef: any = null) {
 
 function occupantEntryResult(packet: any, delivery: any) {
   if (packet.ordinary_work_gate === 'open') return occupantReadyResult(packet);
+  const identityState: any = orientationIdentityState(packet);
   return {
     schema: 'narada.agent_context.orientation_entry.v3',
     status: 'orientation_required',
     source_mutation: false,
     ordinary_work_gate: 'acknowledgement_required',
+    identity_state: identityState,
+    claimed_identity: identityState.claimed_identity,
+    authentication: identityState.authentication,
+    authority: identityState.authority,
     orientation_brief: buildOrientationOccupantBrief(packet.orientation_brief),
     manifest_ref: packet.manifest_ref,
     required_read_progress: occupantReadProgress(packet.required_read_progress),
@@ -1457,6 +1555,7 @@ function occupantEntryResult(packet: any, delivery: any) {
 }
 
 function occupantRequiredReadResult(result: any, packet: any, delivery: any) {
+  const identityState: any = orientationIdentityState(packet);
   const stepIndex: any = packet.orientation_brief.required_reads.findIndex(
     (step: any) => step.step_id === result.step_id,
   );
@@ -1467,6 +1566,10 @@ function occupantRequiredReadResult(result: any, packet: any, delivery: any) {
     source_mutation: false,
     local_persistence: true,
     ordinary_work_gate: gateOpen ? 'open' : 'acknowledgement_required',
+    identity_state: identityState,
+    claimed_identity: identityState.claimed_identity,
+    authentication: identityState.authentication,
+    authority: identityState.authority,
     material: {
       delivery_status: result.status,
       ordinal: stepIndex >= 0 ? stepIndex + 1 : null,
@@ -1711,11 +1814,17 @@ function listSessions(toolArgs: any = {}) {
 }
 
 function checkpointPayload(toolArgs: any, agentId: any, checkpointAt: any, checkpointId: any): Record<string, any> {
+  const identityState: any = identityStateFromEnvironment({
+    claimedIdentity: toolArgs.claimed_identity ?? agentId,
+    authenticatedIdentity: null,
+    now: checkpointAt,
+  });
   return {
     schema: 'narada.agent_context.checkpoint.v1',
     site_id: siteId,
     site_root: siteRoot,
     agent_id: agentId,
+    identity_state: identityState,
     checkpoint_at: checkpointAt,
     active_task: toolArgs.active_task ?? null,
     files_touched: arrayValue(toolArgs.files_touched),
@@ -1736,6 +1845,9 @@ function checkpointPayload(toolArgs: any, agentId: any, checkpointAt: any, check
 
 function rowToCheckpoint(row: any) {
   const payload = parseJson(row.payload_json, {});
+  const identityState = payload.identity_state ?? null;
+  const projectedPayload = { ...payload };
+  delete projectedPayload.identity_state;
   return {
     checkpoint_id: row.checkpoint_id,
     agent_id: row.agent_id,
@@ -1756,7 +1868,8 @@ function rowToCheckpoint(row: any) {
     continuation: payload.continuation ?? null,
     continuation_ref: payload.continuation_ref ?? null,
     continuation_projection: payload.continuation_projection ?? null,
-    payload,
+    identity_state: identityState,
+    payload: projectedPayload,
   };
 }
 
