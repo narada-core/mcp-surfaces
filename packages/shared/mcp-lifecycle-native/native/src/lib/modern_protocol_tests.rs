@@ -161,6 +161,50 @@
     }
 
     #[test]
+    fn runtime_repairs_result_contract_tables_missing_from_existing_database() {
+        let root = std::env::temp_dir().join(format!("narada-native-result-schema-repair-{}", Uuid::new_v4()));
+        let options = Options {
+            surface: Surface::Task,
+            site_root: root.clone(),
+            site_root_source: "test".to_string(),
+            prepare: false,
+            migrate_legacy: false,
+            source_database_path: None,
+        };
+        LifecycleServer::prepare_database(&options).expect("prepare task database");
+        let db_path = options.database_path();
+        {
+            let connection = Connection::open(&db_path).expect("open prepared database");
+            connection
+                .execute_batch("drop table if exists task_structured_results; drop table if exists task_result_contracts;")
+                .expect("remove result tables to simulate an older database");
+        }
+        let server = LifecycleServer::new(options).expect("runtime repairs task database");
+        let table_count: i64 = server
+            .connection()
+            .unwrap()
+            .query_row(
+                "select count(*) from sqlite_master where type='table' and name in ('task_result_contracts','task_structured_results')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("result tables");
+        assert_eq!(table_count, 2);
+        let index_count: i64 = server
+            .connection()
+            .unwrap()
+            .query_row(
+                "select count(*) from sqlite_master where type='index' and name='idx_task_structured_results_task'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("structured result index");
+        assert_eq!(index_count, 1);
+        drop(server);
+        fs::remove_dir_all(root).expect("remove result schema repair fixture");
+    }
+
+    #[test]
     fn anonymous_bridge_poll_is_read_only_and_identity_neutral() {
         let root = std::env::temp_dir().join(format!(
             "narada-native-bridge-poll-{}",

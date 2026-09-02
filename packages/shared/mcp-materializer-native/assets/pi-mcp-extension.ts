@@ -463,6 +463,10 @@ function projectGitResultForModel(value: any): any | undefined {
 function projectStructuredCommandResultForModel(value: any): any | undefined {
   if (value?.schema !== "narada.structured_command.execution_result.v0") return undefined;
   const projection: Record<string, any> = { schema: value.schema, status: value.status };
+  if (value.status === "running") {
+    if (typeof value?.execution_ref === "string") projection.execution_ref = value.execution_ref;
+    return projection;
+  }
   for (const field of ["executed", "pending"]) {
     if (typeof value?.[field] === "boolean") projection[field] = value[field];
   }

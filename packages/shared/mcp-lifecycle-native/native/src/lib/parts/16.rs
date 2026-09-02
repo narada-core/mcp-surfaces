@@ -135,6 +135,28 @@ fn ensure_task_post_schema(c: &Connection) -> Result<(), String> {
         create table if not exists agent_roster_events(event_id text primary key,event_type text not null,agent_id text not null,role text,capabilities_json text,operator_identity text,requested_by text not null,requested_at text not null,authority_basis_json text not null,admission_status text not null,admitted_by text,admitted_at text,reason text,payload_json text,supersedes_event_id text);
         create index if not exists idx_agent_roster_events_agent_id on agent_roster_events(agent_id,requested_at);
         create index if not exists idx_agent_roster_events_status on agent_roster_events(admission_status,requested_at);").map_err(db_error)?;
+    c.execute_batch("create table if not exists task_result_contracts (
+        task_id text primary key,
+        schema_id text not null,
+        schema_digest text not null,
+        schema_json text not null,
+        created_at text not null,
+        foreign key (task_id) references task_lifecycle(task_id)
+    );
+    create table if not exists task_structured_results (
+        result_id text primary key,
+        task_id text not null,
+        report_id text not null,
+        schema_id text not null,
+        schema_digest text not null,
+        result_json text not null,
+        evidence_refs_json text not null,
+        validation_json text not null,
+        admitted_at text not null,
+        foreign key (task_id) references task_lifecycle(task_id)
+    );
+    create unique index if not exists idx_task_structured_results_task
+        on task_structured_results(task_id);").map_err(db_error)?;
     Ok(())
 }
 fn ensure_native_auxiliary_schema(c: &Connection) -> Result<(), String> {
