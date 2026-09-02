@@ -210,6 +210,56 @@ function projectSchemaLeaseForModel(value: any): any | undefined {
   return projection;
 }
 
+function projectConnectionInventoryForModel(value: any): any | undefined {
+  if (value?.schema !== "narada.mcp_loader.connection_inventory.v1" || !Array.isArray(value.connections)) return undefined;
+  const projection: Record<string, any> = { schema: value.schema, status: value.status };
+  for (const field of ["max_connections", "connection_count", "available_slots", "live_count", "closed_count"]) {
+    if (typeof value[field] === "number") projection[field] = value[field];
+  }
+  projection.connections = value.connections.map((connection: any) => {
+    const compact: Record<string, any> = {};
+    for (const field of ["connection_id", "binding_id", "generation_id", "surface_id", "liveness"]) {
+      if (typeof connection?.[field] === "string") compact[field] = connection[field];
+    }
+    if (typeof connection?.pending_request_count === "number") compact.pending_request_count = connection.pending_request_count;
+    if (connection?.actions && typeof connection.actions === "object") {
+      const actions: Record<string, any> = {};
+      for (const field of ["inspect", "detach", "restart"]) {
+        const action = connection.actions[field];
+        if (action && typeof action === "object") {
+          const actionSummary: Record<string, any> = {};
+          for (const key of ["tool_name", "actuator"]) {
+            if (typeof action[key] === "string") actionSummary[key] = action[key];
+          }
+          if (Object.keys(actionSummary).length > 0) actions[field] = actionSummary;
+        }
+      }
+      if (Object.keys(actions).length > 0) compact.actions = actions;
+    }
+    return compact;
+  });
+  if (value.runtime_freshness && typeof value.runtime_freshness === "object") {
+    projection.runtime_freshness = {};
+    for (const field of ["status", "reload_required"]) {
+      if (Object.prototype.hasOwnProperty.call(value.runtime_freshness, field)) projection.runtime_freshness[field] = value.runtime_freshness[field];
+    }
+  }
+  return projection;
+}
+
+function projectSiteSurfacesForModel(value: any): any | undefined {
+  if (value?.schema !== "narada.mcp_loader.site_surfaces.v1" || !Array.isArray(value.surfaces)) return undefined;
+  const projection: Record<string, any> = { schema: value.schema, status: value.status, site_root: value.site_root, surface_count: value.surface_count, surfaces: value.surfaces.map((surface: any) => {
+    const compact: Record<string, any> = {};
+    for (const field of ["binding_id", "surface_id", "server_name"]) {
+      if (typeof surface?.[field] === "string") compact[field] = surface[field];
+    }
+    if (Array.isArray(surface?.runtime_requirements) && surface.runtime_requirements.length > 0) compact.runtime_requirements = surface.runtime_requirements;
+    return compact;
+  }) };
+  return projection;
+}
+
 function projectSiteToolInventoryFindingForModel(value: any): any {
   const projection: Record<string, any> = {};
   for (const field of [
@@ -456,7 +506,7 @@ function projectMutationReceiptForModel(structured: any): any | undefined {
 }
 
 function loaderControlPlaneProjectionForModel(value: any): any | undefined {
-  return projectSurfaceAttachedForModel(value) ?? projectGitResultForModel(value) ?? projectStructuredCommandResultForModel(value) ?? projectMutationReceiptForModel(value) ?? projectEpistemicQueryForModel(value) ?? projectTeamWorkOverviewForModel(value) ?? projectSchemaLeaseForModel(value) ?? projectSiteToolInventoryForModel(value);
+  return projectSurfaceAttachedForModel(value) ?? projectGitResultForModel(value) ?? projectStructuredCommandResultForModel(value) ?? projectMutationReceiptForModel(value) ?? projectEpistemicQueryForModel(value) ?? projectTeamWorkOverviewForModel(value) ?? projectConnectionInventoryForModel(value) ?? projectSiteSurfacesForModel(value) ?? projectSchemaLeaseForModel(value) ?? projectSiteToolInventoryForModel(value);
 }
 
 function projectEpistemicQueryForModel(value: any): any | undefined {
@@ -524,20 +574,39 @@ function bodyOnlyProjectionText(structured: any): string | undefined {
   return JSON.stringify(structured.items.map((item: any) => typeof item?.body === "string" ? item.body : ""));
 }
 
+function projectOutputPageTextForModel(outputText: string): string {
+  let current = outputText;
+  for (let depth = 0; depth < 3; depth += 1) {
+    let parsed: any;
+    try {
+      parsed = JSON.parse(current);
+    } catch {
+      return outputText;
+    }
+    const bodyOnly = bodyOnlyProjectionText(parsed);
+    if (bodyOnly !== undefined) return bodyOnly;
+    const projection = loaderControlPlaneProjectionForModel(parsed);
+    if (projection !== undefined) return JSON.stringify(projection);
+    if (!isOutputPage(parsed) || typeof parsed.output_text !== "string") return outputText;
+    current = parsed.output_text;
+  }
+  return current;
+}
+
 function modelProjectionTextFromStructured(structured: any): string | undefined {
   if (structured?.schema === "narada.mcp_loader.tool_result.v1") {
     const child = structured.result?.structuredContent ?? structured.result;
     if (child === undefined) return undefined;
     const bodyOnly = bodyOnlyProjectionText(child);
     if (bodyOnly !== undefined) return bodyOnly;
-    if (isOutputPage(child) && typeof child.output_text === "string") return child.output_text;
+    if (isOutputPage(child) && typeof child.output_text === "string") return projectOutputPageTextForModel(child.output_text);
     return JSON.stringify(loaderControlPlaneProjectionForModel(child) ?? child);
   }
   const candidates = [structured, structured?.result, structured?.result?.structuredContent, structured?.result?.result];
   for (const candidate of candidates) {
     const bodyOnly = bodyOnlyProjectionText(candidate);
     if (bodyOnly !== undefined) return bodyOnly;
-    if (isOutputPage(candidate) && typeof candidate?.output_text === "string") return candidate.output_text;
+    if (isOutputPage(candidate) && typeof candidate?.output_text === "string") return projectOutputPageTextForModel(candidate.output_text);
     const controlPlaneProjection = loaderControlPlaneProjectionForModel(candidate);
     if (controlPlaneProjection !== undefined) return JSON.stringify(controlPlaneProjection);
   }

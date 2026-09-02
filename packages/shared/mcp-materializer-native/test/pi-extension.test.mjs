@@ -87,10 +87,13 @@ createInterface({ input: process.stdin }).on("line", (line) => {
         value.payload = "x".repeat(4227 - JSON.stringify(value).length);
         return value;
       })(),
+      connection_inventory: { schema: "narada.mcp_loader.connection_inventory.v1", status: "ok", compact: true, max_connections: 8, connection_count: 2, available_slots: 6, live_count: 2, closed_count: 0, live_connection_ids: ["c-1", "c-2"], closed_connection_ids: [], connections: [{ connection_id: "c-1", binding_id: "repo-git", generation_id: "generation-1", surface_id: "git", liveness: "live", age_ms: 12345, pending_request_count: 0, actions: { inspect: { tool_name: "mcp_loader_surface_status", arguments: { connection_id: "c-1" } }, detach: { tool_name: "mcp_loader_detach", arguments: { connection_id: "c-1" } }, restart: { actuator: "mcp-loader", tool_name: "mcp_loader_surface_restart", arguments: { connection_id: "c-1" } } }, ownership: { owner: "mcp-loader", owner_pid: 12345 } }, { connection_id: "c-2", binding_id: "repo-worker", generation_id: "generation-2", surface_id: "worker", liveness: "live", age_ms: 67890, pending_request_count: 1, actions: { inspect: { tool_name: "mcp_loader_surface_status" }, detach: { tool_name: "mcp_loader_detach" }, restart: { actuator: "carrier-supervisor", tool_name: null } }, ownership: { owner: "mcp-loader", owner_pid: 12346 } }], runtime_freshness: { status: "current", reload_required: false, runtime_entrypoint: { path: "C:/long/path.exe" } }, recovery: { noisy: true } },
+      site_surfaces: { schema: "narada.mcp_loader.site_surfaces.v1", status: "ok", compact: true, site_root: "C:/repo", surface_count: 2, surfaces: [{ binding_id: "repo-git", surface_id: "git", server_name: "narada-repo-git", runtime_requirements: [], next_call: { tool_name: "mcp_loader_attach_surface", arguments: { site_root: "C:/repo", binding_id: "repo-git", surface_id: "git", noisy: "omit" } }, noisy: "omit" }, { binding_id: "repo-worker", surface_id: "worker", server_name: "narada-repo-worker", runtime_requirements: ["runtime"], next_call: { tool_name: "mcp_loader_attach_surface", arguments: { site_root: "C:/repo", binding_id: "repo-worker", surface_id: "worker" } } }] },
       team_work_overview: { schema: "narada.epistemic.team_work_overview.v1", status: "ok", mode: "detailed", query_origin: "named_template", template: "epistemic:team-work-overview", ledger_head: "secret-head", ledger_sequence: 42, items: [{ tree_id: "tree:1", objective: "Objective", member: "agent-a", status: "blocked", leaf: { node_id: "leaf:1", title: "Leaf", noisy: "omit" }, latest_attributable_transition: "2026-09-01T00:00:00Z", attribution_basis: "canonical", freshness: { classification: "fresh", rule: "bounded" }, blocker_count: 1, directed_handoff_count: 2, live_presence: { claimed: false, capability: "unavailable", reason: "omit" }, noisy: "omit" }], returned: 1, limit: 10, has_more: false, next_cursor: null, coverage: { queried_members: ["agent-a"], queried_trees: ["tree:1"], complete: true, total_matching: 1, omitted_count: 0, unattributed_active_tree_count: 0, partial_evidence_classes: [], unavailable_evidence_classes: ["live_process_heartbeat"], noisy: "omit" }, semantics: { frontier: "unresolved only; never ownership or current activity", communications: "coordination and attribution only; never scientific evidence", live_presence: "not claimed without a separate typed heartbeat capability" }, bounded: true },
       query_result: { schema: "narada.epistemic.query.v2", query_mode: "datalog", query_origin: "raw", template: null, ledger_head: "secret-head", items: [{ entity_id: "claim:1", payload: { title: "Keep", detail: "answer" } }], count: 1, returned_count: 1, count_semantics: "returned_page", limit: 10, output_bytes: 321, max_output_bytes: 10000, has_more: false, next_cursor: null, normalization: { applied: true, normalized_count: 1 }, query_cost: { planner_mode: "bounded_clause_plan", datoms_loaded: 10, hard_caps: { max_datoms: 100 } } },
       inbox_query: { schema: "narada.epistemic.query.v2", query_mode: "datalog", query_origin: "named_template", template: "epistemic:inbox", ledger_head: "head", items: [{ sender: "sender-a", recipient: "recipient-b", event_id: "event-a", body: "body alpha" }, { sender: "sender-c", recipient: "recipient-b", event_id: "event-c", body: "body beta" }] },
       issue_tree: { schema: "narada.epistemic.issue-tree.resume.v1", status: "ok", tree: { tree_id: "tree:ax", objective: "AX", version: "3" }, selected: { node_id: "issue:selected", version: "2", title: "Selected", state: "selected", score: 0.9 }, frontier: { items: [{ node_id: "issue:selected", state: "selected", score: 0.9 }, { node_id: "issue:open", state: "open", score: 0.8 }], returned: 2, complete: true, total: 2, total_exact: true }, continuation: null, certifies_truth: false, noncertification: "coordination state; not evidence" },
+      producer_command_page: { schema: "narada.producer_output_page.v1", status: "ok", output_ref: "mcp_output:command", reader_tool: "mcp_loader_read_result", full_output_char_length: 3000, output_text: JSON.stringify({ schema: "narada.structured_command.execution_result.v0", status: "ok", executed: true, pending: false, execution_ref: "execution-page", exit_code: 0, command: "pnpm", args: ["test"], working_directory: "C:/repo", stdout: "command body", stderr: "", stdout_truncated: false, stderr_truncated: false, timed_out: false, cancelled: false, execution_posture: { noisy: true }, test_scope: "noisy" }) },
       producer_page: { schema: "narada.producer_output_page.v1", status: "ok", output_ref: "mcp_output:fixture", reader_tool: "mcp_loader_read_result", full_output_char_length: 1234, output_text: JSON.stringify({ schema: "child.result.v1", answer: "only child output" }) },
       loader_page: { schema: "narada.mcp_loader.tool_result.v1", status: "ok", result_summary: { schema: "child.result.v1", status: "ok" }, result: { schema: "narada.producer_output_page.v1", status: "ok", output_ref: "mcp_output:nested", reader_tool: "mcp_loader_read_result", full_output_char_length: 1234, output_text: JSON.stringify({ schema: "child.result.v1", answer: "only nested child output" }) } },
       loader_result: { schema: "narada.mcp_loader.tool_result.v1", connection_id: "c1", surface_id: "s1", result_summary: { schema: "child.result.v1", status: "ok" }, result: { schema: "child.result.v1", answer: "only unwrapped child result" } },
@@ -248,6 +251,36 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     assert.equal(commandModel.execution_posture, undefined);
     assert.equal(commandModel.test_scope, undefined);
     assert.ok(commandExecution.content[0].text.length < 250);
+
+    const commandPage = await registered[0].execute('call-producer-command-page', { value: 'producer_command_page' }, new AbortController().signal);
+    const commandPageModel = JSON.parse(commandPage.content[0].text);
+    assert.deepEqual(Object.keys(commandPageModel).sort(), ['executed', 'execution_ref', 'exit_code', 'pending', 'schema', 'status', 'stdout'].sort());
+    assert.equal(commandPageModel.command, undefined);
+    assert.equal(commandPageModel.args, undefined);
+    assert.equal(commandPageModel.execution_posture, undefined);
+    assert.equal(commandPageModel.output_ref, undefined);
+    assert.equal(commandPageModel.stdout, 'command body');
+    assert.ok(commandPage.content[0].text.length < 300);
+
+    const connectionInventory = await registered[0].execute('call-connection-inventory', { value: 'connection_inventory' }, new AbortController().signal);
+    const connectionInventoryModel = JSON.parse(connectionInventory.content[0].text);
+    assert.deepEqual(Object.keys(connectionInventoryModel).sort(), ['available_slots', 'closed_count', 'connection_count', 'connections', 'live_count', 'max_connections', 'runtime_freshness', 'schema', 'status'].sort());
+    assert.equal(connectionInventoryModel.compact, undefined);
+    assert.equal(connectionInventoryModel.live_connection_ids, undefined);
+    assert.equal(connectionInventoryModel.connections[0].age_ms, undefined);
+    assert.equal(connectionInventoryModel.connections[0].ownership, undefined);
+    assert.equal(connectionInventoryModel.connections[0].actions.inspect.arguments, undefined);
+    assert.deepEqual(connectionInventoryModel.connections[1].actions.restart, { actuator: 'carrier-supervisor' });
+    assert.deepEqual(connectionInventoryModel.runtime_freshness, { status: 'current', reload_required: false });
+    assert.ok(connectionInventory.content[0].text.length < 900);
+
+    const siteSurfaces = await registered[0].execute('call-site-surfaces', { value: 'site_surfaces' }, new AbortController().signal);
+    const siteSurfacesModel = JSON.parse(siteSurfaces.content[0].text);
+    assert.deepEqual(Object.keys(siteSurfacesModel).sort(), ['schema', 'site_root', 'status', 'surface_count', 'surfaces'].sort());
+    assert.deepEqual(siteSurfacesModel.surfaces, [{ binding_id: 'repo-git', surface_id: 'git', server_name: 'narada-repo-git' }, { binding_id: 'repo-worker', surface_id: 'worker', server_name: 'narada-repo-worker', runtime_requirements: ['runtime'] }]);
+    assert.equal(siteSurfacesModel.compact, undefined);
+    assert.equal(siteSurfacesModel.surfaces[0].next_call, undefined);
+    assert.ok(siteSurfaces.content[0].text.length < 500);
 
     const teamOverview = await registered[0].execute('call-team-work-overview', { value: 'team_work_overview' }, new AbortController().signal);
     const teamModel = JSON.parse(teamOverview.content[0].text);
