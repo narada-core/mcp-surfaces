@@ -737,6 +737,84 @@ function bodyOnlyProjectionText(structured: any): string | undefined {
   return JSON.stringify(structured.items.map((item: any) => typeof item?.body === "string" ? item.body : ""));
 }
 
+function projectMcpLoaderToolResultForModel(value: any): any | undefined {
+  if (value?.schema !== "narada.mcp_loader.tool_result.v1") return undefined;
+  const summary = value.result_summary;
+  const page = value.result;
+  const projection: Record<string, any> = {
+    schema: value.schema,
+    status: typeof value.status === "string"
+      ? value.status
+      : typeof summary?.status === "string"
+        ? summary.status
+        : typeof page?.status === "string" ? page.status : "ok",
+  };
+  for (const field of ["connection_id", "surface_id"]) {
+    if (typeof value?.[field] === "string") projection[field] = value[field];
+  }
+  if (typeof value?.result_bounded === "boolean") projection.result_bounded = value.result_bounded;
+  if (summary && typeof summary === "object") {
+    const compact: Record<string, any> = {};
+    for (const field of [
+      "schema",
+      "status",
+      "is_error",
+      "count",
+      "item_count",
+      "finding_count",
+      "tool_count",
+      "ref",
+      "output_ref",
+      "next_offset",
+      "truncated",
+    ]) {
+      if (Object.prototype.hasOwnProperty.call(summary, field)) {
+        const candidate = summary[field];
+        if (typeof candidate === "string" || typeof candidate === "number" || typeof candidate === "boolean" || candidate === null) {
+          compact[field] = candidate;
+        }
+      }
+    }
+    if (Object.keys(compact).length > 0) projection.result_summary = compact;
+  }
+  const reference = typeof value?.details_ref === "string"
+    ? value.details_ref
+    : typeof page?.output_ref === "string"
+      ? page.output_ref
+      : typeof page?.ref === "string" ? page.ref : undefined;
+  if (reference !== undefined) projection.details_ref = reference;
+  const reader = typeof value?.details_reader === "string"
+    ? value.details_reader
+    : typeof page?.reader_tool === "string" ? page.reader_tool : undefined;
+  if (reader !== undefined) projection.details_reader = reader;
+  for (const field of ["next_offset", "transport_next_offset"]) {
+    if (Object.prototype.hasOwnProperty.call(page ?? {}, field)) projection[field] = page[field];
+  }
+  return projection;
+}
+
+function projectParsedOutputValueForModel(value: any, depth = 0): string | undefined {
+  if (depth > 4 || value === null || typeof value !== "object") return undefined;
+  const bodyOnly = bodyOnlyProjectionText(value);
+  if (bodyOnly !== undefined) return bodyOnly;
+  const projection = loaderControlPlaneProjectionForModel(value);
+  if (projection !== undefined) return JSON.stringify(projection);
+  const nested: any[] = [value?.structuredContent, value?.result?.structuredContent];
+  if (value?.schema === "narada.mcp_loader.tool_result.v1") nested.push(value.result);
+  for (const candidate of nested) {
+    if (candidate === undefined || candidate === value) continue;
+    const projected = projectParsedOutputValueForModel(candidate, depth + 1);
+    if (projected !== undefined) return projected;
+  }
+  const loaderResult = projectMcpLoaderToolResultForModel(value);
+  if (loaderResult !== undefined) return JSON.stringify(loaderResult);
+  if (isOutputPage(value) && typeof value.output_text === "string") {
+    const projected = projectOutputPageTextForModel(value.output_text);
+    if (projected !== value.output_text) return projected;
+  }
+  return undefined;
+}
+
 function projectOutputPageTextForModel(outputText: string): string {
   let current = outputText;
   for (let depth = 0; depth < 3; depth += 1) {
@@ -746,10 +824,8 @@ function projectOutputPageTextForModel(outputText: string): string {
     } catch {
       return outputText;
     }
-    const bodyOnly = bodyOnlyProjectionText(parsed);
-    if (bodyOnly !== undefined) return bodyOnly;
-    const projection = loaderControlPlaneProjectionForModel(parsed);
-    if (projection !== undefined) return JSON.stringify(projection);
+    const projection = projectParsedOutputValueForModel(parsed);
+    if (projection !== undefined) return projection;
     if (!isOutputPage(parsed) || typeof parsed.output_text !== "string") return outputText;
     current = parsed.output_text;
   }
@@ -762,7 +838,18 @@ function modelProjectionTextFromStructured(structured: any): string | undefined 
     if (child === undefined) return undefined;
     const bodyOnly = bodyOnlyProjectionText(child);
     if (bodyOnly !== undefined) return bodyOnly;
-    if (isOutputPage(child) && typeof child.output_text === "string") return projectOutputPageTextForModel(child.output_text);
+    if (isOutputPage(child) && typeof child.output_text === "string") {
+      const projected = projectOutputPageTextForModel(child.output_text);
+      if (projected !== child.output_text) return projected;
+      const pageIsIncomplete = child.truncated === true
+        || child.output_truncated === true
+        || typeof child.next_offset === "number";
+      if (pageIsIncomplete) {
+        const fallback = projectMcpLoaderToolResultForModel(structured);
+        if (fallback !== undefined) return JSON.stringify(fallback);
+      }
+      return projected;
+    }
     return JSON.stringify(loaderControlPlaneProjectionForModel(child) ?? child);
   }
   const candidates = [structured, structured?.result, structured?.result?.structuredContent, structured?.result?.result];

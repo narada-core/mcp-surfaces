@@ -202,7 +202,22 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       connection_id: "c-tools",
       surface_id: "epistemic-graph",
       result_summary: { schema: "narada.mcp_loader.tools.v1", status: "ok", tool_count: 3 },
-      result: { schema: "narada.producer_output_page.v1", status: "ok", output_ref: "mcp_output:tools", reader_tool: "mcp_loader_read_result", full_output_char_length: 5900, output_text: JSON.stringify(fixtures.tools_result) },
+      result_bounded: true,
+      result: { schema: "narada.producer_output_page.v1", status: "ok", output_ref: "mcp_output:tools", reader_tool: "mcp_loader_read_result", full_output_char_length: 5900, output_text: JSON.stringify({ structuredContent: fixtures.tools_result, isError: null }, null, 2) },
+    };
+    fixtures.loader_tools_truncated_page = {
+      ...fixtures.loader_tools_page,
+      details_ref: "mcp_output:tools-truncated",
+      details_reader: "mcp_loader_read_result",
+      result: {
+        ...fixtures.loader_tools_page.result,
+        output_ref: "mcp_output:tools-truncated",
+        ref: "mcp_output:tools-truncated",
+        output_text: fixtures.loader_tools_page.result.output_text.slice(0, 120),
+        next_offset: 120,
+        transport_next_offset: 120,
+        full_output_char_length: fixtures.loader_tools_page.result.output_text.length,
+      },
     };
     const requestedValue = message.params.arguments.value;
     process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: {
@@ -351,6 +366,15 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     assert.deepEqual(JSON.parse(loaderToolsResult.content[0].text), toolsModel);
     const loaderToolsPage = await registered[0].execute('call-loader-tools-page', { value: 'loader_tools_page' }, new AbortController().signal);
     assert.deepEqual(JSON.parse(loaderToolsPage.content[0].text), toolsModel);
+    const loaderToolsTruncatedPage = await registered[0].execute('call-loader-tools-truncated-page', { value: 'loader_tools_truncated_page' }, new AbortController().signal);
+    const loaderToolsTruncatedModel = JSON.parse(loaderToolsTruncatedPage.content[0].text);
+    assert.deepEqual(Object.keys(loaderToolsTruncatedModel).sort(), ['connection_id', 'details_reader', 'details_ref', 'next_offset', 'result_bounded', 'result_summary', 'schema', 'status', 'surface_id', 'transport_next_offset'].sort());
+    assert.equal(loaderToolsTruncatedModel.result_summary.schema, 'narada.mcp_loader.tools.v1');
+    assert.equal(loaderToolsTruncatedModel.details_ref, 'mcp_output:tools-truncated');
+    assert.equal(loaderToolsTruncatedModel.details_reader, 'mcp_loader_read_result');
+    assert.equal(loaderToolsTruncatedModel.next_offset, 120);
+    assert.doesNotMatch(loaderToolsTruncatedPage.content[0].text, /structuredContent|output_text|epistemic_graph_guidance/);
+    assert.ok(loaderToolsTruncatedPage.content[0].text.length < 500);
 
     const authoritativeJson = await registered[0].execute('call-authoritative-json', { value: 'authoritative_json' }, new AbortController().signal);
     const writeReceipt = await registered[0].execute('call-write-file', { value: 'write_file' }, new AbortController().signal);
