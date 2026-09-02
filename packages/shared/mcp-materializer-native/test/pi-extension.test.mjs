@@ -576,7 +576,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     assert.equal(result.details.modelVisibleTruncated, false);
 
     const shortcut = shortcuts.get('f8');
-    assert.match(shortcut.description, /compact, model-visible, full-output, hide/);
+    assert.match(shortcut.description, /single-line, model-visible, full-output, hide/);
     const expansionStates = [];
     await shortcut.handler({ ui: { setToolsExpanded(value) { expansionStates.push(value); } } });
     const modelVisible = registered[0].renderResult(result, { expanded: false }).render(160).join('\n');
@@ -591,7 +591,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     assert.deepEqual(expansionStates, [true, false, true]);
 
     await shortcut.handler({ ui: { setToolsExpanded(value) { expansionStates.push(value); } } });
-    assert.match(registered[0].renderResult(result, { expanded: false }).render(160).join('\n'), /f8: compact/);
+    assert.deepEqual(registered[0].renderResult(result, { expanded: false }).render(160), []);
     assert.deepEqual(expansionStates, [true, false, true, false]);
     const hiddenCall = registered[0].renderCall({}, {
       fg(_kind, text) { return text; },

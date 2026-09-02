@@ -941,8 +941,8 @@ function preservesDeliveredContent(result: any): boolean {
 
 const MAX_MODEL_VISIBLE_RESULT_CHARS = 8_000;
 
-type ToolResultView = "compact" | "model-visible" | "full-output" | "hide";
-const TOOL_RESULT_VIEWS: ToolResultView[] = ["compact", "model-visible", "full-output", "hide"];
+type ToolResultView = "single-line" | "model-visible" | "full-output" | "hide";
+const TOOL_RESULT_VIEWS: ToolResultView[] = ["single-line", "model-visible", "full-output", "hide"];
 const TOOL_RESULT_VIEW_SHORTCUT = "f8";
 const TOOL_RESULT_VIEW_SHORTCUT_ALIASES = ["f8", "ctrl+shift+m"];
 
@@ -1151,7 +1151,7 @@ class McpClient {
 export default function naradaMcpCarrier(pi: any): void {
   let clients: McpClient[] = [];
   let started = false;
-  let toolResultView: ToolResultView = "compact";
+  let toolResultView: ToolResultView = "single-line";
   let naradaSessionIdentityState: NaradaSessionIdentityState | null = null;
 
   const currentSessionId = (ctx: any): string => String(ctx?.sessionManager?.getSessionId?.() ?? "ephemeral");
@@ -1233,7 +1233,7 @@ export default function naradaMcpCarrier(pi: any): void {
   };
   for (const shortcut of TOOL_RESULT_VIEW_SHORTCUT_ALIASES) {
     pi.registerShortcut?.(shortcut, {
-      description: "Cycle MCP tool output: compact, model-visible, full-output, hide",
+      description: "Cycle MCP tool output: single-line, model-visible, full-output, hide",
       handler: cycleToolResultView,
     });
   }
@@ -1319,7 +1319,7 @@ export default function naradaMcpCarrier(pi: any): void {
   pi.events.on(NARADA_MARICI_INBOX_POLL_EVENT, pollMariciInbox);
 
   pi.on("session_start", async (_event: unknown, ctx: any) => {
-    toolResultView = "compact";
+    toolResultView = "single-line";
     restoreNaradaSessionIdentity(ctx);
     if (started) return;
     started = true;
@@ -1449,9 +1449,10 @@ export default function naradaMcpCarrier(pi: any): void {
               };
             },
             renderResult: (result: any, options: { expanded: boolean }, theme: any) => {
+              if (toolResultView === "hide") return hiddenComponent();
               const modelVisibleText = resultText(result);
               const fullText = result?.details?.expandedText ?? modelVisibleText;
-              const view: ToolResultView = toolResultView === "compact" && options.expanded
+              const view: ToolResultView = toolResultView === "single-line" && options.expanded
                 ? "full-output"
                 : toolResultView;
               const nextView = TOOL_RESULT_VIEWS[(TOOL_RESULT_VIEWS.indexOf(view) + 1) % TOOL_RESULT_VIEWS.length];
@@ -1503,7 +1504,7 @@ export default function naradaMcpCarrier(pi: any): void {
   });
 
   pi.on("session_shutdown", () => {
-    toolResultView = "compact";
+    toolResultView = "single-line";
     for (const client of clients) client.close();
     clients = [];
     started = false;
