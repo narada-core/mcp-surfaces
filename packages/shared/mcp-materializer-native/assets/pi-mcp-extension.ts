@@ -210,10 +210,27 @@ function projectSchemaLeaseForModel(value: any): any | undefined {
   return projection;
 }
 
+function projectRuntimeFreshnessForModel(value: any): any | undefined {
+  if (value?.schema !== "narada.mcp_loader.runtime_freshness.v1") return undefined;
+  const projection: Record<string, any> = { schema: value.schema, status: value.status };
+  if (typeof value?.reload_required === "boolean") projection.reload_required = value.reload_required;
+  const needsAttention = value.status !== "current" || value.reload_required === true;
+  if (needsAttention && typeof value?.freshness_scope === "string") projection.freshness_scope = value.freshness_scope;
+  if (needsAttention && Array.isArray(value?.reasons) && value.reasons.length > 0) projection.reasons = value.reasons;
+  if (needsAttention && value?.reload_action && typeof value.reload_action === "object") {
+    const action: Record<string, any> = {};
+    for (const field of ["owner", "availability", "capability", "tool_name"]) {
+      if (typeof value.reload_action[field] === "string") action[field] = value.reload_action[field];
+    }
+    if (Object.keys(action).length > 0) projection.reload_action = action;
+  }
+  return projection;
+}
+
 function projectConnectionInventoryForModel(value: any): any | undefined {
   if (value?.schema !== "narada.mcp_loader.connection_inventory.v1" || !Array.isArray(value.connections)) return undefined;
   const projection: Record<string, any> = { schema: value.schema, status: value.status };
-  for (const field of ["max_connections", "connection_count", "available_slots", "live_count", "closed_count"]) {
+  for (const field of ["connection_count", "available_slots", "live_count"]) {
     if (typeof value[field] === "number") projection[field] = value[field];
   }
   projection.connections = value.connections.map((connection: any) => {
@@ -221,28 +238,23 @@ function projectConnectionInventoryForModel(value: any): any | undefined {
     for (const field of ["connection_id", "binding_id", "generation_id", "surface_id", "liveness"]) {
       if (typeof connection?.[field] === "string") compact[field] = connection[field];
     }
-    if (typeof connection?.pending_request_count === "number") compact.pending_request_count = connection.pending_request_count;
-    if (connection?.actions && typeof connection.actions === "object") {
-      const actions: Record<string, any> = {};
-      for (const field of ["inspect", "detach", "restart"]) {
-        const action = connection.actions[field];
-        if (action && typeof action === "object") {
-          const actionSummary: Record<string, any> = {};
-          for (const key of ["tool_name", "actuator"]) {
-            if (typeof action[key] === "string") actionSummary[key] = action[key];
-          }
-          if (Object.keys(actionSummary).length > 0) actions[field] = actionSummary;
-        }
-      }
-      if (Object.keys(actions).length > 0) compact.actions = actions;
+    if (typeof connection?.pending_request_count === "number" && connection.pending_request_count > 0) {
+      compact.pending_request_count = connection.pending_request_count;
+    }
+    const restart = connection?.actions?.restart;
+    if (restart && typeof restart === "object") {
+      if (typeof restart.actuator === "string") compact.restart_owner = restart.actuator;
+      else if (typeof restart.tool_name === "string") compact.restart_tool = restart.tool_name;
     }
     return compact;
   });
-  if (value.runtime_freshness && typeof value.runtime_freshness === "object") {
-    projection.runtime_freshness = {};
+  const freshness = value.runtime_freshness;
+  if (freshness && typeof freshness === "object" && (freshness.status !== "current" || freshness.reload_required === true)) {
+    const compact: Record<string, any> = {};
     for (const field of ["status", "reload_required"]) {
-      if (Object.prototype.hasOwnProperty.call(value.runtime_freshness, field)) projection.runtime_freshness[field] = value.runtime_freshness[field];
+      if (Object.prototype.hasOwnProperty.call(freshness, field)) compact[field] = freshness[field];
     }
+    if (Object.keys(compact).length > 0) projection.runtime_freshness = compact;
   }
   return projection;
 }
@@ -262,14 +274,16 @@ function projectSurfaceHandleOpenedForModel(value: any): any | undefined {
 
 function projectSiteSurfacesForModel(value: any): any | undefined {
   if (value?.schema !== "narada.mcp_loader.site_surfaces.v1" || !Array.isArray(value.surfaces)) return undefined;
-  const projection: Record<string, any> = { schema: value.schema, status: value.status, site_root: value.site_root, surface_count: value.surface_count, surfaces: value.surfaces.map((surface: any) => {
+  const projection: Record<string, any> = { schema: value.schema, status: value.status };
+  if (typeof value.site_root === "string") projection.site_root = value.site_root;
+  if (typeof value.surface_count === "number") projection.surface_count = value.surface_count;
+  projection.surfaces = value.surfaces.map((surface: any) => {
     const compact: Record<string, any> = {};
-    for (const field of ["binding_id", "surface_id", "server_name"]) {
+    for (const field of ["binding_id", "surface_id"]) {
       if (typeof surface?.[field] === "string") compact[field] = surface[field];
     }
-    if (Array.isArray(surface?.runtime_requirements) && surface.runtime_requirements.length > 0) compact.runtime_requirements = surface.runtime_requirements;
     return compact;
-  }) };
+  });
   return projection;
 }
 
@@ -523,7 +537,7 @@ function projectMutationReceiptForModel(structured: any): any | undefined {
 }
 
 function loaderControlPlaneProjectionForModel(value: any): any | undefined {
-  return projectSurfaceAttachedForModel(value) ?? projectSurfaceHandleOpenedForModel(value) ?? projectGitResultForModel(value) ?? projectStructuredCommandResultForModel(value) ?? projectMutationReceiptForModel(value) ?? projectEpistemicQueryForModel(value) ?? projectTeamWorkOverviewForModel(value) ?? projectConnectionInventoryForModel(value) ?? projectSiteSurfacesForModel(value) ?? projectSchemaLeaseForModel(value) ?? projectSiteToolInventoryForModel(value);
+  return projectSurfaceAttachedForModel(value) ?? projectSurfaceHandleOpenedForModel(value) ?? projectRuntimeFreshnessForModel(value) ?? projectGitResultForModel(value) ?? projectStructuredCommandResultForModel(value) ?? projectMutationReceiptForModel(value) ?? projectEpistemicQueryForModel(value) ?? projectTeamWorkOverviewForModel(value) ?? projectConnectionInventoryForModel(value) ?? projectSiteSurfacesForModel(value) ?? projectSchemaLeaseForModel(value) ?? projectSiteToolInventoryForModel(value);
 }
 
 function projectEpistemicQueryForModel(value: any): any | undefined {

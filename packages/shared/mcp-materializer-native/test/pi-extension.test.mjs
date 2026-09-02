@@ -98,6 +98,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       producer_page: { schema: "narada.producer_output_page.v1", status: "ok", output_ref: "mcp_output:fixture", reader_tool: "mcp_loader_read_result", full_output_char_length: 1234, output_text: JSON.stringify({ schema: "child.result.v1", answer: "only child output" }) },
       loader_page: { schema: "narada.mcp_loader.tool_result.v1", status: "ok", result_summary: { schema: "child.result.v1", status: "ok" }, result: { schema: "narada.producer_output_page.v1", status: "ok", output_ref: "mcp_output:nested", reader_tool: "mcp_loader_read_result", full_output_char_length: 1234, output_text: JSON.stringify({ schema: "child.result.v1", answer: "only nested child output" }) } },
       loader_result: { schema: "narada.mcp_loader.tool_result.v1", connection_id: "c1", surface_id: "s1", result_summary: { schema: "child.result.v1", status: "ok" }, result: { schema: "child.result.v1", answer: "only unwrapped child result" } },
+      runtime_freshness: { schema: "narada.mcp_loader.runtime_freshness.v1", status: "current", reload_required: false, freshness_scope: "native_loader_artifact", process_started_at: "2026-09-01T00:00:00Z", runtime_entrypoint: { path: "C:/long/runtime.exe" }, source_entrypoint: { path: "C:/long/source.rs" }, reasons: [], reload_action: { owner: "carrier_or_runtime_supervisor", capability: "restart_mcp_loader_process", guidance: "omit while current" }, noisy: "omit" },
       schema_lease_compact: { schema: "narada.mcp_loader.schema_lease.v1", status: "issued", connection_id: "c-compact", logical_connection_id: "logical-compact", generation_id: "generation-compact", surface_id: "surface-compact", tool_name: "surface_read", tool_schema_digest: "tool-digest", tool_contract_digest: "contract-digest", input_schema_digest: "input-digest", output_schema_digest: "output-digest", description: "Read the surface", annotations: { readOnlyHint: true }, argument_skeleton: { site_root: "x" }, minimal_valid_arguments: { site_root: "x" }, minimal_valid_arguments_status: "validated", verbose_contract_call: { tool_name: "mcp_loader_inspect_tool" }, schema_lease: "lease-compact", lease_scope: "loader_process_child_generation", transferable: false, authorization_resolution: "lease_renewed", input_contract: { type: "object", required: ["site_root"], properties: { site_root: { type: "string" } } } },
       schema_lease_verbose: { schema: "narada.mcp_loader.schema_lease.v1", status: "issued", connection_id: "c-verbose", logical_connection_id: "logical-verbose", generation_id: "generation-verbose", surface_id: "surface-verbose", tool_name: "surface_write", tool_schema_digest: "verbose-tool-digest", tool_contract_digest: "verbose-contract-digest", input_schema_digest: "verbose-input-digest", output_schema_digest: "verbose-output-digest", description: "Write the surface", annotations: { readOnlyHint: false }, argument_skeleton: { value: "x" }, minimal_valid_arguments: { value: "x" }, minimal_valid_arguments_status: "validated", verbose_contract_call: { tool_name: "mcp_loader_inspect_tool" }, schema_lease: "lease-verbose", lease_scope: "loader_process_child_generation", transferable: false, authorization_resolution: "lease_renewed", tool_contract: { name: "surface_write", description: "Write the surface", inputSchema: { type: "object", required: ["value"], properties: { value: { type: "string" } } }, annotations: { readOnlyHint: false } } },
       structured_command: { schema: "narada.structured_command.execution_result.v0", status: "running", executed: true, pending: true, execution_ref: "execution-1", command: "pnpm", args: ["test"], working_directory: "C:/repo", started_at: "2026-09-01T00:00:00Z", timeout_ms: 900000, execution_posture: { test_scope: "noisy", expected_cost: "medium" }, test_scope: "noisy", expected_cost: "medium", stdout: "", stderr: "", stdout_truncated: false, stderr_truncated: false, timed_out: false, cancelled: false, stdout_char_length: 0, stderr_char_length: 0 },
@@ -284,23 +285,38 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 
     const connectionInventory = await registered[0].execute('call-connection-inventory', { value: 'connection_inventory' }, new AbortController().signal);
     const connectionInventoryModel = JSON.parse(connectionInventory.content[0].text);
-    assert.deepEqual(Object.keys(connectionInventoryModel).sort(), ['available_slots', 'closed_count', 'connection_count', 'connections', 'live_count', 'max_connections', 'runtime_freshness', 'schema', 'status'].sort());
+    assert.deepEqual(Object.keys(connectionInventoryModel).sort(), ['available_slots', 'connection_count', 'connections', 'live_count', 'schema', 'status'].sort());
     assert.equal(connectionInventoryModel.compact, undefined);
+    assert.equal(connectionInventoryModel.max_connections, undefined);
+    assert.equal(connectionInventoryModel.closed_count, undefined);
     assert.equal(connectionInventoryModel.live_connection_ids, undefined);
     assert.equal(connectionInventoryModel.connections[0].age_ms, undefined);
     assert.equal(connectionInventoryModel.connections[0].ownership, undefined);
-    assert.equal(connectionInventoryModel.connections[0].actions.inspect.arguments, undefined);
-    assert.deepEqual(connectionInventoryModel.connections[1].actions.restart, { actuator: 'carrier-supervisor' });
-    assert.deepEqual(connectionInventoryModel.runtime_freshness, { status: 'current', reload_required: false });
-    assert.ok(connectionInventory.content[0].text.length < 900);
+    assert.equal(connectionInventoryModel.connections[0].actions, undefined);
+    assert.equal(connectionInventoryModel.connections[0].pending_request_count, undefined);
+    assert.equal(connectionInventoryModel.connections[1].pending_request_count, 1);
+    assert.equal(connectionInventoryModel.connections[0].restart_owner, 'mcp-loader');
+    assert.equal(connectionInventoryModel.connections[1].restart_owner, 'carrier-supervisor');
+    assert.equal(connectionInventoryModel.runtime_freshness, undefined);
+    assert.ok(connectionInventory.content[0].text.length < 700);
 
     const siteSurfaces = await registered[0].execute('call-site-surfaces', { value: 'site_surfaces' }, new AbortController().signal);
     const siteSurfacesModel = JSON.parse(siteSurfaces.content[0].text);
     assert.deepEqual(Object.keys(siteSurfacesModel).sort(), ['schema', 'site_root', 'status', 'surface_count', 'surfaces'].sort());
-    assert.deepEqual(siteSurfacesModel.surfaces, [{ binding_id: 'repo-git', surface_id: 'git', server_name: 'narada-repo-git' }, { binding_id: 'repo-worker', surface_id: 'worker', server_name: 'narada-repo-worker', runtime_requirements: ['runtime'] }]);
+    assert.deepEqual(siteSurfacesModel.surfaces, [{ binding_id: 'repo-git', surface_id: 'git' }, { binding_id: 'repo-worker', surface_id: 'worker' }]);
     assert.equal(siteSurfacesModel.compact, undefined);
+    assert.equal(siteSurfacesModel.surfaces[0].server_name, undefined);
+    assert.equal(siteSurfacesModel.surfaces[1].runtime_requirements, undefined);
     assert.equal(siteSurfacesModel.surfaces[0].next_call, undefined);
-    assert.ok(siteSurfaces.content[0].text.length < 500);
+    assert.ok(siteSurfaces.content[0].text.length < 350);
+
+    const runtimeFreshness = await registered[0].execute('call-runtime-freshness', { value: 'runtime_freshness' }, new AbortController().signal);
+    const runtimeModel = JSON.parse(runtimeFreshness.content[0].text);
+    assert.deepEqual(Object.keys(runtimeModel).sort(), ['reload_required', 'schema', 'status'].sort());
+    assert.equal(runtimeModel.runtime_entrypoint, undefined);
+    assert.equal(runtimeModel.source_entrypoint, undefined);
+    assert.equal(runtimeModel.reload_action, undefined);
+    assert.ok(runtimeFreshness.content[0].text.length < 180);
 
     const teamOverview = await registered[0].execute('call-team-work-overview', { value: 'team_work_overview' }, new AbortController().signal);
     const teamModel = JSON.parse(teamOverview.content[0].text);
