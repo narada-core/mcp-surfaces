@@ -521,6 +521,37 @@ function projectStructuredCommandResultForModel(value: any): any | undefined {
   return projection;
 }
 
+function projectLocalFilesystemGrepForModel(value: any): any | undefined {
+  if (value?.schema !== "local.filesystem.grep.v1" || !Array.isArray(value.match_objects)) return undefined;
+  const matchObjects = value.match_objects.map((match: any) => {
+    const projection: Record<string, any> = {};
+    for (const field of ["path", "line", "count", "text"]) {
+      if (Object.prototype.hasOwnProperty.call(match ?? {}, field)) projection[field] = match[field];
+    }
+    return projection;
+  });
+  const projection: Record<string, any> = { schema: value.schema, status: value.status, match_objects: matchObjects };
+  for (const field of ["output_mode", "snapshot_id"]) {
+    if (typeof value?.[field] === "string") projection[field] = value[field];
+  }
+  for (const field of ["offset", "limit", "count", "returned"]) {
+    if (typeof value?.[field] === "number") projection[field] = value[field];
+  }
+  for (const field of ["count_exact", "has_more", "snapshot_complete"]) {
+    if (typeof value?.[field] === "boolean") projection[field] = value[field];
+  }
+  if (value?.count_exact === false && typeof value?.count_semantics === "string") projection.count_semantics = value.count_semantics;
+  if (Object.prototype.hasOwnProperty.call(value ?? {}, "next_offset")) projection.next_offset = value.next_offset;
+  if (value?.no_match_diagnostics && typeof value.no_match_diagnostics === "object") {
+    const diagnostics: Record<string, any> = {};
+    for (const field of ["status", "remediation"]) {
+      if (typeof value.no_match_diagnostics[field] === "string") diagnostics[field] = value.no_match_diagnostics[field];
+    }
+    if (Object.keys(diagnostics).length > 0) projection.no_match_diagnostics = diagnostics;
+  }
+  return projection;
+}
+
 function projectMutationReceiptForModel(structured: any): any | undefined {
   if (structured?.schema === "local.filesystem.write_file.v1") {
     return {
@@ -555,7 +586,7 @@ function projectMutationReceiptForModel(structured: any): any | undefined {
 }
 
 function loaderControlPlaneProjectionForModel(value: any): any | undefined {
-  return projectSurfaceAttachedForModel(value) ?? projectSurfaceHandleOpenedForModel(value) ?? projectRuntimeFreshnessForModel(value) ?? projectGitResultForModel(value) ?? projectStructuredCommandResultForModel(value) ?? projectMutationReceiptForModel(value) ?? projectEpistemicQueryForModel(value) ?? projectTeamWorkOverviewForModel(value) ?? projectConnectionInventoryForModel(value) ?? projectSiteSurfacesForModel(value) ?? projectSchemaLeaseBatchForModel(value) ?? projectSchemaLeaseForModel(value) ?? projectSiteToolInventoryForModel(value);
+  return projectSurfaceAttachedForModel(value) ?? projectSurfaceHandleOpenedForModel(value) ?? projectRuntimeFreshnessForModel(value) ?? projectGitResultForModel(value) ?? projectStructuredCommandResultForModel(value) ?? projectLocalFilesystemGrepForModel(value) ?? projectMutationReceiptForModel(value) ?? projectEpistemicQueryForModel(value) ?? projectTeamWorkOverviewForModel(value) ?? projectConnectionInventoryForModel(value) ?? projectSiteSurfacesForModel(value) ?? projectSchemaLeaseBatchForModel(value) ?? projectSchemaLeaseForModel(value) ?? projectSiteToolInventoryForModel(value);
 }
 
 function projectEpistemicQueryForModel(value: any): any | undefined {

@@ -78,6 +78,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     }
     const fixtures = {
       stat: { schema: "local.filesystem.stat.v1", path: "C:/repo/file.md", relative_path: "file.md", type: "file", size: 13558 },
+      grep_result: { schema: "local.filesystem.grep.v1", status: "ok", output_mode: "content", offset: 0, limit: 2, count: 2, count_exact: true, count_semantics: "count is the exact full result count", scanned: 2, scanned_unit: "matched_entries", returned: 2, max_matches: 30, max_output_chars: 4000, order: "ripgrep_traversal", cache_hit: true, snapshot_reused: true, cache_policy: "auto", snapshot_id: "s_grep", requested_snapshot_id: null, snapshot_complete: true, cache_memory_bytes: 40, page_match_bytes: 40, page_match_bytes_limit: 4000, page_matches_truncated: 0, timeout_ms: 30000, freshness: { path: "C:/repo", type: "directory", size: 100, mtime: "2026-09-02T00:00:00Z", mtime_ms: 1, tree_sha256: "secret-tree" }, scope: { requested_path: "packages", root: "C:/repo", path: "C:/repo/packages", argument: "directory", include_glob: null, default_exclusions_applied: true }, has_more: false, next_offset: null, continuation: null, matches_format: "structured", match_objects_authoritative: true, match_objects: [{ path: "packages/a.ts", line: 10, text: "const a = 1;", raw: "packages/a.ts|10|const a = 1;" }, { path: "packages/b.ts", line: 20, text: "const b = 2;", raw: "packages/b.ts|20|const b = 2;" }] },
       empty_range: { schema: "local.filesystem.read.v1", relative_path: "file.md", total_lines: 250, returned_lines: 0, offset: 300, requested_start_line: 300, requested_end_line: 380 },
       empty_valid_range: { schema: "local.filesystem.read.v1", relative_path: "file.md", total_lines: 250, returned_lines: 0, offset: 200, requested_start_line: 200, requested_end_line: 200 },
       replace: { schema: "local.filesystem.str_replace_file.v1", status: "replaced", relative_path: "file.md", occurrences: 1 },
@@ -129,6 +130,14 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       lease_count: 1,
       leases: [fixtures.schema_lease_compact],
       binding_resolution: { binding_id: "repo-git", canonical_binding_id: "repo-git" },
+    };
+    fixtures.loader_grep_result = {
+      schema: "narada.mcp_loader.tool_result.v1",
+      status: "ok",
+      connection_id: "c1",
+      surface_id: "local-filesystem",
+      result_summary: { schema: "local.filesystem.grep.v1", status: "ok" },
+      result: { structuredContent: fixtures.grep_result },
     };
     const requestedValue = message.params.arguments.value;
     process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: {
@@ -220,7 +229,16 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     assert.equal(queryModel.query_cost, undefined);
     assert.ok(queryResult.content[0].text.length < 700);
 
-
+    const grepResult = await registered[0].execute('call-loader-grep-result', { value: 'loader_grep_result' }, new AbortController().signal);
+    const grepModel = JSON.parse(grepResult.content[0].text);
+    assert.deepEqual(Object.keys(grepModel).sort(), ['count', 'count_exact', 'has_more', 'limit', 'match_objects', 'next_offset', 'offset', 'output_mode', 'returned', 'schema', 'snapshot_complete', 'snapshot_id', 'status'].sort());
+    assert.deepEqual(grepModel.match_objects, [
+      { path: 'packages/a.ts', line: 10, text: 'const a = 1;' },
+      { path: 'packages/b.ts', line: 20, text: 'const b = 2;' },
+    ]);
+    assert.equal(grepModel.scope, undefined);
+    assert.equal(grepModel.continuation, undefined);
+    assert.ok(grepResult.content[0].text.length < 800);
 
     const authoritativeJson = await registered[0].execute('call-authoritative-json', { value: 'authoritative_json' }, new AbortController().signal);
     const writeReceipt = await registered[0].execute('call-write-file', { value: 'write_file' }, new AbortController().signal);
