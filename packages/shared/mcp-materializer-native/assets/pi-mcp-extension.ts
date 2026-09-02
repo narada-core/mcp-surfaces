@@ -247,6 +247,19 @@ function projectConnectionInventoryForModel(value: any): any | undefined {
   return projection;
 }
 
+function projectSurfaceHandleOpenedForModel(value: any): any | undefined {
+  if (value?.schema !== "narada.mcp_loader.surface_handle_opened.v1") return undefined;
+  const projection: Record<string, any> = { schema: value.schema, status: value.status };
+  for (const field of ["surface_handle", "handle_scope", "binding_id", "generation_id", "site_root", "surface_id", "runtime_kind"]) {
+    if (typeof value?.[field] === "string") projection[field] = value[field];
+  }
+  for (const field of ["handle_survives_child_restart", "handle_survives_loader_restart"]) {
+    if (typeof value?.[field] === "boolean") projection[field] = value[field];
+  }
+  if (typeof value?.tool_count === "number") projection.tool_count = value.tool_count;
+  return projection;
+}
+
 function projectSiteSurfacesForModel(value: any): any | undefined {
   if (value?.schema !== "narada.mcp_loader.site_surfaces.v1" || !Array.isArray(value.surfaces)) return undefined;
   const projection: Record<string, any> = { schema: value.schema, status: value.status, site_root: value.site_root, surface_count: value.surface_count, surfaces: value.surfaces.map((surface: any) => {
@@ -506,7 +519,7 @@ function projectMutationReceiptForModel(structured: any): any | undefined {
 }
 
 function loaderControlPlaneProjectionForModel(value: any): any | undefined {
-  return projectSurfaceAttachedForModel(value) ?? projectGitResultForModel(value) ?? projectStructuredCommandResultForModel(value) ?? projectMutationReceiptForModel(value) ?? projectEpistemicQueryForModel(value) ?? projectTeamWorkOverviewForModel(value) ?? projectConnectionInventoryForModel(value) ?? projectSiteSurfacesForModel(value) ?? projectSchemaLeaseForModel(value) ?? projectSiteToolInventoryForModel(value);
+  return projectSurfaceAttachedForModel(value) ?? projectSurfaceHandleOpenedForModel(value) ?? projectGitResultForModel(value) ?? projectStructuredCommandResultForModel(value) ?? projectMutationReceiptForModel(value) ?? projectEpistemicQueryForModel(value) ?? projectTeamWorkOverviewForModel(value) ?? projectConnectionInventoryForModel(value) ?? projectSiteSurfacesForModel(value) ?? projectSchemaLeaseForModel(value) ?? projectSiteToolInventoryForModel(value);
 }
 
 function projectEpistemicQueryForModel(value: any): any | undefined {
