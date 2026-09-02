@@ -572,6 +572,8 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     const smallCollapsed = registered[0].renderResult(result, { expanded: false }).render(160).join('\n');
     assert.match(smallCollapsed, /MCP result.*model-visible.*f8: single-line/);
     assert.doesNotMatch(smallCollapsed, /schema_lease/);
+    const smallExpanded = registered[0].renderResult(result, { expanded: true }).render(160).join('\n');
+    assert.match(smallExpanded, /^full-output · \d+ characters — f8: single-line/);
     assert.equal(result.details.fullOutputCharLength, result.details.modelVisibleCharLength);
     assert.equal(result.details.modelVisibleTruncated, false);
 

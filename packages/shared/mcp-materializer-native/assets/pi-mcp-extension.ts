@@ -1455,7 +1455,7 @@ export default function naradaMcpCarrier(pi: any): void {
               const view: ToolResultView = toolResultView === "compact" && options.expanded
                 ? "full-output"
                 : toolResultView;
-              const nextView = TOOL_RESULT_VIEWS[(TOOL_RESULT_VIEWS.indexOf(view) + 1) % TOOL_RESULT_VIEWS.length];
+              const nextView = TOOL_RESULT_VIEWS[(TOOL_RESULT_VIEWS.indexOf(toolResultView) + 1) % TOOL_RESULT_VIEWS.length];
               if (view === "full-output") {
                 return textComponent(`${resultViewHeader(view, fullText.length, nextView)}\n${fullText || JSON.stringify(result?.details ?? null)}`);
               }
