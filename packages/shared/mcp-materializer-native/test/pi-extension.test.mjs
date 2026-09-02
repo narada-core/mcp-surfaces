@@ -121,6 +121,15 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       inventory: { schema: "narada.mcp_loader.site_tool_inventory_check.v1", status: "drift", observation_coverage: "partial", checked_surface_count: 3, violation_count: 1, finding_status_counts: { drift: 1 }, observation_ref: "mcp_payload:inventory", observed_tools: { git: ["tool-a", "tool-b"], worker: ["tool-c"] }, runtime_freshness: { noisy: true }, findings: [{ surface_id: "git", status: "drift", declared_count: 10, observed_count: 8, missing_from_fabric: ["tool-a"], extra_in_fabric: ["tool-z"], duplicate_declared_tools: [], duplicate_observed_tools: [], unclassified_observed_tools: [] }] },
       oversized: { schema: "narada.epistemic.query.v2", status: "ok", payload: "x".repeat(21000) },
     };
+    fixtures.schema_lease_batch = {
+      schema: "narada.mcp_loader.schema_lease_batch.v1",
+      status: "issued",
+      connection_id: "c-batch",
+      surface_handle: "msh-batch",
+      lease_count: 1,
+      leases: [fixtures.schema_lease_compact],
+      binding_resolution: { binding_id: "repo-git", canonical_binding_id: "repo-git" },
+    };
     const requestedValue = message.params.arguments.value;
     process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: {
       content: [{ type: "text", text: requestedValue === "authoritative_json" ? JSON.stringify(fixtures.producer_page) : "summary without lease" }],
@@ -244,6 +253,15 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     assert.equal(leaseModel.binding_resolution, undefined);
     assert.equal(leaseModel.tool_contract, undefined);
     assert.notEqual(registered[0].renderResult(lease, { expanded: true }).render(160).join('\n'), lease.content[0].text);
+
+    const batchLease = await registered[0].execute('call-schema-lease-batch', { value: 'schema_lease_batch' }, new AbortController().signal);
+    const batchLeaseModel = JSON.parse(batchLease.content[0].text);
+    assert.deepEqual(Object.keys(batchLeaseModel).sort(), ['connection_id', 'lease_count', 'leases', 'schema', 'status', 'surface_handle'].sort());
+    assert.deepEqual(Object.keys(batchLeaseModel.leases[0]).sort(), ['input_contract', 'schema_lease', 'tool_name'].sort());
+    assert.equal(batchLeaseModel.binding_resolution, undefined);
+    assert.equal(batchLeaseModel.leases[0].connection_id, undefined);
+    assert.equal(batchLeaseModel.leases[0].tool_contract, undefined);
+    assert.ok(batchLease.content[0].text.length < 700);
 
     const commandExecution = await registered[0].execute('call-structured-command', { value: 'structured_command' }, new AbortController().signal);
     const commandModel = JSON.parse(commandExecution.content[0].text);

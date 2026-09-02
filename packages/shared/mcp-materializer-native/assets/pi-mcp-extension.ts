@@ -210,6 +210,24 @@ function projectSchemaLeaseForModel(value: any): any | undefined {
   return projection;
 }
 
+function projectSchemaLeaseBatchForModel(value: any): any | undefined {
+  if (value?.schema !== "narada.mcp_loader.schema_lease_batch.v1" || !Array.isArray(value.leases)) return undefined;
+  const leases = value.leases.map((lease: any) => {
+    const projection: Record<string, any> = {};
+    for (const field of ["tool_name", "schema_lease"]) {
+      if (typeof lease?.[field] === "string") projection[field] = lease[field];
+    }
+    if (Object.prototype.hasOwnProperty.call(lease ?? {}, "input_contract")) projection.input_contract = lease.input_contract;
+    return projection;
+  });
+  const projection: Record<string, any> = { schema: value.schema, status: value.status, leases };
+  for (const field of ["connection_id", "surface_handle"]) {
+    if (typeof value?.[field] === "string") projection[field] = value[field];
+  }
+  if (typeof value.lease_count === "number") projection.lease_count = value.lease_count;
+  return projection;
+}
+
 function projectRuntimeFreshnessForModel(value: any): any | undefined {
   if (value?.schema !== "narada.mcp_loader.runtime_freshness.v1") return undefined;
   const projection: Record<string, any> = { schema: value.schema, status: value.status };
@@ -537,7 +555,7 @@ function projectMutationReceiptForModel(structured: any): any | undefined {
 }
 
 function loaderControlPlaneProjectionForModel(value: any): any | undefined {
-  return projectSurfaceAttachedForModel(value) ?? projectSurfaceHandleOpenedForModel(value) ?? projectRuntimeFreshnessForModel(value) ?? projectGitResultForModel(value) ?? projectStructuredCommandResultForModel(value) ?? projectMutationReceiptForModel(value) ?? projectEpistemicQueryForModel(value) ?? projectTeamWorkOverviewForModel(value) ?? projectConnectionInventoryForModel(value) ?? projectSiteSurfacesForModel(value) ?? projectSchemaLeaseForModel(value) ?? projectSiteToolInventoryForModel(value);
+  return projectSurfaceAttachedForModel(value) ?? projectSurfaceHandleOpenedForModel(value) ?? projectRuntimeFreshnessForModel(value) ?? projectGitResultForModel(value) ?? projectStructuredCommandResultForModel(value) ?? projectMutationReceiptForModel(value) ?? projectEpistemicQueryForModel(value) ?? projectTeamWorkOverviewForModel(value) ?? projectConnectionInventoryForModel(value) ?? projectSiteSurfacesForModel(value) ?? projectSchemaLeaseBatchForModel(value) ?? projectSchemaLeaseForModel(value) ?? projectSiteToolInventoryForModel(value);
 }
 
 function projectEpistemicQueryForModel(value: any): any | undefined {
@@ -645,6 +663,8 @@ function modelProjectionTextFromStructured(structured: any): string | undefined 
 }
 
 function controlPlaneProjectionText(structured: any): string | undefined {
+  const leaseBatchProjection = projectSchemaLeaseBatchForModel(structured);
+  if (leaseBatchProjection !== undefined) return JSON.stringify(leaseBatchProjection);
   if (structured?.schema === "narada.mcp_loader.schema_lease.v1") {
     const projection: any = {
       schema: structured.schema,
