@@ -119,6 +119,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
         minimal_example: { noisy: "z".repeat(500) },
         requested: { workflow: null, tool: null },
       },
+      tools_result: { schema: "narada.mcp_loader.tools.v1", status: "ok", connection_id: "c-tools", surface_id: "epistemic-graph", compact: true, tool_count: 3, tools: [{ name: "epistemic_graph_guidance", description: "Explain the problem-situation graph workflow.", inputSchema: { type: "object" } }, { name: "epistemic_graph_query", description: "Run a bounded query with a very long description that must not enter the model projection.", inputSchema: { type: "object", properties: { query: { type: "object" } } } }, { name: "epistemic_graph_submit_review_admit", description: "Submit, review, and admit a contribution.", inputSchema: { type: "object", required: ["actor"] } }], runtime_freshness: { status: "current", reload_required: false, source: "omit" }, runtime_lifecycle: { restartability_status: "available", session_restart_required: false, guidance: "omit" } },
       empty_range: { schema: "local.filesystem.read.v1", relative_path: "file.md", total_lines: 250, returned_lines: 0, offset: 300, requested_start_line: 300, requested_end_line: 380 },
       empty_valid_range: { schema: "local.filesystem.read.v1", relative_path: "file.md", total_lines: 250, returned_lines: 0, offset: 200, requested_start_line: 200, requested_end_line: 200 },
       replace: { schema: "local.filesystem.str_replace_file.v1", status: "replaced", relative_path: "file.md", occurrences: 1 },
@@ -186,6 +187,22 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       surface_id: "epistemic-graph",
       result_summary: { schema: "narada.epistemic.guidance.v2", status: "ok" },
       result: { structuredContent: fixtures.guidance_result },
+    };
+    fixtures.loader_tools_result = {
+      schema: "narada.mcp_loader.tool_result.v1",
+      status: "ok",
+      connection_id: "c-tools",
+      surface_id: "epistemic-graph",
+      result_summary: { schema: "narada.mcp_loader.tools.v1", status: "ok", tool_count: 3 },
+      result: { structuredContent: fixtures.tools_result },
+    };
+    fixtures.loader_tools_page = {
+      schema: "narada.mcp_loader.tool_result.v1",
+      status: "ok",
+      connection_id: "c-tools",
+      surface_id: "epistemic-graph",
+      result_summary: { schema: "narada.mcp_loader.tools.v1", status: "ok", tool_count: 3 },
+      result: { schema: "narada.producer_output_page.v1", status: "ok", output_ref: "mcp_output:tools", reader_tool: "mcp_loader_read_result", full_output_char_length: 5900, output_text: JSON.stringify(fixtures.tools_result) },
     };
     const requestedValue = message.params.arguments.value;
     process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: {
@@ -315,6 +332,25 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     assert.equal(guidanceModel.minimal_example, undefined);
     assert.equal(guidanceModel.requested, undefined);
     assert.ok(guidanceResult.content[0].text.length < 2000, `guidance model length=${guidanceResult.content[0].text.length}`);
+
+    const toolsResult = await registered[0].execute('call-tools-result', { value: 'tools_result' }, new AbortController().signal);
+    const toolsModel = JSON.parse(toolsResult.content[0].text);
+    assert.deepEqual(Object.keys(toolsModel).sort(), ['connection_id', 'schema', 'status', 'surface_id', 'tool_count', 'tools'].sort());
+    assert.deepEqual(toolsModel.tools, [
+      { name: 'epistemic_graph_guidance' },
+      { name: 'epistemic_graph_query' },
+      { name: 'epistemic_graph_submit_review_admit' },
+    ]);
+    assert.equal(toolsModel.tools[0].description, undefined);
+    assert.equal(toolsModel.compact, undefined);
+    assert.equal(toolsModel.runtime_freshness, undefined);
+    assert.equal(toolsModel.runtime_lifecycle, undefined);
+    assert.ok(toolsResult.content[0].text.length < 500);
+
+    const loaderToolsResult = await registered[0].execute('call-loader-tools-result', { value: 'loader_tools_result' }, new AbortController().signal);
+    assert.deepEqual(JSON.parse(loaderToolsResult.content[0].text), toolsModel);
+    const loaderToolsPage = await registered[0].execute('call-loader-tools-page', { value: 'loader_tools_page' }, new AbortController().signal);
+    assert.deepEqual(JSON.parse(loaderToolsPage.content[0].text), toolsModel);
 
     const authoritativeJson = await registered[0].execute('call-authoritative-json', { value: 'authoritative_json' }, new AbortController().signal);
     const writeReceipt = await registered[0].execute('call-write-file', { value: 'write_file' }, new AbortController().signal);

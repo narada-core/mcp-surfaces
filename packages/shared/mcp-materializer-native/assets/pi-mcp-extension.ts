@@ -521,6 +521,36 @@ function projectStructuredCommandResultForModel(value: any): any | undefined {
   return projection;
 }
 
+function projectMcpLoaderToolsForModel(value: any): any | undefined {
+  if (value?.schema !== "narada.mcp_loader.tools.v1" || !Array.isArray(value.tools)) return undefined;
+  const tools = value.tools
+    .map((tool: any) => typeof tool?.name === "string" ? { name: tool.name } : undefined)
+    .filter((tool: any): tool is { name: string } => tool !== undefined);
+  const projection: Record<string, any> = { schema: value.schema, tools };
+  for (const field of ["status", "connection_id", "surface_id"]) {
+    if (typeof value?.[field] === "string") projection[field] = value[field];
+  }
+  if (typeof value?.tool_count === "number") projection.tool_count = value.tool_count;
+  const freshness = value.runtime_freshness;
+  if (freshness && typeof freshness === "object" && (freshness.status !== "current" || freshness.reload_required === true)) {
+    const compact: Record<string, any> = {};
+    for (const field of ["status", "reload_required"]) {
+      if (Object.prototype.hasOwnProperty.call(freshness, field)) compact[field] = freshness[field];
+    }
+    if (Array.isArray(freshness.reasons) && freshness.reasons.length > 0) compact.reasons = freshness.reasons;
+    if (Object.keys(compact).length > 0) projection.runtime_freshness = compact;
+  }
+  const lifecycle = value.runtime_lifecycle;
+  if (lifecycle && typeof lifecycle === "object" && lifecycle.restartability_status !== "available") {
+    const compact: Record<string, any> = {};
+    for (const field of ["restartability_status", "session_restart_required"]) {
+      if (Object.prototype.hasOwnProperty.call(lifecycle, field)) compact[field] = lifecycle[field];
+    }
+    if (Object.keys(compact).length > 0) projection.runtime_lifecycle = compact;
+  }
+  return projection;
+}
+
 function projectLocalFilesystemGrepForModel(value: any): any | undefined {
   if (value?.schema !== "local.filesystem.grep.v1" || !Array.isArray(value.match_objects)) return undefined;
   const matchObjects = value.match_objects.map((match: any) => {
@@ -639,7 +669,7 @@ function projectMutationReceiptForModel(structured: any): any | undefined {
 }
 
 function loaderControlPlaneProjectionForModel(value: any): any | undefined {
-  return projectSurfaceAttachedForModel(value) ?? projectSurfaceHandleOpenedForModel(value) ?? projectRuntimeFreshnessForModel(value) ?? projectGitResultForModel(value) ?? projectStructuredCommandResultForModel(value) ?? projectLocalFilesystemGrepForModel(value) ?? projectEpistemicGuidanceForModel(value) ?? projectMutationReceiptForModel(value) ?? projectEpistemicQueryForModel(value) ?? projectTeamWorkOverviewForModel(value) ?? projectConnectionInventoryForModel(value) ?? projectSiteSurfacesForModel(value) ?? projectSchemaLeaseBatchForModel(value) ?? projectSchemaLeaseForModel(value) ?? projectSiteToolInventoryForModel(value);
+  return projectSurfaceAttachedForModel(value) ?? projectSurfaceHandleOpenedForModel(value) ?? projectRuntimeFreshnessForModel(value) ?? projectGitResultForModel(value) ?? projectStructuredCommandResultForModel(value) ?? projectMcpLoaderToolsForModel(value) ?? projectLocalFilesystemGrepForModel(value) ?? projectEpistemicGuidanceForModel(value) ?? projectMutationReceiptForModel(value) ?? projectEpistemicQueryForModel(value) ?? projectTeamWorkOverviewForModel(value) ?? projectConnectionInventoryForModel(value) ?? projectSiteSurfacesForModel(value) ?? projectSchemaLeaseBatchForModel(value) ?? projectSchemaLeaseForModel(value) ?? projectSiteToolInventoryForModel(value);
 }
 
 function projectEpistemicQueryForModel(value: any): any | undefined {
