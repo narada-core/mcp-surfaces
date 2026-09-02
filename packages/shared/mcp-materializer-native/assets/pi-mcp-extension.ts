@@ -552,6 +552,59 @@ function projectLocalFilesystemGrepForModel(value: any): any | undefined {
   return projection;
 }
 
+function projectEpistemicGuidanceForModel(value: any): any | undefined {
+  if (value?.schema !== "narada.epistemic.guidance.v2") return undefined;
+  const projection: Record<string, any> = { schema: value.schema };
+  if (typeof value?.purpose === "string") projection.purpose = value.purpose;
+  if (Array.isArray(value.workflow)) {
+    projection.workflow = value.workflow.map((step: any) => {
+      const compact: Record<string, any> = {};
+      if (typeof step?.step === "number") compact.step = step.step;
+      if (typeof step?.tool === "string") compact.tool = step.tool;
+      if (Array.isArray(step?.tools)) {
+        const tools = step.tools.filter((tool: any) => typeof tool === "string");
+        if (tools.length > 0) compact.tools = tools;
+      }
+      for (const field of ["preferred", "alternative", "manual_only"]) {
+        if (typeof step?.[field] === "boolean") compact[field] = step[field];
+      }
+      return compact;
+    });
+  }
+  if (Array.isArray(value.read_routing)) {
+    const routes = value.read_routing
+      .map((route: any) => typeof route?.tool === "string" ? { tool: route.tool } : undefined)
+      .filter((route: any): route is { tool: string } => route !== undefined);
+    if (routes.length > 0) projection.read_routing = routes;
+  }
+  const transport = value.payload_transport;
+  if (transport && typeof transport === "object") {
+    const compact: Record<string, any> = {};
+    if (Array.isArray(transport.accepted_by)) compact.accepted_by = transport.accepted_by.filter((tool: any) => typeof tool === "string");
+    if (transport.call_shape && typeof transport.call_shape === "object" && typeof transport.call_shape.payload_ref === "string") {
+      compact.call_shape = { payload_ref: transport.call_shape.payload_ref };
+    }
+    for (const field of ["exclusive_form", "authority_rule"]) {
+      if (typeof transport[field] === "string") compact[field] = transport[field];
+    }
+    if (Object.keys(compact).length > 0) projection.payload_transport = compact;
+  }
+  if (value.identity_rule && typeof value.identity_rule === "object" && typeof value.identity_rule.idempotency === "string") {
+    projection.identity_rule = { idempotency: value.identity_rule.idempotency };
+  }
+  for (const field of ["concurrency_rule", "admission_meaning", "problem_policy"]) {
+    if (typeof value?.[field] === "string") projection[field] = value[field];
+  }
+  if (value.requested && typeof value.requested === "object") {
+    const requested: Record<string, string> = {};
+    for (const field of ["workflow", "tool"]) {
+      if (typeof value.requested[field] === "string") requested[field] = value.requested[field];
+    }
+    if (Object.keys(requested).length > 0) projection.requested = requested;
+  }
+  return projection;
+}
+
 function projectMutationReceiptForModel(structured: any): any | undefined {
   if (structured?.schema === "local.filesystem.write_file.v1") {
     return {
@@ -586,7 +639,7 @@ function projectMutationReceiptForModel(structured: any): any | undefined {
 }
 
 function loaderControlPlaneProjectionForModel(value: any): any | undefined {
-  return projectSurfaceAttachedForModel(value) ?? projectSurfaceHandleOpenedForModel(value) ?? projectRuntimeFreshnessForModel(value) ?? projectGitResultForModel(value) ?? projectStructuredCommandResultForModel(value) ?? projectLocalFilesystemGrepForModel(value) ?? projectMutationReceiptForModel(value) ?? projectEpistemicQueryForModel(value) ?? projectTeamWorkOverviewForModel(value) ?? projectConnectionInventoryForModel(value) ?? projectSiteSurfacesForModel(value) ?? projectSchemaLeaseBatchForModel(value) ?? projectSchemaLeaseForModel(value) ?? projectSiteToolInventoryForModel(value);
+  return projectSurfaceAttachedForModel(value) ?? projectSurfaceHandleOpenedForModel(value) ?? projectRuntimeFreshnessForModel(value) ?? projectGitResultForModel(value) ?? projectStructuredCommandResultForModel(value) ?? projectLocalFilesystemGrepForModel(value) ?? projectEpistemicGuidanceForModel(value) ?? projectMutationReceiptForModel(value) ?? projectEpistemicQueryForModel(value) ?? projectTeamWorkOverviewForModel(value) ?? projectConnectionInventoryForModel(value) ?? projectSiteSurfacesForModel(value) ?? projectSchemaLeaseBatchForModel(value) ?? projectSchemaLeaseForModel(value) ?? projectSiteToolInventoryForModel(value);
 }
 
 function projectEpistemicQueryForModel(value: any): any | undefined {

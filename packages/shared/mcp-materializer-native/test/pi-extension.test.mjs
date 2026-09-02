@@ -79,6 +79,46 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     const fixtures = {
       stat: { schema: "local.filesystem.stat.v1", path: "C:/repo/file.md", relative_path: "file.md", type: "file", size: 13558 },
       grep_result: { schema: "local.filesystem.grep.v1", status: "ok", output_mode: "content", offset: 0, limit: 2, count: 2, count_exact: true, count_semantics: "count is the exact full result count", scanned: 2, scanned_unit: "matched_entries", returned: 2, max_matches: 30, max_output_chars: 4000, order: "ripgrep_traversal", cache_hit: true, snapshot_reused: true, cache_policy: "auto", snapshot_id: "s_grep", requested_snapshot_id: null, snapshot_complete: true, cache_memory_bytes: 40, page_match_bytes: 40, page_match_bytes_limit: 4000, page_matches_truncated: 0, timeout_ms: 30000, freshness: { path: "C:/repo", type: "directory", size: 100, mtime: "2026-09-02T00:00:00Z", mtime_ms: 1, tree_sha256: "secret-tree" }, scope: { requested_path: "packages", root: "C:/repo", path: "C:/repo/packages", argument: "directory", include_glob: null, default_exclusions_applied: true }, has_more: false, next_offset: null, continuation: null, matches_format: "structured", match_objects_authoritative: true, match_objects: [{ path: "packages/a.ts", line: 10, text: "const a = 1;", raw: "packages/a.ts|10|const a = 1;" }, { path: "packages/b.ts", line: 20, text: "const b = 2;", raw: "packages/b.ts|20|const b = 2;" }] },
+      guidance_result: {
+        schema: "narada.epistemic.guidance.v2",
+        purpose: "Preserve evolving problem situations, not certify truth.",
+        workflow: [
+          { step: 1, tool: "epistemic_graph_submit_review_admit", preferred: true, why: "Perform the ordinary submit, preserved policy review, and admission workflow atomically. Omit expected_ledger_head to snapshot the current head and omit idempotency_key for deterministic retry safety." },
+          { step: 2, tool: "epistemic_graph_capture_sources", alternative: true, why: "Create a reviewable source proposal when manual review before admission is intended; operations may be empty for pure source capture." },
+          { step: 3, tool: "epistemic_graph_proposal_submit", alternative: true, why: "Persist a reviewable proposal without source batching." },
+          { step: 4, tools: ["epistemic_graph_proposal_review", "epistemic_graph_proposal_admit"], manual_only: true, why: "Use separate calls only when the operator wants an explicit pause between proposal, review, and admission." },
+          { step: 5, tool: "epistemic_graph_neighborhood", why: "Verify the admitted problem situation and its relations." },
+        ],
+        read_routing: [
+          { tool: "epistemic_graph_team_work_overview", use_when: "A bounded turn-boundary view is needed." },
+          { tool: "epistemic_graph_issue_tree_frontier", use_when: "The unresolved leaves of one known tree are needed." },
+          { tool: "epistemic_graph_neighborhood", use_when: "One entity's explicit one-hop relations are needed." },
+          { tool: "epistemic_graph_snapshot", use_when: "A broad paged visualization is needed." },
+        ],
+        payload_transport: {
+          accepted_by: ["epistemic_graph_proposal_submit", "epistemic_graph_submit_review_admit"],
+          call_shape: { payload_ref: "mcp_payload:<payload-id>@v<positive-revision>" },
+          exclusive_form: "Supply payload_ref alone; do not combine it with actor, authority_basis, operations, or another inline proposal field.",
+          authority_rule: "A payload reference is immutable transport, not mutation authority. The target Site binding and graph mutation boundary still validate actor, authority_basis, schema, and operations.",
+          retry_rule: "The same valid immutable revision is safe to retry only when its content remains contract-valid.",
+        },
+        identity_rule: {
+          relations: "Omit relation_id to derive it deterministically.",
+          idempotency: "Omit idempotency_key for deterministic content-hash retry identity; supply one only to name a wider caller-defined retry scope.",
+        },
+        revision_pattern: {
+          entity_title_correction: "Declare a successor entity with the corrected title and connect it to the prior entity using supersedes. Keep the prior identity as immutable history.",
+          discovery: "Query or inspect the predecessor neighborhood before declaring the successor.",
+          reason: "The graph is append-only.",
+        },
+        concurrency_rule: "Omit expected_ledger_head to snapshot the live head during submission while retaining CAS protection through admission. Supply a concrete status.ledger_head only when an external read must be the concurrency boundary. If review reports stale, query again and submit a new proposal; do not rewrite the immutable proposal.",
+        admission_meaning: "policy-valid contribution; never truth certification",
+        problem_policy: "Transform apparent solutions into successor problems; record closure only as an attributed assessment.",
+        immutable_payload_recovery: { noisy: "x".repeat(9000) },
+        communication_model: { noisy: "y".repeat(3000) },
+        minimal_example: { noisy: "z".repeat(500) },
+        requested: { workflow: null, tool: null },
+      },
       empty_range: { schema: "local.filesystem.read.v1", relative_path: "file.md", total_lines: 250, returned_lines: 0, offset: 300, requested_start_line: 300, requested_end_line: 380 },
       empty_valid_range: { schema: "local.filesystem.read.v1", relative_path: "file.md", total_lines: 250, returned_lines: 0, offset: 200, requested_start_line: 200, requested_end_line: 200 },
       replace: { schema: "local.filesystem.str_replace_file.v1", status: "replaced", relative_path: "file.md", occurrences: 1 },
@@ -138,6 +178,14 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       surface_id: "local-filesystem",
       result_summary: { schema: "local.filesystem.grep.v1", status: "ok" },
       result: { structuredContent: fixtures.grep_result },
+    };
+    fixtures.loader_guidance_result = {
+      schema: "narada.mcp_loader.tool_result.v1",
+      status: "ok",
+      connection_id: "c1",
+      surface_id: "epistemic-graph",
+      result_summary: { schema: "narada.epistemic.guidance.v2", status: "ok" },
+      result: { structuredContent: fixtures.guidance_result },
     };
     const requestedValue = message.params.arguments.value;
     process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: {
@@ -239,6 +287,34 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     assert.equal(grepModel.scope, undefined);
     assert.equal(grepModel.continuation, undefined);
     assert.ok(grepResult.content[0].text.length < 800);
+
+    const guidanceResult = await registered[0].execute('call-loader-guidance-result', { value: 'loader_guidance_result' }, new AbortController().signal);
+    const guidanceModel = JSON.parse(guidanceResult.content[0].text);
+    assert.deepEqual(Object.keys(guidanceModel).sort(), ['admission_meaning', 'concurrency_rule', 'identity_rule', 'payload_transport', 'problem_policy', 'purpose', 'read_routing', 'schema', 'workflow'].sort());
+    assert.deepEqual(guidanceModel.workflow, [
+      { step: 1, tool: 'epistemic_graph_submit_review_admit', preferred: true },
+      { step: 2, tool: 'epistemic_graph_capture_sources', alternative: true },
+      { step: 3, tool: 'epistemic_graph_proposal_submit', alternative: true },
+      { step: 4, tools: ['epistemic_graph_proposal_review', 'epistemic_graph_proposal_admit'], manual_only: true },
+      { step: 5, tool: 'epistemic_graph_neighborhood' },
+    ]);
+    assert.deepEqual(guidanceModel.read_routing, [
+      { tool: 'epistemic_graph_team_work_overview' },
+      { tool: 'epistemic_graph_issue_tree_frontier' },
+      { tool: 'epistemic_graph_neighborhood' },
+      { tool: 'epistemic_graph_snapshot' },
+    ]);
+    assert.deepEqual(guidanceModel.payload_transport, {
+      accepted_by: ['epistemic_graph_proposal_submit', 'epistemic_graph_submit_review_admit'],
+      call_shape: { payload_ref: 'mcp_payload:<payload-id>@v<positive-revision>' },
+      exclusive_form: 'Supply payload_ref alone; do not combine it with actor, authority_basis, operations, or another inline proposal field.',
+      authority_rule: 'A payload reference is immutable transport, not mutation authority. The target Site binding and graph mutation boundary still validate actor, authority_basis, schema, and operations.',
+    });
+    assert.equal(guidanceModel.workflow[0].why, undefined);
+    assert.equal(guidanceModel.immutable_payload_recovery, undefined);
+    assert.equal(guidanceModel.minimal_example, undefined);
+    assert.equal(guidanceModel.requested, undefined);
+    assert.ok(guidanceResult.content[0].text.length < 2000, `guidance model length=${guidanceResult.content[0].text.length}`);
 
     const authoritativeJson = await registered[0].execute('call-authoritative-json', { value: 'authoritative_json' }, new AbortController().signal);
     const writeReceipt = await registered[0].execute('call-write-file', { value: 'write_file' }, new AbortController().signal);
