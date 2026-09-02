@@ -737,6 +737,32 @@ function bodyOnlyProjectionText(structured: any): string | undefined {
   return JSON.stringify(structured.items.map((item: any) => typeof item?.body === "string" ? item.body : ""));
 }
 
+function filesystemReadBodyFromTransport(result: any, depth = 0): string | undefined {
+  if (depth > 3 || !Array.isArray(result?.content)) return undefined;
+  for (const block of result.content) {
+    if (block?.type !== "text" || typeof block.text !== "string") continue;
+    let parsed: any;
+    try {
+      parsed = JSON.parse(block.text);
+    } catch {
+      return block.text;
+    }
+    if (parsed?.schema === "local.filesystem.read.v1" && typeof parsed.content === "string") {
+      return parsed.content;
+    }
+    const nested = filesystemReadBodyFromTransport(parsed, depth + 1);
+    if (nested !== undefined) return nested;
+    return block.text;
+  }
+  return undefined;
+}
+
+function projectLocalFilesystemReadForModel(value: any, transportResult?: any): string | undefined {
+  if (value?.schema !== "local.filesystem.read.v1") return undefined;
+  if (typeof value.content === "string") return value.content;
+  return filesystemReadBodyFromTransport(transportResult);
+}
+
 function projectMcpLoaderToolResultForModel(value: any): any | undefined {
   if (value?.schema !== "narada.mcp_loader.tool_result.v1") return undefined;
   const summary = value.result_summary;
@@ -797,6 +823,8 @@ function projectParsedOutputValueForModel(value: any, depth = 0): string | undef
   if (depth > 4 || value === null || typeof value !== "object") return undefined;
   const bodyOnly = bodyOnlyProjectionText(value);
   if (bodyOnly !== undefined) return bodyOnly;
+  const filesystemRead = projectLocalFilesystemReadForModel(value?.structuredContent ?? value, value);
+  if (filesystemRead !== undefined) return filesystemRead;
   const projection = loaderControlPlaneProjectionForModel(value);
   if (projection !== undefined) return JSON.stringify(projection);
   const nested: any[] = [value?.structuredContent, value?.result?.structuredContent];
@@ -832,10 +860,15 @@ function projectOutputPageTextForModel(outputText: string): string {
   return current;
 }
 
-function modelProjectionTextFromStructured(structured: any): string | undefined {
+function modelProjectionTextFromStructured(structured: any, transportResult?: any): string | undefined {
+  const filesystemRead = projectLocalFilesystemReadForModel(structured, transportResult);
+  if (filesystemRead !== undefined) return filesystemRead;
   if (structured?.schema === "narada.mcp_loader.tool_result.v1") {
-    const child = structured.result?.structuredContent ?? structured.result;
+    const childResult = structured.result;
+    const child = childResult?.structuredContent ?? childResult;
     if (child === undefined) return undefined;
+    const childFilesystemRead = projectLocalFilesystemReadForModel(child, childResult);
+    if (childFilesystemRead !== undefined) return childFilesystemRead;
     const bodyOnly = bodyOnlyProjectionText(child);
     if (bodyOnly !== undefined) return bodyOnly;
     if (isOutputPage(child) && typeof child.output_text === "string") {
@@ -914,7 +947,7 @@ function mutationReceiptProjectionText(structured: any): string | undefined {
 }
 
 function modelContentProjection(result: any, content: any[]): any[] {
-  const structuredProjection = modelProjectionTextFromStructured(result?.structuredContent);
+  const structuredProjection = modelProjectionTextFromStructured(result?.structuredContent, result);
   if (structuredProjection !== undefined) return [{ type: "text", text: structuredProjection }];
   const controlPlaneProjection = controlPlaneProjectionText(result?.structuredContent);
   if (controlPlaneProjection !== undefined) return [{ type: "text", text: controlPlaneProjection }];

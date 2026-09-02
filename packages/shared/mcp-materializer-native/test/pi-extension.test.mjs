@@ -157,6 +157,60 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       mcp_page: { schema: "narada.mcp_output_page.v1", status: "ok", ref: "mcp_output:page", path: ".ai/tmp/mcp-outputs/workspace/page.json", full_output_char_length: 1234, output_text: JSON.stringify({ schema: "child.result.v1", answer: "only mcp output" }) },
       worker_page: { schema: "narada.worker.output_page.v1", status: "ok", ref: "worker_output:page", path: "worker.json", output_text: JSON.stringify({ schema: "child.result.v1", answer: "only worker output" }) },
       authoritative_json: { schema: "local.filesystem.read.v1", content_delivery: { format: "filesystem_read_text", channel: "content" }, relative_path: "file.json" },
+      filesystem_read_result: (() => {
+        const body = "const filesystemRead = true;\\n";
+        const path = "C:/repo/" + "nested/".repeat(200) + "read.ts";
+        const readValue = {
+          schema: "local.filesystem.read.v1",
+          path,
+          root: "C:/repo",
+          relative_path: path.slice("C:/repo/".length),
+          total_lines: 1,
+          total_lines_exact: true,
+          total_lines_status: "exact",
+          line_window_complete: true,
+          offset: 1,
+          limit: 400,
+          requested_limit: 400,
+          requested_start_line: null,
+          requested_end_line: null,
+          served_end_line: 1,
+          returned_lines: 1,
+          next_offset: null,
+          next_start_line: null,
+          continuation: null,
+          content: body,
+          content_sha256: "body",
+          content_hash_scope: "full_file",
+          hash_source: "live_file_bytes",
+          cache_used: false,
+          content_window_sha256: "window",
+          max_limit: 1000,
+          limit_adjusted: false,
+          pagination_required: false,
+          has_more: false,
+          requested_range_complete: true,
+          timeout_ms: 5000,
+        };
+        const { content, ...structuredContent } = readValue;
+        structuredContent.content_delivery = {
+          channel: "content",
+          block_index: 0,
+          format: "filesystem_read_text",
+          duplicated_in_structured_content: false,
+        };
+        return {
+          schema: "narada.mcp_loader.tool_result.v1",
+          connection_id: "c-filesystem",
+          surface_id: "local-filesystem",
+          result_summary: { schema: readValue.schema, status: "ok" },
+          result: {
+            content: [{ type: "text", text: JSON.stringify(readValue, null, 2) }],
+            structuredContent,
+            isError: false,
+          },
+        };
+      })(),
       write_file: { schema: "local.filesystem.write_file.v1", status: "written", path: "C:/site/.ai/file.md", root: "C:/site", relative_path: ".ai/file.md", size: 17, create_parent_directories: true, before_sha256: "before", after_sha256: "after", sha256: "after", content_sha256: "after", timeout_ms: 30000 },
       submit_review_admit: { schema: "narada.epistemic.submit_review_admit.v1", status: "admitted", submission: { proposal_id: "proposal-1", proposal_digest: "digest-1", content_fingerprint: "content-1", operation_count: 4, operations: [{ op: "entity_create", title: "repeated input" }] }, review: { status: "policy_valid", review_details: { repeated: "input" } }, admission: { status: "admitted", proposal_id: "proposal-1", ledger_head: "head-1", event: { operations: [{ op: "entity_create", title: "repeated input" }] } }, review_gate_preserved: true, certifies_truth: false },
       schema_lease: { schema: "narada.mcp_loader.schema_lease.v1", status: "issued", connection_id: "c1", surface_id: "git", tool_name: "git_status", schema_lease: "lease-1", tool_schema_digest: "digest-1", input_schema_digest: "input-digest", binding_resolution: { surface_handle: "handle", runtime_lifecycle: { noisy: true } }, input_contract: { required: [], properties: ["working_directory"] }, tool_contract: { name: "git_status", inputSchema: { type: "object" } } },
@@ -377,6 +431,12 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     assert.ok(loaderToolsTruncatedPage.content[0].text.length < 500);
 
     const authoritativeJson = await registered[0].execute('call-authoritative-json', { value: 'authoritative_json' }, new AbortController().signal);
+    const filesystemRead = await registered[0].execute('call-filesystem-read-result', { value: 'filesystem_read_result' }, new AbortController().signal);
+    assert.equal(filesystemRead.content[0].text, 'const filesystemRead = true;\n');
+    assert.ok(filesystemRead.details.fullOutputCharLength > 5000, `filesystem read full length=${filesystemRead.details.fullOutputCharLength}`);
+    assert.ok(filesystemRead.details.modelVisibleCharLength < 100, `filesystem read model length=${filesystemRead.details.modelVisibleCharLength}`);
+    assert.equal(filesystemRead.details.modelVisibleTruncated, false);
+    assert.doesNotMatch(filesystemRead.content[0].text, /local\.filesystem\.read\.v1|content_sha256|nested/);
     const writeReceipt = await registered[0].execute('call-write-file', { value: 'write_file' }, new AbortController().signal);
     const writeModel = JSON.parse(writeReceipt.content[0].text);
     assert.deepEqual(Object.keys(writeModel).sort(), ['after_sha256', 'before_sha256', 'relative_path', 'schema', 'sha256', 'size', 'status'].sort());
