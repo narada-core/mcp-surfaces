@@ -75,6 +75,19 @@ export function summarizeMcpResult(result: any, fullText: string, modelVisibleTe
   const summary = structured?.result_summary;
   const schema = summary?.schema ?? structured?.schema;
   const status = summary?.status ?? structured?.status;
+  const nested = structured?.result?.structuredContent ?? structured?.result;
+  const nestedSchema = summary?.schema ?? nested?.schema ?? structured?.schema;
+  if (nestedSchema === 'narada.epistemic.query.v2') {
+    const query = nested?.schema === nestedSchema ? nested : structured;
+    const returned = [
+      query?.returned_count,
+      query?.count,
+      Array.isArray(query?.items) ? query.items.length : undefined,
+    ].find((value) => Number.isInteger(value) && value >= 0);
+    const count = returned === undefined ? '' : ` · ${counted(returned, 'item')}`;
+    const queryStatus = query?.status ?? status;
+    return withModelVisibleSize(`${nestedSchema}${typeof queryStatus === 'string' ? `: ${queryStatus}` : ''}${count}`);
+  }
   if (typeof status === 'string' && typeof path === 'string') return withModelVisibleSize(`${status} ${path}`);
   const chars = authoritativeCharacterCount(structured, fullText.length);
   if (schema === 'narada.mcp_loader.result_page.v1') {

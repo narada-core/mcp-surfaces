@@ -77,6 +77,23 @@ test('carrier-neutral MCP presentation uses authoritative compact quantities and
     structuredContent: { schema: 'narada.mcp_loader.result_page.v1', full_output_char_length: 4227 },
   }, 'full transport text', 'model text'), 'MCP loader result page · 4.2k characters · model-visible 10 characters');
   assert.equal(presentation.collapseMcpResultByDefault(), true);
+
+  const nestedQuery = {
+    schema: 'narada.epistemic.query.v2',
+    status: 'ok',
+    returned_count: 4,
+    items: [{ entity_id: 'one' }, { entity_id: 'two' }, { entity_id: 'three' }, { entity_id: 'four' }],
+  };
+  const nestedQuerySummary = presentation.summarizeMcpResult({
+    structuredContent: {
+      schema: 'narada.mcp_loader.tool_result.v1',
+      status: 'ok',
+      result_summary: { schema: nestedQuery.schema, status: nestedQuery.status },
+      result: { structuredContent: nestedQuery },
+    },
+  }, 'x'.repeat(82_000), 'x'.repeat(406));
+  assert.equal(nestedQuerySummary, 'narada.epistemic.query.v2: ok · 4 items · model-visible 406 characters');
+  assert.doesNotMatch(nestedQuerySummary, /82k|characters\)/);
 });
 
 test('native tool renderer wrapper hides call and result without replacing execution', async () => {
