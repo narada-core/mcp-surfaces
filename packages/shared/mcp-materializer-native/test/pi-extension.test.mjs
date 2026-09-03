@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import test from 'node:test';
 
@@ -17,6 +17,19 @@ async function materializedTemplate(servers) {
   return template
     .replace('__NARADA_MCP_RESULT_PRESENTATION__', presentation)
     .replace('__NARADA_PI_MCP_SERVERS__', JSON.stringify(servers));
+}
+
+const piCodingAgentModulePath = process.env.PI_CODING_AGENT_MODULE
+  ?? join(dirname(process.execPath), 'node_modules', '@earendil-works', 'pi-coding-agent', 'dist', 'index.js');
+let piCodingAgentRuntime;
+try {
+  piCodingAgentRuntime = await import(pathToFileURL(piCodingAgentModulePath).href);
+} catch {
+  piCodingAgentRuntime = undefined;
+}
+
+function stripAnsi(value) {
+  return value.replace(/\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))/g, '');
 }
 
 function retainedCommandBox(tool, result, theme) {
@@ -88,6 +101,66 @@ test('native tool renderer wrapper hides call and result without replacing execu
     view = 'compact';
     assert.deepEqual(wrapped.renderCall({}, {}, {}).render(80), ['call']);
     assert.deepEqual(wrapped.renderResult({}, { expanded: false }, {}, {}).render(80), ['result']);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Pi ToolExecutionComponent produces distinct collapsed and expanded native shell snapshots', {
+  skip: piCodingAgentRuntime ? false : 'Pi runtime package is not installed beside the active Node runtime',
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'narada-pi-visual-renderer-'));
+  try {
+    const extensionPath = join(root, 'index.ts');
+    await writeFile(extensionPath, await materializedTemplate([]), 'utf8');
+    const { withToolResultView } = await import(`${pathToFileURL(extensionPath).href}?visual-renderer`);
+    const {
+      ToolExecutionComponent,
+      createBashToolDefinition,
+      createPowerShellToolDefinition,
+      initTheme,
+    } = piCodingAgentRuntime;
+    initTheme('dark');
+
+    for (const [name, factory] of [
+      ['bash', createBashToolDefinition],
+      ['powershell', createPowerShellToolDefinition],
+    ]) {
+      let view = 'compact';
+      const wrapped = withToolResultView(factory('C:/repo'), () => view);
+      const component = new ToolExecutionComponent(
+        name,
+        `visual-${name}`,
+        { command: 'visual-test-command' },
+        {},
+        wrapped,
+        { requestRender() {} },
+        'C:/repo',
+      );
+      const result = {
+        content: [{ type: 'text', text: Array.from({ length: 8 }, (_, index) => `line${index}`).join('\n') }],
+        details: {},
+      };
+      component.updateResult(result, false);
+      const snapshot = () => component.render(80).map(stripAnsi);
+      const contentSnapshot = (lines) => lines
+        .filter((line) => /line\d/.test(line))
+        .map((line) => line.trim());
+
+      const collapsedSnapshot = snapshot();
+      view = 'full-output';
+      component.setExpanded(true);
+      const expandedSnapshot = snapshot();
+      assert.notDeepEqual(expandedSnapshot, collapsedSnapshot, `${name}: expansion must change the rendered box`);
+      assert.deepEqual(contentSnapshot(collapsedSnapshot), ['line3', 'line4', 'line5', 'line6', 'line7'], `${name}: collapsed snapshot`);
+      assert.deepEqual(contentSnapshot(expandedSnapshot), ['line0', 'line1', 'line2', 'line3', 'line4', 'line5', 'line6', 'line7'], `${name}: expanded snapshot`);
+
+      view = 'hide';
+      component.setExpanded(false);
+      assert.doesNotMatch(snapshot().join('\n'), /visual-test-command|line\d/, `${name}: hidden snapshot`);
+      view = 'compact';
+      assert.deepEqual(contentSnapshot(snapshot()), contentSnapshot(collapsedSnapshot), `${name}: compact snapshot restores after hide`);
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }
