@@ -978,6 +978,21 @@ type ToolResultView = "compact" | "single-line" | "model-visible" | "full-output
 const TOOL_RESULT_VIEWS: ToolResultView[] = ["compact", "single-line", "model-visible", "full-output", "hide"];
 const TOOL_RESULT_VIEW_SHORTCUT = "f8";
 const TOOL_RESULT_VIEW_SHORTCUT_ALIASES = ["f8", "ctrl+shift+m"];
+const TOOL_RESULT_VIEW_STATUS_KEY = "narada-mcp-tool-view";
+
+function nextToolResultView(view: ToolResultView): ToolResultView {
+  return TOOL_RESULT_VIEWS[(TOOL_RESULT_VIEWS.indexOf(view) + 1) % TOOL_RESULT_VIEWS.length];
+}
+
+function nativeShellDisplay(view: ToolResultView): "hidden" | "collapsed" | "expanded" {
+  if (view === "hide") return "hidden";
+  if (view === "full-output") return "expanded";
+  return "collapsed";
+}
+
+function toolResultViewStatus(view: ToolResultView): string {
+  return `Tool view: ${view} · shells ${nativeShellDisplay(view)} · ${TOOL_RESULT_VIEW_SHORTCUT}: ${nextToolResultView(view)}`;
+}
 
 function boundedModelContent(
   result: any,
@@ -1307,21 +1322,21 @@ export default function naradaMcpCarrier(pi: any): void {
     }
   };
 
-  const cycleToolResultView = async (ctx: any): Promise<void> => {
-    const previousView = toolResultView;
-    const currentIndex = TOOL_RESULT_VIEWS.indexOf(toolResultView);
-    toolResultView = TOOL_RESULT_VIEWS[(currentIndex + 1) % TOOL_RESULT_VIEWS.length];
-    if (toolResultView === "full-output") {
-      ctx?.ui?.setToolsExpanded?.(true);
-    } else if (previousView === "full-output") {
-      ctx?.ui?.setToolsExpanded?.(false);
-    } else {
-      // Pi's public UI API exposes only a boolean expansion state. Toggle
-      // through true so the host rebuilds rows even when the previous state
-      // was false (notably when leaving the hide view).
-      ctx?.ui?.setToolsExpanded?.(true);
-      ctx?.ui?.setToolsExpanded?.(false);
+  const syncToolResultView = (ctx: any): void => {
+    const shouldExpandNativeShells = nativeShellDisplay(toolResultView) === "expanded";
+    const hostExpanded = ctx?.ui?.getToolsExpanded?.();
+    if (typeof hostExpanded !== "boolean" || hostExpanded !== shouldExpandNativeShells) {
+      ctx?.ui?.setToolsExpanded?.(shouldExpandNativeShells);
     }
+    // setStatus is also the repaint path when the host expansion boolean does
+    // not change. Never pulse the host through the opposite expansion state:
+    // that makes native shell rows flicker independently of the MCP view.
+    ctx?.ui?.setStatus?.(TOOL_RESULT_VIEW_STATUS_KEY, toolResultViewStatus(toolResultView));
+  };
+
+  const cycleToolResultView = async (ctx: any): Promise<void> => {
+    toolResultView = nextToolResultView(toolResultView);
+    syncToolResultView(ctx);
   };
   for (const shortcut of TOOL_RESULT_VIEW_SHORTCUT_ALIASES) {
     pi.registerShortcut?.(shortcut, {
@@ -1413,6 +1428,7 @@ export default function naradaMcpCarrier(pi: any): void {
   pi.on("session_start", async (_event: unknown, ctx: any) => {
     toolResultView = "compact";
     restoreNaradaSessionIdentity(ctx);
+    syncToolResultView(ctx);
     if (started) return;
     started = true;
     const nextClients: McpClient[] = [];
@@ -1596,8 +1612,9 @@ export default function naradaMcpCarrier(pi: any): void {
     }
   });
 
-  pi.on("session_shutdown", () => {
+  pi.on("session_shutdown", (_event: unknown, ctx: any) => {
     toolResultView = "compact";
+    ctx?.ui?.setStatus?.(TOOL_RESULT_VIEW_STATUS_KEY, undefined);
     for (const client of clients) client.close();
     clients = [];
     started = false;

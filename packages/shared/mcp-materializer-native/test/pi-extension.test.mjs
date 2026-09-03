@@ -667,41 +667,60 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     const shortcut = shortcuts.get('f8');
     assert.match(shortcut.description, /compact, single-line, model-visible, full-output, hide/);
     const expansionStates = [];
-    await shortcut.handler({ ui: { setToolsExpanded(value) { expansionStates.push(value); } } });
+    const viewStatuses = [];
+    let hostToolsExpanded = false;
+    const shortcutContext = {
+      ui: {
+        getToolsExpanded() { return hostToolsExpanded; },
+        setToolsExpanded(value) {
+          expansionStates.push(value);
+          hostToolsExpanded = value;
+        },
+        setStatus(key, value) {
+          if (key === 'narada-mcp-tool-view') viewStatuses.push(value);
+        },
+      },
+    };
+    await shortcut.handler(shortcutContext);
     const singleLine = registered[0].renderResult(result, { expanded: false }).render(160).join('\n');
     assert.match(singleLine, /MCP result.*model-visible.*f8: model-visible/);
-    assert.deepEqual(expansionStates, [true, false]);
+    assert.deepEqual(expansionStates, []);
+    assert.match(viewStatuses.at(-1), /^Tool view: single-line · shells collapsed · f8: model-visible$/);
     const singleLineCall = registered[0].renderCall({}, {
       fg(_kind, text) { return text; },
       bold(text) { return text; },
     }, {}).render(160);
     assert.deepEqual(singleLineCall, []);
 
-    await shortcut.handler({ ui: { setToolsExpanded(value) { expansionStates.push(value); } } });
+    await shortcut.handler(shortcutContext);
     const modelVisible = registered[0].renderResult(result, { expanded: false }).render(160).join('\n');
     assert.match(modelVisible, /^model-visible · \d+ characters/);
     assert.match(modelVisible, /schema_lease/);
-    assert.deepEqual(expansionStates, [true, false, true, false]);
+    assert.deepEqual(expansionStates, []);
+    assert.match(viewStatuses.at(-1), /^Tool view: model-visible · shells collapsed · f8: full-output$/);
 
-    await shortcut.handler({ ui: { setToolsExpanded(value) { expansionStates.push(value); } } });
+    await shortcut.handler(shortcutContext);
     const fullOutput = registered[0].renderResult(result, { expanded: false }).render(160).join('\n');
     assert.match(fullOutput, /^full-output · \d+ characters/);
     assert.match(fullOutput, /schema_lease/);
-    assert.deepEqual(expansionStates, [true, false, true, false, true]);
+    assert.deepEqual(expansionStates, [true]);
+    assert.match(viewStatuses.at(-1), /^Tool view: full-output · shells expanded · f8: hide$/);
 
-    await shortcut.handler({ ui: { setToolsExpanded(value) { expansionStates.push(value); } } });
+    await shortcut.handler(shortcutContext);
     assert.deepEqual(registered[0].renderResult(result, { expanded: false }).render(160), []);
-    assert.deepEqual(expansionStates, [true, false, true, false, true, false]);
+    assert.deepEqual(expansionStates, [true, false]);
+    assert.match(viewStatuses.at(-1), /^Tool view: hide · shells hidden · f8: compact$/);
     const hiddenCall = registered[0].renderCall({}, {
       fg(_kind, text) { return text; },
       bold(text) { return text; },
     }, {}).render(160);
     assert.deepEqual(hiddenCall, []);
 
-    await shortcut.handler({ ui: { setToolsExpanded(value) { expansionStates.push(value); } } });
+    await shortcut.handler(shortcutContext);
     const compactView = registered[0].renderResult(result, { expanded: false }).render(160).join('\n');
     assert.match(compactView, /f8: single-line/);
-    assert.deepEqual(expansionStates, [true, false, true, false, true, false, true, false]);
+    assert.deepEqual(expansionStates, [true, false]);
+    assert.match(viewStatuses.at(-1), /^Tool view: compact · shells collapsed · f8: single-line$/);
     const compactCall = registered[0].renderCall({}, {
       fg(_kind, text) { return text; },
       bold(text) { return text; },
@@ -751,21 +770,21 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     assert.doesNotMatch(oversized.content[0].text, /x{100}/);
     const oversizedExpanded = registered[0].renderResult(oversized, { expanded: true }).render(160).join('\n');
     assert.match(oversizedExpanded, /x{100}/);
-    await shortcut.handler({ ui: { setToolsExpanded() {} } });
+    await shortcut.handler(shortcutContext);
     const oversizedSingleLine = registered[0].renderResult(oversized, { expanded: false }).render(160).join('\n');
     assert.match(oversizedSingleLine, /model-visible.*f8: model-visible/);
     assert.doesNotMatch(oversizedSingleLine, /x{100}/);
-    await shortcut.handler({ ui: { setToolsExpanded() {} } });
+    await shortcut.handler(shortcutContext);
     const oversizedModelVisible = registered[0].renderResult(oversized, { expanded: false }).render(160).join('\n');
     assert.match(oversizedModelVisible, /^model-visible · [0-9.]+[kmb]? characters/);
     assert.doesNotMatch(oversizedModelVisible, /x{100}/);
-    await shortcut.handler({ ui: { setToolsExpanded() {} } });
+    await shortcut.handler(shortcutContext);
     const oversizedFullOutput = registered[0].renderResult(oversized, { expanded: false }).render(160).join('\n');
     assert.match(oversizedFullOutput, /^full-output · [0-9.]+[kmb]? characters/);
     assert.match(oversizedFullOutput, /x{100}/);
-    await shortcut.handler({ ui: { setToolsExpanded() {} } });
+    await shortcut.handler(shortcutContext);
     assert.deepEqual(registered[0].renderResult(oversized, { expanded: false }).render(160), []);
-    await shortcut.handler({ ui: { setToolsExpanded() {} } });
+    await shortcut.handler(shortcutContext);
 
     const largeResult = {
       content: [{ type: 'text', text: 'x'.repeat(5000) }],
