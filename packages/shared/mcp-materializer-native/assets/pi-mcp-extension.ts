@@ -1008,8 +1008,28 @@ function boundedModelContent(
   return { content: [{ type: "text", text: JSON.stringify(summary) }], expandedText: fullOutputText || rawText, truncated: true };
 }
 
-function hiddenComponent(): { render: (width: number) => string[]; invalidate: () => void } {
-  return { render: () => [], invalidate: () => {} };
+function hiddenComponent(): { render: (width: number) => string[]; invalidate: () => void; __naradaHidden: true } {
+  return { render: () => [], invalidate: () => {}, __naradaHidden: true };
+}
+
+function nativeRendererContext(context: any): any {
+  return context?.lastComponent?.__naradaHidden
+    ? { ...context, lastComponent: undefined }
+    : context;
+}
+
+export function withToolResultView(tool: any, getView: () => ToolResultView): any {
+  return {
+    ...tool,
+    renderCall: (args: any, theme: any, context: any) => {
+      if (getView() === "hide") return hiddenComponent();
+      return tool.renderCall?.(args, theme, nativeRendererContext(context)) ?? hiddenComponent();
+    },
+    renderResult: (result: any, options: any, theme: any, context: any) => {
+      if (getView() === "hide") return hiddenComponent();
+      return tool.renderResult?.(result, options, theme, nativeRendererContext(context)) ?? hiddenComponent();
+    },
+  };
 }
 
 function textComponent(text: string): { render: (width: number) => string[] } {
@@ -1248,6 +1268,45 @@ export default function naradaMcpCarrier(pi: any): void {
     handler: (args: string, ctx: any) => naradaIdentityCommand(args, ctx),
   });
 
+  const registerNativeShellDisplayOverrides = async (ctx: any): Promise<void> => {
+    const nativeShellNames = new Set(
+      (pi.getAllTools?.() ?? [])
+        .filter((tool: any) => tool?.sourceInfo?.source === "builtin")
+        .map((tool: any) => tool?.name),
+    );
+    const requestedNames = ["bash", "powershell"].filter((name) => nativeShellNames.has(name));
+    if (requestedNames.length === 0) return;
+
+    try {
+      const piAgent = await import("@earendil-works/pi-coding-agent");
+      const settings = typeof piAgent.SettingsManager?.create === "function"
+        ? piAgent.SettingsManager.create(
+          ctx.cwd,
+          piAgent.getAgentDir?.(),
+          { projectTrusted: ctx.isProjectTrusted?.() === true },
+        )
+        : undefined;
+      const factories: Record<string, any> = {
+        bash: piAgent.createBashToolDefinition,
+        powershell: piAgent.createPowerShellToolDefinition,
+      };
+      for (const name of requestedNames) {
+        const factory = factories[name];
+        if (typeof factory !== "function") continue;
+        const options = name === "bash"
+          ? {
+            commandPrefix: settings?.getShellCommandPrefix?.(),
+            shellPath: settings?.getShellPath?.(),
+          }
+          : undefined;
+        pi.registerTool(withToolResultView(factory(ctx.cwd, options), () => toolResultView));
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      ctx?.ui?.notify?.(`Narada MCP shell display integration unavailable: ${message}`, "warning");
+    }
+  };
+
   const cycleToolResultView = async (ctx: any): Promise<void> => {
     const previousView = toolResultView;
     const currentIndex = TOOL_RESULT_VIEWS.indexOf(toolResultView);
@@ -1371,6 +1430,7 @@ export default function naradaMcpCarrier(pi: any): void {
       "info",
     );
     try {
+      await registerNativeShellDisplayOverrides(ctx);
       const inventories: Array<{ client: McpClient; tools: any[]; runtime: StartupRuntime }> = [];
       for (const config of bootstrapConfigs) {
         const client = new McpClient(config);

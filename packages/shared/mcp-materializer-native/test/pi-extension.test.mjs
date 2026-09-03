@@ -31,6 +31,33 @@ test('carrier-neutral MCP presentation uses authoritative compact quantities and
   assert.equal(presentation.collapseMcpResultByDefault(), true);
 });
 
+test('native tool renderer wrapper hides call and result without replacing execution', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'narada-pi-shell-renderer-'));
+  try {
+    const extensionPath = join(root, 'index.ts');
+    await writeFile(extensionPath, await materializedTemplate([]), 'utf8');
+    const { withToolResultView } = await import(`${pathToFileURL(extensionPath).href}?shell-renderer`);
+    let view = 'hide';
+    const native = {
+      name: 'bash',
+      execute: async () => ({ content: [{ type: 'text', text: 'native' }] }),
+      renderCall: () => ({ render: () => ['call'], invalidate() {} }),
+      renderResult: () => ({ render: () => ['result'], invalidate() {} }),
+    };
+    const wrapped = withToolResultView(native, () => view);
+
+    assert.equal(wrapped.execute, native.execute);
+    assert.deepEqual(wrapped.renderCall({}, {}, {}).render(80), []);
+    assert.deepEqual(wrapped.renderResult({}, { expanded: false }, {}, {}).render(80), []);
+
+    view = 'compact';
+    assert.deepEqual(wrapped.renderCall({}, {}, {}).render(80), ['call']);
+    assert.deepEqual(wrapped.renderResult({}, { expanded: false }, {}, {}).render(80), ['result']);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('generated Pi extension handshakes, registers, calls, and closes admitted MCP server', async () => {
   const root = await mkdtemp(join(tmpdir(), 'narada-pi-extension-'));
   let shutdown;
