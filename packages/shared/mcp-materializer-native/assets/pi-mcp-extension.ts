@@ -1027,8 +1027,33 @@ function hiddenComponent(): { render: (width: number) => string[]; invalidate: (
   return { render: () => [], invalidate: () => {}, __naradaHidden: true };
 }
 
+function dynamicComponent(render: (width: number) => string[], invalidate: () => void = () => {}): any {
+  return { render, invalidate };
+}
+
+function dynamicNativeComponent(component: any, getView: () => ToolResultView): any {
+  return {
+    render(width: number): string[] {
+      if (getView() === "hide") return [];
+      return component?.render?.(width) ?? [];
+    },
+    invalidate(): void {
+      component?.invalidate?.();
+    },
+    __naradaNativeComponent: component,
+  };
+}
+
 function nativeRendererContext(context: any): any {
-  return context?.lastComponent?.__naradaHidden
+  const lastComponent = context?.lastComponent;
+  const nativeComponent = lastComponent?.__naradaNativeComponent;
+  if (nativeComponent) {
+    return {
+      ...context,
+      lastComponent: nativeComponent.__naradaHidden ? undefined : nativeComponent,
+    };
+  }
+  return lastComponent?.__naradaHidden
     ? { ...context, lastComponent: undefined }
     : context;
 }
@@ -1037,12 +1062,12 @@ export function withToolResultView(tool: any, getView: () => ToolResultView): an
   return {
     ...tool,
     renderCall: (args: any, theme: any, context: any) => {
-      if (getView() === "hide") return hiddenComponent();
-      return tool.renderCall?.(args, theme, nativeRendererContext(context)) ?? hiddenComponent();
+      const component = tool.renderCall?.(args, theme, nativeRendererContext(context)) ?? hiddenComponent();
+      return dynamicNativeComponent(component, getView);
     },
     renderResult: (result: any, options: any, theme: any, context: any) => {
-      if (getView() === "hide") return hiddenComponent();
-      return tool.renderResult?.(result, options, theme, nativeRendererContext(context)) ?? hiddenComponent();
+      const component = tool.renderResult?.(result, options, theme, nativeRendererContext(context)) ?? hiddenComponent();
+      return dynamicNativeComponent(component, getView);
     },
   };
 }
@@ -1082,6 +1107,13 @@ function textComponent(text: string): { render: (width: number) => string[] } {
       });
     },
   };
+}
+
+function dynamicTextComponent(getText: () => string | undefined): any {
+  return dynamicComponent((width: number) => {
+    const text = getText();
+    return text === undefined ? [] : textComponent(text).render(width);
+  });
 }
 
 function mutedText(theme: any, text: string): string {
@@ -1523,9 +1555,10 @@ export default function naradaMcpCarrier(pi: any): void {
             label: tool.title ?? exposedName,
             description: `${tool.description ?? "MCP tool"} (server: ${client.config.name}; MCP name: ${tool.name}).${carrierRoutingGuidance(client.config.name, tool.name)}`,
             parameters: tool.inputSchema ?? { type: "object", additionalProperties: true },
-            renderCall: (_args: any, theme: any) => toolResultView === "single-line" || toolResultView === "hide"
-              ? hiddenComponent()
-              : textComponent(theme.fg("toolTitle", theme.bold(tool.name))),
+            renderCall: (_args: any, theme: any) => dynamicTextComponent(() =>
+              toolResultView === "single-line" || toolResultView === "hide"
+                ? undefined
+                : theme.fg("toolTitle", theme.bold(tool.name))),
             execute: async (_toolCallId: string, params: unknown, signal: AbortSignal) => {
               const result = await client.request("tools/call", { name: tool.name, arguments: params ?? {} }, 120000, signal);
               const rawText = resultText(result);
@@ -1558,25 +1591,27 @@ export default function naradaMcpCarrier(pi: any): void {
               };
             },
             renderResult: (result: any, options: { expanded: boolean }, theme: any) => {
-              if (toolResultView === "hide") return hiddenComponent();
               const modelVisibleText = resultText(result);
               const fullText = result?.details?.expandedText ?? modelVisibleText;
-              const view: ToolResultView = toolResultView === "compact" && options.expanded
-                ? "full-output"
-                : toolResultView;
-              const nextView = TOOL_RESULT_VIEWS[(TOOL_RESULT_VIEWS.indexOf(toolResultView) + 1) % TOOL_RESULT_VIEWS.length];
-              if (view === "full-output") {
-                return textComponent(`${resultViewHeader(view, fullText.length, nextView)}\n${fullText || JSON.stringify(result?.details ?? null)}`);
-              }
-              if (view === "model-visible") {
-                return textComponent(`${resultViewHeader(view, modelVisibleText.length, nextView)}\n${modelVisibleText || JSON.stringify(result?.details ?? null)}`);
-              }
               const summary = result?.details?.uiSummary ?? summarizeMcpResult(result, fullText, modelVisibleText);
               const modelVisibleSize = `model-visible ${compactQuantity(modelVisibleText.length)} ${modelVisibleText.length === 1 ? "character" : "characters"}`;
               const summaryWithModelVisibleSize = summary.includes("model-visible")
                 ? summary
                 : `${summary} · ${modelVisibleSize}`;
-              return textComponent(mutedText(theme, `${summaryWithModelVisibleSize} — ${TOOL_RESULT_VIEW_SHORTCUT}: ${nextView}`));
+              return dynamicTextComponent(() => {
+                if (toolResultView === "hide") return undefined;
+                const view: ToolResultView = toolResultView === "compact" && options.expanded
+                  ? "full-output"
+                  : toolResultView;
+                const nextView = nextToolResultView(toolResultView);
+                if (view === "full-output") {
+                  return `${resultViewHeader(view, fullText.length, nextView)}\n${fullText || JSON.stringify(result?.details ?? null)}`;
+                }
+                if (view === "model-visible") {
+                  return `${resultViewHeader(view, modelVisibleText.length, nextView)}\n${modelVisibleText || JSON.stringify(result?.details ?? null)}`;
+                }
+                return mutedText(theme, `${summaryWithModelVisibleSize} — ${TOOL_RESULT_VIEW_SHORTCUT}: ${nextView}`);
+              });
             },
           });
         }

@@ -19,6 +19,41 @@ async function materializedTemplate(servers) {
     .replace('__NARADA_PI_MCP_SERVERS__', JSON.stringify(servers));
 }
 
+function retainedCommandBox(tool, result, theme) {
+  let expanded = false;
+  let callComponent;
+  let resultComponent;
+  const refresh = () => {
+    const context = {
+      args: { value: 'hello' },
+      toolCallId: 'e2e-command-box',
+      state: {},
+      cwd: 'C:/repo',
+      executionStarted: true,
+      argsComplete: true,
+      isPartial: false,
+      expanded,
+      isError: result.isError === true,
+    };
+    callComponent = tool.renderCall(context.args, theme, { ...context, lastComponent: callComponent });
+    resultComponent = tool.renderResult(result, { expanded, isPartial: false }, theme, { ...context, lastComponent: resultComponent });
+  };
+  refresh();
+  return {
+    refresh,
+    render(width) {
+      return [
+        ...(callComponent?.render?.(width) ?? []),
+        ...(resultComponent?.render?.(width) ?? []),
+      ];
+    },
+    setExpanded(value) {
+      expanded = value;
+      refresh();
+    },
+  };
+}
+
 test('carrier-neutral MCP presentation uses authoritative compact quantities and grammar', () => {
   assert.equal(presentation.compactQuantity(4227), '4.2k');
   assert.equal(presentation.summarizeMcpResult({}, 'x'), 'MCP result (1 character)');
@@ -58,7 +93,7 @@ test('native tool renderer wrapper hides call and result without replacing execu
   }
 });
 
-test('generated Pi extension handshakes, registers, calls, and closes admitted MCP server', async () => {
+test('generated Pi extension renders retained command boxes through every F8 state', async () => {
   const root = await mkdtemp(join(tmpdir(), 'narada-pi-extension-'));
   let shutdown;
   try {
@@ -669,12 +704,14 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     const expansionStates = [];
     const viewStatuses = [];
     let hostToolsExpanded = false;
+    let refreshCommandBoxes = () => {};
     const shortcutContext = {
       ui: {
         getToolsExpanded() { return hostToolsExpanded; },
         setToolsExpanded(value) {
           expansionStates.push(value);
           hostToolsExpanded = value;
+          refreshCommandBoxes();
         },
         setStatus(key, value) {
           if (key === 'narada-mcp-tool-view') viewStatuses.push(value);
@@ -726,6 +763,35 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       bold(text) { return text; },
     }, {}).render(160);
     assert.deepEqual(compactCall, ['fixture_echo']);
+
+    const commandBox = retainedCommandBox(registered[0], result, {
+      fg(_kind, text) { return text; },
+      bold(text) { return text; },
+    });
+    refreshCommandBoxes = commandBox.refresh;
+    for (const view of ['compact', 'single-line', 'model-visible', 'full-output', 'hide']) {
+      const rendered = commandBox.render(160).join('\n');
+      if (view === 'compact') {
+        assert.match(rendered, /fixture_echo/);
+        assert.match(rendered, /MCP result.*f8: single-line/);
+      } else if (view === 'single-line') {
+        assert.doesNotMatch(rendered, /fixture_echo/);
+        assert.match(rendered, /MCP result.*f8: model-visible/);
+      } else if (view === 'model-visible') {
+        assert.match(rendered, /fixture_echo/);
+        assert.match(rendered, /(?:^|\n)model-visible · \d+ characters/);
+      } else if (view === 'full-output') {
+        assert.match(rendered, /fixture_echo/);
+        assert.match(rendered, /(?:^|\n)full-output · \d+ characters/);
+      } else {
+        assert.deepEqual(commandBox.render(160), []);
+      }
+      await shortcut.handler(shortcutContext);
+    }
+    const restoredCompact = commandBox.render(160).join('\n');
+    assert.match(restoredCompact, /fixture_echo/);
+    assert.match(restoredCompact, /MCP result.*f8: single-line/);
+
     const themedCollapsed = registered[0].renderResult(result, { expanded: false }, {
       fg(kind, text) { return `<${kind}>${text}</${kind}>`; },
     }).render(160).join('\n');
