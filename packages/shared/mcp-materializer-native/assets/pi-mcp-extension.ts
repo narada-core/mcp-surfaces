@@ -552,34 +552,123 @@ function projectMcpLoaderToolsForModel(value: any): any | undefined {
   return projection;
 }
 
-function projectLocalFilesystemGrepForModel(value: any): any | undefined {
-  if (value?.schema !== "local.filesystem.grep.v1" || !Array.isArray(value.match_objects)) return undefined;
-  const matchObjects = value.match_objects.map((match: any) => {
-    const projection: Record<string, any> = {};
-    for (const field of ["path", "line", "count", "text"]) {
-      if (Object.prototype.hasOwnProperty.call(match ?? {}, field)) projection[field] = match[field];
-    }
-    return projection;
-  });
-  const projection: Record<string, any> = { schema: value.schema, status: value.status, match_objects: matchObjects };
-  for (const field of ["output_mode", "snapshot_id"]) {
-    if (typeof value?.[field] === "string") projection[field] = value[field];
+function normalizeFilesystemProjectionPath(value: any): string {
+  return String(value ?? "").replace(/\\/g, "/").replace(/\/+/g, "/").replace(/\/$/, "");
+}
+
+function filesystemProjectionRoot(value: any): string {
+  const scope = value?.scope;
+  const explicit = normalizeFilesystemProjectionPath(scope?.path);
+  if (explicit) return explicit;
+  const root = normalizeFilesystemProjectionPath(scope?.root);
+  const requested = normalizeFilesystemProjectionPath(scope?.requested_path);
+  if (root && requested && requested !== ".") return `${root}/${requested}`;
+  return root || requested;
+}
+
+function filesystemProjectionRelativePath(path: string, root: string): string {
+  const candidate = normalizeFilesystemProjectionPath(path);
+  const candidateParts = candidate.split("/").filter(Boolean);
+  const rootParts = normalizeFilesystemProjectionPath(root).split("/").filter(Boolean);
+  if (rootParts.length === 0) return candidateParts.join("/");
+  for (let start = candidateParts.length - rootParts.length; start >= 0; start -= 1) {
+    const matchesRoot = rootParts.every((part, index) => part.toLowerCase() === candidateParts[start + index]?.toLowerCase());
+    if (matchesRoot) return candidateParts.slice(start + rootParts.length).join("/") || candidateParts.at(-1) || candidate;
   }
-  for (const field of ["offset", "limit", "count", "returned"]) {
+  return candidateParts.join("/");
+}
+
+function isFilesystemProjectionFolder(value: any): boolean {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function sortFilesystemProjectionTree(tree: Record<string, any>): Record<string, any> {
+  return Object.fromEntries(
+    Object.entries(tree)
+      .sort(([left, leftValue], [right, rightValue]) => {
+        const leftFolder = isFilesystemProjectionFolder(leftValue);
+        const rightFolder = isFilesystemProjectionFolder(rightValue);
+        return Number(rightFolder) - Number(leftFolder) || left.localeCompare(right);
+      })
+      .map(([name, value]) => [name, isFilesystemProjectionFolder(value) ? sortFilesystemProjectionTree(value) : value]),
+  );
+}
+
+function insertFilesystemProjectionTree(tree: Record<string, any>, path: string, leaf: any): void {
+  const parts = path.split("/").filter(Boolean);
+  if (parts.length === 0) return;
+  let current = tree;
+  for (let index = 0; index < parts.length; index += 1) {
+    const name = parts[index];
+    if (index === parts.length - 1) {
+      const existing = current[name];
+      if (Array.isArray(existing) && Array.isArray(leaf)) current[name] = [...existing, ...leaf];
+      else if (existing === undefined) current[name] = leaf;
+      return;
+    }
+    if (!isFilesystemProjectionFolder(current[name])) current[name] = {};
+    current = current[name];
+  }
+}
+
+function filesystemProjectionTree(entries: Array<{ path: string; leaf: any }>, root: string): Record<string, any> {
+  const tree: Record<string, any> = {};
+  for (const entry of entries) {
+    insertFilesystemProjectionTree(tree, filesystemProjectionRelativePath(entry.path, root), entry.leaf);
+  }
+  return sortFilesystemProjectionTree(tree);
+}
+
+function addFilesystemSearchSummary(projection: Record<string, any>, value: any, root: string): void {
+  if (root) projection.root = root;
+  for (const field of ["count", "returned"]) {
     if (typeof value?.[field] === "number") projection[field] = value[field];
   }
-  for (const field of ["count_exact", "has_more", "snapshot_complete"]) {
-    if (typeof value?.[field] === "boolean") projection[field] = value[field];
-  }
-  if (value?.count_exact === false && typeof value?.count_semantics === "string") projection.count_semantics = value.count_semantics;
-  if (Object.prototype.hasOwnProperty.call(value ?? {}, "next_offset")) projection.next_offset = value.next_offset;
-  if (value?.no_match_diagnostics && typeof value.no_match_diagnostics === "object") {
-    const diagnostics: Record<string, any> = {};
-    for (const field of ["status", "remediation"]) {
-      if (typeof value.no_match_diagnostics[field] === "string") diagnostics[field] = value.no_match_diagnostics[field];
+  if (typeof value?.count_exact === "boolean") projection.count_exact = value.count_exact;
+  if (typeof value?.has_more === "boolean") projection.has_more = value.has_more;
+  if (typeof value?.next_offset === "number") projection.next_offset = value.next_offset;
+  if (typeof value?.snapshot_id === "string") projection.snapshot_id = value.snapshot_id;
+}
+
+function projectLocalFilesystemGlobForModel(value: any): any | undefined {
+  if (value?.schema !== "local.filesystem.glob.v1" || !Array.isArray(value.matches)) return undefined;
+  const root = filesystemProjectionRoot(value);
+  const projection: Record<string, any> = { schema: value.schema, status: value.status };
+  addFilesystemSearchSummary(projection, value, root);
+  projection.tree = filesystemProjectionTree(
+    value.matches
+      .filter((match: any): match is string => typeof match === "string")
+      .map((path: string) => ({ path, leaf: true })),
+    root,
+  );
+  return projection;
+}
+
+function projectLocalFilesystemGrepForModel(value: any): any | undefined {
+  if (value?.schema !== "local.filesystem.grep.v1" || !Array.isArray(value.match_objects)) return undefined;
+  const root = filesystemProjectionRoot(value);
+  const grouped = new Map<string, any[]>();
+  for (const match of value.match_objects) {
+    if (typeof match?.path !== "string") continue;
+    const detail: Record<string, any> = {};
+    for (const field of ["line", "count", "text"]) {
+      if (Object.prototype.hasOwnProperty.call(match, field)) detail[field] = match[field];
     }
-    if (Object.keys(diagnostics).length > 0) projection.no_match_diagnostics = diagnostics;
+    const path = match.path;
+    const entries = grouped.get(path) ?? [];
+    entries.push(Object.keys(detail).length > 0 ? detail : true);
+    grouped.set(path, entries);
   }
+  const projection: Record<string, any> = { schema: value.schema, status: value.status };
+  if (typeof value?.output_mode === "string") projection.output_mode = value.output_mode;
+  addFilesystemSearchSummary(projection, value, root);
+  projection.tree = filesystemProjectionTree(
+    [...grouped.entries()].map(([path, entries]) => ({
+      path,
+      leaf: entries.length === 1 && entries[0] === true ? true : entries,
+    })),
+    root,
+  );
   return projection;
 }
 
@@ -670,7 +759,7 @@ function projectMutationReceiptForModel(structured: any): any | undefined {
 }
 
 function loaderControlPlaneProjectionForModel(value: any): any | undefined {
-  return projectSurfaceAttachedForModel(value) ?? projectSurfaceHandleOpenedForModel(value) ?? projectRuntimeFreshnessForModel(value) ?? projectGitResultForModel(value) ?? projectStructuredCommandResultForModel(value) ?? projectMcpLoaderToolsForModel(value) ?? projectLocalFilesystemGrepForModel(value) ?? projectEpistemicGuidanceForModel(value) ?? projectMutationReceiptForModel(value) ?? projectEpistemicQueryForModel(value) ?? projectTeamWorkOverviewForModel(value) ?? projectConnectionInventoryForModel(value) ?? projectSiteSurfacesForModel(value) ?? projectSchemaLeaseBatchForModel(value) ?? projectSchemaLeaseForModel(value) ?? projectSiteToolInventoryForModel(value);
+  return projectSurfaceAttachedForModel(value) ?? projectSurfaceHandleOpenedForModel(value) ?? projectRuntimeFreshnessForModel(value) ?? projectGitResultForModel(value) ?? projectStructuredCommandResultForModel(value) ?? projectMcpLoaderToolsForModel(value) ?? projectLocalFilesystemGlobForModel(value) ?? projectLocalFilesystemGrepForModel(value) ?? projectEpistemicGuidanceForModel(value) ?? projectMutationReceiptForModel(value) ?? projectEpistemicQueryForModel(value) ?? projectTeamWorkOverviewForModel(value) ?? projectConnectionInventoryForModel(value) ?? projectSiteSurfacesForModel(value) ?? projectSchemaLeaseBatchForModel(value) ?? projectSchemaLeaseForModel(value) ?? projectSiteToolInventoryForModel(value);
 }
 
 function projectEpistemicQueryForModel(value: any): any | undefined {
@@ -738,7 +827,7 @@ function bodyOnlyProjectionText(structured: any): string | undefined {
   return JSON.stringify(structured.items.map((item: any) => typeof item?.body === "string" ? item.body : ""));
 }
 
-function filesystemReadBodyFromTransport(result: any, depth = 0): string | undefined {
+function filesystemReadBodyFromTransport(result: any, depth = 0, fallbackToBlockText = true): string | undefined {
   if (depth > 3 || !Array.isArray(result?.content)) return undefined;
   for (const block of result.content) {
     if (block?.type !== "text" || typeof block.text !== "string") continue;
@@ -746,14 +835,14 @@ function filesystemReadBodyFromTransport(result: any, depth = 0): string | undef
     try {
       parsed = JSON.parse(block.text);
     } catch {
-      return block.text;
+      return fallbackToBlockText ? block.text : undefined;
     }
     if (parsed?.schema === "local.filesystem.read.v1" && typeof parsed.content === "string") {
       return parsed.content;
     }
-    const nested = filesystemReadBodyFromTransport(parsed, depth + 1);
+    const nested = filesystemReadBodyFromTransport(parsed, depth + 1, fallbackToBlockText);
     if (nested !== undefined) return nested;
-    return block.text;
+    if (fallbackToBlockText) return block.text;
   }
   return undefined;
 }
@@ -826,6 +915,8 @@ function projectParsedOutputValueForModel(value: any, depth = 0): string | undef
   if (bodyOnly !== undefined) return bodyOnly;
   const filesystemRead = projectLocalFilesystemReadForModel(value?.structuredContent ?? value, value);
   if (filesystemRead !== undefined) return filesystemRead;
+  const transportFilesystemRead = filesystemReadBodyFromTransport(value, 0, false);
+  if (transportFilesystemRead !== undefined) return transportFilesystemRead;
   const projection = loaderControlPlaneProjectionForModel(value);
   if (projection !== undefined) return JSON.stringify(projection);
   const nested: any[] = [value?.structuredContent, value?.result?.structuredContent];

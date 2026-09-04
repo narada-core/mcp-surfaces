@@ -254,7 +254,8 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     }
     const fixtures = {
       stat: { schema: "local.filesystem.stat.v1", path: "C:/repo/file.md", relative_path: "file.md", type: "file", size: 13558 },
-      grep_result: { schema: "local.filesystem.grep.v1", status: "ok", output_mode: "content", offset: 0, limit: 2, count: 2, count_exact: true, count_semantics: "count is the exact full result count", scanned: 2, scanned_unit: "matched_entries", returned: 2, max_matches: 30, max_output_chars: 4000, order: "ripgrep_traversal", cache_hit: true, snapshot_reused: true, cache_policy: "auto", snapshot_id: "s_grep", requested_snapshot_id: null, snapshot_complete: true, cache_memory_bytes: 40, page_match_bytes: 40, page_match_bytes_limit: 4000, page_matches_truncated: 0, timeout_ms: 30000, freshness: { path: "C:/repo", type: "directory", size: 100, mtime: "2026-09-02T00:00:00Z", mtime_ms: 1, tree_sha256: "secret-tree" }, scope: { requested_path: "packages", root: "C:/repo", path: "C:/repo/packages", argument: "directory", include_glob: null, default_exclusions_applied: true }, has_more: false, next_offset: null, continuation: null, matches_format: "structured", match_objects_authoritative: true, match_objects: [{ path: "packages/a.ts", line: 10, text: "const a = 1;", raw: "packages/a.ts|10|const a = 1;" }, { path: "packages/b.ts", line: 20, text: "const b = 2;", raw: "packages/b.ts|20|const b = 2;" }] },
+      glob_result: { schema: "local.filesystem.glob.v1", status: "ok", count: 3, count_exact: true, returned: 3, has_more: false, next_offset: null, snapshot_id: "s_glob", scope: { root: "C:/repo", path: "C:/repo/packages" }, matches: ["C:/repo/packages/a.ts", "C:/repo/packages/src/b.ts", "C:/repo/packages/src/c.ts"], freshness: { path: "C:/repo/packages", tree_entry_count: 3 }, cache_memory_bytes: 12345 },
+      grep_result: { schema: "local.filesystem.grep.v1", status: "ok", output_mode: "content", offset: 0, limit: 2, count: 2, count_exact: true, count_semantics: "count is the exact full result count", scanned: 2, scanned_unit: "matched_entries", returned: 2, max_matches: 30, max_output_chars: 4000, order: "ripgrep_traversal", cache_hit: true, snapshot_reused: true, cache_policy: "auto", snapshot_id: "s_grep", requested_snapshot_id: null, snapshot_complete: true, cache_memory_bytes: 40, page_match_bytes: 40, page_match_bytes_limit: 4000, page_matches_truncated: 0, timeout_ms: 30000, freshness: { path: "C:/repo", type: "directory", size: 100, mtime: "2026-09-02T00:00:00Z", mtime_ms: 1, tree_sha256: "secret-tree" }, scope: { requested_path: "packages", root: "C:/repo", path: "C:/repo/packages", argument: "directory", include_glob: null, default_exclusions_applied: true }, has_more: false, next_offset: null, continuation: null, matches_format: "structured", match_objects_authoritative: true, match_objects: [{ path: "C:/repo/packages/a.ts", line: 10, text: "const a = 1;", raw: "packages/a.ts|10|const a = 1;" }, { path: "C:/repo/packages/b.ts", line: 20, text: "const b = 2;", raw: "packages/b.ts|20|const b = 2;" }] },
       guidance_result: {
         schema: "narada.epistemic.guidance.v2",
         purpose: "Preserve evolving problem situations, not certify truth.",
@@ -387,6 +388,29 @@ createInterface({ input: process.stdin }).on("line", (line) => {
           },
         };
       })(),
+      read_result_filesystem_page: (() => {
+        const readValue = {
+          schema: "local.filesystem.read.v1",
+          relative_path: "research/basic-laws.rzk.md",
+          content: "# Basic raw-fraction addition laws\\n",
+        };
+        const transport = {
+          content: [{ type: "text", text: JSON.stringify(readValue, null, 2), annotations: { audience: ["assistant"] } }],
+          structuredContent: { schema: readValue.schema, relative_path: readValue.relative_path, content_delivery: { format: "filesystem_read_text" } },
+          isError: null,
+        };
+        return {
+          schema: "narada.mcp_loader.result_page.v1",
+          connection_id: "c-filesystem",
+          surface_id: "local-filesystem",
+          result: {
+            schema: "narada.mcp_output_page.v1",
+            output_ref: "mcp_output:read-result",
+            output_text: JSON.stringify(transport, null, 2),
+            next_offset: null,
+          },
+        };
+      })(),
       write_file: { schema: "local.filesystem.write_file.v1", status: "written", path: "C:/site/.ai/file.md", root: "C:/site", relative_path: ".ai/file.md", size: 17, create_parent_directories: true, before_sha256: "before", after_sha256: "after", sha256: "after", content_sha256: "after", timeout_ms: 30000 },
       submit_review_admit: { schema: "narada.epistemic.submit_review_admit.v1", status: "admitted", submission: { proposal_id: "proposal-1", proposal_digest: "digest-1", content_fingerprint: "content-1", operation_count: 4, operations: [{ op: "entity_create", title: "repeated input" }] }, review: { status: "policy_valid", review_details: { repeated: "input" } }, admission: { status: "admitted", proposal_id: "proposal-1", ledger_head: "head-1", event: { operations: [{ op: "entity_create", title: "repeated input" }] } }, review_gate_preserved: true, certifies_truth: false },
       schema_lease: { schema: "narada.mcp_loader.schema_lease.v1", status: "issued", connection_id: "c1", surface_id: "git", tool_name: "git_status", schema_lease: "lease-1", tool_schema_digest: "digest-1", input_schema_digest: "input-digest", binding_resolution: { surface_handle: "handle", runtime_lifecycle: { noisy: true } }, input_contract: { required: [], properties: ["working_directory"] }, tool_contract: { name: "git_status", inputSchema: { type: "object" } } },
@@ -409,6 +433,14 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       surface_id: "local-filesystem",
       result_summary: { schema: "local.filesystem.grep.v1", status: "ok" },
       result: { structuredContent: fixtures.grep_result },
+    };
+    fixtures.grep_read_result_page = {
+      schema: "narada.mcp_loader.result_page.v1",
+      result: {
+        schema: "narada.mcp_output_page.v1",
+        output_ref: "mcp_output:grep-result",
+        output_text: JSON.stringify({ structuredContent: fixtures.grep_result }, null, 2),
+      },
     };
     fixtures.loader_guidance_result = {
       schema: "narada.mcp_loader.tool_result.v1",
@@ -570,16 +602,30 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     assert.equal(queryModel.query_cost, undefined);
     assert.ok(queryResult.content[0].text.length < 700);
 
+    const globResult = await registered[0].execute('call-glob-result', { value: 'glob_result' }, new AbortController().signal);
+    const globModel = JSON.parse(globResult.content[0].text);
+    assert.deepEqual(Object.keys(globModel).sort(), ['count', 'count_exact', 'has_more', 'returned', 'root', 'schema', 'snapshot_id', 'status', 'tree'].sort());
+    assert.deepEqual(globModel.tree, {
+      src: { 'b.ts': true, 'c.ts': true },
+      'a.ts': true,
+    });
+    assert.equal(globModel.freshness, undefined);
+    assert.equal(globModel.matches, undefined);
+    assert.ok(globResult.content[0].text.length < 300);
+
     const grepResult = await registered[0].execute('call-loader-grep-result', { value: 'loader_grep_result' }, new AbortController().signal);
     const grepModel = JSON.parse(grepResult.content[0].text);
-    assert.deepEqual(Object.keys(grepModel).sort(), ['count', 'count_exact', 'has_more', 'limit', 'match_objects', 'next_offset', 'offset', 'output_mode', 'returned', 'schema', 'snapshot_complete', 'snapshot_id', 'status'].sort());
-    assert.deepEqual(grepModel.match_objects, [
-      { path: 'packages/a.ts', line: 10, text: 'const a = 1;' },
-      { path: 'packages/b.ts', line: 20, text: 'const b = 2;' },
-    ]);
+    assert.deepEqual(Object.keys(grepModel).sort(), ['count', 'count_exact', 'has_more', 'output_mode', 'returned', 'root', 'schema', 'snapshot_id', 'status', 'tree'].sort());
+    assert.deepEqual(grepModel.tree, {
+      'a.ts': [{ line: 10, text: 'const a = 1;' }],
+      'b.ts': [{ line: 20, text: 'const b = 2;' }],
+    });
+    assert.equal(grepModel.match_objects, undefined);
     assert.equal(grepModel.scope, undefined);
     assert.equal(grepModel.continuation, undefined);
-    assert.ok(grepResult.content[0].text.length < 800);
+    assert.ok(grepResult.content[0].text.length < 500);
+    const grepReadResultPage = await registered[0].execute('call-grep-read-result-page', { value: 'grep_read_result_page' }, new AbortController().signal);
+    assert.deepEqual(JSON.parse(grepReadResultPage.content[0].text), grepModel);
 
     const guidanceResult = await registered[0].execute('call-loader-guidance-result', { value: 'loader_guidance_result' }, new AbortController().signal);
     const guidanceModel = JSON.parse(guidanceResult.content[0].text);
@@ -644,6 +690,10 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     assert.ok(filesystemRead.details.modelVisibleCharLength < 100, `filesystem read model length=${filesystemRead.details.modelVisibleCharLength}`);
     assert.equal(filesystemRead.details.modelVisibleTruncated, false);
     assert.doesNotMatch(filesystemRead.content[0].text, /local\.filesystem\.read\.v1|content_sha256|nested/);
+    const readResultPage = await registered[0].execute('call-read-result-filesystem-page', { value: 'read_result_filesystem_page' }, new AbortController().signal);
+    assert.equal(readResultPage.content[0].text, '# Basic raw-fraction addition laws\n');
+    assert.equal(readResultPage.details.modelVisibleCharLength, '# Basic raw-fraction addition laws\n'.length);
+    assert.doesNotMatch(readResultPage.content[0].text, /content|structuredContent|local\.filesystem\.read\.v1/);
     const writeReceipt = await registered[0].execute('call-write-file', { value: 'write_file' }, new AbortController().signal);
     const writeModel = JSON.parse(writeReceipt.content[0].text);
     assert.deepEqual(Object.keys(writeModel).sort(), ['after_sha256', 'before_sha256', 'relative_path', 'schema', 'sha256', 'size', 'status'].sort());
