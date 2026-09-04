@@ -112,10 +112,12 @@ test('native tool renderer wrapper hides call and result without replacing execu
     const wrapped = withToolResultView(native, () => view);
 
     assert.equal(wrapped.execute, native.execute);
+    assert.equal(wrapped.renderShell, 'self');
     assert.deepEqual(wrapped.renderCall({}, {}, {}).render(80), []);
     assert.deepEqual(wrapped.renderResult({}, { expanded: false }, {}, {}).render(80), []);
 
     view = 'compact';
+    assert.equal(wrapped.renderShell, undefined);
     assert.deepEqual(wrapped.renderCall({}, {}, {}).render(80), ['call']);
     assert.deepEqual(wrapped.renderResult({}, { expanded: false }, {}, {}).render(80), ['result']);
   } finally {
@@ -196,7 +198,7 @@ test('Pi ToolExecutionComponent produces distinct collapsed and expanded native 
 
       view = 'hide';
       component.setExpanded(false);
-      assert.doesNotMatch(snapshot().join('\n'), /visual-test-command|line\d/, `${name}: hidden snapshot`);
+      assert.deepEqual(snapshot(), [], `${name}: hidden snapshot has no spacer rows`);
       view = 'compact';
       assert.deepEqual(contentSnapshot(snapshot()), contentSnapshot(collapsedSnapshot), `${name}: compact snapshot restores after hide`);
     }
@@ -859,6 +861,21 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     assert.deepEqual(registered[0].renderResult(result, { expanded: false }).render(160), []);
     assert.deepEqual(expansionStates, [true, false]);
     assert.match(viewStatuses.at(-1), /^Tool view: hide · shells hidden · f8: compact$/);
+    if (piCodingAgentRuntime) {
+      const { ToolExecutionComponent, initTheme } = piCodingAgentRuntime;
+      initTheme('dark');
+      const hiddenMcpTool = new ToolExecutionComponent(
+        'fixture_echo',
+        'hidden-mcp-tool',
+        { value: 'hello' },
+        {},
+        registered[0],
+        { requestRender() {} },
+        'C:/repo',
+      );
+      hiddenMcpTool.updateResult(result, false);
+      assert.deepEqual(hiddenMcpTool.render(160), [], 'hidden MCP tools must not leave spacer rows');
+    }
     const hiddenCall = registered[0].renderCall({}, {
       fg(_kind, text) { return text; },
       bold(text) { return text; },

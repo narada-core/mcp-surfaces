@@ -980,6 +980,7 @@ const TOOL_RESULT_VIEW_SHORTCUT = "f8";
 const TOOL_RESULT_VIEW_SHORTCUT_ALIASES = ["f8", "ctrl+shift+m"];
 const TOOL_RESULT_VIEW_STATUS_KEY = "narada-mcp-tool-view";
 export const NATIVE_TOOL_DISPLAY_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls", "powershell"] as const;
+const toolResultViewRefreshers = new Set<() => void>();
 
 export function nativeToolDisplayNames(tools: any[]): string[] {
   const available = new Set(
@@ -1054,6 +1055,16 @@ function dynamicNativeComponent(component: any, getView: () => ToolResultView): 
   };
 }
 
+function refreshToolResultViewRenderers(): void {
+  for (const refresh of toolResultViewRefreshers) {
+    try {
+      refresh();
+    } catch {
+      // A stale tool component must not prevent the view shortcut from updating.
+    }
+  }
+}
+
 function nativeRendererContext(context: any): any {
   const lastComponent = context?.lastComponent;
   const nativeComponent = lastComponent?.__naradaNativeComponent;
@@ -1069,17 +1080,32 @@ function nativeRendererContext(context: any): any {
 }
 
 export function withToolResultView(tool: any, getView: () => ToolResultView): any {
-  return {
+  const invalidators = new Set<() => void>();
+  toolResultViewRefreshers.add(() => {
+    for (const invalidate of invalidators) invalidate();
+  });
+  const wrapped = {
     ...tool,
     renderCall: (args: any, theme: any, context: any) => {
+      if (typeof context?.invalidate === "function") invalidators.add(context.invalidate);
       const component = tool.renderCall?.(args, theme, nativeRendererContext(context)) ?? hiddenComponent();
       return dynamicNativeComponent(component, getView);
     },
     renderResult: (result: any, options: any, theme: any, context: any) => {
+      if (typeof context?.invalidate === "function") invalidators.add(context.invalidate);
       const component = tool.renderResult?.(result, options, theme, nativeRendererContext(context)) ?? hiddenComponent();
       return dynamicNativeComponent(component, getView);
     },
   };
+  // Pi's default tool shell always starts with a Spacer. Switch to its self
+  // shell while hidden so an empty renderer removes the whole tool row, not
+  // just its contents.
+  Object.defineProperty(wrapped, "renderShell", {
+    configurable: true,
+    enumerable: true,
+    get: () => getView() === "hide" ? "self" : tool.renderShell,
+  });
+  return wrapped;
 }
 
 function textComponent(text: string): { render: (width: number) => string[] } {
@@ -1365,21 +1391,24 @@ export default function naradaMcpCarrier(pi: any): void {
     }
   };
 
-  const syncToolResultView = (ctx: any): void => {
+  const syncToolResultView = (ctx: any): boolean => {
     const shouldExpandNativeTools = nativeToolDisplay(toolResultView) === "expanded";
     const hostExpanded = ctx?.ui?.getToolsExpanded?.();
-    if (typeof hostExpanded !== "boolean" || hostExpanded !== shouldExpandNativeTools) {
+    const hostExpansionChanged = typeof hostExpanded !== "boolean" || hostExpanded !== shouldExpandNativeTools;
+    if (hostExpansionChanged) {
       ctx?.ui?.setToolsExpanded?.(shouldExpandNativeTools);
     }
     // setStatus is also the repaint path when the host expansion boolean does
     // not change. Never pulse the host through the opposite expansion state:
     // that makes native shell rows flicker independently of the MCP view.
     ctx?.ui?.setStatus?.(TOOL_RESULT_VIEW_STATUS_KEY, toolResultViewStatus(toolResultView));
+    return hostExpansionChanged;
   };
 
   const cycleToolResultView = async (ctx: any): Promise<void> => {
     toolResultView = nextToolResultView(toolResultView);
-    syncToolResultView(ctx);
+    const hostExpansionChanged = syncToolResultView(ctx);
+    if (!hostExpansionChanged) refreshToolResultViewRenderers();
   };
   for (const shortcut of TOOL_RESULT_VIEW_SHORTCUT_ALIASES) {
     pi.registerShortcut?.(shortcut, {
@@ -1561,7 +1590,7 @@ export default function naradaMcpCarrier(pi: any): void {
             throw new Error(`Narada MCP qualified tool name collision: ${exposedName}`);
           }
           exposed.add(exposedName);
-          pi.registerTool({
+          pi.registerTool(withToolResultView({
             name: exposedName,
             label: tool.title ?? exposedName,
             description: `${tool.description ?? "MCP tool"} (server: ${client.config.name}; MCP name: ${tool.name}).${carrierRoutingGuidance(client.config.name, tool.name)}`,
@@ -1624,7 +1653,7 @@ export default function naradaMcpCarrier(pi: any): void {
                 return mutedText(theme, `${summaryWithModelVisibleSize} — ${TOOL_RESULT_VIEW_SHORTCUT}: ${nextView}`);
               });
             },
-          });
+          }, () => toolResultView));
         }
       }
       clients = nextClients;
@@ -1664,6 +1693,7 @@ export default function naradaMcpCarrier(pi: any): void {
     for (const client of clients) client.close();
     clients = [];
     started = false;
+    toolResultViewRefreshers.clear();
     pi.events.off?.(NARADA_MARICI_INBOX_POLL_EVENT, pollMariciInbox);
   });
 }
