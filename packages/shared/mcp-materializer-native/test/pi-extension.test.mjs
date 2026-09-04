@@ -828,7 +828,10 @@ createInterface({ input: process.stdin }).on("line", (line) => {
           refreshCommandBoxes();
         },
         setStatus(key, value) {
-          if (key === 'narada-mcp-tool-view') viewStatuses.push(value);
+          if (key === 'narada-mcp-tool-view') {
+            viewStatuses.push(value);
+            refreshCommandBoxes();
+          }
         },
       },
     };

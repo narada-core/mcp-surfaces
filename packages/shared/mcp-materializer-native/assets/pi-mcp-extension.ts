@@ -980,7 +980,6 @@ const TOOL_RESULT_VIEW_SHORTCUT = "f8";
 const TOOL_RESULT_VIEW_SHORTCUT_ALIASES = ["f8", "ctrl+shift+m"];
 const TOOL_RESULT_VIEW_STATUS_KEY = "narada-mcp-tool-view";
 export const NATIVE_TOOL_DISPLAY_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls", "powershell"] as const;
-const toolResultViewRefreshers = new Set<() => void>();
 const NATIVE_TOOL_RENDER_STATE = Symbol("narada-native-tool-render-state");
 let nativeToolBox: any;
 
@@ -1057,16 +1056,6 @@ function dynamicNativeComponent(component: any, getView: () => ToolResultView): 
   };
 }
 
-function refreshToolResultViewRenderers(): void {
-  for (const refresh of toolResultViewRefreshers) {
-    try {
-      refresh();
-    } catch {
-      // A stale tool component must not prevent the view shortcut from updating.
-    }
-  }
-}
-
 function nativeRendererContext(context: any): any {
   const lastComponent = context?.lastComponent;
   const nativeComponent = lastComponent?.__naradaNativeComponent;
@@ -1135,16 +1124,11 @@ export function withToolResultView(
   getView: () => ToolResultView,
   options: { selfShell?: boolean } = {},
 ): any {
-  const invalidators = new Set<() => void>();
-  toolResultViewRefreshers.add(() => {
-    for (const invalidate of invalidators) invalidate();
-  });
   const selfShell = options.selfShell === true;
   const wrapped = {
     ...tool,
     ...(selfShell ? { renderShell: "self" } : {}),
     renderCall: (args: any, theme: any, context: any) => {
-      if (typeof context?.invalidate === "function") invalidators.add(context.invalidate);
       if (selfShell) {
         const shell = nativeToolShellFor(context, theme);
         const rendererContext = {
@@ -1159,7 +1143,6 @@ export function withToolResultView(
       return dynamicNativeComponent(component, getView);
     },
     renderResult: (result: any, rendererOptions: any, theme: any, context: any) => {
-      if (typeof context?.invalidate === "function") invalidators.add(context.invalidate);
       if (selfShell) {
         const shell = nativeToolShellFor(context, theme);
         const rendererContext = {
@@ -1476,24 +1459,22 @@ export default function naradaMcpCarrier(pi: any): void {
     }
   };
 
-  const syncToolResultView = (ctx: any): boolean => {
+  const syncToolResultView = (ctx: any): void => {
     const shouldExpandNativeTools = nativeToolDisplay(toolResultView) === "expanded";
     const hostExpanded = ctx?.ui?.getToolsExpanded?.();
-    const hostExpansionChanged = typeof hostExpanded !== "boolean" || hostExpanded !== shouldExpandNativeTools;
-    if (hostExpansionChanged) {
+    if (typeof hostExpanded !== "boolean" || hostExpanded !== shouldExpandNativeTools) {
       ctx?.ui?.setToolsExpanded?.(shouldExpandNativeTools);
     }
-    // setStatus is also the repaint path when the host expansion boolean does
-    // not change. Never pulse the host through the opposite expansion state:
-    // that makes native shell rows flicker independently of the MCP view.
+    // setStatus requests the repaint when the host expansion boolean does not
+    // change. Do not invalidate every historical tool component here: the
+    // wrapped renderers read the current view at render time, and a broad
+    // invalidate storm can make the interactive host appear hung.
     ctx?.ui?.setStatus?.(TOOL_RESULT_VIEW_STATUS_KEY, toolResultViewStatus(toolResultView));
-    return hostExpansionChanged;
   };
 
   const cycleToolResultView = async (ctx: any): Promise<void> => {
     toolResultView = nextToolResultView(toolResultView);
-    const hostExpansionChanged = syncToolResultView(ctx);
-    if (!hostExpansionChanged) refreshToolResultViewRenderers();
+    syncToolResultView(ctx);
   };
   for (const shortcut of TOOL_RESULT_VIEW_SHORTCUT_ALIASES) {
     pi.registerShortcut?.(shortcut, {
@@ -1778,7 +1759,6 @@ export default function naradaMcpCarrier(pi: any): void {
     for (const client of clients) client.close();
     clients = [];
     started = false;
-    toolResultViewRefreshers.clear();
     pi.events.off?.(NARADA_MARICI_INBOX_POLL_EVENT, pollMariciInbox);
   });
 }
