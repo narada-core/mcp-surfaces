@@ -981,6 +981,8 @@ const TOOL_RESULT_VIEW_SHORTCUT_ALIASES = ["f8", "ctrl+shift+m"];
 const TOOL_RESULT_VIEW_STATUS_KEY = "narada-mcp-tool-view";
 export const NATIVE_TOOL_DISPLAY_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls", "powershell"] as const;
 const toolResultViewRefreshers = new Set<() => void>();
+const NATIVE_TOOL_RENDER_STATE = Symbol("narada-native-tool-render-state");
+let nativeToolBox: any;
 
 export function nativeToolDisplayNames(tools: any[]): string[] {
   const available = new Set(
@@ -1079,32 +1081,109 @@ function nativeRendererContext(context: any): any {
     : context;
 }
 
-export function withToolResultView(tool: any, getView: () => ToolResultView): any {
+function nativeToolBackground(theme: any, context: any): ((text: string) => string) | undefined {
+  if (typeof theme?.bg !== "function") return undefined;
+  const color = context?.isError ? "toolErrorBg" : context?.isPartial ? "toolPendingBg" : "toolSuccessBg";
+  return (text: string) => theme.bg(color, text);
+}
+
+function createNativeToolShell(theme: any, context: any): any {
+  const box = typeof nativeToolBox === "function"
+    ? new nativeToolBox(1, 1, nativeToolBackground(theme, context))
+    : undefined;
+  const shell: any = {
+    callComponent: undefined,
+    resultComponent: undefined,
+    sync(nextTheme: any, nextContext: any): void {
+      if (box) {
+        box.setBgFn?.(nativeToolBackground(nextTheme, nextContext));
+        box.clear();
+        if (shell.callComponent) box.addChild(shell.callComponent);
+        if (shell.resultComponent) box.addChild(shell.resultComponent);
+      }
+    },
+    render(width: number): string[] {
+      if (box) return box.render(width);
+      return [
+        ...(shell.callComponent?.render?.(width) ?? []),
+        ...(shell.resultComponent?.render?.(width) ?? []),
+      ];
+    },
+    invalidate(): void {
+      if (box) {
+        box.invalidate?.();
+        return;
+      }
+      shell.callComponent?.invalidate?.();
+      shell.resultComponent?.invalidate?.();
+    },
+  };
+  return shell;
+}
+
+function nativeToolShellFor(context: any, theme: any): any {
+  const state = context?.state;
+  if (!state) return createNativeToolShell(theme, context);
+  if (!state[NATIVE_TOOL_RENDER_STATE]) {
+    state[NATIVE_TOOL_RENDER_STATE] = createNativeToolShell(theme, context);
+  }
+  return state[NATIVE_TOOL_RENDER_STATE];
+}
+
+export function withToolResultView(
+  tool: any,
+  getView: () => ToolResultView,
+  options: { selfShell?: boolean } = {},
+): any {
   const invalidators = new Set<() => void>();
   toolResultViewRefreshers.add(() => {
     for (const invalidate of invalidators) invalidate();
   });
+  const selfShell = options.selfShell === true;
   const wrapped = {
     ...tool,
+    ...(selfShell ? { renderShell: "self" } : {}),
     renderCall: (args: any, theme: any, context: any) => {
       if (typeof context?.invalidate === "function") invalidators.add(context.invalidate);
+      if (selfShell) {
+        const shell = nativeToolShellFor(context, theme);
+        const rendererContext = {
+          ...nativeRendererContext(context),
+          lastComponent: shell.callComponent,
+        };
+        shell.callComponent = tool.renderCall?.(args, theme, rendererContext) ?? hiddenComponent();
+        shell.sync(theme, context);
+        return dynamicNativeComponent(shell, getView);
+      }
       const component = tool.renderCall?.(args, theme, nativeRendererContext(context)) ?? hiddenComponent();
       return dynamicNativeComponent(component, getView);
     },
-    renderResult: (result: any, options: any, theme: any, context: any) => {
+    renderResult: (result: any, rendererOptions: any, theme: any, context: any) => {
       if (typeof context?.invalidate === "function") invalidators.add(context.invalidate);
-      const component = tool.renderResult?.(result, options, theme, nativeRendererContext(context)) ?? hiddenComponent();
+      if (selfShell) {
+        const shell = nativeToolShellFor(context, theme);
+        const rendererContext = {
+          ...nativeRendererContext(context),
+          lastComponent: shell.resultComponent,
+        };
+        shell.resultComponent = tool.renderResult?.(result, rendererOptions, theme, rendererContext) ?? hiddenComponent();
+        shell.sync(theme, context);
+        return dynamicNativeComponent(hiddenComponent(), getView);
+      }
+      const component = tool.renderResult?.(result, rendererOptions, theme, nativeRendererContext(context)) ?? hiddenComponent();
       return dynamicNativeComponent(component, getView);
     },
   };
-  // Pi's default tool shell always starts with a Spacer. Switch to its self
-  // shell while hidden so an empty renderer removes the whole tool row, not
-  // just its contents.
-  Object.defineProperty(wrapped, "renderShell", {
-    configurable: true,
-    enumerable: true,
-    get: () => getView() === "hide" ? "self" : tool.renderShell,
-  });
+  if (!selfShell) {
+    // Pi's default tool shell always starts with a Spacer. Switch to its self
+    // shell while hidden so an empty renderer removes the whole tool row, not
+    // just its contents.
+    Object.defineProperty(wrapped, "renderShell", {
+      configurable: true,
+      enumerable: true,
+      get: () => getView() === "hide" ? "self" : tool.renderShell,
+    });
+  }
   return wrapped;
 }
 
@@ -1357,6 +1436,12 @@ export default function naradaMcpCarrier(pi: any): void {
 
     try {
       const piAgent = await import("@earendil-works/pi-coding-agent");
+      try {
+        const piTui = await import("@earendil-works/pi-tui");
+        nativeToolBox = piTui.Box;
+      } catch {
+        nativeToolBox = undefined;
+      }
       const settings = typeof piAgent.SettingsManager?.create === "function"
         ? piAgent.SettingsManager.create(
           ctx.cwd,
@@ -1383,7 +1468,7 @@ export default function naradaMcpCarrier(pi: any): void {
             shellPath: settings?.getShellPath?.(),
           }
           : undefined;
-        pi.registerTool(withToolResultView(factory(ctx.cwd, options), () => toolResultView));
+        pi.registerTool(withToolResultView(factory(ctx.cwd, options), () => toolResultView, { selfShell: true }));
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

@@ -168,7 +168,7 @@ test('Pi ToolExecutionComponent produces distinct collapsed and expanded native 
       ['powershell', createPowerShellToolDefinition],
     ]) {
       let view = 'compact';
-      const wrapped = withToolResultView(factory('C:/repo'), () => view);
+      const wrapped = withToolResultView(factory('C:/repo'), () => view, { selfShell: true });
       const component = new ToolExecutionComponent(
         name,
         `visual-${name}`,
