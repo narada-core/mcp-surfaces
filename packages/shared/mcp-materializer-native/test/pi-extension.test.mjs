@@ -805,14 +805,6 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       const pageFull = registered[0].renderResult(page, { expanded: true }).render(160).join('\n');
       assert.notEqual(pageFull, page.content[0].text);
     }
-    const smallCollapsed = registered[0].renderResult(result, { expanded: false }).render(160).join('\n');
-    assert.match(smallCollapsed, /MCP result.*model-visible.*f8: single-line/);
-    assert.doesNotMatch(smallCollapsed, /schema_lease/);
-    const smallExpanded = registered[0].renderResult(result, { expanded: true }).render(160).join('\n');
-    assert.match(smallExpanded, /^full-output · \d+ characters — f8: single-line/);
-    assert.equal(result.details.fullOutputCharLength, result.details.modelVisibleCharLength);
-    assert.equal(result.details.modelVisibleTruncated, false);
-
     const shortcut = shortcuts.get('f8');
     assert.match(shortcut.description, /compact, single-line, model-visible, full-output, hide/);
     const expansionStates = [];
@@ -835,6 +827,27 @@ createInterface({ input: process.stdin }).on("line", (line) => {
         },
       },
     };
+    assert.deepEqual(registered[0].renderResult(result, { expanded: false }).render(160), [], 'tool output starts hidden');
+
+    await shortcut.handler(shortcutContext);
+    const smallCollapsed = registered[0].renderResult(result, { expanded: false }).render(160).join('\n');
+    assert.match(smallCollapsed, /MCP result.*model-visible.*f8: single-line/);
+    assert.doesNotMatch(smallCollapsed, /schema_lease/);
+    const smallExpanded = registered[0].renderResult(result, { expanded: true }).render(160).join('\n');
+    assert.match(smallExpanded, /^full-output · \d+ characters — f8: single-line/);
+    assert.equal(result.details.fullOutputCharLength, result.details.modelVisibleCharLength);
+    assert.equal(result.details.modelVisibleTruncated, false);
+
+    const compactView = registered[0].renderResult(result, { expanded: false }).render(160).join('\n');
+    assert.match(compactView, /MCP result.*model-visible.*f8: single-line/);
+    assert.deepEqual(expansionStates, []);
+    assert.match(viewStatuses.at(-1), /^Tool view: compact · shells collapsed · f8: single-line$/);
+    const compactCall = registered[0].renderCall({}, {
+      fg(_kind, text) { return text; },
+      bold(text) { return text; },
+    }, {}).render(160);
+    assert.deepEqual(compactCall, ['fixture_echo']);
+
     await shortcut.handler(shortcutContext);
     const singleLine = registered[0].renderResult(result, { expanded: false }).render(160).join('\n');
     assert.match(singleLine, /MCP result.*model-visible.*f8: model-visible/);
@@ -886,15 +899,10 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     assert.deepEqual(hiddenCall, []);
 
     await shortcut.handler(shortcutContext);
-    const compactView = registered[0].renderResult(result, { expanded: false }).render(160).join('\n');
-    assert.match(compactView, /f8: single-line/);
+    const initialCompact = registered[0].renderResult(result, { expanded: false }).render(160).join('\n');
+    assert.match(initialCompact, /f8: single-line/);
     assert.deepEqual(expansionStates, [true, false]);
     assert.match(viewStatuses.at(-1), /^Tool view: compact · shells collapsed · f8: single-line$/);
-    const compactCall = registered[0].renderCall({}, {
-      fg(_kind, text) { return text; },
-      bold(text) { return text; },
-    }, {}).render(160);
-    assert.deepEqual(compactCall, ['fixture_echo']);
 
     const commandBox = retainedCommandBox(registered[0], result, {
       fg(_kind, text) { return text; },

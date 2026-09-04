@@ -1349,7 +1349,7 @@ class McpClient {
 export default function naradaMcpCarrier(pi: any): void {
   let clients: McpClient[] = [];
   let started = false;
-  let toolResultView: ToolResultView = "compact";
+  let toolResultView: ToolResultView = "hide";
   let naradaSessionIdentityState: NaradaSessionIdentityState | null = null;
 
   const currentSessionId = (ctx: any): string => String(ctx?.sessionManager?.getSessionId?.() ?? "ephemeral");
@@ -1564,7 +1564,7 @@ export default function naradaMcpCarrier(pi: any): void {
   pi.events.on(NARADA_MARICI_INBOX_POLL_EVENT, pollMariciInbox);
 
   pi.on("session_start", async (_event: unknown, ctx: any) => {
-    toolResultView = "compact";
+    toolResultView = "hide";
     restoreNaradaSessionIdentity(ctx);
     syncToolResultView(ctx);
     if (started) return;
@@ -1754,7 +1754,7 @@ export default function naradaMcpCarrier(pi: any): void {
   });
 
   pi.on("session_shutdown", (_event: unknown, ctx: any) => {
-    toolResultView = "compact";
+    toolResultView = "hide";
     ctx?.ui?.setStatus?.(TOOL_RESULT_VIEW_STATUS_KEY, undefined);
     for (const client of clients) client.close();
     clients = [];
