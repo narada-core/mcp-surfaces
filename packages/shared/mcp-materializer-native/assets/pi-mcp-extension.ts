@@ -1001,7 +1001,7 @@ function nativeToolDisplay(view: ToolResultView): "hidden" | "collapsed" | "expa
 }
 
 function toolResultViewStatus(view: ToolResultView): string {
-  return `Tool view: ${view} · native tools ${nativeToolDisplay(view)} · ${TOOL_RESULT_VIEW_SHORTCUT}: ${nextToolResultView(view)}`;
+  return `Tool view: ${view} · shells ${nativeToolDisplay(view)} · ${TOOL_RESULT_VIEW_SHORTCUT}: ${nextToolResultView(view)}`;
 }
 
 function boundedModelContent(

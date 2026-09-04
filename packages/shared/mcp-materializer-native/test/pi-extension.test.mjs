@@ -834,7 +834,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     const singleLine = registered[0].renderResult(result, { expanded: false }).render(160).join('\n');
     assert.match(singleLine, /MCP result.*model-visible.*f8: model-visible/);
     assert.deepEqual(expansionStates, []);
-    assert.match(viewStatuses.at(-1), /^Tool view: single-line · native tools collapsed · f8: model-visible$/);
+    assert.match(viewStatuses.at(-1), /^Tool view: single-line · shells collapsed · f8: model-visible$/);
     const singleLineCall = registered[0].renderCall({}, {
       fg(_kind, text) { return text; },
       bold(text) { return text; },
@@ -846,19 +846,19 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     assert.match(modelVisible, /^model-visible · \d+ characters/);
     assert.match(modelVisible, /schema_lease/);
     assert.deepEqual(expansionStates, []);
-    assert.match(viewStatuses.at(-1), /^Tool view: model-visible · native tools collapsed · f8: full-output$/);
+    assert.match(viewStatuses.at(-1), /^Tool view: model-visible · shells collapsed · f8: full-output$/);
 
     await shortcut.handler(shortcutContext);
     const fullOutput = registered[0].renderResult(result, { expanded: false }).render(160).join('\n');
     assert.match(fullOutput, /^full-output · \d+ characters/);
     assert.match(fullOutput, /schema_lease/);
     assert.deepEqual(expansionStates, [true]);
-    assert.match(viewStatuses.at(-1), /^Tool view: full-output · native tools expanded · f8: hide$/);
+    assert.match(viewStatuses.at(-1), /^Tool view: full-output · shells expanded · f8: hide$/);
 
     await shortcut.handler(shortcutContext);
     assert.deepEqual(registered[0].renderResult(result, { expanded: false }).render(160), []);
     assert.deepEqual(expansionStates, [true, false]);
-    assert.match(viewStatuses.at(-1), /^Tool view: hide · native tools hidden · f8: compact$/);
+    assert.match(viewStatuses.at(-1), /^Tool view: hide · shells hidden · f8: compact$/);
     const hiddenCall = registered[0].renderCall({}, {
       fg(_kind, text) { return text; },
       bold(text) { return text; },
@@ -869,7 +869,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     const compactView = registered[0].renderResult(result, { expanded: false }).render(160).join('\n');
     assert.match(compactView, /f8: single-line/);
     assert.deepEqual(expansionStates, [true, false]);
-    assert.match(viewStatuses.at(-1), /^Tool view: compact · native tools collapsed · f8: single-line$/);
+    assert.match(viewStatuses.at(-1), /^Tool view: compact · shells collapsed · f8: single-line$/);
     const compactCall = registered[0].renderCall({}, {
       fg(_kind, text) { return text; },
       bold(text) { return text; },
