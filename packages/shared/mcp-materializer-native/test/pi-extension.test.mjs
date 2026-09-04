@@ -411,6 +411,9 @@ createInterface({ input: process.stdin }).on("line", (line) => {
           },
         };
       })(),
+      transport_only_read_result: {
+        content: [{ type: "text", text: JSON.stringify({ schema: "local.filesystem.read.v1", content: "# Transport-only read" }) }],
+      },
       write_file: { schema: "local.filesystem.write_file.v1", status: "written", path: "C:/site/.ai/file.md", root: "C:/site", relative_path: ".ai/file.md", size: 17, create_parent_directories: true, before_sha256: "before", after_sha256: "after", sha256: "after", content_sha256: "after", timeout_ms: 30000 },
       submit_review_admit: { schema: "narada.epistemic.submit_review_admit.v1", status: "admitted", submission: { proposal_id: "proposal-1", proposal_digest: "digest-1", content_fingerprint: "content-1", operation_count: 4, operations: [{ op: "entity_create", title: "repeated input" }] }, review: { status: "policy_valid", review_details: { repeated: "input" } }, admission: { status: "admitted", proposal_id: "proposal-1", ledger_head: "head-1", event: { operations: [{ op: "entity_create", title: "repeated input" }] } }, review_gate_preserved: true, certifies_truth: false },
       schema_lease: { schema: "narada.mcp_loader.schema_lease.v1", status: "issued", connection_id: "c1", surface_id: "git", tool_name: "git_status", schema_lease: "lease-1", tool_schema_digest: "digest-1", input_schema_digest: "input-digest", binding_resolution: { surface_handle: "handle", runtime_lifecycle: { noisy: true } }, input_contract: { required: [], properties: ["working_directory"] }, tool_contract: { name: "git_status", inputSchema: { type: "object" } } },
@@ -482,10 +485,14 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       },
     };
     const requestedValue = message.params.arguments.value;
-    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: {
-      content: [{ type: "text", text: requestedValue === "authoritative_json" ? JSON.stringify(fixtures.producer_page) : "summary without lease" }],
-      structuredContent: fixtures[requestedValue] ?? { value: requestedValue, schema_lease: "lease-fixture" }
-    } }) + "\\n");
+    const transportOnly = requestedValue === "transport_only_read_result";
+    const responseResult = {
+      content: transportOnly
+        ? fixtures.transport_only_read_result.content
+        : [{ type: "text", text: requestedValue === "authoritative_json" ? JSON.stringify(fixtures.producer_page) : "summary without lease" }],
+    };
+    if (!transportOnly) responseResult.structuredContent = fixtures[requestedValue] ?? { value: requestedValue, schema_lease: "lease-fixture" };
+    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: responseResult }) + "\\n");
   }
 });
 `, 'utf8');
@@ -694,6 +701,9 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     assert.equal(readResultPage.content[0].text, '# Basic raw-fraction addition laws\n');
     assert.equal(readResultPage.details.modelVisibleCharLength, '# Basic raw-fraction addition laws\n'.length);
     assert.doesNotMatch(readResultPage.content[0].text, /content|structuredContent|local\.filesystem\.read\.v1/);
+    const transportOnlyRead = await registered[0].execute('call-transport-only-read-result', { value: 'transport_only_read_result' }, new AbortController().signal);
+    assert.equal(transportOnlyRead.content[0].text, '# Transport-only read');
+    assert.equal(transportOnlyRead.details.modelVisibleCharLength, '# Transport-only read'.length);
     const writeReceipt = await registered[0].execute('call-write-file', { value: 'write_file' }, new AbortController().signal);
     const writeModel = JSON.parse(writeReceipt.content[0].text);
     assert.deepEqual(Object.keys(writeModel).sort(), ['after_sha256', 'before_sha256', 'relative_path', 'schema', 'sha256', 'size', 'status'].sort());

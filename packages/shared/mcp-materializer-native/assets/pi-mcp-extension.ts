@@ -985,7 +985,7 @@ function modelProjectionTextFromStructured(structured: any, transportResult?: an
     const controlPlaneProjection = loaderControlPlaneProjectionForModel(candidate);
     if (controlPlaneProjection !== undefined) return JSON.stringify(controlPlaneProjection);
   }
-  return undefined;
+  return projectParsedOutputValueForModel(structured);
 }
 
 function controlPlaneProjectionText(structured: any): string | undefined {
