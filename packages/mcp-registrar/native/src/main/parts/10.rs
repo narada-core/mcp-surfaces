@@ -146,7 +146,19 @@ fn carrier_validate(contract: &Value, args: &Value) -> Result<Value, String> {
             json!({"server_key":key,"surface_id":surface_id}),
             scope_finding_detail(server["narada_scope"].clone()),
         );
-        let entrypoint = canonical_root(PathBuf::from(server["entrypoint"].as_str().unwrap_or("")));
+        let configured_entrypoint = canonical_root(PathBuf::from(server["entrypoint"].as_str().unwrap_or("")));
+        // Native carrier projections are launched through the runtime proxy. The
+        // validation plan may retain the retired compatibility child path, so
+        // validate the same canonical native entrypoint used by site launch.
+        let entrypoint = if server["uses_runtime_proxy"].as_bool() == Some(true) {
+            let projection_id = server["projection_id"].as_str().unwrap_or("default");
+            canonical_native_surface_entrypoint(surface_id, projection_id)
+                .map(PathBuf::from)
+                .map(canonical_root)
+                .unwrap_or(configured_entrypoint)
+        } else {
+            configured_entrypoint
+        };
         if !entrypoint.exists() {
             add(
                 "error",
