@@ -475,6 +475,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     const notifications = [];
     const startupStatuses = [];
     const eventHandlers = new Map();
+    let footerFactory;
     const shortcuts = new Map();
     const pi = {
       events: {
@@ -498,12 +499,32 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     extension(pi);
     shutdown = () => handlers.get('session_shutdown')?.();
     await handlers.get('session_start')?.({}, {
+      mode: 'tui',
+      cwd: 'C:/repo',
+      model: { id: 'fixture-model', provider: 'fixture', contextWindow: 272000, reasoning: false },
+      getContextUsage() { return { percent: 0, contextWindow: 272000 }; },
       ui: {
         notify(message, level) { notifications.push({ message, level }); },
         theme: { fg(_kind, text) { return `\x1b[90m${text}\x1b[39m`; } },
+        setFooter(factory) { footerFactory = factory; },
         setStatus(key, value) { startupStatuses.push({ key, value }); },
       },
     });
+
+    assert.equal(typeof footerFactory, 'function');
+    const footer = footerFactory(
+      { requestRender() {} },
+      { fg(_kind, text) { return `\x1b[90m${text}\x1b[39m`; } },
+      {
+        onBranchChange() { return () => {}; },
+        getGitBranch() { return null; },
+        getExtensionStatuses() { return new Map(); },
+        getAvailableProviderCount() { return 1; },
+      },
+    );
+    const footerStats = stripAnsi(footer.render(160)[1]);
+    assert.match(footerStats, /0\.0%\/272k \(auto\)/);
+    assert.doesNotMatch(footerStats, /↑|↓|CH|\$|(?:^| )R/);
 
     const identityStatus = startupStatuses.find(({ key }) => key === 'narada-session-identity');
     assert.equal(stripAnsi(identityStatus.value), 'Narada: marici.Nima');

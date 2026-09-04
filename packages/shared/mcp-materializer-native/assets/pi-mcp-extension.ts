@@ -2,6 +2,7 @@
 import { readFileSync } from "node:fs";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface } from "node:readline";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 
 type ServerConfig = {
   name: string;
@@ -1012,6 +1013,60 @@ function mutedStatus(ctx: any, text: string): string {
   return typeof theme?.fg === "function" ? theme.fg("muted", text) : text;
 }
 
+function footerForeground(theme: any, color: string, text: string): string {
+  return typeof theme?.fg === "function" ? theme.fg(color, text) : text;
+}
+
+function footerVisibleWidth(text: string): number {
+  return text.replace(/\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))/g, "").length;
+}
+
+function footerTruncate(text: string, width: number, ellipsis = "..."): string {
+  const limit = Math.max(0, Math.floor(width));
+  if (limit === 0) return "";
+  if (footerVisibleWidth(text) <= limit) return text;
+  const ellipsisWidth = footerVisibleWidth(ellipsis);
+  const contentWidth = Math.max(0, limit - ellipsisWidth);
+  let result = "";
+  let visible = 0;
+  for (let offset = 0; offset < text.length;) {
+    const ansi = text.slice(offset).match(/^\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))/)?.[0];
+    if (ansi) {
+      result += ansi;
+      offset += ansi.length;
+      continue;
+    }
+    const character = String.fromCodePoint(text.codePointAt(offset)!);
+    if (visible + 1 > contentWidth) break;
+    result += character;
+    visible += 1;
+    offset += character.length;
+  }
+  return result + ellipsis;
+}
+
+function footerFormatTokens(count: number): string {
+  if (count < 1000) return String(count);
+  if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
+  if (count < 1000000) return `${Math.round(count / 1000)}k`;
+  if (count < 10000000) return `${(count / 1000000).toFixed(1)}M`;
+  return `${Math.round(count / 1000000)}M`;
+}
+
+function footerCwd(cwd: string): string {
+  const home = process.env.HOME || process.env.USERPROFILE;
+  if (!home) return cwd;
+  const relativeToHome = relative(resolve(home), resolve(cwd));
+  const insideHome = relativeToHome === ""
+    || (relativeToHome !== ".." && !relativeToHome.startsWith(`..${sep}`) && !isAbsolute(relativeToHome));
+  if (!insideHome) return cwd;
+  return relativeToHome === "" ? "~" : `~${sep}${relativeToHome}`;
+}
+
+function footerSanitizeStatus(text: string): string {
+  return text.replace(/[\r\n\t]/g, " ").replace(/ +/g, " ").trim();
+}
+
 function boundedModelContent(
   result: any,
   content: any[],
@@ -1357,6 +1412,90 @@ export default function naradaMcpCarrier(pi: any): void {
   let started = false;
   let toolResultView: ToolResultView = "hide";
   let naradaSessionIdentityState: NaradaSessionIdentityState | null = null;
+  let footerModel: any;
+  let footerAutoCompactEnabled = true;
+
+  const installFocusedFooter = (ctx: any): void => {
+    if (ctx?.mode !== "tui") return;
+    if (typeof ctx?.ui?.setFooter !== "function") return;
+    footerModel = ctx.model;
+    ctx.ui.setFooter((tui: any, theme: any, footerData: any) => {
+      const unsubscribe = footerData?.onBranchChange?.(() => tui?.requestRender?.());
+      return {
+        dispose: typeof unsubscribe === "function" ? unsubscribe : undefined,
+        invalidate: () => undefined,
+        render: (width: number): string[] => {
+          const safeWidth = Math.max(1, Math.floor(width));
+          const contextUsage = ctx.getContextUsage?.();
+          const contextWindow = contextUsage?.contextWindow ?? footerModel?.contextWindow ?? 0;
+          const contextPercentValue = contextUsage?.percent ?? 0;
+          const contextPercent = contextUsage?.percent === null ? "?" : contextPercentValue.toFixed(1);
+          const autoIndicator = footerAutoCompactEnabled ? " (auto)" : "";
+          const contextDisplay = `${contextPercent}%/${footerFormatTokens(contextWindow)}${autoIndicator}`;
+          const contextText = contextPercentValue > 90
+            ? footerForeground(theme, "error", contextDisplay)
+            : contextPercentValue > 70
+              ? footerForeground(theme, "warning", contextDisplay)
+              : contextDisplay;
+
+          let pwd = footerCwd(String(ctx.cwd ?? ""));
+          const branch = footerData?.getGitBranch?.();
+          if (branch) pwd = `${pwd} (${branch})`;
+          const sessionName = ctx.sessionManager?.getSessionName?.();
+          if (sessionName) pwd = `${pwd} • ${sessionName}`;
+
+          const modelName = footerModel?.id || "no-model";
+          const rightSide = footerModel?.reasoning
+            ? `${modelName} • ${(ctx.thinkingLevel ?? "off") === "off" ? "thinking off" : ctx.thinkingLevel}`
+            : modelName;
+          const providerCount = footerData?.getAvailableProviderCount?.() ?? 0;
+          const providerSide = providerCount > 1 && footerModel
+            ? `(${footerModel.provider}) ${rightSide}`
+            : rightSide;
+          const contextWidth = footerVisibleWidth(contextText);
+          const rightWidth = footerVisibleWidth(providerSide);
+          const statsLine = contextWidth + 2 + rightWidth <= safeWidth
+            ? contextText + " ".repeat(safeWidth - contextWidth - rightWidth) + providerSide
+            : footerTruncate(contextText, safeWidth);
+
+          const lines = [
+            footerForeground(theme, "dim", footerTruncate(pwd, safeWidth)),
+            footerForeground(theme, "dim", statsLine),
+          ];
+          const statuses = footerData?.getExtensionStatuses?.();
+          if (statuses?.size > 0) {
+            const statusLine = Array.from(statuses.entries())
+              .sort(([left]: [string, string], [right]: [string, string]) => left.localeCompare(right))
+              .map(([, text]: [string, string]) => footerSanitizeStatus(String(text)))
+              .join(" ");
+            lines.push(footerTruncate(statusLine, safeWidth));
+          }
+          return lines;
+        },
+      };
+    });
+  };
+
+  const refreshFooterSettings = async (ctx: any): Promise<void> => {
+    footerAutoCompactEnabled = typeof ctx?.autoCompactionEnabled === "boolean"
+      ? ctx.autoCompactionEnabled
+      : true;
+    try {
+      const piAgent = await import("@earendil-works/pi-coding-agent");
+      const settings = typeof piAgent.SettingsManager?.create === "function"
+        ? piAgent.SettingsManager.create(
+          ctx.cwd,
+          piAgent.getAgentDir?.(),
+          { projectTrusted: ctx.isProjectTrusted?.() === true },
+        )
+        : undefined;
+      if (typeof settings?.getCompactionEnabled === "function") {
+        footerAutoCompactEnabled = settings.getCompactionEnabled();
+      }
+    } catch {
+      // The custom footer still works when the host package is unavailable to the extension.
+    }
+  };
 
   const currentSessionId = (ctx: any): string => String(ctx?.sessionManager?.getSessionId?.() ?? "ephemeral");
   const effectiveNaradaIdentity = (): EffectiveNaradaIdentity | null => {
@@ -1417,6 +1556,10 @@ export default function naradaMcpCarrier(pi: any): void {
   pi.registerCommand("narada-identity", {
     description: "Set, inspect, or clear the mechanically admitted Narada identity for this Pi session",
     handler: (args: string, ctx: any) => naradaIdentityCommand(args, ctx),
+  });
+
+  pi.on("model_select", (event: any) => {
+    if (event?.model) footerModel = event.model;
   });
 
   const registerNativeToolDisplayOverrides = async (ctx: any): Promise<void> => {
@@ -1571,6 +1714,8 @@ export default function naradaMcpCarrier(pi: any): void {
 
   pi.on("session_start", async (_event: unknown, ctx: any) => {
     toolResultView = "hide";
+    installFocusedFooter(ctx);
+    await refreshFooterSettings(ctx);
     restoreNaradaSessionIdentity(ctx);
     syncToolResultView(ctx);
     if (started) return;
@@ -1761,6 +1906,7 @@ export default function naradaMcpCarrier(pi: any): void {
 
   pi.on("session_shutdown", (_event: unknown, ctx: any) => {
     toolResultView = "hide";
+    ctx?.ui?.setFooter?.(undefined);
     ctx?.ui?.setStatus?.(TOOL_RESULT_VIEW_STATUS_KEY, undefined);
     for (const client of clients) client.close();
     clients = [];
