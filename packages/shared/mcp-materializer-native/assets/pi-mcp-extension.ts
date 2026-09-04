@@ -976,8 +976,9 @@ const MAX_MODEL_VISIBLE_RESULT_CHARS = 8_000;
 
 type ToolResultView = "compact" | "single-line" | "model-visible" | "full-output" | "hide";
 const TOOL_RESULT_VIEWS: ToolResultView[] = ["compact", "single-line", "model-visible", "full-output", "hide"];
-const TOOL_RESULT_VIEW_SHORTCUT = "f8";
-const TOOL_RESULT_VIEW_SHORTCUT_ALIASES = ["f8", "ctrl+shift+m"];
+const TOOL_RESULT_VIEW_SHORTCUT_KEY = "f8";
+const TOOL_RESULT_VIEW_SHORTCUT = "F8";
+const TOOL_RESULT_VIEW_SHORTCUT_ALIASES = [TOOL_RESULT_VIEW_SHORTCUT_KEY, "ctrl+shift+m"];
 const TOOL_RESULT_VIEW_STATUS_KEY = "narada-mcp-tool-view";
 export const NATIVE_TOOL_DISPLAY_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls", "powershell"] as const;
 const NATIVE_TOOL_RENDER_STATE = Symbol("narada-native-tool-render-state");
@@ -1004,6 +1005,11 @@ function nativeToolDisplay(view: ToolResultView): "hidden" | "collapsed" | "expa
 
 function toolResultViewStatus(view: ToolResultView): string {
   return `Tool view: ${view} · shells ${nativeToolDisplay(view)} · ${TOOL_RESULT_VIEW_SHORTCUT}: ${nextToolResultView(view)}`;
+}
+
+function mutedStatus(ctx: any, text: string): string {
+  const theme = ctx?.ui?.theme;
+  return typeof theme?.fg === "function" ? theme.fg("muted", text) : text;
 }
 
 function boundedModelContent(
@@ -1372,7 +1378,7 @@ export default function naradaMcpCarrier(pi: any): void {
         : { status: "cleared", identity: null, sessionId, changedAt: String(data.changedAt ?? data.clearedAt ?? ""), source: "operator_slash_command" };
     }
     const effective = effectiveNaradaIdentity();
-    ctx?.ui?.setStatus?.("narada-session-identity", effective ? `Narada: ${effective.identity}` : undefined);
+    ctx?.ui?.setStatus?.("narada-session-identity", effective ? mutedStatus(ctx, `Narada: ${effective.identity}`) : undefined);
   };
 
   const naradaIdentityCommand = async (args: string, ctx: any, legacy = false) => {
@@ -1403,7 +1409,7 @@ export default function naradaMcpCarrier(pi: any): void {
     await ctx.waitForIdle?.();
     naradaSessionIdentityState = { status: "admitted", identity, sessionId: currentSessionId(ctx), changedAt: new Date().toISOString(), source: "operator_slash_command" };
     pi.appendEntry(NARADA_SESSION_IDENTITY_ENTRY, naradaSessionIdentityState);
-    ctx?.ui?.setStatus?.("narada-session-identity", `Narada: ${identity}`);
+    ctx?.ui?.setStatus?.("narada-session-identity", mutedStatus(ctx, `Narada: ${identity}`));
     ctx?.ui?.notify?.(`Mechanically admitted ${identity} for this Pi session. Identity does not grant task-claim, graph-mutation, or publication authority.`, "info");
     pi.events.emit?.("narada:mcp:identity-changed", naradaSessionIdentityState);
   };
@@ -1469,7 +1475,7 @@ export default function naradaMcpCarrier(pi: any): void {
     // change. Do not invalidate every historical tool component here: the
     // wrapped renderers read the current view at render time, and a broad
     // invalidate storm can make the interactive host appear hung.
-    ctx?.ui?.setStatus?.(TOOL_RESULT_VIEW_STATUS_KEY, toolResultViewStatus(toolResultView));
+    ctx?.ui?.setStatus?.(TOOL_RESULT_VIEW_STATUS_KEY, mutedStatus(ctx, toolResultViewStatus(toolResultView)));
   };
 
   const cycleToolResultView = async (ctx: any): Promise<void> => {

@@ -473,6 +473,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     const handlers = new Map();
     const registered = [];
     const notifications = [];
+    const startupStatuses = [];
     const eventHandlers = new Map();
     const shortcuts = new Map();
     const pi = {
@@ -496,8 +497,17 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     };
     extension(pi);
     shutdown = () => handlers.get('session_shutdown')?.();
-    await handlers.get('session_start')?.({}, { ui: { notify(message, level) { notifications.push({ message, level }); } } });
+    await handlers.get('session_start')?.({}, {
+      ui: {
+        notify(message, level) { notifications.push({ message, level }); },
+        theme: { fg(_kind, text) { return `\x1b[90m${text}\x1b[39m`; } },
+        setStatus(key, value) { startupStatuses.push({ key, value }); },
+      },
+    });
 
+    const identityStatus = startupStatuses.find(({ key }) => key === 'narada-session-identity');
+    assert.equal(stripAnsi(identityStatus.value), 'Narada: marici.Nima');
+    assert.match(identityStatus.value, /^\x1b\[90m/);
     assert.match(notifications[0].message, /mcp=loading/);
     assert.match(notifications[1].message, /mcp=attached/);
     assert.match(notifications[1].message, /loader=current/);
@@ -809,10 +819,12 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     assert.match(shortcut.description, /compact, single-line, model-visible, full-output, hide/);
     const expansionStates = [];
     const viewStatuses = [];
+    let mutedStatusSeen = false;
     let hostToolsExpanded = false;
     let refreshCommandBoxes = () => {};
     const shortcutContext = {
       ui: {
+        theme: { fg(_kind, text) { return `\x1b[90m${text}\x1b[39m`; } },
         getToolsExpanded() { return hostToolsExpanded; },
         setToolsExpanded(value) {
           expansionStates.push(value);
@@ -821,7 +833,8 @@ createInterface({ input: process.stdin }).on("line", (line) => {
         },
         setStatus(key, value) {
           if (key === 'narada-mcp-tool-view') {
-            viewStatuses.push(value);
+            mutedStatusSeen ||= /\x1b\[90m/.test(value);
+            viewStatuses.push(stripAnsi(value));
             refreshCommandBoxes();
           }
         },
@@ -831,17 +844,18 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 
     await shortcut.handler(shortcutContext);
     const smallCollapsed = registered[0].renderResult(result, { expanded: false }).render(160).join('\n');
-    assert.match(smallCollapsed, /MCP result.*model-visible.*f8: single-line/);
+    assert.match(smallCollapsed, /MCP result.*model-visible.*F8: single-line/);
     assert.doesNotMatch(smallCollapsed, /schema_lease/);
     const smallExpanded = registered[0].renderResult(result, { expanded: true }).render(160).join('\n');
-    assert.match(smallExpanded, /^full-output · \d+ characters — f8: single-line/);
+    assert.match(smallExpanded, /^full-output · \d+ characters — F8: single-line/);
     assert.equal(result.details.fullOutputCharLength, result.details.modelVisibleCharLength);
     assert.equal(result.details.modelVisibleTruncated, false);
 
     const compactView = registered[0].renderResult(result, { expanded: false }).render(160).join('\n');
-    assert.match(compactView, /MCP result.*model-visible.*f8: single-line/);
+    assert.match(compactView, /MCP result.*model-visible.*F8: single-line/);
     assert.deepEqual(expansionStates, []);
-    assert.match(viewStatuses.at(-1), /^Tool view: compact · shells collapsed · f8: single-line$/);
+    assert.match(viewStatuses.at(-1), /^Tool view: compact · shells collapsed · F8: single-line$/);
+    assert.equal(mutedStatusSeen, true);
     const compactCall = registered[0].renderCall({}, {
       fg(_kind, text) { return text; },
       bold(text) { return text; },
@@ -850,9 +864,9 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 
     await shortcut.handler(shortcutContext);
     const singleLine = registered[0].renderResult(result, { expanded: false }).render(160).join('\n');
-    assert.match(singleLine, /MCP result.*model-visible.*f8: model-visible/);
+    assert.match(singleLine, /MCP result.*model-visible.*F8: model-visible/);
     assert.deepEqual(expansionStates, []);
-    assert.match(viewStatuses.at(-1), /^Tool view: single-line · shells collapsed · f8: model-visible$/);
+    assert.match(viewStatuses.at(-1), /^Tool view: single-line · shells collapsed · F8: model-visible$/);
     const singleLineCall = registered[0].renderCall({}, {
       fg(_kind, text) { return text; },
       bold(text) { return text; },
@@ -864,19 +878,19 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     assert.match(modelVisible, /^model-visible · \d+ characters/);
     assert.match(modelVisible, /schema_lease/);
     assert.deepEqual(expansionStates, []);
-    assert.match(viewStatuses.at(-1), /^Tool view: model-visible · shells collapsed · f8: full-output$/);
+    assert.match(viewStatuses.at(-1), /^Tool view: model-visible · shells collapsed · F8: full-output$/);
 
     await shortcut.handler(shortcutContext);
     const fullOutput = registered[0].renderResult(result, { expanded: false }).render(160).join('\n');
     assert.match(fullOutput, /^full-output · \d+ characters/);
     assert.match(fullOutput, /schema_lease/);
     assert.deepEqual(expansionStates, [true]);
-    assert.match(viewStatuses.at(-1), /^Tool view: full-output · shells expanded · f8: hide$/);
+    assert.match(viewStatuses.at(-1), /^Tool view: full-output · shells expanded · F8: hide$/);
 
     await shortcut.handler(shortcutContext);
     assert.deepEqual(registered[0].renderResult(result, { expanded: false }).render(160), []);
     assert.deepEqual(expansionStates, [true, false]);
-    assert.match(viewStatuses.at(-1), /^Tool view: hide · shells hidden · f8: compact$/);
+    assert.match(viewStatuses.at(-1), /^Tool view: hide · shells hidden · F8: compact$/);
     if (piCodingAgentRuntime) {
       const { ToolExecutionComponent, initTheme } = piCodingAgentRuntime;
       initTheme('dark');
@@ -900,9 +914,9 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 
     await shortcut.handler(shortcutContext);
     const initialCompact = registered[0].renderResult(result, { expanded: false }).render(160).join('\n');
-    assert.match(initialCompact, /f8: single-line/);
+    assert.match(initialCompact, /F8: single-line/);
     assert.deepEqual(expansionStates, [true, false]);
-    assert.match(viewStatuses.at(-1), /^Tool view: compact · shells collapsed · f8: single-line$/);
+    assert.match(viewStatuses.at(-1), /^Tool view: compact · shells collapsed · F8: single-line$/);
 
     const commandBox = retainedCommandBox(registered[0], result, {
       fg(_kind, text) { return text; },
@@ -913,10 +927,10 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       const rendered = commandBox.render(160).join('\n');
       if (view === 'compact') {
         assert.match(rendered, /fixture_echo/);
-        assert.match(rendered, /MCP result.*f8: single-line/);
+        assert.match(rendered, /MCP result.*F8: single-line/);
       } else if (view === 'single-line') {
         assert.doesNotMatch(rendered, /fixture_echo/);
-        assert.match(rendered, /MCP result.*f8: model-visible/);
+        assert.match(rendered, /MCP result.*F8: model-visible/);
       } else if (view === 'model-visible') {
         assert.match(rendered, /fixture_echo/);
         assert.match(rendered, /(?:^|\n)model-visible · \d+ characters/);
@@ -930,12 +944,12 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     }
     const restoredCompact = commandBox.render(160).join('\n');
     assert.match(restoredCompact, /fixture_echo/);
-    assert.match(restoredCompact, /MCP result.*f8: single-line/);
+    assert.match(restoredCompact, /MCP result.*F8: single-line/);
 
     const themedCollapsed = registered[0].renderResult(result, { expanded: false }, {
       fg(kind, text) { return `<${kind}>${text}</${kind}>`; },
     }).render(160).join('\n');
-    assert.match(themedCollapsed, /<muted>MCP result \(.*\) · model-visible .* — f8: single-line<\/muted>/);
+    assert.match(themedCollapsed, /<muted>MCP result \(.*\) · model-visible .* — F8: single-line<\/muted>/);
     const ansiCollapsedLines = registered[0].renderResult(result, { expanded: false }, {
       fg(_kind, text) { return `\x1b[90m${text}\x1b[39m`; },
     }).render(7);
@@ -967,7 +981,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       const fixture = await registered[0].execute('call-' + value, { value }, new AbortController().signal);
       const rendered = registered[0].renderResult(fixture, { expanded: false }).render(160).join('\n');
       assert.match(rendered, expected);
-      assert.match(rendered, /f8: single-line/);
+      assert.match(rendered, /F8: single-line/);
     }
 
     const oversized = await registered[0].execute('call-oversized', { value: 'oversized' }, new AbortController().signal);
@@ -978,7 +992,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     assert.match(oversizedExpanded, /x{100}/);
     await shortcut.handler(shortcutContext);
     const oversizedSingleLine = registered[0].renderResult(oversized, { expanded: false }).render(160).join('\n');
-    assert.match(oversizedSingleLine, /model-visible.*f8: model-visible/);
+    assert.match(oversizedSingleLine, /model-visible.*F8: model-visible/);
     assert.doesNotMatch(oversizedSingleLine, /x{100}/);
     await shortcut.handler(shortcutContext);
     const oversizedModelVisible = registered[0].renderResult(oversized, { expanded: false }).render(160).join('\n');
@@ -997,7 +1011,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       details: { uiSummary: 'fixture_echo: large fixture' },
     };
     const collapsed = registered[0].renderResult(largeResult, { expanded: false });
-    assert.match(collapsed.render(120).join('\n'), /large fixture.*model-visible.*f8: single-line/);
+    assert.match(collapsed.render(120).join('\n'), /large fixture.*model-visible.*F8: single-line/);
     assert.doesNotMatch(collapsed.render(120).join('\n'), /x{100}/);
     const expanded = registered[0].renderResult(largeResult, { expanded: true });
     assert.match(expanded.render(120).join('\n'), /x{100}/);
