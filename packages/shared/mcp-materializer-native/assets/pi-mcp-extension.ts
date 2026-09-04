@@ -726,16 +726,23 @@ function projectEpistemicGuidanceForModel(value: any): any | undefined {
 }
 
 function projectMutationReceiptForModel(structured: any): any | undefined {
-  if (structured?.schema === "local.filesystem.write_file.v1") {
-    return {
+  if ([
+    "local.filesystem.write_file.v1",
+    "local.filesystem.str_replace_file.v1",
+    "local.filesystem.replace_range.v1",
+  ].includes(structured?.schema)) {
+    const projection: Record<string, any> = {
       schema: structured.schema,
       status: structured.status,
       relative_path: structured.relative_path,
-      size: structured.size,
-      sha256: structured.sha256 ?? structured.after_sha256,
-      before_sha256: structured.before_sha256,
-      after_sha256: structured.after_sha256,
     };
+    for (const field of ["size", "occurrences", "start_line", "end_line", "inserted_lines"]) {
+      if (typeof structured?.[field] === "number") projection[field] = structured[field];
+    }
+    if (typeof structured?.before_sha256 === "string") projection.before_sha256 = structured.before_sha256;
+    if (typeof structured?.after_sha256 === "string") projection.after_sha256 = structured.after_sha256;
+    else if (typeof structured?.sha256 === "string") projection.after_sha256 = structured.sha256;
+    return projection;
   }
   if (structured?.schema === "narada.epistemic.submit_review_admit.v1") {
     const submission = structured.submission ?? {};

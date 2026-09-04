@@ -299,7 +299,8 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       tools_result: { schema: "narada.mcp_loader.tools.v1", status: "ok", connection_id: "c-tools", surface_id: "epistemic-graph", compact: true, tool_count: 3, tools: [{ name: "epistemic_graph_guidance", description: "Explain the problem-situation graph workflow.", inputSchema: { type: "object" } }, { name: "epistemic_graph_query", description: "Run a bounded query with a very long description that must not enter the model projection.", inputSchema: { type: "object", properties: { query: { type: "object" } } } }, { name: "epistemic_graph_submit_review_admit", description: "Submit, review, and admit a contribution.", inputSchema: { type: "object", required: ["actor"] } }], runtime_freshness: { status: "current", reload_required: false, source: "omit" }, runtime_lifecycle: { restartability_status: "available", session_restart_required: false, guidance: "omit" } },
       empty_range: { schema: "local.filesystem.read.v1", relative_path: "file.md", total_lines: 250, returned_lines: 0, offset: 300, requested_start_line: 300, requested_end_line: 380 },
       empty_valid_range: { schema: "local.filesystem.read.v1", relative_path: "file.md", total_lines: 250, returned_lines: 0, offset: 200, requested_start_line: 200, requested_end_line: 200 },
-      replace: { schema: "local.filesystem.str_replace_file.v1", status: "replaced", relative_path: "file.md", occurrences: 1 },
+      replace: { schema: "local.filesystem.str_replace_file.v1", status: "replaced", relative_path: "file.md", occurrences: 1, before_sha256: "before", after_sha256: "after", sha256: "after", content_sha256: "after" },
+      replace_range: { schema: "local.filesystem.replace_range.v1", status: "replaced_range", relative_path: "file.md", start_line: 2, end_line: 4, inserted_lines: 3, before_sha256: "before-range", after_sha256: "after-range", sha256: "after-range", content_sha256: "after-range" },
       bridge: { schema: "narada.task.inbox.bridge.v1", status: "planned", count: 0, envelopes: [] },
       generic_large: (() => {
         const value = { schema: "narada.mcp_loader.result_page.v1", full_output_char_length: 4227, payload: "" };
@@ -706,9 +707,18 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     assert.equal(transportOnlyRead.details.modelVisibleCharLength, '# Transport-only read'.length);
     const writeReceipt = await registered[0].execute('call-write-file', { value: 'write_file' }, new AbortController().signal);
     const writeModel = JSON.parse(writeReceipt.content[0].text);
-    assert.deepEqual(Object.keys(writeModel).sort(), ['after_sha256', 'before_sha256', 'relative_path', 'schema', 'sha256', 'size', 'status'].sort());
+    assert.deepEqual(Object.keys(writeModel).sort(), ['after_sha256', 'before_sha256', 'relative_path', 'schema', 'size', 'status'].sort());
+    assert.equal(writeModel.sha256, undefined);
+    assert.equal(writeModel.content_sha256, undefined);
     assert.equal(writeModel.path, undefined);
     assert.notEqual(registered[0].renderResult(writeReceipt, { expanded: true }).render(160).join('\n'), writeReceipt.content[0].text);
+    const replaceReceipt = await registered[0].execute('call-str-replace', { value: 'replace' }, new AbortController().signal);
+    const replaceModel = JSON.parse(replaceReceipt.content[0].text);
+    assert.deepEqual(Object.keys(replaceModel).sort(), ['after_sha256', 'before_sha256', 'occurrences', 'relative_path', 'schema', 'status'].sort());
+    assert.equal(replaceModel.sha256, undefined);
+    const replaceRangeReceipt = await registered[0].execute('call-replace-range', { value: 'replace_range' }, new AbortController().signal);
+    const replaceRangeModel = JSON.parse(replaceRangeReceipt.content[0].text);
+    assert.deepEqual(Object.keys(replaceRangeModel).sort(), ['after_sha256', 'before_sha256', 'end_line', 'inserted_lines', 'relative_path', 'schema', 'start_line', 'status'].sort());
 
     const submitReceipt = await registered[0].execute('call-submit-review-admit', { value: 'submit_review_admit' }, new AbortController().signal);
     const submitModel = JSON.parse(submitReceipt.content[0].text);
