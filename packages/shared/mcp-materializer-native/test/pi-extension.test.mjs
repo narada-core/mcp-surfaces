@@ -707,18 +707,25 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     assert.equal(transportOnlyRead.details.modelVisibleCharLength, '# Transport-only read'.length);
     const writeReceipt = await registered[0].execute('call-write-file', { value: 'write_file' }, new AbortController().signal);
     const writeModel = JSON.parse(writeReceipt.content[0].text);
-    assert.deepEqual(Object.keys(writeModel).sort(), ['after_sha256', 'before_sha256', 'relative_path', 'schema', 'size', 'status'].sort());
+    assert.deepEqual(Object.keys(writeModel).sort(), ['relative_path', 'schema', 'size', 'status'].sort());
+    assert.equal(writeModel.before_sha256, undefined);
+    assert.equal(writeModel.after_sha256, undefined);
     assert.equal(writeModel.sha256, undefined);
     assert.equal(writeModel.content_sha256, undefined);
     assert.equal(writeModel.path, undefined);
     assert.notEqual(registered[0].renderResult(writeReceipt, { expanded: true }).render(160).join('\n'), writeReceipt.content[0].text);
     const replaceReceipt = await registered[0].execute('call-str-replace', { value: 'replace' }, new AbortController().signal);
     const replaceModel = JSON.parse(replaceReceipt.content[0].text);
-    assert.deepEqual(Object.keys(replaceModel).sort(), ['after_sha256', 'before_sha256', 'occurrences', 'relative_path', 'schema', 'status'].sort());
+    assert.deepEqual(Object.keys(replaceModel).sort(), ['occurrences', 'relative_path', 'schema', 'status'].sort());
+    assert.equal(replaceModel.before_sha256, undefined);
+    assert.equal(replaceModel.after_sha256, undefined);
     assert.equal(replaceModel.sha256, undefined);
+    assert.equal(replaceModel.content_sha256, undefined);
     const replaceRangeReceipt = await registered[0].execute('call-replace-range', { value: 'replace_range' }, new AbortController().signal);
     const replaceRangeModel = JSON.parse(replaceRangeReceipt.content[0].text);
-    assert.deepEqual(Object.keys(replaceRangeModel).sort(), ['after_sha256', 'before_sha256', 'end_line', 'inserted_lines', 'relative_path', 'schema', 'start_line', 'status'].sort());
+    assert.deepEqual(Object.keys(replaceRangeModel).sort(), ['end_line', 'inserted_lines', 'relative_path', 'schema', 'start_line', 'status'].sort());
+    assert.equal(replaceRangeModel.before_sha256, undefined);
+    assert.equal(replaceRangeModel.after_sha256, undefined);
 
     const submitReceipt = await registered[0].execute('call-submit-review-admit', { value: 'submit_review_admit' }, new AbortController().signal);
     const submitModel = JSON.parse(submitReceipt.content[0].text);

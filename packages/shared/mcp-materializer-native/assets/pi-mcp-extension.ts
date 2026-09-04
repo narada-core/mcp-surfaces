@@ -739,9 +739,6 @@ function projectMutationReceiptForModel(structured: any): any | undefined {
     for (const field of ["size", "occurrences", "start_line", "end_line", "inserted_lines"]) {
       if (typeof structured?.[field] === "number") projection[field] = structured[field];
     }
-    if (typeof structured?.before_sha256 === "string") projection.before_sha256 = structured.before_sha256;
-    if (typeof structured?.after_sha256 === "string") projection.after_sha256 = structured.after_sha256;
-    else if (typeof structured?.sha256 === "string") projection.after_sha256 = structured.sha256;
     return projection;
   }
   if (structured?.schema === "narada.epistemic.submit_review_admit.v1") {
