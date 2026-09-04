@@ -979,19 +979,29 @@ const TOOL_RESULT_VIEWS: ToolResultView[] = ["compact", "single-line", "model-vi
 const TOOL_RESULT_VIEW_SHORTCUT = "f8";
 const TOOL_RESULT_VIEW_SHORTCUT_ALIASES = ["f8", "ctrl+shift+m"];
 const TOOL_RESULT_VIEW_STATUS_KEY = "narada-mcp-tool-view";
+export const NATIVE_TOOL_DISPLAY_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls", "powershell"] as const;
+
+export function nativeToolDisplayNames(tools: any[]): string[] {
+  const available = new Set(
+    tools
+      .filter((tool: any) => tool?.sourceInfo?.source === "builtin")
+      .map((tool: any) => tool?.name),
+  );
+  return NATIVE_TOOL_DISPLAY_NAMES.filter((name) => available.has(name));
+}
 
 function nextToolResultView(view: ToolResultView): ToolResultView {
   return TOOL_RESULT_VIEWS[(TOOL_RESULT_VIEWS.indexOf(view) + 1) % TOOL_RESULT_VIEWS.length];
 }
 
-function nativeShellDisplay(view: ToolResultView): "hidden" | "collapsed" | "expanded" {
+function nativeToolDisplay(view: ToolResultView): "hidden" | "collapsed" | "expanded" {
   if (view === "hide") return "hidden";
   if (view === "full-output") return "expanded";
   return "collapsed";
 }
 
 function toolResultViewStatus(view: ToolResultView): string {
-  return `Tool view: ${view} · shells ${nativeShellDisplay(view)} · ${TOOL_RESULT_VIEW_SHORTCUT}: ${nextToolResultView(view)}`;
+  return `Tool view: ${view} · native tools ${nativeToolDisplay(view)} · ${TOOL_RESULT_VIEW_SHORTCUT}: ${nextToolResultView(view)}`;
 }
 
 function boundedModelContent(
@@ -1315,13 +1325,8 @@ export default function naradaMcpCarrier(pi: any): void {
     handler: (args: string, ctx: any) => naradaIdentityCommand(args, ctx),
   });
 
-  const registerNativeShellDisplayOverrides = async (ctx: any): Promise<void> => {
-    const nativeShellNames = new Set(
-      (pi.getAllTools?.() ?? [])
-        .filter((tool: any) => tool?.sourceInfo?.source === "builtin")
-        .map((tool: any) => tool?.name),
-    );
-    const requestedNames = ["bash", "powershell"].filter((name) => nativeShellNames.has(name));
+  const registerNativeToolDisplayOverrides = async (ctx: any): Promise<void> => {
+    const requestedNames = nativeToolDisplayNames(pi.getAllTools?.() ?? []);
     if (requestedNames.length === 0) return;
 
     try {
@@ -1334,7 +1339,13 @@ export default function naradaMcpCarrier(pi: any): void {
         )
         : undefined;
       const factories: Record<string, any> = {
+        read: piAgent.createReadToolDefinition,
         bash: piAgent.createBashToolDefinition,
+        edit: piAgent.createEditToolDefinition,
+        write: piAgent.createWriteToolDefinition,
+        grep: piAgent.createGrepToolDefinition,
+        find: piAgent.createFindToolDefinition,
+        ls: piAgent.createLsToolDefinition,
         powershell: piAgent.createPowerShellToolDefinition,
       };
       for (const name of requestedNames) {
@@ -1350,15 +1361,15 @@ export default function naradaMcpCarrier(pi: any): void {
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      ctx?.ui?.notify?.(`Narada MCP shell display integration unavailable: ${message}`, "warning");
+      ctx?.ui?.notify?.(`Narada MCP native tool display integration unavailable: ${message}`, "warning");
     }
   };
 
   const syncToolResultView = (ctx: any): void => {
-    const shouldExpandNativeShells = nativeShellDisplay(toolResultView) === "expanded";
+    const shouldExpandNativeTools = nativeToolDisplay(toolResultView) === "expanded";
     const hostExpanded = ctx?.ui?.getToolsExpanded?.();
-    if (typeof hostExpanded !== "boolean" || hostExpanded !== shouldExpandNativeShells) {
-      ctx?.ui?.setToolsExpanded?.(shouldExpandNativeShells);
+    if (typeof hostExpanded !== "boolean" || hostExpanded !== shouldExpandNativeTools) {
+      ctx?.ui?.setToolsExpanded?.(shouldExpandNativeTools);
     }
     // setStatus is also the repaint path when the host expansion boolean does
     // not change. Never pulse the host through the opposite expansion state:
@@ -1478,7 +1489,7 @@ export default function naradaMcpCarrier(pi: any): void {
       "info",
     );
     try {
-      await registerNativeShellDisplayOverrides(ctx);
+      await registerNativeToolDisplayOverrides(ctx);
       const inventories: Array<{ client: McpClient; tools: any[]; runtime: StartupRuntime }> = [];
       for (const config of bootstrapConfigs) {
         const client = new McpClient(config);
