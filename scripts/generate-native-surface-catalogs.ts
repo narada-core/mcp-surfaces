@@ -58,7 +58,7 @@ const filesystem = {
 const structured = nativeTools(executable('narada-structured-command-mcp', 'NARADA_NATIVE_STRUCTURED_COMMAND_CATALOG_EXECUTABLE'), [
   '--allowed-root', workspaceRoot, '--site-root', workspaceRoot, '--storage-root', workspaceRoot,
   '--allow-command', 'node', '--allow-command', 'pnpm', '--allow-command', 'npm', '--allow-command', 'python',
-  '--allow-prefix', 'uv run --with sympy python',
+  '--allow-prefix', 'uv run --with sympy python', '--allow-prefix', 'uv run --with scipy python',
 ]);
 
 writeTypescript(

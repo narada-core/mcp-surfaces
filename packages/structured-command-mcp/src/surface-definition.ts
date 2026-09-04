@@ -15,7 +15,7 @@ export function surfaceDefinition(): DefinedSurface {
     default_effect: 'command',
     projections: [{
       id: 'default',
-      transport: { kind: 'stdio', command: 'narada-structured-command-mcp', args: ["--allowed-root","{workspace_root}","--allow-command","node","--allow-command","pnpm","--allow-command","npm","--allow-command","python","--allow-prefix","uv run --with sympy python"], env: [] },
+      transport: { kind: 'stdio', command: 'narada-structured-command-mcp', args: ["--allowed-root","{workspace_root}","--allow-command","node","--allow-command","pnpm","--allow-command","npm","--allow-command","python","--allow-prefix","uv run --with sympy python","--allow-prefix","uv run --with scipy python"], env: [] },
       injection_scope: 'local_site',
       default_injection: 'disabled',
       runtime_requirements: [],

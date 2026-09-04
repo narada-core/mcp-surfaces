@@ -48,7 +48,14 @@
                 .filter(|pair| pair[0] == "--allow-command" && pair[1] == "python")
                 .count()
         };
+        let has_scipy_prefix = |args: &Value| {
+            args.as_array()
+                .expect("argument array")
+                .windows(2)
+                .any(|pair| pair[0] == "--allow-prefix" && pair[1] == "uv run --with scipy python")
+        };
 
+        assert!(has_scipy_prefix(&surface["args"]));
         assert_eq!(count_python_admissions(&surface["args"]), 1);
         assert_eq!(
             count_python_admissions(&surface["projections"][0]["args"]),
@@ -58,6 +65,8 @@
             count_python_admissions(&surface["descriptor"]["projections"][0]["transport"]["args"]),
             1
         );
+        assert!(has_scipy_prefix(&surface["projections"][0]["args"]));
+        assert!(has_scipy_prefix(&surface["descriptor"]["projections"][0]["transport"]["args"]));
         assert_eq!(
             surface["descriptor_digest"],
             sha256_text(&canonical_json(&surface["descriptor"]))
