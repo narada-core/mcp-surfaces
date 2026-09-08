@@ -117,12 +117,6 @@ fn ticket_draft_upsert(
         if draft.is_none() {
             recovered = false;
             let mut message = Map::new();
-            if let Some(value) = normalized.get("body_text").and_then(Value::as_str) {
-                message.insert("body".to_string(), json!({"contentType":"Text","content":value}));
-            }
-            if let Some(value) = normalized.get("body_html").and_then(Value::as_str) {
-                message.insert("body".to_string(), json!({"contentType":"HTML","content":value}));
-            }
             message.insert(
                 "singleValueExtendedProperties".to_string(),
                 json!([{"id":TICKET_DRAFT_OPERATION_PROPERTY_ID,"value":operation_key}]),
@@ -155,6 +149,42 @@ fn ticket_draft_upsert(
             draft = Some(created);
         }
         let draft = draft.ok_or_else(|| unavailable("graph_ticket_draft_create_result_invalid", "draft missing"))?;
+        let draft_id = required_draft_id(&draft)?;
+        let draft_suffix = format!("messages/{}", encode_component(&draft_id));
+        let observed = policy
+            .adapter
+            .request("GET", Some(&mailbox_id), &draft_suffix, &Map::new(), None)?;
+        let observed_html = graph_body_as_html(observed.get("body").or_else(|| draft.get("body")))?;
+        let draft = if observed_html.contains("data-narada-quoted-history=\"true\"") {
+            observed
+        } else {
+            if observed_html.trim().is_empty() {
+                return Err(unavailable(
+                    "graph_ticket_reply_quote_missing",
+                    "Graph did not return native quoted history",
+                ));
+            }
+            let authored_html = authored_reply_html(body_text.as_deref(), body_html.as_deref())?;
+            let composed_html = compose_reply_html(
+                &authored_html,
+                &observed_html,
+                policy.reply_signature_name.as_deref(),
+            );
+            let patched = policy.adapter.request(
+                "PATCH",
+                Some(&mailbox_id),
+                &draft_suffix,
+                &Map::new(),
+                Some(&json!({"body":{"contentType":"HTML","content":composed_html}})),
+            )?;
+            if patched.get("isDraft").and_then(Value::as_bool) == Some(false) {
+                return Err(unavailable(
+                    "graph_ticket_reply_draft_not_unsent",
+                    "Graph returned a sent message",
+                ));
+            }
+            patched
+        };
         let draft_id = required_draft_id(&draft)?;
         let draft_ref = ticket_draft_ref_value(&normalized, &draft, &draft_id);
         let receipt_id = stable_receipt_id(&operation_key, &draft_id);

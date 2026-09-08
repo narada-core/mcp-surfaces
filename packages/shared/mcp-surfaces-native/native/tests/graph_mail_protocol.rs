@@ -135,6 +135,7 @@ fn mock_graph() -> (String, Arc<AtomicBool>, thread::JoinHandle<Vec<String>>) {
                     };
                     let body = json!({
                         "id":"draft-1","isDraft":true,"subject":"fixture","conversationId":"thread-1",
+                        "body":{"contentType":"HTML","content":"<div>Original quoted history</div>"},
                         "name":"fixture.txt","contentType":"text/plain","contentBytes":"SGVsbG8=",
                         "singleValueExtendedProperties":[{"id":"String {d700a6f2-79ad-4f44-9df7-3e9b622f09f8} Name NaradaTicketDraftOperation","value":"operation-1"}],
                         "uploadUrl":upload_url,

@@ -1735,11 +1735,12 @@ async function graphMailTicketDraftUpsert(
     let recovered = true;
     if (!draft) {
       recovered = false;
-      const message = messagePatchFromArgs(normalized);
-      message.singleValueExtendedProperties = [{
-        id: TICKET_DRAFT_OPERATION_PROPERTY_ID,
-        value: draftOperationKey,
-      }];
+      const message: GraphMailRecord = {
+        singleValueExtendedProperties: [{
+          id: TICKET_DRAFT_OPERATION_PROPERTY_ID,
+          value: draftOperationKey,
+        }],
+      };
       const action = normalized.reply_mode === 'reply' ? 'createReply' : 'createReplyAll';
       const path = graphMailboxPath(
         normalized.mailbox_id,
@@ -1767,18 +1768,47 @@ async function graphMailTicketDraftUpsert(
         ticket_id: normalized.ticket_id,
         effect_claim_id: normalized.effect_claim_id,
         draft_operation_key: draftOperationKey,
-        draft_id: draftId,
+        draft_id: requiredDraftId(draft),
       });
-      await state.ticketDraftFaultInjector?.(
-        'after_graph_commit_before_receipt',
-        draftOperationKey,
-      );
     }
 
     const draftId = requiredDraftId(draft);
+    const draftPath = graphMailboxPath(
+      normalized.mailbox_id,
+      'messages/' + encodeURIComponent(draftId),
+      policy,
+    );
+    const observed = asRecord(await graphRequest(
+      { policy, accessToken, fetchImpl },
+      { method: 'GET', path: draftPath },
+    ));
+    const observedHtml = graphBodyAsHtml(observed.body ?? draft.body);
+    if (!observedHtml.trim()) throw new Error('graph_ticket_reply_quote_missing');
+    if (!observedHtml.includes('data-narada-quoted-history="true"')) {
+      const authoredHtml = bodyHtml ?? '<p>' + escapeHtml(bodyText ?? '')
+        .replace(/\r\n/g, '\n')
+        .replace(/\r/g, '\n')
+        .replace(/\n/g, '<br>') + '</p>';
+      const signatureHtml = policy.reply_signature_name
+        ? '<p>Thanks,<br>' + escapeHtml(policy.reply_signature_name) + '</p>'
+        : '';
+      const composedHtml = authoredHtml + signatureHtml
+        + '<div data-narada-quoted-history="true">' + observedHtml + '</div>';
+      draft = asRecord(await graphRequest(
+        { policy, accessToken, fetchImpl },
+        { method: 'PATCH', path: draftPath, body: { body: { contentType: 'HTML', content: composedHtml } } },
+      ));
+      if (draft.isDraft === false) throw new Error('graph_ticket_reply_draft_not_unsent');
+    } else {
+      draft = observed;
+    }
+    await state.ticketDraftFaultInjector?.(
+      'after_graph_commit_before_receipt',
+      draftOperationKey,
+    );
     const completed = store.complete(draftOperationKey, {
-      draft_id: draftId,
-      receipt_id: stableReceiptId(draftOperationKey, draftId),
+      draft_id: requiredDraftId(draft),
+      receipt_id: stableReceiptId(draftOperationKey, requiredDraftId(draft)),
       draft_ref: ticketDraftRef(normalized, draft),
       now: new Date().toISOString(),
     });

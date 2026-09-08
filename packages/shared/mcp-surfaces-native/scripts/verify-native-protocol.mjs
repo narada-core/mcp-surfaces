@@ -2295,7 +2295,7 @@ server.listen(0, '127.0.0.1', async () => {
   try {
     const port = server.address().port;
     fixturePort = port;
-    const config = JSON.stringify({ graph_base_url: 'http://127.0.0.1:' + port + '/v1.0', allowed_mailboxes: ['fixture@example.test'], allow_folder_create: true, allow_message_move: true, allow_message_mark_read: true, mailbox_organization_approval_token: 'org-fixture', allow_send_draft: true, send_approval_token: 'send-fixture', allow_device_code_auth: true, device_code_tenant_id: 'tenant-fixture', device_code_client_id: 'client-fixture', device_code_allowed_scopes: ['Mail.ReadWrite'] });
+    const config = JSON.stringify({ graph_base_url: 'http://127.0.0.1:' + port + '/v1.0', allowed_mailboxes: ['fixture@example.test'], allow_folder_create: true, allow_message_move: true, allow_message_mark_read: true, mailbox_organization_approval_token: 'org-fixture', reply_signature_name: 'Ezra', allow_send_draft: true, send_approval_token: 'send-fixture', allow_device_code_auth: true, device_code_tenant_id: 'tenant-fixture', device_code_client_id: 'client-fixture', device_code_allowed_scopes: ['Mail.ReadWrite'] });
     for (const root of [bunRoot, rustRoot]) { mkdirSync(root + '/.ai', { recursive: true }); writeFileSync(root + '/.ai/graph-mail-mcp.json', config); }
     const env = { ...process.env, GRAPH_ACCESS_TOKEN: 'fixture-token', NARADA_NATIVE_GRAPH_ALLOW_INSECURE_TEST: '1', NARADA_GRAPH_MAIL_ALLOW_INSECURE_TEST: '1', NARADA_GRAPH_MAIL_DEVICE_CODE_ENDPOINT: 'http://127.0.0.1:' + port + '/oauth2/v2.0' };
     for (const key of ['MS_GRAPH_ACCESS_TOKEN', 'GRAPH_TENANT_ID', 'GRAPH_CLIENT_ID', 'GRAPH_CLIENT_SECRET', 'GRAPH_TOKEN_ENDPOINT', 'NARADA_GRAPH_MAIL_AUTHORITY_ENTRYPOINT', 'NARADA_GRAPH_MAIL_AUTHORITY_ARGS']) delete env[key];
@@ -2357,9 +2357,18 @@ server.listen(0, '127.0.0.1', async () => {
     assertSame('graph_mail.native_graph.auth_device_code_poll', normalizeAuthPoll(mailboxStructured(payload.bunAuthPoll, 33, 'bun')), normalizeAuthPoll(mailboxStructured(payload.rustAuthPoll, 33, 'rust')));
     const normalizeDownload = (value, root) => ({ ...value, file_path: String(value.file_path).replace(root, '<fixture-root>') });
     assertSame('graph_mail.native_graph.21', normalizeDownload(mailboxStructured(payload.bun, 21, 'bun'), join(root, 'bun')), normalizeDownload(mailboxStructured(payload.rust, 21, 'rust'), join(root, 'rust')));
-    const expectedMethods = ['GET', 'GET', 'GET', 'POST', 'POST', 'PATCH', 'GET', 'GET', 'GET', 'POST', 'DELETE', 'POST', 'POST', 'POST', 'PATCH', 'GET', 'DELETE', 'POST', 'POST', 'GET', 'PATCH', 'GET', 'POST', 'POST', 'GET', 'GET', 'POST', 'GET', 'DELETE'];
+    const expectedMethods = ['GET', 'GET', 'GET', 'POST', 'POST', 'PATCH', 'GET', 'GET', 'GET', 'POST', 'DELETE', 'POST', 'POST', 'POST', 'PATCH', 'GET', 'DELETE', 'POST', 'POST', 'GET', 'PATCH', 'GET', 'POST', 'POST', 'GET', 'GET', 'POST', 'GET', 'PATCH', 'GET', 'DELETE'];
     assertSame('graph_mail.native_graph.bun_methods', payload.received.slice(0, expectedMethods.length).map((value) => value.method), expectedMethods);
     assertSame('graph_mail.native_graph.rust_methods', payload.received.slice(expectedMethods.length, expectedMethods.length * 2).map((value) => value.method), expectedMethods);
+    for (const [label, request] of [
+      ['bun', payload.received[28]],
+      ['rust', payload.received[expectedMethods.length + 28]],
+    ]) {
+      const content = request?.body?.body?.content ?? '';
+      if (!content.includes('Ticket body') || !content.includes('Thanks,<br>Ezra') || !content.includes('data-narada-quoted-history="true"') || !content.includes('Quoted history')) {
+        throw new Error('graph_mail.native_graph.ticket_native_reply_body_mismatch:' + label + ':' + JSON.stringify(content));
+      }
+    }
     if (payload.received.slice(0, expectedMethods.length * 2).some((value) => value.authorization !== 'Bearer fixture-token')) throw new Error('graph_mail_native_graph_fixture_authorization_mismatch');
     const auditPath = join(root, 'rust', '.ai', 'audit', 'graph-mail-mcp.jsonl');
     const auditKinds = readFileSync(auditPath, 'utf8').trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line).event_kind);

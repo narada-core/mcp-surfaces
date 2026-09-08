@@ -978,6 +978,22 @@ try {
     fetchImpl: mockFetch(ticketDraftCalls, [
       { body: { value: [] } },
       { body: { id: 'ticket-draft-1', isDraft: true, conversationId: 'conversation-1' } },
+      {
+        body: {
+          id: 'ticket-draft-1',
+          isDraft: true,
+          conversationId: 'conversation-1',
+          body: { contentType: 'HTML', content: '<div>Original quoted history</div>' },
+        },
+      },
+      {
+        body: {
+          id: 'ticket-draft-1',
+          isDraft: true,
+          conversationId: 'conversation-1',
+          body: { contentType: 'HTML', content: '<p>Prepared but unsent response.</p><br><br>Thanks,<br>Ezra<div data-narada-quoted-history="true"><div>Original quoted history</div></div>' },
+        },
+      },
     ]),
   });
   const ticketDraftRequest = {
@@ -1009,17 +1025,24 @@ try {
   assert.equal(ticketDraft.result.structuredContent.schema, 'narada.domain_operation.v1');
   assert.equal(ticketDraft.result.structuredContent.result.draft_id, 'ticket-draft-1');
   assert.equal(ticketDraft.result.structuredContent.result.idempotency_replayed_or_recovered, false);
-  assert.equal(ticketDraftCalls.length, 2);
+  assert.equal(ticketDraftCalls.length, 4);
   assert.equal(ticketDraftCalls[0].init.method, 'GET');
   assert.match(ticketDraftCalls[0].url, /singleValueExtendedProperties/);
   assert.equal(ticketDraftCalls[1].init.method, 'POST');
   assert.match(ticketDraftCalls[1].url, /source-message-1\/createReplyAll$/);
   const ticketDraftBody = JSON.parse(ticketDraftCalls[1].init.body);
-  assert.equal(ticketDraftBody.message.body.content, ticketDraftRequest.body_text);
+  assert.equal(ticketDraftBody.message.body, undefined);
   assert.equal(
     ticketDraftBody.message.singleValueExtendedProperties[0].value,
     ticketDraftArguments.draft_operation_key,
   );
+  assert.equal(ticketDraftCalls[2].init.method, 'GET');
+  assert.equal(ticketDraftCalls[3].init.method, 'PATCH');
+  const ticketDraftPatch = JSON.parse(ticketDraftCalls[3].init.body);
+  assert.match(ticketDraftPatch.body.content, /^<p>Prepared but unsent response\.<\/p>/);
+  assert.match(ticketDraftPatch.body.content, /Thanks,<br>Ezra/);
+  assert.match(ticketDraftPatch.body.content, /data-narada-quoted-history="true"/);
+  assert.match(ticketDraftPatch.body.content, /Original quoted history/);
 
   const ticketDraftReplay = await rpc({
     jsonrpc: '2.0',
@@ -1030,7 +1053,7 @@ try {
   assert.equal(ticketDraftReplay.error, undefined);
   assert.equal(ticketDraftReplay.result.structuredContent.result.draft_id, 'ticket-draft-1');
   assert.equal(ticketDraftReplay.result.structuredContent.result.idempotency_replayed_or_recovered, true);
-  assert.equal(ticketDraftCalls.length, 2, 'exact replay must not call Graph');
+  assert.equal(ticketDraftCalls.length, 4, 'exact replay must not call Graph');
 
   const discardDraftCalls: CapturedRequest[] = [];
   const discardDraftState = createServerState({
@@ -1039,6 +1062,8 @@ try {
     fetchImpl: mockFetch(discardDraftCalls, [
       { body: { value: [] } },
       { body: { id: 'ticket-draft-discard-1', isDraft: true, conversationId: 'conversation-discard-1' } },
+      { body: { id: 'ticket-draft-discard-1', isDraft: true, body: { contentType: 'HTML', content: '<div>Discard quoted history</div>' } } },
+      { body: { id: 'ticket-draft-discard-1', isDraft: true, changeKey: 'discard-change-1' } },
       {
         body: {
           id: 'ticket-draft-discard-1',
@@ -1107,8 +1132,8 @@ try {
   assert.equal(discardReceipt.disposition, 'discarded');
   assert.equal(discardReceipt.evidence_kind, 'operator_confirmed_graph_discard');
   assert.equal(discardReceipt.graph_delete_confirmed, true);
-  assert.equal(discardDraftCalls[4].init.method, 'DELETE');
-  assert.equal(discardDraftCalls[4].init.headers['If-Match'], 'discard-change-1');
+  assert.equal(discardDraftCalls[6].init.method, 'DELETE');
+  assert.equal(discardDraftCalls[6].init.headers['If-Match'], 'discard-change-1');
   const { receipt_sha256: discardReceiptSha256, ...unsignedDiscardReceipt } = discardReceipt;
   assert.equal(discardReceiptSha256, sha256Canonical(unsignedDiscardReceipt));
   const discardedReplay = await rpc({
@@ -1117,7 +1142,7 @@ try {
   }, discardDraftState);
   assert.equal(discardedReplay.error, undefined);
   assert.equal(discardedReplay.result.structuredContent.idempotency_replayed_or_recovered, true);
-  assert.equal(discardDraftCalls.length, 5, 'discard replay must not call Graph');
+  assert.equal(discardDraftCalls.length, 7, 'discard replay must not call Graph');
   const discardAck = await rpc({
     jsonrpc: '2.0', id: 14014, method: 'tools/call',
     params: {
@@ -1139,6 +1164,8 @@ try {
     accessToken: 'test-token',
     fetchImpl: mockFetch(interruptedDiscardCalls, [
       { body: { value: [] } },
+      { body: { id: 'ticket-draft-discard-recovered', isDraft: true } },
+      { body: { id: 'ticket-draft-discard-recovered', isDraft: true, body: { contentType: 'HTML', content: '<div>Recovered discard quoted history</div>' } } },
       { body: { id: 'ticket-draft-discard-recovered', isDraft: true } },
       { body: { value: [{ id: 'ticket-draft-discard-recovered', isDraft: true, changeKey: 'discard-change-recovered' }] } },
       { status: 204, text: '' },
@@ -1307,7 +1334,10 @@ try {
     fetchImpl: mockFetch(recoveryCalls, [
       { body: { value: [] } },
       { body: { id: 'ticket-draft-recovered', isDraft: true, conversationId: 'conversation-2' } },
+      { body: { id: 'ticket-draft-recovered', isDraft: true, conversationId: 'conversation-2', body: { contentType: 'HTML', content: '<div>Recovery quoted history</div>' } } },
+      { body: { id: 'ticket-draft-recovered', isDraft: true, conversationId: 'conversation-2' } },
       { body: { value: [{ id: 'ticket-draft-recovered', isDraft: true, conversationId: 'conversation-2' }] } },
+      { body: { id: 'ticket-draft-recovered', isDraft: true, conversationId: 'conversation-2', body: { contentType: 'HTML', content: '<p>Prepared response.</p><br><br>Thanks,<br>Ezra<div data-narada-quoted-history="true"><div>Recovery quoted history</div></div>' } } },
     ]),
     ticketDraftFaultInjector: () => {
       if (!injectCrash) return;

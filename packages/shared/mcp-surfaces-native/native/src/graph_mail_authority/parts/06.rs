@@ -83,6 +83,22 @@ fn compose_reply_html(comment_html: &str, quote_html: &str, signature_name: Opti
     )
 }
 
+fn authored_reply_html(body_text: Option<&str>, body_html: Option<&str>) -> Result<String, Value> {
+    match (body_text, body_html) {
+        (Some(text), None) => Ok(format!(
+            "<p>{}</p>",
+            escape_html(text)
+                .replace("\r\n", "\n")
+                .replace('\r', "\n")
+                .replace('\n', "<br>")
+        )),
+        (None, Some(html)) => Ok(html.to_string()),
+        _ => Err(unavailable(
+            "graph_ticket_draft_exactly_one_body_required",
+            "provide exactly one of body_text or body_html",
+        )),
+    }
+}
 fn reply_all_to_last_in_thread(
     policy: &Policy,
     args: &Map<String, Value>,
