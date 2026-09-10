@@ -47,7 +47,7 @@ fn admit_message(args: &Map<String, Value>, root: &Path) -> Result<Value, Value>
             value
         }
     })?;
-    if fact.fact_type != "mail.message.discovered" {
+    if !matches!(fact.fact_type.as_str(), "mail.message.discovered" | "mail.message.changed") {
         let code = format!("mailbox_admission_fact_type_invalid:{}", fact.fact_type);
         return Err(error(&code, &code));
     }
@@ -74,11 +74,34 @@ fn admit_message(args: &Map<String, Value>, root: &Path) -> Result<Value, Value>
     };
     let event_payload = serde_json::from_str::<Value>(&event_payload_json)
         .map_err(|e| error("mailbox_admission_source_event_invalid", &e.to_string()))?;
-    if event_topic != "mailbox.message.first_observed"
-        || event_scope != scope.scope_id
-        || event_payload.get("fact_id").and_then(Value::as_str) != Some(fact_id.as_str())
-        || event_payload.get("mailbox_id").and_then(Value::as_str) != Some(scope.scope_id.as_str())
-    {
+    let source_matches = if event_topic == "mailbox.message.first_observed" {
+        event_payload.get("fact_id").and_then(Value::as_str) == Some(fact_id.as_str())
+            && event_payload.get("mailbox_id").and_then(Value::as_str) == Some(scope.scope_id.as_str())
+    } else if event_topic == "mailbox.thread.attention_required" {
+        let first_event_id = event_payload
+            .get("first_observed_event_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let first_payload: Option<String> = db.query_row(
+            "SELECT payload_json FROM mailbox_outbox WHERE event_id=? AND scope_id=? AND topic='mailbox.message.first_observed'",
+            params![first_event_id, scope.scope_id],
+            |row| row.get(0),
+        ).optional().map_err(|e| error("mailbox_admission_source_event_query_failed", &e.to_string()))?;
+        let first_matches = first_payload
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            .is_some_and(|payload| {
+                payload.get("message_id").and_then(Value::as_str) == Some(metadata.message_id.as_str())
+                    && payload.get("mailbox_id").and_then(Value::as_str) == Some(scope.scope_id.as_str())
+            });
+        event_payload.get("fact_id").and_then(Value::as_str) == Some(fact_id.as_str())
+            && event_payload.get("message_id").and_then(Value::as_str) == Some(metadata.message_id.as_str())
+            && event_payload.get("scope_id").and_then(Value::as_str) == Some(scope.scope_id.as_str())
+            && event_payload.get("attention_state").and_then(Value::as_str) == Some("required")
+            && first_matches
+    } else {
+        false
+    };
+    if event_scope != scope.scope_id || !source_matches {
         let code = format!("mailbox_admission_source_event_mismatch:{source_event_id}");
         return Err(error(&code, &code));
     }
@@ -262,4 +285,3 @@ fn admit_message(args: &Map<String, Value>, root: &Path) -> Result<Value, Value>
         Err(value) => Err(value),
     }
 }
-

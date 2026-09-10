@@ -108,6 +108,44 @@ test('mailbox outbox drains in bounded pages without requiring oversized MCP out
   assert.equal(fabric.schedulerEvents.size, 12);
 });
 
+test('client-last attention is not acknowledged until mailbox admission and durable ticket admission succeed', async () => {
+  const attentionEvent: JsonRecord = {
+    ...mailboxEvent,
+    event_id: 'attention-1',
+    topic: 'mailbox.thread.attention_required',
+    partition_key: 'thread-1',
+    aggregate_id: 'thread-1',
+    payload: {
+      scope_id: 'support',
+      message_id: 'message-1',
+      fact_id: 'fact-1',
+      attention_state: 'required',
+    },
+  };
+  const fabric = new FixtureFabric(attentionEvent);
+  fabric.failNextTicketAdmission = true;
+  const options = {
+    siteRoot: 'D:/fixture',
+    profile: 'mailbox' as const,
+    consumerId: 'scheduler-mailbox-attention',
+    scopeId: 'support',
+    topics: ['mailbox.thread.attention_required'],
+    outboxStartAt: '2026-07-31T00:00:00.000Z',
+  };
+
+  const failed = await runSchedulerDomainOutboxDispatcher(options, fabric);
+  assert.equal(failed.status, 'completed_with_errors');
+  assert.equal(failed.events_ticketed, 0);
+  assert.equal(failed.events_acknowledged, 0);
+
+  const recovered = await runSchedulerDomainOutboxDispatcher(options, fabric);
+  assert.equal(recovered.status, 'completed');
+  assert.equal(recovered.events_ticketed, 1);
+  assert.equal(recovered.events_acknowledged, 1);
+  assert.equal(fabric.ticketAdmissions.size, 1);
+  assert.equal(fabric.mailboxAcknowledged, true);
+});
+
 class FixtureFabric implements SchedulerDomainFabricCaller {
   readonly schedulerEvents = new Map<string, JsonRecord>();
   readonly workTopics = new Set<string>();
@@ -115,6 +153,8 @@ class FixtureFabric implements SchedulerDomainFabricCaller {
   readonly mailboxListLimits: number[] = [];
   workAcknowledged = false;
   failNextMailboxAck = false;
+  failNextTicketAdmission = false;
+  readonly ticketAdmissions = new Map<string, JsonRecord>();
 
   constructor(
     mailboxEvent: JsonRecord | JsonRecord[] | null,
@@ -166,6 +206,32 @@ class FixtureFabric implements SchedulerDomainFabricCaller {
       }
       this.mailboxAcknowledgedIds.add(String(args.event_id));
       return { status: 'acknowledged' };
+    }
+    if (surfaceId === 'mailbox' && toolName === 'mailbox_message_admit') {
+      return {
+        operation_ref: `mailbox-admission:${String(args.fact_id)}`,
+        result: {
+          admission_id: `admission-${String(args.fact_id)}`,
+          decision: 'admitted',
+          source: {
+            source_kind: 'mailbox_message',
+            source_scope: 'support',
+            immutable_source_id: 'message-1',
+            source_ref: { fact_id: args.fact_id },
+            correlation_keys: [],
+          },
+        },
+      };
+    }
+    if (surfaceId === 'work-lifecycle' && toolName === 'ticket_admit_source') {
+      if (this.failNextTicketAdmission) {
+        this.failNextTicketAdmission = false;
+        throw new Error('fixture_ticket_admission_failed');
+      }
+      const key = String(args.idempotency_key);
+      const ticket = this.ticketAdmissions.get(key) ?? { ticket_id: 'ticket-1', revision: 1 };
+      this.ticketAdmissions.set(key, ticket);
+      return { operation_ref: 'work-ticket:ticket-1', result: ticket };
     }
     if (surfaceId === 'work-lifecycle' && toolName === 'work_outbox_consumer_register') {
       this.workTopics.add(String(args.topic));

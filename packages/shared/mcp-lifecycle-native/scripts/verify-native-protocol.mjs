@@ -418,6 +418,8 @@ try {
   const draftDispositionArgs = { ticket_id: mailboxAdmission.ticket_id, draft_id: draftId, evidence: dispositionEvidence, idempotency_key: 'native-proof-draft-disposition', causation_id: 'native-proof-draft-disposition-causation' };
   const draftDisposition = callWork('ticket_draft_disposition_reconcile', draftDispositionArgs);
   assert.equal(draftDisposition.result.status, 'reconciled');
+  assert.equal(draftDisposition.result.ticket.status, 'resolved');
+  assert.equal(draftDisposition.result.ticket.resolution_code, 'response_sent');
   assert.equal(callWork('ticket_draft_disposition_reconcile', draftDispositionArgs).result.status, 'already_reconciled');
 
   const taskPageOne = structured(run('task', taskRoot, [tool(3000, 'task_lifecycle_list', { limit: 1, offset: 0 })]), 3000);

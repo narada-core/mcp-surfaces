@@ -98,6 +98,23 @@ fn init_outbox_schema(db: &Connection) -> Result<(), Value> {
           result_json TEXT NOT NULL,
           created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS mailbox_thread_attention(
+          thread_id TEXT PRIMARY KEY,
+          scope_id TEXT NOT NULL,
+          thread_key TEXT NOT NULL,
+          revision INTEGER NOT NULL,
+          latest_message_id TEXT NOT NULL,
+          latest_fact_id TEXT NOT NULL,
+          latest_at TEXT NOT NULL,
+          direction TEXT NOT NULL CHECK(direction IN ('inbound','outbound','indeterminate')),
+          admission_decision TEXT NOT NULL CHECK(admission_decision IN ('admitted','rejected','not_applicable','indeterminate')),
+          attention_state TEXT NOT NULL CHECK(attention_state IN ('required','cleared','excluded','indeterminate')),
+          subject TEXT,
+          updated_at TEXT NOT NULL,
+          UNIQUE(scope_id,thread_key)
+        );
+        CREATE INDEX IF NOT EXISTS mailbox_thread_attention_scope_state_idx
+          ON mailbox_thread_attention(scope_id,attention_state,latest_at,thread_id);
         CREATE INDEX IF NOT EXISTS mailbox_outbox_order_idx
           ON mailbox_outbox(occurred_at, event_id);
         CREATE INDEX IF NOT EXISTS mailbox_outbox_subscription_idx
@@ -106,7 +123,7 @@ fn init_outbox_schema(db: &Connection) -> Result<(), Value> {
           ON mailbox_sync_generations(scope_id, created_at);
         CREATE UNIQUE INDEX IF NOT EXISTS mailbox_admission_scope_fact_idx
           ON mailbox_admission_receipts(scope_id, fact_id);
-        PRAGMA user_version = 2;
+        PRAGMA user_version = 3;
         "#,
     )
     .map_err(|e| error("mailbox_domain_schema_failed", &e.to_string()))?;
@@ -263,4 +280,3 @@ fn message_fact_find(args: &Map<String, Value>, root: &Path) -> Result<Value, Va
         }))
     }
 }
-

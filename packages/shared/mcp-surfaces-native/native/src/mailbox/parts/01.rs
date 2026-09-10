@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -17,11 +17,11 @@ const READ_NAMES: &[&str] = &[
     "mailbox_doctor", "mailbox_accounts_list", "mailbox_messages_list", "mailbox_message_show",
     "mailbox_output_show", "mailbox_fact_show", "mailbox_message_fact_find", "mailbox_admission_show",
     "mailbox_search", "mailbox_thread_show", "mailbox_generation_show", "mailbox_outbox_consumer_show",
-    "mailbox_outbox_list",
+    "mailbox_outbox_list", "mailbox_thread_attention_list",
 ];
 const MUTATING_NAMES: &[&str] = &[
     "mailbox_sync_generation", "mailbox_reconcile_first_observations", "mailbox_message_admit",
-    "mailbox_outbox_consumer_register", "mailbox_outbox_ack",
+    "mailbox_outbox_consumer_register", "mailbox_outbox_ack", "mailbox_thread_attention_rebuild",
 ];
 
 pub fn list_tools() -> Vec<Value> {
@@ -47,11 +47,13 @@ pub fn call_tool(name: &str, args: &Map<String, Value>, root: &Path) -> Result<V
         "mailbox_admission_show" => admission_show(args, root),
         "mailbox_outbox_consumer_show" => outbox_consumer_show(args, root),
         "mailbox_outbox_list" => outbox_list(args, root),
+        "mailbox_thread_attention_list" => thread_attention_list(args, root),
         "mailbox_outbox_consumer_register" => outbox_consumer_register(args, root),
         "mailbox_outbox_ack" => outbox_ack(args, root),
         "mailbox_sync_generation" => crate::mailbox_sync::sync_generation(args, root),
         "mailbox_reconcile_first_observations" => reconcile_first_observations(args, root),
         "mailbox_message_admit" => admit_message(args, root),
+        "mailbox_thread_attention_rebuild" => thread_attention_rebuild(args, root),
         _ => Err(error("unknown_tool", &format!("unknown_tool:{name}"))),
     }
 }
@@ -267,4 +269,3 @@ fn open_domain_db_write(root: &Path) -> Result<Connection, Value> {
     init_outbox_schema(&db)?;
     Ok(db)
 }
-

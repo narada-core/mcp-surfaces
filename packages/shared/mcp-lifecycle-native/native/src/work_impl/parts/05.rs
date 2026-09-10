@@ -341,14 +341,15 @@ fn native_work_reconcile_draft(
             )
             .map_err(db_error)?;
     }
+    let terminal_at = if sent { Some(timestamp.as_str()) } else { None };
     let ticket = native_work_transition(
         server,
         &ticket_id,
-        "actionable",
+        if sent { "resolved" } else { "actionable" },
         None,
+        if sent { Some("response_sent") } else { None },
         None,
-        None,
-        None,
+        terminal_at,
     )?;
     let event_id = native_work_event(
         server,
@@ -360,6 +361,7 @@ fn native_work_reconcile_draft(
         &json!({
             "draft_id":draft_id,
             "disposition":disposition,
+            "ticket_outcome":if sent { "resolved_response_sent" } else { "actionable" },
             "evidence_kind":evidence_kind,
             "evidence_id":evidence.get("evidence_id"),
             "superseded_draft_ids":superseded

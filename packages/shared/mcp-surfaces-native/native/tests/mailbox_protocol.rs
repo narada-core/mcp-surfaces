@@ -183,7 +183,7 @@ fn mailbox_public_protocol_is_complete_bounded_paged_and_recoverable() {
         .pointer("/result/tools")
         .and_then(Value::as_array)
         .unwrap();
-    assert_eq!(tools.len(), 19);
+    assert_eq!(tools.len(), 21);
     for entry in tools {
         let name = entry["name"].as_str().unwrap();
         assert_eq!(entry["inputSchema"]["title"], format!("{name}.input"));
@@ -310,9 +310,14 @@ fn mailbox_public_protocol_is_complete_bounded_paged_and_recoverable() {
                 "mailbox_message_fact_find",
                 json!({"scope_id":"support","message_id":"m-live"}),
             ),
+            tool(
+                25,
+                "mailbox_thread_attention_list",
+                json!({"scope_id":"support","state":"required","limit":10}),
+            ),
         ],
     );
-    for id in 21..=24 {
+    for id in 21..=25 {
         assert!(
             response(&replay, id).get("error").is_none(),
             "{id}: {}",
@@ -324,15 +329,33 @@ fn mailbox_public_protocol_is_complete_bounded_paged_and_recoverable() {
         Some(&json!(true))
     );
     let found = structured(response(&replay, 24));
+    assert_eq!(structured(response(&replay, 25))["total_count"], 1);
     let fact_id = found
         .pointer("/fact_id")
         .and_then(Value::as_str)
         .unwrap_or_else(|| panic!("fact projection: {found}"))
         .to_string();
-    let source_event_id = found
-        .pointer("/source_event_id")
-        .and_then(Value::as_str)
-        .unwrap_or_else(|| panic!("event projection: {found}"))
+    let attention = run(
+        &root,
+        &url,
+        &[
+            tool(
+                26,
+                "mailbox_outbox_consumer_register",
+                json!({"consumer_id":"attention-consumer","scope_id":"support","topics":["mailbox.thread.attention_required"],"start_at":"2020-01-01T00:00:00Z"}),
+            ),
+            tool(
+                27,
+                "mailbox_outbox_list",
+                json!({"consumer_id":"attention-consumer","limit":10}),
+            ),
+        ],
+    );
+    assert!(response(&attention, 26).get("error").is_none());
+    assert!(response(&attention, 27).get("error").is_none());
+    let source_event_id = structured(response(&attention, 27))["items"][0]["event_id"]
+        .as_str()
+        .unwrap()
         .to_string();
     let admitted = run(
         &root,

@@ -240,6 +240,10 @@ fn schema(name: &str) -> Value {
             "thread_id":{"type":"string","maxLength":1024},"mailbox_id":{"type":"string","maxLength":512},
             "offset":{"type":"integer","minimum":0,"maximum":1000000},"limit":{"type":"integer","minimum":1,"maximum":100},"include_body":{"type":"boolean"}
         },"required":["thread_id"],"additionalProperties":false}),
+        "mailbox_thread_attention_list" => json!({"type":"object","properties":{
+            "scope_id":{"type":"string"},"state":{"type":"string","enum":["required","cleared","excluded","indeterminate"]},
+            "offset":{"type":"integer","minimum":0,"maximum":1000000},"limit":{"type":"integer","minimum":1,"maximum":100}
+        },"additionalProperties":false}),
         "mailbox_generation_show" => json!({"type":"object","properties":{"generation_id":{"type":"string"},"offset":{"type":"integer","minimum":0,"maximum":1000000},"limit":{"type":"integer","minimum":1,"maximum":100}},"required":["generation_id"],"additionalProperties":false}),
         "mailbox_admission_show" => json!({"type":"object","properties":{"scope_id":{"type":"string"},"fact_id":{"type":"string"}},"required":["scope_id","fact_id"],"additionalProperties":false}),
         "mailbox_fact_show" => json!({"type":"object","properties":{
@@ -270,9 +274,11 @@ fn schema(name: &str) -> Value {
             "idempotency_key":{"type":"string"},"fact_id":{"type":"string"},"source_event_id":{"type":"string"},
             "scope_id":{"type":"string"},"policy_version":{"type":"string"},"config_path":{"type":"string"}
         },"required":["idempotency_key","fact_id","source_event_id"],"additionalProperties":false}),
+        "mailbox_thread_attention_rebuild" => json!({"type":"object","properties":{
+            "idempotency_key":{"type":"string"},"scope_id":{"type":"string"},"config_path":{"type":"string"}
+        },"required":["idempotency_key"],"additionalProperties":false}),
         "mailbox_output_show" => json!({"type":"object","properties":{"ref":{"type":"string"},"output_ref":{"type":"string"},"offset":{"type":"integer","minimum":0,"maximum":1000000},"limit":{"type":"integer","minimum":1,"maximum":10000}},"additionalProperties":false}),
         _ => json!({"type":"object","additionalProperties":false}),
     }
 }
 fn tool(name:&str,description:&str,schema:Value,read_only:bool)->Value{json!({"name":name,"description":description,"inputSchema":schema,"annotations":{"title":name,"readOnlyHint":read_only,"destructiveHint":!read_only,"idempotentHint":read_only,"openWorldHint":false},"outputSchema":{"type":"object","additionalProperties":true}})}
-

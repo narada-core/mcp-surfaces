@@ -81,13 +81,14 @@ fn load_scope(args: &Map<String, Value>, site_root: &Path) -> Result<ScopeConfig
             error("mailbox_scope_id_required", "mailbox_scope_id_required")
         }
     })?;
-    normalize_scope(raw, site_root, &site_canonical, args.get("timeout_ms").and_then(Value::as_u64).unwrap_or(20_000).clamp(100,60_000))
+    normalize_scope(raw, site_root, &site_canonical, &config_canonical, args.get("timeout_ms").and_then(Value::as_u64).unwrap_or(20_000).clamp(100,60_000))
 }
 
 fn normalize_scope(
     raw: &Value,
     site_root: &Path,
     site_canonical: &Path,
+    config_path: &Path,
     request_timeout_ms: u64,
 ) -> Result<ScopeConfig, Value> {
     let object = raw
@@ -221,6 +222,7 @@ fn normalize_scope(
         .min(300_000);
     Ok(ScopeConfig {
         scope_id,
+        config_path: config_path.to_path_buf(),
         root_dir_text: normalized_path_text(&root_dir),
         root_dir,
         graph: GraphConfig {
@@ -257,4 +259,3 @@ fn normalize_scope(
             .unwrap_or(true),
     })
 }
-

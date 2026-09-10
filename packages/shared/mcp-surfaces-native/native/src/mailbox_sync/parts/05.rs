@@ -130,6 +130,8 @@ fn mark_record_application(
 
 fn finalize_generation(
     db: &mut Connection,
+    site_root: &Path,
+    scope: &ScopeConfig,
     generation_id: &str,
     lease_token: &str,
     now: &str,
@@ -165,6 +167,7 @@ fn finalize_generation(
     let mut observed: Vec<Value> = Vec::new();
     let mut observed_keys = HashSet::new();
     let mut tombstone_count = 0_u64;
+    let mut thread_attention_change_count = 0_u64;
     for record in &records {
         if record.application_status == "not_applied" {
             continue;
@@ -172,6 +175,16 @@ fn finalize_generation(
         if matches!(record.event_kind.as_str(), "delete" | "deleted") {
             tombstone_count += 1;
             continue;
+        }
+        if crate::mailbox::project_thread_attention_fact(
+            &tx,
+            site_root,
+            &scope.config_path,
+            &generation.scope_id,
+            &record.fact_id,
+            now,
+        )? {
+            thread_attention_change_count += 1;
         }
         let (Some(message_id), Some(mailbox_id)) = (&record.message_id, &record.mailbox_id) else {
             continue;
@@ -245,6 +258,7 @@ fn finalize_generation(
         "observed_message_count":observed.len(),
         "first_observation_count":first_observation_count,
         "tombstone_count":tombstone_count,
+        "thread_attention_change_count":thread_attention_change_count,
         "observed_message_refs":observed.iter().take(100).cloned().collect::<Vec<_>>(),
         "observed_message_refs_truncated":observed.len()>100,
         "completed_at":now,
@@ -269,4 +283,3 @@ fn finalize_generation(
         .map_err(|e| error("mailbox_domain_transaction_commit_failed", &e.to_string()))?;
     Ok(completed)
 }
-

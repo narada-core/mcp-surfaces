@@ -27,6 +27,7 @@ export interface SchedulerDomainOutboxOptions {
   topics?: string[];
   sourceSurfaceId?: string;
   schedulerSurfaceId?: string;
+  workLifecycleSurfaceId?: string;
   maxEvents?: number;
   requestTimeoutMs?: number;
   loaderEntrypoint?: string;
@@ -39,6 +40,7 @@ export interface SchedulerDomainOutboxReport extends JsonRecord {
   events_seen: number;
   events_admitted: number;
   events_acknowledged: number;
+  events_ticketed: number;
   errors: JsonRecord[];
 }
 
@@ -50,7 +52,7 @@ export async function runSchedulerDomainOutboxDispatcher(
   const ownedFabric = providedFabric ? null : await SiteFabricClient.open({
     siteRoot: options.siteRoot,
     loaderEntrypoint: options.loaderEntrypoint,
-    allowedSurfaceIds: [options.schedulerSurfaceId, options.sourceSurfaceId],
+    allowedSurfaceIds: [...new Set([options.schedulerSurfaceId, options.sourceSurfaceId, options.workLifecycleSurfaceId])],
     requestTimeoutMs: options.requestTimeoutMs,
   });
   const fabric = providedFabric ?? ownedFabric!;
@@ -61,6 +63,7 @@ export async function runSchedulerDomainOutboxDispatcher(
     events_seen: 0,
     events_admitted: 0,
     events_acknowledged: 0,
+    events_ticketed: 0,
     errors: [],
   };
   try {
@@ -81,6 +84,10 @@ export async function runSchedulerDomainOutboxDispatcher(
         remaining -= 1;
         try {
           const event = parseDomainEvent(raw);
+          const ticketReceipt = options.profile === 'mailbox' && event.topic === 'mailbox.thread.attention_required'
+            ? await admitMailboxAttention(fabric, options, event)
+            : null;
+          if (ticketReceipt) report.events_ticketed += 1;
           await fabric.call(options.schedulerSurfaceId, 'scheduler_event_admit', {
             event_id: event.event_id,
             topic: event.topic,
@@ -90,12 +97,12 @@ export async function runSchedulerDomainOutboxDispatcher(
             schema_version: event.schema_version,
             causation_id: event.causation_id,
             idempotency_key: event.idempotency_key,
-            payload: event.payload,
+            payload: ticketReceipt ? { ...event.payload, ticket_admission: ticketReceipt } : event.payload,
             occurred_at: event.occurred_at,
             implementation_id: implementationId,
           });
           report.events_admitted += 1;
-          await acknowledgeEvent(fabric, options, event);
+          await acknowledgeEvent(fabric, options, event, ticketReceipt);
           report.events_acknowledged += 1;
         } catch (error) {
           pageFailed = true;
@@ -130,6 +137,7 @@ interface NormalizedOptions {
   topics: string[];
   sourceSurfaceId: string;
   schedulerSurfaceId: string;
+  workLifecycleSurfaceId: string;
   maxEvents: number;
   requestTimeoutMs: number;
   loaderEntrypoint?: string;
@@ -154,6 +162,7 @@ function normalizeOptions(input: SchedulerDomainOutboxOptions): NormalizedOption
     topics,
     sourceSurfaceId: optionalString(input.sourceSurfaceId) ?? profile,
     schedulerSurfaceId: optionalString(input.schedulerSurfaceId) ?? 'scheduler',
+    workLifecycleSurfaceId: optionalString(input.workLifecycleSurfaceId) ?? 'work-lifecycle',
     maxEvents: boundedInteger(input.maxEvents, 100, 1, 100, 'maxEvents'),
     requestTimeoutMs: boundedInteger(input.requestTimeoutMs, 30_000, 1_000, 300_000, 'requestTimeoutMs'),
     ...(input.loaderEntrypoint ? { loaderEntrypoint: input.loaderEntrypoint } : {}),
@@ -209,6 +218,7 @@ async function acknowledgeEvent(
   fabric: SchedulerDomainFabricCaller,
   options: NormalizedOptions,
   event: DomainEvent,
+  ticketReceipt: JsonRecord | null,
 ): Promise<void> {
   const args = {
     consumer_id: options.consumerId,
@@ -216,7 +226,10 @@ async function acknowledgeEvent(
     receipt: {
       schema: 'narada.scheduler.domain_outbox_receipt.v2',
       outcome: 'admitted',
-      effect_ref: `scheduler-event:${event.event_id}`,
+      effect_ref: ticketReceipt
+        ? requiredString(ticketReceipt.ticket_ref, 'ticket_admission_ticket_ref_missing')
+        : `scheduler-event:${event.event_id}`,
+      ...(ticketReceipt ? { ticket_admission: ticketReceipt } : {}),
     },
   };
   await fabric.call(
@@ -224,6 +237,45 @@ async function acknowledgeEvent(
     options.profile === 'mailbox' ? 'mailbox_outbox_ack' : 'work_outbox_ack',
     args,
   );
+}
+
+async function admitMailboxAttention(
+  fabric: SchedulerDomainFabricCaller,
+  options: NormalizedOptions,
+  event: DomainEvent,
+): Promise<JsonRecord> {
+  const factId = requiredString(event.payload.fact_id, 'mailbox_attention_fact_id_missing');
+  const admissionOperation = await fabric.call(options.sourceSurfaceId, 'mailbox_message_admit', {
+    idempotency_key: `scheduler-mailbox-admission:${event.event_id}`,
+    scope_id: options.scopeId,
+    fact_id: factId,
+    source_event_id: event.event_id,
+  });
+  const admission = requireRecord(admissionOperation.result, 'mailbox_attention_admission_result_missing');
+  const decision = requiredString(admission.decision, 'mailbox_attention_admission_decision_missing');
+  if (decision !== 'admitted') {
+    return {
+      schema: 'narada.scheduler.mailbox_attention_ticket_admission.v1',
+      decision,
+      mailbox_admission_ref: requiredString(admissionOperation.operation_ref, 'mailbox_admission_ref_missing'),
+      ticket_ref: `mailbox-admission:${requiredString(admission.admission_id, 'mailbox_admission_id_missing')}`,
+    };
+  }
+  const source = requireRecord(admission.source, 'mailbox_attention_source_missing');
+  const ticketOperation = await fabric.call(options.workLifecycleSurfaceId, 'ticket_admit_source', {
+    idempotency_key: `scheduler-mailbox-ticket:${event.event_id}`,
+    source,
+  });
+  const ticket = requireRecord(ticketOperation.result ?? ticketOperation.ticket, 'ticket_admission_result_missing');
+  const ticketId = requiredString(ticket.ticket_id, 'ticket_admission_ticket_id_missing');
+  return {
+    schema: 'narada.scheduler.mailbox_attention_ticket_admission.v1',
+    decision: 'admitted',
+    mailbox_admission_ref: requiredString(admissionOperation.operation_ref, 'mailbox_admission_ref_missing'),
+    ticket_ref: `work-ticket:${ticketId}`,
+    ticket_id: ticketId,
+    ticket_revision: ticket.revision,
+  };
 }
 
 interface DomainEvent {
@@ -303,6 +355,7 @@ function parseCliArgs(argv: string[]): SchedulerDomainOutboxOptions {
   const values = parseFlagValues(argv, new Set([
     '--site-root', '--profile', '--consumer-id', '--scope-id', '--outbox-start-at', '--topics',
     '--source-surface-id', '--scheduler-surface-id', '--max-events',
+    '--work-lifecycle-surface-id',
     '--request-timeout-ms', '--loader-entrypoint',
   ]));
   return {
@@ -314,6 +367,7 @@ function parseCliArgs(argv: string[]): SchedulerDomainOutboxOptions {
     ...(values.has('--topics') ? { topics: values.get('--topics')!.split(',').map((topic) => topic.trim()).filter(Boolean) } : {}),
     ...(values.has('--source-surface-id') ? { sourceSurfaceId: values.get('--source-surface-id') } : {}),
     ...(values.has('--scheduler-surface-id') ? { schedulerSurfaceId: values.get('--scheduler-surface-id') } : {}),
+    ...(values.has('--work-lifecycle-surface-id') ? { workLifecycleSurfaceId: values.get('--work-lifecycle-surface-id') } : {}),
     ...(values.has('--max-events') ? { maxEvents: Number(values.get('--max-events')) } : {}),
     ...(values.has('--request-timeout-ms') ? { requestTimeoutMs: Number(values.get('--request-timeout-ms')) } : {}),
     ...(values.has('--loader-entrypoint') ? { loaderEntrypoint: values.get('--loader-entrypoint') } : {}),

@@ -37,6 +37,7 @@ struct GraphConfig {
 #[derive(Clone)]
 struct ScopeConfig {
     scope_id: String,
+    config_path: PathBuf,
     root_dir: PathBuf,
     root_dir_text: String,
     graph: GraphConfig,
@@ -170,11 +171,11 @@ fn run_claimed_generation(
                 params![generation_id],
             )
             .map_err(|e| error("mailbox_sync_reconcile_failed", &e.to_string()))?;
-            generation = finalize_generation(db, generation_id, lease_token, &now_iso_millis())?;
+            generation = finalize_generation(db, site_root, scope, generation_id, lease_token, &now_iso_millis())?;
             return generation_operation(&generation, true);
         }
         if generation.next_cursor.is_none() && generation_ready(db, generation_id)? {
-            generation = finalize_generation(db, generation_id, lease_token, &now_iso_millis())?;
+            generation = finalize_generation(db, site_root, scope, generation_id, lease_token, &now_iso_millis())?;
             return generation_operation(&generation, true);
         }
         if current_cursor != generation.parent_cursor {
@@ -272,7 +273,6 @@ fn run_claimed_generation(
         let code = format!("mailbox_sync_cursor_not_committed:{generation_id}");
         return Err(error(&code, &code));
     }
-    generation = finalize_generation(db, generation_id, lease_token, &now_iso_millis())?;
+    generation = finalize_generation(db, site_root, scope, generation_id, lease_token, &now_iso_millis())?;
     generation_operation(&generation, false)
 }
-
