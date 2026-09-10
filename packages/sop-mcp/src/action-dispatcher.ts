@@ -27,6 +27,7 @@ export interface SopActionDispatcherOptions {
   maxActions?: number;
   requestTimeoutMs?: number;
   loaderEntrypoint?: string;
+  bindingAdmissionPath?: string;
 }
 
 export interface SopActionDispatcherReport extends JsonRecord {
@@ -45,6 +46,7 @@ export async function runSopActionDispatcher(
   const ownedFabric = providedFabric ? null : await SiteFabricClient.open({
     siteRoot: options.siteRoot,
     loaderEntrypoint: options.loaderEntrypoint,
+    bindingAdmissionPath: options.bindingAdmissionPath,
     requestTimeoutMs: options.requestTimeoutMs,
   });
   const fabric = providedFabric ?? ownedFabric!;
@@ -192,6 +194,7 @@ interface NormalizedOptions {
   maxActions: number;
   requestTimeoutMs: number;
   loaderEntrypoint?: string;
+  bindingAdmissionPath?: string;
 }
 
 function normalizeOptions(input: SopActionDispatcherOptions): NormalizedOptions {
@@ -201,6 +204,7 @@ function normalizeOptions(input: SopActionDispatcherOptions): NormalizedOptions 
     maxActions: boundedInteger(input.maxActions, 100, 1, 100, 'maxActions'),
     requestTimeoutMs: boundedInteger(input.requestTimeoutMs, 30_000, 1_000, 300_000, 'requestTimeoutMs'),
     ...(input.loaderEntrypoint ? { loaderEntrypoint: input.loaderEntrypoint } : {}),
+    ...(input.bindingAdmissionPath ? { bindingAdmissionPath: input.bindingAdmissionPath } : {}),
   };
 }
 
@@ -239,6 +243,7 @@ function boundedError(error: unknown): string {
 function parseCliArgs(argv: string[]): SopActionDispatcherOptions {
   const values = parseFlagValues(argv, new Set([
     '--site-root', '--sop-surface-id', '--max-actions', '--request-timeout-ms', '--loader-entrypoint',
+    '--binding-admission-path',
   ]));
   return {
     siteRoot: requiredString(values.get('--site-root'), 'site_root_required'),
@@ -246,6 +251,7 @@ function parseCliArgs(argv: string[]): SopActionDispatcherOptions {
     ...(values.has('--max-actions') ? { maxActions: Number(values.get('--max-actions')) } : {}),
     ...(values.has('--request-timeout-ms') ? { requestTimeoutMs: Number(values.get('--request-timeout-ms')) } : {}),
     ...(values.has('--loader-entrypoint') ? { loaderEntrypoint: values.get('--loader-entrypoint') } : {}),
+    ...(values.has('--binding-admission-path') ? { bindingAdmissionPath: values.get('--binding-admission-path') } : {}),
   };
 }
 

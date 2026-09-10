@@ -7,7 +7,8 @@
   "bin": {
     "scheduler-mcp": "./dist/src/main.js",
     "scheduler-sop-dispatch": "./dist/src/sop-activation-dispatcher.js",
-    "scheduler-domain-outbox-dispatch": "./dist/src/domain-outbox-dispatcher.js"
+    "scheduler-domain-outbox-dispatch": "./dist/src/domain-outbox-dispatcher.js",
+    "scheduler-ticket-draft-reconcile": "./dist/src/ticket-draft-disposition-reconciler.js"
   },
   "types": "./dist/src/main.d.ts",
   "exports": {
@@ -23,6 +24,10 @@
       "types": "./dist/src/domain-outbox-dispatcher.d.ts",
       "default": "./dist/src/domain-outbox-dispatcher.js"
     },
+    "./ticket-draft-disposition-reconciler": {
+      "types": "./dist/src/ticket-draft-disposition-reconciler.d.ts",
+      "default": "./dist/src/ticket-draft-disposition-reconciler.js"
+    },
     ".": {
       "types": "./dist/src/main.d.ts",
       "default": "./dist/src/main.js"
@@ -32,8 +37,8 @@
     "build": "tsc -b",
     "typecheck": "tsc -b --pretty false",
     "test": "pnpm run test:bun",
-    "test:bun": "pnpm build && bun test dist/test/activation-store.test.js dist/test/sop-activation-dispatcher.test.js dist/test/domain-outbox-dispatcher.test.js && bun dist/test/scheduler-mcp.test.js && bun dist/test/protocol-smoke.test.js",
-    "test:node": "pnpm build && node --disable-warning=ExperimentalWarning --test dist/test/activation-store.test.js dist/test/sop-activation-dispatcher.test.js dist/test/domain-outbox-dispatcher.test.js && node dist/test/scheduler-mcp.test.js && node dist/test/protocol-smoke.test.js",
+    "test:bun": "pnpm build && bun test dist/test/activation-store.test.js dist/test/sop-activation-dispatcher.test.js dist/test/domain-outbox-dispatcher.test.js dist/test/ticket-draft-disposition-reconciler.test.js && bun dist/test/scheduler-mcp.test.js && bun dist/test/protocol-smoke.test.js",
+    "test:node": "pnpm build && node --disable-warning=ExperimentalWarning --test dist/test/activation-store.test.js dist/test/sop-activation-dispatcher.test.js dist/test/domain-outbox-dispatcher.test.js dist/test/ticket-draft-disposition-reconciler.test.js && node dist/test/scheduler-mcp.test.js && node dist/test/protocol-smoke.test.js",
     "test:e2e:host": "pnpm run test:e2e:host:bun",
     "test:e2e:host:bun": "pnpm build && bun dist/test/site-fabric-scheduler-e2e.test.js",
     "test:e2e:host:node": "pnpm build && node --disable-warning=ExperimentalWarning dist/test/site-fabric-scheduler-e2e.test.js"
