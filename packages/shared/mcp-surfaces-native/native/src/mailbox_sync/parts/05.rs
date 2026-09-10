@@ -183,6 +183,7 @@ fn finalize_generation(
             &generation.scope_id,
             &record.fact_id,
             now,
+            true,
         )? {
             thread_attention_change_count += 1;
         }

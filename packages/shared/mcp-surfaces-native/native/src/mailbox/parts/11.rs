@@ -44,7 +44,7 @@ fn attention_subject(fact: &MailFact) -> Option<String> {
 }
 
 pub(crate) fn project_thread_attention_fact(
-    tx: &Transaction<'_>, site_root: &Path, config_path: &Path, scope_id: &str, fact_id: &str, now: &str,
+    tx: &Transaction<'_>, site_root: &Path, config_path: &Path, scope_id: &str, fact_id: &str, now: &str, emit_event: bool,
 ) -> Result<bool, Value> {
     let mut args=Map::new();
     args.insert("scope_id".to_string(),json!(scope_id));
@@ -79,6 +79,7 @@ pub(crate) fn project_thread_attention_fact(
     tx.execute("INSERT INTO mailbox_thread_attention(thread_id,scope_id,thread_key,revision,latest_message_id,latest_fact_id,latest_at,direction,admission_decision,attention_state,subject,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(thread_id) DO UPDATE SET revision=excluded.revision,latest_message_id=excluded.latest_message_id,latest_fact_id=excluded.latest_fact_id,latest_at=excluded.latest_at,direction=excluded.direction,admission_decision=excluded.admission_decision,attention_state=excluded.attention_state,subject=excluded.subject,updated_at=excluded.updated_at",
         params![thread_id,scope.scope_id,thread_key,revision,metadata.message_id,fact_id,latest_at,direction,admission,state,attention_subject(&fact),now]
     ).map_err(|e|error("mailbox_thread_attention_update_failed",&e.to_string()))?;
+    if !emit_event { return Ok(true); }
     let topic=match state{"required"=>"mailbox.thread.attention_required","cleared"=>"mailbox.thread.attention_cleared","indeterminate"=>"mailbox.thread.attention_indeterminate",_=>return Ok(true)};
     let event_id=stable_id("mte_",&format!("{}\0{}\0{}",thread_id,revision,state));
     let first_event_id=stable_id("mbe_",&format!("first-observed\0{}\0{}",scope.scope_id,metadata.message_id));
@@ -104,7 +105,26 @@ fn thread_attention_rebuild(args:&Map<String,Value>,root:&Path)->Result<Value,Va
     let mut db=open_domain_db_write(root)?;
     let tx=db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e|error("mailbox_domain_transaction_failed",&e.to_string()))?;
     let now=now_iso_millis();let mut changed=0;
-    for fact_id in &fact_ids{if project_thread_attention_fact(&tx,root,&config_path,&scope.scope_id,fact_id,&now)?{changed+=1;}}
+    tx.execute("DELETE FROM mailbox_thread_attention WHERE scope_id=?",params![scope.scope_id])
+        .map_err(|e|error("mailbox_thread_attention_rebuild_reset_failed",&e.to_string()))?;
+    for fact_id in &fact_ids{if project_thread_attention_fact(&tx,root,&config_path,&scope.scope_id,fact_id,&now,false)?{changed+=1;}}
+    let mut statement=tx.prepare("SELECT thread_id,thread_key,revision,latest_message_id,latest_fact_id,latest_at,direction,admission_decision,attention_state,subject FROM mailbox_thread_attention WHERE scope_id=? ORDER BY thread_id")
+        .map_err(|e|error("mailbox_thread_attention_query_failed",&e.to_string()))?;
+    let rows=statement.query_map(params![scope.scope_id],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,i64>(2)?,row.get::<_,String>(3)?,row.get::<_,String>(4)?,row.get::<_,String>(5)?,row.get::<_,String>(6)?,row.get::<_,String>(7)?,row.get::<_,String>(8)?,row.get::<_,Option<String>>(9)?)))
+        .map_err(|e|error("mailbox_thread_attention_query_failed",&e.to_string()))?;
+    let final_rows=rows.collect::<Result<Vec<_>,_>>().map_err(|e|error("mailbox_thread_attention_row_failed",&e.to_string()))?;
+    drop(statement);
+    let mut final_events=0;
+    for (thread_id,thread_key,revision,message_id,fact_id,latest_at,direction,admission,state,subject) in final_rows {
+        let topic=match state.as_str(){"required"=>"mailbox.thread.attention_required","cleared"=>"mailbox.thread.attention_cleared","indeterminate"=>"mailbox.thread.attention_indeterminate",_=>continue};
+        let schema=match state.as_str(){"required"=>"narada.mailbox.thread_attention_required.v1","cleared"=>"narada.mailbox.thread_attention_cleared.v1",_=>"narada.mailbox.thread_attention_indeterminate.v1"};
+        let event_id=stable_id("mte_",&format!("rebuild-final\0{}\0{}\0{}",thread_id,fact_id,state));
+        let first_event_id=stable_id("mbe_",&format!("first-observed\0{}\0{}",scope.scope_id,message_id));
+        let payload=json!({"schema":schema,"thread_id":thread_id,"thread_key":thread_key,"thread_revision":revision,"scope_id":scope.scope_id,"message_id":message_id,"fact_id":fact_id,"first_observed_event_id":first_event_id,"attention_state":state,"direction":direction,"admission_decision":admission,"latest_at":latest_at,"subject":subject});
+        final_events+=tx.execute("INSERT OR IGNORE INTO mailbox_outbox(event_id,scope_id,topic,aggregate_id,aggregate_revision,schema_version,causation_id,idempotency_key,partition_key,occurred_at,payload_json) VALUES(?,?,?,?,?,1,?,?,?,?,?)",
+            params![event_id,scope.scope_id,topic,thread_id,revision,fact_id,event_id,thread_id,now,serde_json::to_string(&payload).unwrap_or_else(|_|"{}".to_string())])
+            .map_err(|e|error("mailbox_thread_attention_outbox_failed",&e.to_string()))?;
+    }
     tx.commit().map_err(|e|error("mailbox_domain_transaction_commit_failed",&e.to_string()))?;
-    Ok(json!({"schema":"narada.mailbox.thread_attention_rebuild.v1","status":"completed","operation_ref":format!("mailbox-thread-rebuild:{}",stable_id("mtr_",&idempotency_key)),"scope_id":scope.scope_id,"facts_scanned":fact_ids.len(),"thread_changes":changed}))
+    Ok(json!({"schema":"narada.mailbox.thread_attention_rebuild.v1","status":"completed","operation_ref":format!("mailbox-thread-rebuild:{}",stable_id("mtr_",&idempotency_key)),"scope_id":scope.scope_id,"facts_scanned":fact_ids.len(),"thread_changes":changed,"final_events_published":final_events}))
 }
