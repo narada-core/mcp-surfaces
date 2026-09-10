@@ -26,11 +26,23 @@ for await (const line of lines) {
   }
   const name = String(params.name ?? '');
   const args = record(params.arguments);
-  if (name === 'mcp_loader_attach_surface') {
+  if (name === 'mcp_loader_list_site_surfaces') {
+    respond(request.id, toolResult({
+      schema: 'narada.mcp_loader.site_surfaces.v1',
+      surfaces: ['alpha', 'beta'].map((surfaceId) => ({
+        binding_id: `fake-site-${surfaceId}`,
+        surface_id: surfaceId,
+        runtime_requirements: [],
+      })),
+    }));
+    continue;
+  }
+  if (name === 'mcp_loader_open_surface') {
     attachCount += 1;
     respond(request.id, toolResult({
-      schema: 'narada.mcp_loader.surface_attached.v1',
+      schema: 'narada.mcp_loader.surface_handle_opened.v1',
       connection_id: `connection-${String(args.surface_id)}`,
+      binding_id: args.binding_id,
       surface_id: args.surface_id,
       attach_count: attachCount,
     }));

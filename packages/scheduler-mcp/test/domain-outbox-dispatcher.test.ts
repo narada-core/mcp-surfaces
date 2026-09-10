@@ -213,10 +213,12 @@ class FixtureFabric implements SchedulerDomainFabricCaller {
         result: {
           admission_id: `admission-${String(args.fact_id)}`,
           decision: 'admitted',
+          policy_version: 'fixture-policy-v1',
           source: {
             source_kind: 'mailbox_message',
             source_scope: 'support',
             immutable_source_id: 'message-1',
+            summary: 'Mailbox message: fixture',
             source_ref: { fact_id: args.fact_id },
             correlation_keys: [],
           },
@@ -229,7 +231,16 @@ class FixtureFabric implements SchedulerDomainFabricCaller {
         throw new Error('fixture_ticket_admission_failed');
       }
       const key = String(args.idempotency_key);
-      const ticket = this.ticketAdmissions.get(key) ?? { ticket_id: 'ticket-1', revision: 1 };
+      assert.equal(args.source_kind, 'mailbox_message');
+      assert.equal(args.source_scope, 'support');
+      assert.equal(args.immutable_source_id, 'message-1');
+      assert.equal(args.policy_version, 'fixture-policy-v1');
+      assert.equal(args.summary, 'Mailbox message: fixture');
+      assert.deepEqual(args.source_ref, { fact_id: 'fact-1' });
+      assert.deepEqual(args.correlation_keys, []);
+      assert.equal(args.work_due_policy, 'deferred');
+      assert.equal('source' in args, false);
+      const ticket = this.ticketAdmissions.get(key) ?? { ticket_id: 'ticket-1', ticket_revision: 1 };
       this.ticketAdmissions.set(key, ticket);
       return { operation_ref: 'work-ticket:ticket-1', result: ticket };
     }

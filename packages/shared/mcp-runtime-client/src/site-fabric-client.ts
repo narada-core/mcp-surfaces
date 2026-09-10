@@ -134,12 +134,25 @@ export class SiteFabricClient {
     if (pending) return await pending;
 
     const attachment = (async (): Promise<AttachedSurface> => {
-      const attached = unwrapOuterToolResult(await this.#client.callTool('mcp_loader_attach_surface', {
+      const listed = unwrapOuterToolResult(await this.#client.callTool('mcp_loader_list_site_surfaces', {
         site_root: this.siteRoot,
+      }));
+      const surfaces = Array.isArray(listed.surfaces) ? listed.surfaces.filter(isRecord) : [];
+      const candidates = surfaces.filter((surface) => surface.surface_id === normalizedSurfaceId);
+      const selected = normalizedRuntimeKind
+        ? candidates.find((surface) => surface.runtime_kind === normalizedRuntimeKind)
+          ?? candidates.find((surface) => Array.isArray(surface.runtime_requirements)
+            && surface.runtime_requirements.includes(normalizedRuntimeKind))
+        : candidates[0];
+      if (!selected) throw new Error(`site_fabric_binding_not_found:${normalizedSurfaceId}`);
+      const bindingId = requiredString(selected.binding_id, 'mcp_loader_binding_id');
+      const attached = unwrapOuterToolResult(await this.#client.callTool('mcp_loader_open_surface', {
+        site_root: this.siteRoot,
+        binding_id: bindingId,
         surface_id: normalizedSurfaceId,
         ...(normalizedRuntimeKind ? { runtime_kind: normalizedRuntimeKind } : {}),
       }));
-      const connectionId = requiredString(attached.connection_id, 'mcp_loader_attach_connection_id');
+      const connectionId = requiredString(attached.connection_id, 'mcp_loader_open_connection_id');
       this.#assertOpen();
       const connection = { connectionId, surfaceId: normalizedSurfaceId, runtimeKind: normalizedRuntimeKind };
       this.#connections.set(key, connection);

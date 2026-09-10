@@ -262,9 +262,19 @@ async function admitMailboxAttention(
     };
   }
   const source = requireRecord(admission.source, 'mailbox_attention_source_missing');
+  const sourceRef = requireRecord(source.source_ref, 'mailbox_attention_source_ref_missing');
+  const correlationKeys = recordArray(source.correlation_keys, 'mailbox_attention_correlation_keys_invalid');
   const ticketOperation = await fabric.call(options.workLifecycleSurfaceId, 'ticket_admit_source', {
     idempotency_key: `scheduler-mailbox-ticket:${event.event_id}`,
-    source,
+    source_kind: requiredString(source.source_kind, 'mailbox_attention_source_kind_missing'),
+    source_scope: requiredString(source.source_scope, 'mailbox_attention_source_scope_missing'),
+    immutable_source_id: requiredString(source.immutable_source_id, 'mailbox_attention_immutable_source_id_missing'),
+    causation_id: event.event_id,
+    policy_version: requiredString(admission.policy_version, 'mailbox_attention_policy_version_missing'),
+    summary: requiredString(source.summary, 'mailbox_attention_source_summary_missing'),
+    source_ref: sourceRef,
+    correlation_keys: correlationKeys,
+    work_due_policy: 'deferred',
   });
   const ticket = requireRecord(ticketOperation.result ?? ticketOperation.ticket, 'ticket_admission_result_missing');
   const ticketId = requiredString(ticket.ticket_id, 'ticket_admission_ticket_id_missing');
@@ -274,7 +284,7 @@ async function admitMailboxAttention(
     mailbox_admission_ref: requiredString(admissionOperation.operation_ref, 'mailbox_admission_ref_missing'),
     ticket_ref: `work-ticket:${ticketId}`,
     ticket_id: ticketId,
-    ticket_revision: ticket.revision,
+    ticket_revision: ticket.ticket_revision,
   };
 }
 
