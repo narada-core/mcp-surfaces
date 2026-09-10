@@ -89,6 +89,13 @@ for await (const line of lines) {
     }));
     continue;
   }
+  if (name === 'mcp_loader_inspect_tool') {
+    respond(request.id, toolResult({
+      schema: 'narada.mcp_loader.schema_lease.v1',
+      schema_lease: `lease-${String(args.connection_id)}-${String(args.tool_name)}`,
+    }));
+    continue;
+  }
   if (name !== 'mcp_loader_call_tool') {
     respond(request.id, toolResult({ schema: 'fake.unknown.v1' }, true));
     continue;

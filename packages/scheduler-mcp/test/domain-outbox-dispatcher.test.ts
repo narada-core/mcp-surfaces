@@ -204,6 +204,7 @@ class FixtureFabric implements SchedulerDomainFabricCaller {
         this.failNextMailboxAck = false;
         throw new Error('fixture_response_lost_before_mailbox_ack');
       }
+      assert.deepEqual(Object.keys(args.receipt as JsonRecord).sort(), ['effect_ref', 'outcome', 'schema']);
       this.mailboxAcknowledgedIds.add(String(args.event_id));
       return { status: 'acknowledged' };
     }

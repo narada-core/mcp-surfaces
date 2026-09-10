@@ -31,6 +31,7 @@ export interface SchedulerDomainOutboxOptions {
   maxEvents?: number;
   requestTimeoutMs?: number;
   loaderEntrypoint?: string;
+  bindingAdmissionPath?: string;
 }
 
 export interface SchedulerDomainOutboxReport extends JsonRecord {
@@ -52,6 +53,7 @@ export async function runSchedulerDomainOutboxDispatcher(
   const ownedFabric = providedFabric ? null : await SiteFabricClient.open({
     siteRoot: options.siteRoot,
     loaderEntrypoint: options.loaderEntrypoint,
+    bindingAdmissionPath: options.bindingAdmissionPath,
     allowedSurfaceIds: [...new Set([options.schedulerSurfaceId, options.sourceSurfaceId, options.workLifecycleSurfaceId])],
     requestTimeoutMs: options.requestTimeoutMs,
   });
@@ -141,6 +143,7 @@ interface NormalizedOptions {
   maxEvents: number;
   requestTimeoutMs: number;
   loaderEntrypoint?: string;
+  bindingAdmissionPath?: string;
 }
 
 function normalizeOptions(input: SchedulerDomainOutboxOptions): NormalizedOptions {
@@ -166,6 +169,7 @@ function normalizeOptions(input: SchedulerDomainOutboxOptions): NormalizedOption
     maxEvents: boundedInteger(input.maxEvents, 100, 1, 100, 'maxEvents'),
     requestTimeoutMs: boundedInteger(input.requestTimeoutMs, 30_000, 1_000, 300_000, 'requestTimeoutMs'),
     ...(input.loaderEntrypoint ? { loaderEntrypoint: input.loaderEntrypoint } : {}),
+    ...(input.bindingAdmissionPath ? { bindingAdmissionPath: input.bindingAdmissionPath } : {}),
   };
 }
 
@@ -229,7 +233,6 @@ async function acknowledgeEvent(
       effect_ref: ticketReceipt
         ? requiredString(ticketReceipt.ticket_ref, 'ticket_admission_ticket_ref_missing')
         : `scheduler-event:${event.event_id}`,
-      ...(ticketReceipt ? { ticket_admission: ticketReceipt } : {}),
     },
   };
   await fabric.call(
@@ -366,7 +369,7 @@ function parseCliArgs(argv: string[]): SchedulerDomainOutboxOptions {
     '--site-root', '--profile', '--consumer-id', '--scope-id', '--outbox-start-at', '--topics',
     '--source-surface-id', '--scheduler-surface-id', '--max-events',
     '--work-lifecycle-surface-id',
-    '--request-timeout-ms', '--loader-entrypoint',
+    '--request-timeout-ms', '--loader-entrypoint', '--binding-admission-path',
   ]));
   return {
     siteRoot: requiredString(values.get('--site-root'), 'site_root_required'),
@@ -381,6 +384,7 @@ function parseCliArgs(argv: string[]): SchedulerDomainOutboxOptions {
     ...(values.has('--max-events') ? { maxEvents: Number(values.get('--max-events')) } : {}),
     ...(values.has('--request-timeout-ms') ? { requestTimeoutMs: Number(values.get('--request-timeout-ms')) } : {}),
     ...(values.has('--loader-entrypoint') ? { loaderEntrypoint: values.get('--loader-entrypoint') } : {}),
+    ...(values.has('--binding-admission-path') ? { bindingAdmissionPath: values.get('--binding-admission-path') } : {}),
   };
 }
 

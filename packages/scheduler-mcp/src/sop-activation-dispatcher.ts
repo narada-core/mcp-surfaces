@@ -74,6 +74,7 @@ export interface SchedulerSopDispatcherOptions {
   leaseMs?: number;
   requestTimeoutMs?: number;
   loaderEntrypoint?: string;
+  bindingAdmissionPath?: string;
 }
 
 export interface SchedulerSopDispatcherReport extends JsonRecord {
@@ -97,6 +98,7 @@ export async function runSchedulerSopDispatcher(
   const ownedFabric = providedFabric ? null : await SiteFabricClient.open({
     siteRoot: options.siteRoot,
     loaderEntrypoint: options.loaderEntrypoint,
+    bindingAdmissionPath: options.bindingAdmissionPath,
     allowedSurfaceIds: [options.schedulerSurfaceId, options.sopSurfaceId],
     requestTimeoutMs: options.requestTimeoutMs,
   });
@@ -224,7 +226,7 @@ export async function runSchedulerSopDispatcher(
         const sopVersion = parseSopVersion(activation.target_template_version);
         const run = await fabric.call(options.sopSurfaceId, 'sop_run_start', {
           sop_id: requiredString(activation.target_sop_id, 'scheduler_target_sop_id_missing'),
-          sop_version: sopVersion,
+          version: sopVersion,
           occurrence_key: requiredString(activation.occurrence_key, 'scheduler_occurrence_key_missing'),
           input: {
             schema: 'narada.scheduler.sop_activation_input.v1',
@@ -294,6 +296,7 @@ interface NormalizedOptions {
   leaseMs: number;
   requestTimeoutMs: number;
   loaderEntrypoint?: string;
+  bindingAdmissionPath?: string;
 }
 
 function normalizeOptions(input: SchedulerSopDispatcherOptions): NormalizedOptions {
@@ -309,6 +312,7 @@ function normalizeOptions(input: SchedulerSopDispatcherOptions): NormalizedOptio
     leaseMs: boundedInteger(input.leaseMs, 60_000, 1_000, 300_000, 'leaseMs'),
     requestTimeoutMs: boundedInteger(input.requestTimeoutMs, 30_000, 1_000, 300_000, 'requestTimeoutMs'),
     ...(input.loaderEntrypoint ? { loaderEntrypoint: input.loaderEntrypoint } : {}),
+    ...(input.bindingAdmissionPath ? { bindingAdmissionPath: input.bindingAdmissionPath } : {}),
   };
 }
 
@@ -410,7 +414,7 @@ function parseCliArgs(argv: string[]): SchedulerSopDispatcherOptions {
   const known = new Set([
     '--site-root', '--outbox-start-at', '--consumer-id', '--scheduler-surface-id',
     '--sop-surface-id', '--max-events', '--max-activations', '--lease-ms',
-    '--request-timeout-ms', '--loader-entrypoint',
+    '--request-timeout-ms', '--loader-entrypoint', '--binding-admission-path',
   ]);
   for (const flag of values.keys()) if (!known.has(flag)) throw new Error(`unknown_argument:${flag}`);
   return {
@@ -424,6 +428,7 @@ function parseCliArgs(argv: string[]): SchedulerSopDispatcherOptions {
     ...(values.has('--lease-ms') ? { leaseMs: Number(values.get('--lease-ms')) } : {}),
     ...(values.has('--request-timeout-ms') ? { requestTimeoutMs: Number(values.get('--request-timeout-ms')) } : {}),
     ...(values.has('--loader-entrypoint') ? { loaderEntrypoint: values.get('--loader-entrypoint') } : {}),
+    ...(values.has('--binding-admission-path') ? { bindingAdmissionPath: values.get('--binding-admission-path') } : {}),
   };
 }
 

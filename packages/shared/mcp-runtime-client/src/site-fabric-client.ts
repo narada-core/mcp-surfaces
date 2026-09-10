@@ -7,6 +7,7 @@ import { McpProcessClient, isRecord, type JsonRecord } from './process-client.js
 export interface SiteFabricClientOptions {
   siteRoot: string;
   loaderEntrypoint?: string;
+  bindingAdmissionPath?: string;
   nodeExecutable?: string;
   loaderImplementation?: McpLoaderImplementation;
   allowedSurfaceIds?: readonly string[];
@@ -43,8 +44,8 @@ interface AttachedSurface {
 }
 
 const DEFAULT_MAX_MATERIALIZED_RESULT_CHARS = 1_000_000;
-const DEFAULT_MATERIALIZED_RESULT_PAGE_CHARS = 20_000;
-const MAX_MATERIALIZED_RESULT_PAGE_CHARS = 20_000;
+const DEFAULT_MATERIALIZED_RESULT_PAGE_CHARS = 4_000;
+const MAX_MATERIALIZED_RESULT_PAGE_CHARS = 4_000;
 const MAX_MATERIALIZED_RESULT_PAGES = 256;
 const MAX_MATERIALIZED_RESULT_DEPTH = 4;
 
@@ -102,6 +103,9 @@ export class SiteFabricClient {
       '--allowed-site-root', siteRoot,
       '--max-connections', String(maxConnections),
     ];
+    if (options.bindingAdmissionPath) {
+      args.push('--binding-admission-path', requiredString(options.bindingAdmissionPath, 'bindingAdmissionPath'));
+    }
     for (const surfaceId of allowedSurfaceIds ?? []) args.push('--allowed-surface-id', surfaceId);
 
     const client = await McpProcessClient.start({
@@ -175,9 +179,17 @@ export class SiteFabricClient {
     const connection = await this.attach(surfaceId, options.runtimeKind);
     const timeoutMs = options.timeoutMs ?? this.#client.requestTimeoutMs;
     const deadlineAt = Date.now() + timeoutMs;
+    const normalizedToolName = requiredString(toolName, 'toolName');
+    const inspection = unwrapOuterToolResult(await this.#client.callTool('mcp_loader_inspect_tool', {
+      connection_id: connection.connectionId,
+      tool_name: normalizedToolName,
+      include_tool_contract: false,
+    }, timeoutMs));
+    const schemaLease = requiredString(inspection.schema_lease, 'mcp_loader_schema_lease_missing');
     const outer = unwrapOuterToolResult(await this.#client.callTool('mcp_loader_call_tool', {
       connection_id: connection.connectionId,
-      tool_name: requiredString(toolName, 'toolName'),
+      tool_name: normalizedToolName,
+      schema_lease: schemaLease,
       arguments: args,
     }, timeoutMs));
     const context = `${surfaceId}:${toolName}`;

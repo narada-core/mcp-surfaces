@@ -104,7 +104,7 @@ test('terminal outbox is acknowledged only after Scheduler admission/resolution 
   assert.ok(order.indexOf('scheduler_event_admit') < order.indexOf('scheduler_activation_resolve'));
   assert.ok(order.indexOf('scheduler_activation_resolve') < order.indexOf('sop_outbox_ack'));
   const start = fabric.calls.find((call) => call.tool === 'sop_run_start')!;
-  assert.equal(start.args.sop_version, 2);
+  assert.equal(start.args.version, 2);
   assert.equal(start.args.occurrence_key, 'binding-1:terminal-event-1');
   const admitted = fabric.calls.find((call) => call.tool === 'scheduler_activation_admit_sop')!;
   assert.equal(admitted.args.lease_token, 'lease-1');
