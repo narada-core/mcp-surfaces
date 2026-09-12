@@ -30,7 +30,7 @@ fn input_schema(name: &str) -> Value {
                 "preflight_paths":{"type":"array","maxItems":64,"items":{"type":"object","properties":{"path":{"type":"string","minLength":1,"maxLength":4096},"access":{"type":"string","enum":["read","write","create"],"default":"read"}},"required":["path"],"additionalProperties":false}},
                 "invocation_plan_ref":{"type":"string","minLength":6,"maxLength":512,"pattern":"^plan:[A-Za-z0-9._:-]+$"},
                 "max_run_ms":{"type":"integer","minimum":1,"maximum":1800000,"default":300000,"description":"Hard worker runtime deadline enforced by the native authority."},
-                "queue_timeout_ms":{"type":"integer","minimum":1,"maximum":1800000,"default":300000,"description":"Bounded provider-admission wait. This clock is separate from max_run_ms, which begins only after admission."},
+                "queue_timeout_ms":{"type":"integer","minimum":1,"maximum":1800000,"default":60000,"description":"Bounded provider-admission wait, defaulting to an early 60-second stall cutoff. This clock is separate from max_run_ms, which begins only after admission."},
                 "wait_for_completion":{"type":"boolean","default":false,"description":"Return after bounded child completion polling when true; false returns the accepted running record immediately."},
                 "wait_timeout_ms":{"type":"integer","minimum":0,"maximum":100000,"default":30000,"description":"Maximum transport-safe inline completion wait when wait_for_completion is true. Longer work remains durable and must be recovered with worker_run_wait or worker_run_status."}
             },

@@ -68,7 +68,9 @@ fn search_tool(state: &mut State, args: &Value, grep: bool) -> Result<Value, FsE
         .unwrap_or(if grep { 30 } else { 100 })
         .clamp(1, 500) as usize;
     let max_matches = if grep {
-        integer(args, "max_matches").unwrap_or(30).clamp(1, 100) as usize
+        integer(args, "internal_capture_limit")
+            .map(|value| value.clamp(1, MAX_SEARCH_CAPTURE_ENTRIES as i64) as usize)
+            .unwrap_or_else(|| integer(args, "max_matches").unwrap_or(30).clamp(1, 100) as usize)
     } else {
         requested_limit
     };

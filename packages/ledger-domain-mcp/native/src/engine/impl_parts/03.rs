@@ -149,6 +149,7 @@ impl Engine {
             "query_batch" => self.query_batch(site_root, args),
             "team_work_overview" => self.team_work_overview(site_root, args),
             "source_inspect" => self.source_inspect(site_root, args),
+            "concept_resolve" => self.concept_resolve(site_root, args),
             "neighborhood" => self.neighborhood(site_root, args),
             "snapshot" => self.snapshot(site_root, args),
             "sequence_create" => self.sequence_create(site_root, args),

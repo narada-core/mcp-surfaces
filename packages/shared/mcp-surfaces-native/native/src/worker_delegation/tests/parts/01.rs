@@ -114,6 +114,23 @@
     }
 
     #[test]
+    fn compact_timed_out_run_preserves_partial_assistant_checkpoint() {
+        let compact = compact_run(&json!({
+            "run_id":"run-timeout-partial",
+            "status":"failed",
+            "completion_state":"partial",
+            "summary":"Lemma established; remaining case was not completed.",
+            "error":"worker_runtime_timed_out:max_run_ms=120000:elapsed_ms=120004",
+            "failure":{"code":"worker_runtime_timed_out","elapsed_ms":120004},
+            "timing":{"duration_ms":120004}
+        }));
+        assert_eq!(compact["completion_state"], "partial");
+        assert_eq!(compact["summary"], "Lemma established; remaining case was not completed.");
+        assert_eq!(compact["result"], "Lemma established; remaining case was not completed.");
+        assert_eq!(compact["result_ref"], "worker-artifact:run-timeout-partial/last_message.json");
+    }
+
+    #[test]
     fn timeout_failure_contains_remediation_and_elapsed_time() {
         let failure = timeout_failure("run-timeout", 120_000, 120_004);
         assert_eq!(failure["code"], "worker_runtime_timed_out");

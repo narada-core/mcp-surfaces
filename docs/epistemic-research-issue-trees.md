@@ -27,9 +27,11 @@ Relations are typed:
 - `blocked_by` links an issue to a blocking graph entity;
 - `derived_from` or another explicit provenance relation links evidence.
 
-A version after 1 requires exactly one predecessor. A blocked node requires at
-least one blocker. An open or selected node cannot carry a terminal
-disposition. At most one non-superseded node in a tree may be selected. A
+A version after 1 requires exactly one `predecessor_id` naming the distinct
+entity ID of its immediate prior revision; each revision must use a new
+`node_id`. Reusing the predecessor ID would create a self-superseding relation
+and is refused. A blocked node requires at least one blocker. An open or
+selected node cannot carry a terminal disposition. At most one non-superseded node in a tree may be selected. A
 disposed node must carry one. Scores rank attention; they do not assert truth.
 
 ## Resume by objective
@@ -74,10 +76,20 @@ copyable continuation arguments. It is a projection, never mutation authority.
 
 ## Evidence boundary
 
+New transitions attach structured references with:
+
+```json
+{"evidence":{"graph_entity_ids":["source-or-result-id"],"artifact_paths":["research/checker.py"]}}
+```
+
+`graph_entity_ids` produce explicit `derived_from` relations. `artifact_paths`
+are retained in the issue payload as typed repository locators. The legacy
+`evidence_ids` array remains a compatibility alias for `graph_entity_ids`; new
+writes use `evidence`. Frontier `evidence_reference_count` counts both kinds.
+
 Issue transitions do not create assessments, test outcomes, or evidence
-promotion records. Evidence identifiers become explicit graph relations only.
-No score, disposition, resolution, or frontier position promotes linked
-material to evidence or certifies truth.
+promotion records. No path, score, disposition, resolution, or frontier
+position promotes linked material to evidence or certifies truth.
 
 ## Marici use
 

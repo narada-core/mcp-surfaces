@@ -49,6 +49,8 @@
         )
         .unwrap_err();
         assert_eq!(error.code, "patch_context_not_found");
+        assert_eq!(error.details["hunk_index"], 0);
+        assert!(error.details["nearby"].is_array());
         assert_eq!(fs::read_to_string(root.join("old.txt")).unwrap(), "old\n");
         assert!(!root.join("new.txt").exists());
         let outcome =

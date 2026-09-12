@@ -13,6 +13,10 @@ assert.match(buildScheduledTaskMutationScript(), /MultipleInstances/);
 assert.match(buildScheduledTaskMutationScript(), /-TaskPath \$taskPath/);
 assert.match(buildScheduledTaskMutationScript(), /Get-ScheduledTask -TaskName \$taskName -TaskPath \$taskPath/);
 assert.match(buildScheduledTaskMutationScript(), /if \(\$wasDisabled\) \{ \$settingsArguments\.Disable = \$true \}/);
+assert.match(buildScheduledTaskMutationScript(), /New-ScheduledTaskPrincipal .*InteractiveToken .*Limited/);
+assert.match(buildScheduledTaskMutationScript(), /AllowStartIfOnBatteries = \$true/);
+assert.match(buildScheduledTaskMutationScript(), /DontStopIfGoingOnBatteries = \$true/);
+assert.match(buildScheduledTaskMutationScript(), /-Principal \$principal/);
 assert.deepEqual(splitScheduledTaskPath('\\Narada\\SonarOperatingProgramDispatch'), {
   taskName: 'SonarOperatingProgramDispatch',
   taskPath: '\\Narada\\',
@@ -88,6 +92,24 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<Re
 function view(res: Record<string, any>): Record<string, any> {
   return res.result.structuredContent as Record<string, any>;
 }
+
+const dryRunCreate = await callTool('scheduler_task_create', {
+  task_name: '\\Narada\\DryRun',
+  command: 'pwsh.exe',
+  arguments: '-NoProfile -File C:\\workspace\\narada.sonar\\scripts\\supervisor.ps1 start',
+  working_dir: 'C:\\workspace\\narada.sonar',
+  schedule: 'hourly',
+  interval_minutes: 15,
+  implementation_id: runtimeStatus.implementation_id,
+  dry_run: true,
+});
+const dryRunCreateData = view(dryRunCreate);
+assert.equal(dryRunCreateData.status, 'planned');
+assert.equal(dryRunCreateData.principal.logon_type, 'InteractiveToken');
+assert.equal(dryRunCreateData.principal.run_level, 'Limited');
+assert.equal(dryRunCreateData.battery_policy.allow_start, true);
+assert.equal(dryRunCreateData.battery_policy.stop_when_switching_to_battery, false);
+assert.deepEqual(dryRunCreateData.schtasks_preview_args.slice(0, 4), ['/create', '/tn', '\\Narada\\DryRun', '/tr']);
 
 if (process.env.NARADA_RUN_LIVE_SCHEDULER_TESTS === '1') {
   const list = await callTool('scheduler_task_list', { limit: 5 });

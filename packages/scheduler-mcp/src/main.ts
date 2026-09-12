@@ -369,6 +369,7 @@ export function listTools() {
           interval_minutes: { type: 'number', description: 'Repeat interval in minutes (for hourly).' },
           execution_time_limit_seconds: { type: 'integer', minimum: 1, maximum: 86400, description: 'Hard Task Scheduler wall-time limit.' },
           multiple_instances: { type: 'string', enum: ['ignore_new', 'parallel', 'queue', 'stop_existing'], description: 'Task Scheduler overlap policy.' },
+          dry_run: { type: 'boolean', description: 'Validate policy and return the exact runnable-principal, battery, action, and schedule plan without creating a task.' },
           implementation_id: { type: 'string', description: 'Current implementation_id returned by scheduler_runtime_status.' },
         },
         required: ['task_name', 'command', 'schedule', 'implementation_id'],
@@ -561,13 +562,15 @@ export function buildScheduledTaskMutationScript(): string {
     '$taskPath = [Environment]::GetEnvironmentVariable("NARADA_SCHEDULER_TASK_PATH")',
     '$existingTask = Get-ScheduledTask -TaskName $taskName -TaskPath $taskPath',
     '$wasDisabled = [string]$existingTask.State -eq "Disabled"',
+    '$principalUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name',
+    '$principal = New-ScheduledTaskPrincipal -UserId $principalUser -LogonType InteractiveToken -RunLevel Limited',
     'if ([string]::IsNullOrWhiteSpace($workingDirectory)) { if ([string]::IsNullOrWhiteSpace($arguments)) { $action = New-ScheduledTaskAction -Execute $execute } else { $action = New-ScheduledTaskAction -Execute $execute -Argument $arguments } } else { if ([string]::IsNullOrWhiteSpace($arguments)) { $action = New-ScheduledTaskAction -Execute $execute -WorkingDirectory $workingDirectory } else { $action = New-ScheduledTaskAction -Execute $execute -Argument $arguments -WorkingDirectory $workingDirectory } }',
-    '$settingsArguments = @{ Hidden = $true }',
+    '$settingsArguments = @{ Hidden = $true; AllowStartIfOnBatteries = $true; DontStopIfGoingOnBatteries = $true }',
     'if ($wasDisabled) { $settingsArguments.Disable = $true }',
     'if (-not [string]::IsNullOrWhiteSpace($executionLimitSeconds)) { $settingsArguments.ExecutionTimeLimit = [TimeSpan]::FromSeconds([int]$executionLimitSeconds) }',
     'if (-not [string]::IsNullOrWhiteSpace($multipleInstances)) { $settingsArguments.MultipleInstances = $multipleInstances }',
     '$settings = New-ScheduledTaskSettingsSet @settingsArguments',
-    'Set-ScheduledTask -TaskName $taskName -TaskPath $taskPath -Action $action -Settings $settings | Out-Null',
+    'Set-ScheduledTask -TaskName $taskName -TaskPath $taskPath -Action $action -Settings $settings -Principal $principal | Out-Null',
   ].join(';');
 }
 
@@ -939,12 +942,27 @@ async function schedulerTaskCreate(args: JsonRecord, state: SchedulerState): Pro
     : integer(args.execution_time_limit_seconds, 0, 1, 86_400);
   const multipleInstances = schedulerMultipleInstances(args.multiple_instances);
   assertScheduledActionAllowed(command, cmdArgs, workingDir, state);
-  const launchPlan = buildScheduledTaskLaunchPlan(command, cmdArgs, { require_available: true });
+  const launchPlan = buildScheduledTaskLaunchPlan(command, cmdArgs, { require_available: args.dry_run !== true });
   const placeholderPlan = buildScheduledTaskPlaceholderPlan();
   const taskRun = buildTaskRunCommand(launchPlan.target_command, launchPlan.target_arguments);
   const placeholderTaskRun = buildTaskRunCommand(quoteCmd(placeholderPlan.launcher_path), placeholderPlan.launcher_arguments);
   const schArgs = ['/create', '/tn', taskName, '/tr', placeholderTaskRun, '/f'];
   schArgs.push(...buildCreateScheduleArgs(schedule, args));
+  if (args.dry_run === true) {
+    return {
+      status: 'planned',
+      task_name: taskName,
+      schedule,
+      command: taskRun,
+      execute: launchPlan.target_command,
+      arguments: launchPlan.target_arguments,
+      working_dir: workingDir,
+      principal: { source: 'current_windows_identity', logon_type: 'InteractiveToken', run_level: 'Limited' },
+      battery_policy: { allow_start: true, stop_when_switching_to_battery: false },
+      schtasks_preview_args: schArgs,
+      mutation_method: 'schtasks_create_then_powershell_set_explicit_interactive_principal_and_settings',
+    };
+  }
   const { stdout, stderr, exitCode, timedOut } = await schtasks(schArgs);
   if (exitCode !== 0) throw diagnosticError('scheduler_create_failed', `scheduler_create_failed:${exitCode}`, schedulerFailureDetails({ operation: 'create', exitCode, stdout, stderr, taskName, command: placeholderTaskRun, timedOut }));
   const actionResult = await setScheduledTaskAction(
@@ -973,10 +991,12 @@ async function schedulerTaskCreate(args: JsonRecord, state: SchedulerState): Pro
     working_dir: workingDir,
     working_dir_applied: Boolean(workingDir),
     task_hidden: true,
+    principal: { source: 'current_windows_identity', logon_type: 'InteractiveToken', run_level: 'Limited' },
+    battery_policy: { allow_start: true, stop_when_switching_to_battery: false },
     execution_time_limit_seconds: executionTimeLimitSeconds,
     multiple_instances: multipleInstances,
     console_window_policy: launchPlan.console_window_policy,
-    mutation_method: 'schtasks_create_then_powershell_set_scheduled_task_native_no_window_action_and_hidden_settings',
+    mutation_method: 'schtasks_create_then_powershell_set_explicit_interactive_principal_native_no_window_action_and_hidden_settings',
   };
 }
 

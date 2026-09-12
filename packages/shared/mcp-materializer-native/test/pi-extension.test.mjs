@@ -752,6 +752,13 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     assert.equal(leaseModel.tool_contract, undefined);
     assert.notEqual(registered[0].renderResult(lease, { expanded: true }).render(160).join('\n'), lease.content[0].text);
 
+    const verboseLease = await registered[0].execute('call-schema-lease-verbose', { value: 'schema_lease_verbose' }, new AbortController().signal);
+    const verboseLeaseModel = JSON.parse(verboseLease.content[0].text);
+    assert.deepEqual(Object.keys(verboseLeaseModel).sort(), ['connection_id', 'schema', 'schema_lease', 'status', 'surface_id', 'tool_contract', 'tool_name'].sort());
+    assert.deepEqual(verboseLeaseModel.tool_contract.inputSchema.required, ['value']);
+    assert.deepEqual(Object.keys(verboseLeaseModel.tool_contract.inputSchema.properties), ['value']);
+    assert.equal(verboseLeaseModel.input_contract, undefined);
+
     const batchLease = await registered[0].execute('call-schema-lease-batch', { value: 'schema_lease_batch' }, new AbortController().signal);
     const batchLeaseModel = JSON.parse(batchLease.content[0].text);
     assert.deepEqual(Object.keys(batchLeaseModel).sort(), ['connection_id', 'lease_count', 'leases', 'schema', 'status', 'surface_handle'].sort());

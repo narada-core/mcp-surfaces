@@ -218,7 +218,11 @@ function projectSchemaLeaseBatchForModel(value: any): any | undefined {
     for (const field of ["tool_name", "schema_lease"]) {
       if (typeof lease?.[field] === "string") projection[field] = lease[field];
     }
-    if (Object.prototype.hasOwnProperty.call(lease ?? {}, "input_contract")) projection.input_contract = lease.input_contract;
+    if (Object.prototype.hasOwnProperty.call(lease ?? {}, "input_contract")) {
+      projection.input_contract = lease.input_contract;
+    } else if (Object.prototype.hasOwnProperty.call(lease ?? {}, "tool_contract")) {
+      projection.tool_contract = lease.tool_contract;
+    }
     return projection;
   });
   const projection: Record<string, any> = { schema: value.schema, status: value.status, leases };
@@ -1005,7 +1009,11 @@ function controlPlaneProjectionText(structured: any): string | undefined {
     for (const key of ["connection_id", "surface_id"]) {
       if (typeof structured[key] === "string") projection[key] = structured[key];
     }
-    if (structured.input_contract !== undefined) projection.input_contract = structured.input_contract;
+    if (structured.input_contract !== undefined) {
+      projection.input_contract = structured.input_contract;
+    } else if (structured.tool_contract !== undefined) {
+      projection.tool_contract = structured.tool_contract;
+    }
     return JSON.stringify(projection);
   }
   if (structured?.schema === "narada.mcp_loader.site_tool_inventory_check.v1") {

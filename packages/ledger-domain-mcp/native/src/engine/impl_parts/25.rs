@@ -123,6 +123,98 @@ impl Engine {
         }))
     }
 
+    fn concept_resolve(&self, root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
+        self.with_stable_projection(root, || self.concept_resolve_locked(root, args))
+    }
+
+    fn concept_resolve_locked(&self, root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
+        const COMPONENT_LIMIT: usize = 16;
+        const PROVENANCE_LIMIT: usize = 4;
+        const OUTPUT_LIMIT: usize = 6_000;
+
+        let requested = self.required(args, "canonical_name")?;
+        let normalized = requested.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+        let db = Connection::open(self.projection_path(root))
+            .map_err(self.db_error("projection_open_failed"))?;
+        let visible = self.visible_entity_predicate();
+        let mut entity_stmt = db.prepare(&format!(
+            "select entity_id,payload_json from {} where kind='marici:concept' and {visible} order by entity_id",
+            self.entity_table
+        )).map_err(self.db_error("concept_resolve_prepare_failed"))?;
+        let candidates = entity_stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }).map_err(self.db_error("concept_resolve_query_failed"))?
+          .collect::<Result<Vec<_>, _>>()
+          .map_err(self.db_error("concept_resolve_row_failed"))?
+          .into_iter()
+          .filter_map(|(id, raw)| {
+              let payload = serde_json::from_str::<Value>(&raw).ok()?;
+              let name = payload.get("canonical_name")?.as_str()?;
+              let candidate = name.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+              (candidate == normalized).then_some((id, payload))
+          }).take(2).collect::<Vec<_>>();
+
+        if candidates.is_empty() {
+            return Ok(json!({"entity_id":Value::Null,"canonical_name":requested,"definition":Value::Null,"version":Value::Null,"status":"not_found","components":[],"provenance":[],"non_equivalences":[],"bounded":true,"truncated":false}));
+        }
+        if candidates.len() > 1 {
+            return Ok(json!({"entity_id":Value::Null,"canonical_name":requested,"definition":Value::Null,"version":Value::Null,"status":"ambiguous","components":[],"provenance":[],"non_equivalences":[],"bounded":true,"truncated":false}));
+        }
+
+        let (entity_id, payload) = &candidates[0];
+        let mut relation_stmt = db.prepare(&format!(
+            "select relation_type,source_id,target_id,payload_json from {} where source_id=?1 or target_id=?1 order by relation_id limit 256",
+            self.relation_table
+        )).map_err(self.db_error("concept_resolve_relations_prepare_failed"))?;
+        let relation_rows = relation_stmt.query_map([entity_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?))
+        }).map_err(self.db_error("concept_resolve_relations_failed"))?
+          .collect::<Result<Vec<_>, _>>()
+          .map_err(self.db_error("concept_resolve_relation_row_failed"))?;
+
+        let entity_pk = self.table(&self.entity_table).primary_key.clone();
+        let mut components = Vec::new();
+        let mut provenance = Vec::new();
+        let mut truncated = relation_rows.len() == 256;
+        for (relation, source_id, target_id, relation_payload) in relation_rows {
+            let other_id = if source_id == *entity_id { target_id } else { source_id };
+            let other: Option<(String, String)> = db.query_row(
+                &format!("select kind,payload_json from {} where {}=?1", self.entity_table, entity_pk),
+                [&other_id], |row| Ok((row.get(0)?, row.get(1)?))
+            ).optional().map_err(self.db_error("concept_resolve_related_entity_failed"))?;
+            let Some((kind, raw)) = other else { continue };
+            let related = serde_json::from_str::<Value>(&raw).unwrap_or(Value::Null);
+            let relation_meta = serde_json::from_str::<Value>(&relation_payload).unwrap_or(Value::Null);
+            let is_provenance = kind == "source" || relation == "derived_from" || relation == "promotes_to_evidence";
+            if is_provenance {
+                if provenance.len() >= PROVENANCE_LIMIT { truncated = true; continue; }
+                provenance.push(json!({"relation":relation,"entity_id":other_id,"title":related.get("title").cloned().unwrap_or(Value::Null),"locator":related.get("locator").cloned().unwrap_or(Value::Null)}));
+            } else {
+                if components.len() >= COMPONENT_LIMIT { truncated = true; continue; }
+                components.push(json!({"relation":relation,"multiplicity":relation_meta.get("multiplicity").cloned().unwrap_or(Value::Null),"entity_id":other_id,"title":related.get("title").cloned().unwrap_or(Value::Null)}));
+            }
+        }
+        let mut response = json!({
+            "entity_id":entity_id,
+            "canonical_name":payload.get("canonical_name").cloned().unwrap_or(Value::Null),
+            "definition":payload.get("definition").cloned().unwrap_or(Value::Null),
+            "version":payload.get("version").cloned().unwrap_or(Value::Null),
+            "status":"resolved",
+            "components":components,
+            "provenance":provenance,
+            "non_equivalences":payload.get("non_equivalences").and_then(Value::as_array).map(|items| items.iter().take(16).cloned().collect::<Vec<_>>()).unwrap_or_default(),
+            "bounded":true,
+            "truncated":truncated
+        });
+        if serde_json::to_vec(&response).map(|bytes| bytes.len()).unwrap_or(OUTPUT_LIMIT + 1) > OUTPUT_LIMIT {
+            response["components"] = json!([]);
+            response["provenance"] = json!([]);
+            response["non_equivalences"] = json!([]);
+            response["truncated"] = json!(true);
+        }
+        Ok(response)
+    }
+
     fn neighborhood(&self, root: &Path, args: &Map<String, Value>) -> Result<Value, Value> {
         self.with_stable_projection(root, || self.neighborhood_locked(root, args))
     }

@@ -149,7 +149,7 @@ fn constraints_schema() -> Value {
             "wait_for_completion":{"type":"boolean"},
             "wait_timeout_ms":{"type":"integer","minimum":1,"maximum":180000},
             "max_run_ms":{"type":"integer","minimum":1,"maximum":1800000},
-            "queue_timeout_ms":{"type":"integer","minimum":1,"maximum":1800000,"default":300000,"description":"Maximum provider-admission wait; max_run_ms begins only after provider admission."},
+            "queue_timeout_ms":{"type":"integer","minimum":1,"maximum":1800000,"default":60000,"description":"Maximum provider-admission wait, defaulting to an early 60-second stall cutoff; max_run_ms begins only after provider admission."},
             "exit_interview":{"type":"boolean"},
             "max_concurrency":{"type":"integer","minimum":1,"maximum":32},
             "max_retries":{"type":"integer","minimum":0,"maximum":10},

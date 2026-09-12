@@ -56,7 +56,7 @@
     #[test]
     fn provider_queue_timeout_is_distinct_and_discoverable() {
         let schema = input_schema("worker_run");
-        assert_eq!(schema["properties"]["constraints"]["properties"]["queue_timeout_ms"]["default"], 300_000);
+        assert_eq!(schema["properties"]["constraints"]["properties"]["queue_timeout_ms"]["default"], 60_000);
         let failure = queue_timeout_failure("run-fixture", 300_000, 300_001);
         assert_eq!(failure["code"], "provider_queue_timed_out");
         assert_eq!(failure["queue_timeout_ms"], 300_000);

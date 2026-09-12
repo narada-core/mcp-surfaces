@@ -199,7 +199,7 @@ fn apply_patch_content(
     };
     let mut delta: isize = 0;
     let mut cursor = 0usize;
-    for hunk in hunks {
+    for (hunk_index, hunk) in hunks.iter().enumerate() {
         let old: Vec<&str> = hunk
             .lines
             .iter()
@@ -219,7 +219,7 @@ fn apply_patch_content(
                 FsError::new(
                     "patch_context_not_found",
                     "patch_context_not_found",
-                    json!({"context":old}),
+                    json!({"hunk_index":hunk_index,"context":old,"search_start_line":cursor+1,"nearby":lines.iter().skip(cursor.saturating_sub(2)).take(old.len().max(1)+4).cloned().collect::<Vec<_>>()}),
                 )
             })?
         };
@@ -232,7 +232,7 @@ fn apply_patch_content(
             return Err(FsError::new(
                 "patch_context_mismatch",
                 "patch_context_mismatch",
-                json!({"line":position+1,"expected":old}),
+                json!({"hunk_index":hunk_index,"line":position+1,"expected":old,"nearby":lines.iter().skip(position.saturating_sub(2)).take(old.len().max(1)+4).cloned().collect::<Vec<_>>()}),
             ));
         }
         lines.splice(position..position + old.len(), replacement.clone());

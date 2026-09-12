@@ -205,6 +205,19 @@
     }
 
     #[test]
+    fn replace_all_is_hash_guarded_and_reports_occurrences() {
+        let root = test_root("replace-all");
+        let state = test_state(&root, "write");
+        let path = root.join("value.txt");
+        let written = write_file(&state, &json!({"path":path,"content":"old old old\n"})).unwrap();
+        let replaced = str_replace_all_file(&state, &json!({"path":path,"old":"old","new":"new","expected_sha256":written["sha256"]})).unwrap();
+        assert_eq!(replaced["occurrences"], 3);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new new new\n");
+        assert_eq!(replaced["sha256"], replaced["after_sha256"]);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn tool_text_is_a_compact_projection_of_structured_content() {
         let result = tool_result(json!({"schema": "example.v1", "status": "ok", "large": [1,2,3]}));
         let text = result["content"][0]["text"].as_str().unwrap();

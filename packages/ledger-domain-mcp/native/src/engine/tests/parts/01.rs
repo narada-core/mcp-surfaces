@@ -203,12 +203,15 @@
             tool["inputSchema"]["properties"]["workflow"]["type"],
             "string"
         );
+        assert_eq!(tool["inputSchema"]["properties"]["tool"]["type"], "string");
+        assert!(tool["inputSchema"]["required"].is_null());
         let value = engine.guidance_with_request(
-            json!({"workflow":"query_current_frontier"})
+            json!({"workflow":"query_current_frontier","tool":"epistemic_graph_query"})
                 .as_object()
                 .unwrap(),
         );
         assert_eq!(value["requested"]["workflow"], "query_current_frontier");
+        assert_eq!(value["requested"]["tool"], "epistemic_graph_query");
     }
 
     #[test]

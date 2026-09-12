@@ -86,6 +86,8 @@ fn fs_search_tool(state: &mut State, args: &Value) -> Result<Value, FsError> {
     legacy.insert("output_mode".into(), json!(output_mode));
     legacy.insert("limit".into(), json!(max_results));
     legacy.insert("max_matches".into(), json!(max_results));
+    legacy.insert("internal_capture_limit".into(), json!(MAX_SEARCH_CAPTURE_ENTRIES));
+    legacy.insert("max_output_chars".into(), json!(SEARCH_MAX_INLINE_CHAR_LIMIT));
     legacy.insert(
         "cache_policy".into(),
         json!(if cursor.is_some() { "auto" } else { "snapshot" }),

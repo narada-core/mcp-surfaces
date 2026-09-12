@@ -244,6 +244,10 @@ fn list_tools(mode: &str) -> Vec<Value> {
             "Replace exactly one string occurrence in a text file under an allowed root.",
         ));
         names.push((
+            "fs_str_replace_all_file",
+            "Replace every exact string occurrence in a text file under an allowed root, with an optional full-file hash guard.",
+        ));
+        names.push((
             "fs_replace_range",
             "Replace an inclusive line range in a text file under an allowed root.",
         ));
@@ -294,6 +298,12 @@ fn list_tools(mode: &str) -> Vec<Value> {
                 properties.insert("expected_sha256".into(), json!({"type":"string"}));
             }
             "fs_str_replace_file" => {
+                properties.insert("path".into(), json!({"type":"string"}));
+                properties.insert("old".into(), json!({"type":"string"}));
+                properties.insert("new".into(), json!({"type":"string"}));
+                properties.insert("expected_sha256".into(), json!({"type":"string"}));
+            }
+            "fs_str_replace_all_file" => {
                 properties.insert("path".into(), json!({"type":"string"}));
                 properties.insert("old".into(), json!({"type":"string"}));
                 properties.insert("new".into(), json!({"type":"string"}));
@@ -369,6 +379,7 @@ fn list_tools(mode: &str) -> Vec<Value> {
             "fs_glob_search" => vec!["pattern"],
             "fs_patch_outcome_show" => vec!["operation_id"],
             "fs_str_replace_file" => vec!["path", "old", "new"],
+            "fs_str_replace_all_file" => vec!["path", "old", "new"],
             "fs_replace_range" => vec!["path", "start_line", "end_line", "replacement"],
             "fs_apply_patch" => vec!["patch"],
             "fs_move_path" => vec!["from", "to"],
@@ -378,8 +389,8 @@ fn list_tools(mode: &str) -> Vec<Value> {
             _ => Vec::new()
         };
         let write_tool = tool_has_write_effect(name);
-        let destructive = matches!(*name,"fs_str_replace_file"|"fs_replace_range"|"fs_apply_patch"|"fs_move_path"|"fs_rename_directory"|"fs_delete_directory");
-        let idempotent = !matches!(*name,"fs_str_replace_file"|"fs_replace_range"|"fs_move_path"|"fs_rename_directory"|"fs_delete_directory");
+        let destructive = matches!(*name,"fs_str_replace_file"|"fs_str_replace_all_file"|"fs_replace_range"|"fs_apply_patch"|"fs_move_path"|"fs_rename_directory"|"fs_delete_directory");
+        let idempotent = !matches!(*name,"fs_str_replace_file"|"fs_str_replace_all_file"|"fs_replace_range"|"fs_move_path"|"fs_rename_directory"|"fs_delete_directory");
         bound_tool_properties(&mut properties);
         json!({"name": name, "canonical_name": name, "description": description, "inputSchema": {"title":format!("{name} arguments"),"type":"object","properties": properties,"required": required,"additionalProperties":false}, "annotations": {"title":name,"readOnlyHint":!write_tool,"destructiveHint":destructive,"idempotentHint":idempotent,"openWorldHint":false}, "outputSchema":{"title":format!("{name} result"),"type":"object","maxProperties":256,"additionalProperties":true}})
     }).collect()

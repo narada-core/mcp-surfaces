@@ -38,6 +38,7 @@ fn call_tool(state: &mut State, params: &Value) -> Result<Value, FsError> {
         "fs_patch_outcome_show" => patch_outcome(state, args),
         "fs_write_file" => write_file(state, args),
         "fs_str_replace_file" => str_replace_file(state, args),
+        "fs_str_replace_all_file" => str_replace_all_file(state, args),
         "fs_replace_range" => replace_range(state, args),
         "fs_apply_patch" => apply_patch_tool(state, args),
         "fs_move_path" => move_path(state, args, false),
@@ -205,6 +206,7 @@ fn is_write_tool(name: &str) -> bool {
         name,
         "fs_write_file"
             | "fs_str_replace_file"
+            | "fs_str_replace_all_file"
             | "fs_replace_range"
             | "fs_apply_patch"
             | "fs_move_path"

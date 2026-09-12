@@ -19,7 +19,7 @@
     #[test]
     fn delegated_tasks_propagate_queue_budget_and_default_to_provider_capacity() {
         let schema = constraints_schema();
-        assert_eq!(schema["properties"]["queue_timeout_ms"]["default"], 300_000);
+        assert_eq!(schema["properties"]["queue_timeout_ms"]["default"], 60_000);
         assert!(CONSTRAINT_FIELDS.contains(&"queue_timeout_ms"));
         assert_eq!(max_concurrency(&json!({})), 1);
         assert_eq!(asynchronous_worker_constraints(

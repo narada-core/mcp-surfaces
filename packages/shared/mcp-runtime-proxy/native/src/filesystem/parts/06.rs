@@ -66,6 +66,28 @@ fn str_replace_file(state: &State, args: &Value) -> Result<Value, FsError> {
     )
 }
 
+fn str_replace_all_file(state: &State, args: &Value) -> Result<Value, FsError> {
+    let (path, root) = resolve_allowed(state, args.get("path").and_then(Value::as_str), "fs_str_replace_all_file")?;
+    assert_mutation_target_allowed(&path, &root, "fs_str_replace_all_file")?;
+    let old = args.get("old").and_then(Value::as_str).unwrap_or_default();
+    let new = args.get("new").and_then(Value::as_str).unwrap_or_default();
+    if old.is_empty() { return Err(FsError::new("str_replace_all_requires_old", "str_replace_all_requires_old", path_details(&path, &root))); }
+    let before = read_bounded_mutation_text(&path, &root, "fs_str_replace_all_file")?;
+    let before_sha256 = sha256_bytes(before.as_bytes());
+    if let Some(expected) = args.get("expected_sha256").and_then(Value::as_str).filter(|value| !value.is_empty()) {
+        if expected != before_sha256 {
+            return Err(FsError::new("fs_str_replace_all_file_expected_sha256_mismatch", "fs_str_replace_all_file_expected_sha256_mismatch", json!({"expected_sha256":expected,"actual_sha256":before_sha256,"path":path,"root":root})));
+        }
+    }
+    let occurrences = before.match_indices(old).count();
+    if occurrences == 0 { return Err(FsError::new("str_replace_all_not_found", "str_replace_all_not_found", json!({"path":path,"root":root,"old_length":old.len()}))); }
+    let after = before.replace(old, new);
+    fs::write(&path, after.as_bytes()).map_err(|error| FsError::new("fs_str_replace_all_file_failed", format!("fs_str_replace_all_file_failed: {error}"), path_details(&path, &root)))?;
+    let after_sha256 = sha256_bytes(after.as_bytes());
+    append_audit(state, "fs_str_replace_all_file", &path, &root, json!({"occurrences":occurrences,"old_length":old.len(),"new_length":new.len(),"before_sha256":before_sha256,"after_sha256":after_sha256}))?;
+    Ok(json!({"schema":"local.filesystem.str_replace_all_file.v1","status":"replaced","path":path,"root":root,"relative_path":relative_path(&root,&path),"occurrences":occurrences,"before_sha256":before_sha256,"after_sha256":after_sha256,"sha256":after_sha256,"content_sha256":after_sha256}))
+}
+
 fn replace_range(state: &State, args: &Value) -> Result<Value, FsError> {
     let start = integer(args, "start_line").ok_or_else(|| {
         FsError::new(

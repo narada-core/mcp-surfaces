@@ -146,3 +146,62 @@
         assert_eq!(batch["results"][0]["items"][0]["member"], "marici.Nima");
         let _ = fs::remove_dir_all(root);
     }
+
+    #[test]
+    fn concept_resolve_is_exact_one_hop_fixed_and_bounded() {
+        let engine = engine();
+        let root = std::env::temp_dir().join(format!("epistemic-concept-resolve-{}", Uuid::new_v4()));
+        append_team_work_event(&root, &engine, "operator", json!([
+            {"op":"entity.declare","entity_id":"concept:coherence","kind":"marici:concept","title":"Coherence Pyramid","canonical_name":"Coherence Pyramid","definition":"A layered coherence model","version":"v1","non_equivalences":["mere consistency"]},
+            {"op":"entity.declare","entity_id":"claim:component","kind":"claim","title":"Structural component"},
+            {"op":"entity.declare","entity_id":"source:concept","kind":"source","title":"Concept note","version":"1","locator":"notes/coherence.md"},
+            {"op":"relation.declare","relation_id":"rel:component","relation_type":"marici:composed_of","source_id":"concept:coherence","target_id":"claim:component","multiplicity":"one"},
+            {"op":"relation.declare","relation_id":"rel:source","relation_type":"derived_from","source_id":"concept:coherence","target_id":"source:concept"}
+        ]));
+        let resolved = engine.concept_resolve(&root, &Map::from_iter([
+            ("canonical_name".into(), json!("  coherence   pyramid "))
+        ])).expect("exact normalized concept");
+        assert_eq!(resolved["status"], "resolved");
+        assert_eq!(resolved["entity_id"], "concept:coherence");
+        assert_eq!(resolved["components"].as_array().unwrap().len(), 1);
+        assert_eq!(resolved["provenance"].as_array().unwrap().len(), 1);
+        assert_eq!(resolved["components"][0]["multiplicity"], "one");
+        assert_eq!(resolved["provenance"][0]["locator"], "notes/coherence.md");
+        assert!(resolved.get("records").is_none());
+        assert!(serde_json::to_vec(&resolved).unwrap().len() <= 6_000);
+        let fuzzy = engine.concept_resolve(&root, &Map::from_iter([
+            ("canonical_name".into(), json!("Coherence"))
+        ])).expect("not found is explicit");
+        assert_eq!(fuzzy["status"], "not_found");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn communication_principals_are_addressable_without_placeholder_entities() {
+        let engine = engine();
+        let root = std::env::temp_dir().join(format!("epistemic-addressable-principal-{}", Uuid::new_v4()));
+        append_team_work_event(&root, &engine, "operator", json!([
+            {"op":"entity.declare","entity_id":"message:incoming","kind":"narada.epistemic:communication","title":"Incoming","sender":"marici.Grothendieck","recipient":"marici.Benincasa","intent":"question","sent_at":"2026-09-01T00:00:00Z"}
+        ]));
+        engine.neighborhood(&root, &Map::from_iter([("entity_id".into(), json!("message:incoming"))]))
+            .expect("project incoming communication");
+        let result = engine.submit_review_admit(&root, &Map::from_iter([
+            ("actor".into(), json!("operator")),
+            ("authority_basis".into(), json!({"kind":"test"})),
+            ("operations".into(), json!([
+                {"op":"entity.declare","local_ref":"reply","kind":"narada.epistemic:communication","title":"Reply","sender":"marici.Benincasa","recipient":"marici.Grothendieck","intent":"reply","sent_at":"2026-09-01T00:01:00Z"},
+                {"op":"relation.declare","relation_type":"addressed_to","source_ref":"reply","target_id":"marici.Grothendieck"}
+            ]))
+        ])).expect("canonical communication principal is addressable");
+        assert_eq!(result["admission"]["status"], "admitted");
+        let unrelated = engine.submit_review_admit(&root, &Map::from_iter([
+            ("actor".into(), json!("operator")),
+            ("authority_basis".into(), json!({"kind":"test"})),
+            ("operations".into(), json!([
+                {"op":"entity.declare","local_ref":"claim","kind":"claim","title":"Claim"},
+                {"op":"relation.declare","relation_type":"depends_on","source_ref":"claim","target_id":"marici.Grothendieck"}
+            ]))
+        ])).expect_err("principal aliases do not become general graph entities");
+        assert_eq!(unrelated["code"], "dangling_reference");
+        let _ = fs::remove_dir_all(root);
+    }

@@ -41,6 +41,11 @@ mod tests {
             assert!(submit["inputSchema"]["properties"].get(field).is_some(), "missing {field}");
         }
         assert_eq!(submit["inputSchema"]["required"], json!(["surface_id","kind","summary"]));
+        assert!(submit["description"].as_str().unwrap().contains("omit submitter_site_id"));
+        assert!(submit["inputSchema"]["properties"]["details"]["description"].as_str().unwrap().contains("non-authoritative provenance"));
+        let guide = guidance(&json!({"workflow":"cross-site submission"}).as_object().unwrap());
+        assert_eq!(guide["cross_site_submission"]["authority_binding"], "The server records its bound NARADA_SITE_ID and NARADA_AGENT_ID.");
+        assert!(guide["cross_site_submission"]["canonical_route"].as_str().unwrap().contains("without submitter_site_id or submitter_principal"));
         assert_eq!(find("surface_feedback_update_status")["inputSchema"]["required"], json!(["feedback_id","status","resolution_note"]));
         assert!(find("surface_feedback_update_status_batch")["inputSchema"]["properties"]["updates"].is_object());
         assert!(find("surface_feedback_convert_to_task")["inputSchema"]["properties"]["feedback_id"].is_object());
@@ -60,21 +65,23 @@ mod tests {
         for summary in ["first", "second"] {
             call_tool("surface_feedback_submit", &json!({"surface_id":"calendar","submitter_site_id":"site-a","submitter_principal":"agent-a","kind":"observation","summary":summary}).as_object().unwrap(), &root).expect("submit");
         }
+        let cross_site = call_tool("surface_feedback_submit", &json!({"surface_id":"worker-delegation","kind":"observation","summary":"observed on another Site","details":"Observed Site: marici (non-authoritative provenance)"}).as_object().unwrap(), &root).expect("server-bound cross-site submission");
+        assert_eq!(cross_site["submitter_site_id"], "site-a");
         let list = feedback_list(&json!({"scope":"all_authorized","limit":1}).as_object().unwrap(), &root, false).expect("list");
         assert_eq!(list["count"], 1);
         assert_eq!(list["has_more"], true);
         assert_eq!(list["next_offset"], 1);
         let doctor = doctor(&root).expect("doctor");
         assert_eq!(doctor["store_status"], "ready");
-        assert_eq!(doctor["feedback_entries"], 2);
-        assert_eq!(doctor["ledger_events"], 2);
+        assert_eq!(doctor["feedback_entries"], 3);
+        assert_eq!(doctor["ledger_events"], 3);
         assert_eq!(doctor["read_only_native"], false);
         assert_eq!(doctor["capabilities"]["read_scopes"]["all_authorized"]["available"], true);
         assert_eq!(doctor["capabilities"]["read_scopes"]["authority_visible"]["available"], true);
         assert_eq!(doctor["capabilities"]["read_scopes"]["owned_surfaces"]["available"], false);
         assert_eq!(doctor["capabilities"]["mutations"]["submit"]["authority_site_id"], "site-a");
         let authority_entries = feedback_list(&json!({"scope":"authority_site_submissions"}).as_object().unwrap(), &root, false).expect("authority list");
-        assert_eq!(authority_entries["count"], 2);
+        assert_eq!(authority_entries["count"], 3);
         assert!(authority_entries["entries"].as_array().is_some_and(|entries| entries.iter().all(|entry| entry["submitter_site_id"] == "site-a")));
         let mismatch = call_tool("surface_feedback_submit", &json!({"surface_id":"calendar","submitter_site_id":"site-b","kind":"bug","summary":"spoofed"}).as_object().unwrap(), &root).expect_err("authority mismatch");
         assert_eq!(mismatch["code"], "feedback_submitter_site_authority_mismatch");

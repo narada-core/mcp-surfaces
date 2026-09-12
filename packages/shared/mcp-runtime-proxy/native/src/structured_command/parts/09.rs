@@ -81,12 +81,18 @@ fn tool_result(state: &State, payload: Value, tool_name: &str) -> Result<Value, 
         );
     }
     let (reference, full_length) = materialize_output(state, tool_name, &payload, &text)?;
-    let preview = text.chars().take(3_200).collect::<String>();
-    let envelope = json!({"schema": "narada.producer_output_page.v1", "status": payload.get("status").and_then(Value::as_str).unwrap_or("ok"), "truncated": true, "output_ref": reference, "ref": reference, "result_materialized": true, "tool_name": tool_name, "offset": 0, "limit": 3_200, "next_offset": if full_length > 3_200 { json!(3_200) } else { Value::Null }, "transport_offset": 0, "transport_limit": 3_200, "transport_next_offset": if full_length > 3_200 { json!(3_200) } else { Value::Null }, "output_text": preview, "output_truncated": full_length > 3_200, "reader_tool": "structured_command_output_show", "site_root": state.site_root.to_string_lossy(), "read_command": format!("structured_command_output_show({{ ref: \\\"{reference}\\\" }})"), "remediation": format!("Use structured_command_output_show with ref={reference} to read bounded pages."), "inline_limit": 3_200, "full_output_char_length": full_length});
+    let status = payload.get("status").and_then(Value::as_str).unwrap_or("ok");
+    let (preview, preview_shape) = if status == "failed" {
+        let head = text.chars().take(2_200).collect::<String>();
+        let tail_chars = text.chars().rev().take(850).collect::<Vec<_>>();
+        let tail = tail_chars.into_iter().rev().collect::<String>();
+        (format!("{head}\n... FINAL ERROR TAIL ...\n{tail}"), "head_and_error_tail")
+    } else {
+        (text.chars().take(3_200).collect::<String>(), "head")
+    };
+    let envelope = json!({"schema": "narada.producer_output_page.v1", "status": status, "truncated": true, "output_ref": reference, "ref": reference, "result_materialized": true, "tool_name": tool_name, "offset": 0, "limit": 3_200, "next_offset": if full_length > 3_200 { json!(3_200) } else { Value::Null }, "transport_offset": 0, "transport_limit": 3_200, "transport_next_offset": if full_length > 3_200 { json!(3_200) } else { Value::Null }, "output_text": preview, "preview_shape":preview_shape, "output_truncated": full_length > 3_200, "reader_tool": "structured_command_output_show", "site_root": state.site_root.to_string_lossy(), "read_command": format!("structured_command_output_show({{ ref: \\\"{reference}\\\" }})"), "remediation": format!("Use structured_command_output_show with ref={reference} to read bounded pages."), "inline_limit": 3_200, "full_output_char_length": full_length});
     let content = serde_json::to_string(&envelope).unwrap_or_else(|_| "{}".to_string());
-    Ok(
-        json!({"content": [{"type": "text", "text": content, "annotations": {"audience": ["assistant"]}}], "structuredContent": envelope}),
-    )
+    Ok(json!({"content": [{"type": "text", "text": content, "annotations": {"audience": ["assistant"]}}], "structuredContent": envelope}))
 }
 
 fn materialize_output(

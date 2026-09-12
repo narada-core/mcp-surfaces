@@ -124,6 +124,7 @@ impl Engine {
                 "score":selected["score"],
                 "predecessor_id":selected_id,
                 "rationale":transition.get("rationale").cloned().unwrap_or(Value::Null),
+                "evidence":transition.get("evidence").cloned().unwrap_or_else(|| json!({})),
                 "evidence_ids":transition.get("evidence_ids").cloned().unwrap_or_else(|| json!([]))
             })];
             let successors = transition
@@ -200,6 +201,7 @@ impl Engine {
                     "parent_id":selected_id,
                     "rationale":object.get("rationale").cloned().unwrap_or(Value::Null),
                     "blocker_ids":object.get("blocker_ids").cloned().unwrap_or_else(|| json!([])),
+                    "evidence":object.get("evidence").cloned().unwrap_or_else(|| json!({})),
                     "evidence_ids":object.get("evidence_ids").cloned().unwrap_or_else(|| json!([]))
                 }));
             }
@@ -382,8 +384,15 @@ impl Engine {
             if (version == 1 && predecessor.is_some()) || (version > 1 && predecessor.is_none()) {
                 return Err(self.error(
                     "issue_tree_invalid",
-                    "version 1 forbids a predecessor; later versions require one",
-                    json!({"node_index":index,"version":version}),
+                    "version 1 forbids predecessor_id; later versions require predecessor_id",
+                    json!({"node_index":index,"version":version,"field":"predecessor_id"}),
+                ));
+            }
+            if predecessor == Some(node_id) {
+                return Err(self.error(
+                    "issue_tree_invalid",
+                    "predecessor_id must name a distinct immediate prior revision and must differ from node_id",
+                    json!({"node_index":index,"version":version,"field":"predecessor_id","node_id":node_id}),
                 ));
             }
             if state == "selected" {
@@ -427,6 +436,51 @@ impl Engine {
             if let Some(value) = node.get("rationale") {
                 entity.insert("rationale".into(), value.clone());
             }
+            let evidence = node.get("evidence").and_then(Value::as_object);
+            let artifact_paths = evidence
+                .and_then(|value| value.get("artifact_paths"))
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            for path in &artifact_paths {
+                if path.as_str().is_none_or(str::is_empty) {
+                    return Err(self.error(
+                        "issue_tree_invalid",
+                        "evidence.artifact_paths must contain non-empty strings",
+                        json!({"node_index":index,"field":"evidence.artifact_paths"}),
+                    ));
+                }
+            }
+            let mut evidence_refs = artifact_paths
+                .iter()
+                .map(|path| json!({"kind":"artifact_path","path":path}))
+                .collect::<Vec<_>>();
+            let mut graph_entity_ids = evidence
+                .and_then(|value| value.get("graph_entity_ids"))
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            graph_entity_ids.extend(
+                node.get("evidence_ids")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default(),
+            );
+            for id in &graph_entity_ids {
+                let id = id.as_str().filter(|value| !value.is_empty()).ok_or_else(|| {
+                    self.error(
+                        "issue_tree_invalid",
+                        "evidence.graph_entity_ids must contain non-empty strings",
+                        json!({"node_index":index,"field":"evidence.graph_entity_ids"}),
+                    )
+                })?;
+                if !evidence_refs.iter().any(|reference| reference["entity_id"] == id) {
+                    evidence_refs.push(json!({"kind":"graph_entity","entity_id":id}));
+                }
+            }
+            if !evidence_refs.is_empty() {
+                entity.insert("evidence_refs".into(), Value::Array(evidence_refs));
+            }
             operations.push(Value::Object(entity));
             let mut add_relation = |relation_type: &str, target_id: &str| {
                 operations.push(json!({"op":"relation.declare","relation_type":relation_type,"source_id":node_id,"target_id":target_id}));
@@ -447,19 +501,8 @@ impl Engine {
                 })?;
                 add_relation("blocked_by", id);
             }
-            for evidence in node
-                .get("evidence_ids")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default()
-            {
-                let id = evidence.as_str().filter(|v| !v.is_empty()).ok_or_else(|| {
-                    self.error(
-                        "issue_tree_invalid",
-                        "evidence_ids must contain non-empty strings",
-                        json!({"node_index":index}),
-                    )
-                })?;
+            for evidence in graph_entity_ids {
+                let id = evidence.as_str().expect("graph evidence validated above");
                 add_relation("derived_from", id);
             }
         }

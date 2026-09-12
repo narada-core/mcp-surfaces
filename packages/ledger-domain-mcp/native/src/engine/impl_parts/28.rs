@@ -1,18 +1,29 @@
 impl Engine {
     fn validate_references(&self, root: &Path, operations: &[Value]) -> Result<(), Value> {
         let mut known = std::collections::HashSet::new();
+        let mut communication_principals = std::collections::HashSet::new();
         if self.projection_path(root).exists() {
             let db = Connection::open(self.projection_path(root))
                 .map_err(self.db_error("projection_open_failed"))?;
             let entity_pk = self.table(&self.entity_table).primary_key.clone();
             let mut statement = db
-                .prepare(&format!("select {} from {}", entity_pk, self.entity_table))
+                .prepare(&format!("select {},kind,payload_json from {}", entity_pk, self.entity_table))
                 .map_err(self.db_error("projection_reference_prepare_failed"))?;
+            let message_kinds = self.configured_message_kinds();
             let rows = statement
-                .query_map([], |row| row.get::<_, String>(0))
+                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))
                 .map_err(self.db_error("projection_reference_query_failed"))?;
             for row in rows {
-                known.insert(row.map_err(self.db_error("projection_reference_row_failed"))?);
+                let (entity_id, kind, payload_json) = row.map_err(self.db_error("projection_reference_row_failed"))?;
+                known.insert(entity_id);
+                if message_kinds.contains(&kind) {
+                    let payload = serde_json::from_str::<Value>(&payload_json).unwrap_or(Value::Null);
+                    for field in ["sender", "recipient"] {
+                        if let Some(principal) = payload.get(field).and_then(Value::as_str).filter(|value| !value.trim().is_empty()) {
+                            communication_principals.insert(principal.to_string());
+                        }
+                    }
+                }
             }
         }
         let entity_key_field = self
@@ -39,7 +50,10 @@ impl Engine {
                 .get(field)
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            if known.contains(id) {
+            let relation_type = operation.get("relation_type").and_then(Value::as_str);
+            let principal_reference = matches!(relation_type, Some("addressed_to" | "sent_by"))
+                && communication_principals.contains(id);
+            if known.contains(id) || principal_reference {
                 Ok(())
             } else {
                 Err(self.error(

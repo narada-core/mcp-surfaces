@@ -19,8 +19,8 @@ assert.equal(domain.identity.tool_prefix, 'epistemic_graph');
 assert.equal(domain.identity.error_schema_id, 'narada.epistemic.error.v1');
 
 // Every tool name carries the domain tool prefix, and the tool list is the
-// engine's generation target: 31 tools, exactly one guidance tool.
-assert.equal(domain.tools.length, 31);
+// engine's generation target: 32 tools, exactly one guidance tool.
+assert.equal(domain.tools.length, 32);
 for (const tool of domain.tools) {
   assert.ok(tool.name.startsWith(domain.identity.tool_prefix + '_'), `tool name lacks prefix: ${tool.name}`);
   assert.equal(tool.annotations.destructiveHint, false, `${tool.name} destructiveHint`);
@@ -29,6 +29,10 @@ for (const tool of domain.tools) {
   }
 }
 assert.equal(domain.tools.filter((tool: any) => tool.class === 'guidance').length, 1);
+const conceptResolve = domain.tools.find((tool: any) => tool.name === 'epistemic_graph_concept_resolve');
+assert.ok(conceptResolve);
+assert.deepEqual(conceptResolve.inputSchema.required, ['canonical_name']);
+assert.equal(conceptResolve.inputSchema.additionalProperties, false);
 
 const queryTool = domain.tools.find((tool: any) => tool.name === 'epistemic_graph_query');
 const queryShape = queryTool.inputSchema.properties.query;

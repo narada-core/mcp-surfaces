@@ -68,7 +68,12 @@ pub(crate) fn validate_schema_lease(
                 "generation_id": connection.generation_id,
                 "tool_name": tool_name,
                 "tool_schema_digest": digest,
-                "next_call": {
+                "retry_authorization": {
+                    "kind": "unchanged_current_contract_digest",
+                    "tool_contract_digest": digest,
+                    "instruction": "Retry the original call once with tool_contract_digest set to this value; no inspection round trip is required because the current generation supplied it."
+                },
+                "next_call_if_contract_body_is_needed": {
                     "tool_name": "mcp_loader_inspect_tool",
                     "arguments": {"connection_id": connection_id, "tool_name": tool_name}
                 }

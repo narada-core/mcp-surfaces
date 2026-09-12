@@ -57,6 +57,13 @@ pub(crate) fn inspect_binding_tool(
         "tool_name".into(),
         arguments.get("tool_name").cloned().unwrap_or(Value::Null),
     );
+    delegated.insert(
+        "include_tool_contract".into(),
+        arguments
+            .get("include_tool_contract")
+            .cloned()
+            .unwrap_or_else(|| json!("compact")),
+    );
     let mut result = inspect_attached_tool(&delegated, state)?;
     result["binding_resolution"] = json!({
         "status": opened.get("status").cloned().unwrap_or_else(|| json!("opened")),

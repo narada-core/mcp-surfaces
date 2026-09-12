@@ -472,6 +472,14 @@
       "inputSchema": {"type": "object", "properties": {"paths": {"type": "array", "minItems": 1, "maxItems": 20, "items": {"type": "string", "minLength": 1}}, "max_sections_per_file": {"type": "integer", "minimum": 1, "maximum": 50}, "max_chars_per_section": {"type": "integer", "minimum": 100, "maximum": 4000}}, "required": ["paths"], "additionalProperties": false}
     },
     {
+      "name": "epistemic_graph_concept_resolve",
+      "description": "Resolve one canonical marici:concept by exact normalized canonical_name and return a fixed flood-safe one-hop projection.",
+      "class": "core",
+      "feature": null,
+      "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true},
+      "inputSchema": {"type": "object", "properties": {"canonical_name": {"type": "string", "minLength": 1, "maxLength": 256}}, "required": ["canonical_name"], "additionalProperties": false}
+    },
+    {
       "name": "epistemic_graph_neighborhood",
       "description": "Read a bounded one-hop neighborhood.",
       "class": "core",
@@ -595,7 +603,8 @@
         "transition":{"type":"object","properties":{
           "disposition":{"type":"string","enum":["resolved","rejected","exhausted","deferred","superseded","split"]},
           "rationale":{"type":"string","maxLength":8192},
-          "evidence_ids":{"type":"array","maxItems":50,"uniqueItems":true,"items":{"type":"string","minLength":1}},
+          "evidence":{"type":"object","properties":{"graph_entity_ids":{"type":"array","maxItems":50,"uniqueItems":true,"items":{"type":"string","minLength":1}},"artifact_paths":{"type":"array","maxItems":50,"uniqueItems":true,"items":{"type":"string","minLength":1}}},"additionalProperties":false},
+          "evidence_ids":{"type":"array","maxItems":50,"uniqueItems":true,"items":{"type":"string","minLength":1},"description":"Compatibility alias for evidence.graph_entity_ids; new writes should use evidence."},
           "successors":{"type":"array","maxItems":50,"items":{"type":"object","properties":{
             "node_id":{"type":"string","minLength":1},
             "title":{"type":"string","minLength":1},
@@ -603,21 +612,23 @@
             "state":{"type":"string","enum":["open","blocked"],"default":"open"},
             "rationale":{"type":"string","maxLength":8192},
             "blocker_ids":{"type":"array","maxItems":50,"uniqueItems":true,"items":{"type":"string","minLength":1}},
-            "evidence_ids":{"type":"array","maxItems":50,"uniqueItems":true,"items":{"type":"string","minLength":1}}
+            "evidence":{"type":"object","properties":{"graph_entity_ids":{"type":"array","maxItems":50,"uniqueItems":true,"items":{"type":"string","minLength":1}},"artifact_paths":{"type":"array","maxItems":50,"uniqueItems":true,"items":{"type":"string","minLength":1}}},"additionalProperties":false},
+            "evidence_ids":{"type":"array","maxItems":50,"uniqueItems":true,"items":{"type":"string","minLength":1},"description":"Compatibility alias for evidence.graph_entity_ids; new writes should use evidence."}
           },"required":["node_id","title"],"additionalProperties":false}}
         },"required":["disposition"],"additionalProperties":false},
         "nodes":{"type":"array","minItems":1,"maxItems":50,"items":{"type":"object","properties":{
-          "node_id":{"type":"string","minLength":1},
+          "node_id":{"type":"string","minLength":1,"description":"Distinct append-only entity identity for this node revision; never reuse predecessor_id."},
           "title":{"type":"string","minLength":1},
-          "version":{"type":"integer","minimum":1},
+          "version":{"type":"integer","minimum":1,"description":"Positive revision number. Version 1 forbids predecessor_id; later versions require it."},
           "state":{"type":"string","enum":["active","open","selected","blocked","disposed"],"default":"open"},
           "score":{"type":"number","default":0,"description":"Canonical score in [0,1]; exact range validation returns an issue_tree_invalid field-specific correction."},
           "disposition":{"type":"string","enum":["resolved","rejected","exhausted","deferred","superseded","split"]},
           "rationale":{"type":"string","maxLength":8192},
           "parent_id":{"type":"string","minLength":1},
-          "predecessor_id":{"type":"string","minLength":1},
+          "predecessor_id":{"type":"string","minLength":1,"description":"Entity ID of the distinct immediate prior revision. It must differ from node_id."},
           "blocker_ids":{"type":"array","maxItems":50,"uniqueItems":true,"items":{"type":"string","minLength":1}},
-          "evidence_ids":{"type":"array","maxItems":50,"uniqueItems":true,"items":{"type":"string","minLength":1}}
+          "evidence":{"type":"object","properties":{"graph_entity_ids":{"type":"array","maxItems":50,"uniqueItems":true,"items":{"type":"string","minLength":1}},"artifact_paths":{"type":"array","maxItems":50,"uniqueItems":true,"items":{"type":"string","minLength":1}}},"additionalProperties":false},
+          "evidence_ids":{"type":"array","maxItems":50,"uniqueItems":true,"items":{"type":"string","minLength":1},"description":"Compatibility alias for evidence.graph_entity_ids; new writes should use evidence."}
         },"required":["node_id","title","version"],"additionalProperties":false}}
       },"required":["actor","authority_basis","tree_id"],"oneOf":[
         {"required":["nodes"]},

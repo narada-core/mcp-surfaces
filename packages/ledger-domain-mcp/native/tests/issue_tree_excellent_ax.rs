@@ -441,10 +441,60 @@ fn acceptance(case: u8) {
             assert!(bad_version["message"]
                 .as_str()
                 .unwrap()
-                .contains("predecessor"));
+                .contains("predecessor_id"));
+            assert_eq!(bad_version["details"]["field"], "predecessor_id");
+            let self_predecessor = batch(
+                &root,
+                "tree:invalid",
+                json!([{
+                    "node_id":"issue:self",
+                    "title":"self superseding",
+                    "version":2,
+                    "predecessor_id":"issue:self",
+                    "score":0.3
+                }]),
+                "self-predecessor",
+            );
+            assert_eq!(self_predecessor["code"], "issue_tree_invalid");
+            assert!(self_predecessor["message"]
+                .as_str()
+                .unwrap()
+                .contains("must differ from node_id"));
+            assert_eq!(self_predecessor["details"]["field"], "predecessor_id");
         }
         _ => unreachable!(),
     }
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn structured_issue_evidence_counts_artifact_paths_and_preserves_legacy_ids() {
+    let root = root("structured-evidence");
+    let created = create(&root, "Structured evidence test");
+    let (tree_id, _) = tree_and_selected(&created);
+    let admitted = batch(
+        &root,
+        tree_id,
+        json!([
+            {"node_id":"source:one","title":"Source one","version":1,"state":"disposed","disposition":"resolved"},
+            {"node_id":"source:legacy","title":"Legacy source","version":1,"state":"disposed","disposition":"resolved"},
+            {
+                "node_id":"issue:evidence",
+                "title":"Evidence-bearing issue",
+                "version":1,
+                "score":0.5,
+                "evidence":{
+                    "graph_entity_ids":["source:one"],
+                    "artifact_paths":["research/example.lean","research/check-example.ps1"]
+                },
+                "evidence_ids":["source:legacy"]
+            }
+        ]),
+        "structured-evidence",
+    );
+    assert_eq!(admitted["status"], "admitted", "{admitted}");
+    let resumed = resume(&root, tree_id);
+    assert_eq!(resumed["frontier"]["items"][0]["evidence_reference_count"], 4, "{resumed}");
     let _ = fs::remove_dir_all(root);
 }
 

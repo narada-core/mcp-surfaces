@@ -49,7 +49,7 @@ fn worker_run(
     let queue_timeout_ms = constraints
         .and_then(|value| value.get("queue_timeout_ms"))
         .and_then(Value::as_u64)
-        .unwrap_or(300_000)
+        .unwrap_or(60_000)
         .clamp(1, 1_800_000);
     let wait_for_completion = constraints
         .and_then(|value| value.get("wait_for_completion"))
