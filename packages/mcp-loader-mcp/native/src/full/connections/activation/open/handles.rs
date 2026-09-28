@@ -59,6 +59,11 @@ pub(crate) fn resume_or_open_surface(
     state: &mut LoaderState,
 ) -> Result<Value, Diagnostic> {
     let binding_id = required_string(arguments, "binding_id", "missing_binding_id")?;
+    let requested_site_root = normalize_path(&required_string(
+        arguments,
+        "site_root",
+        "missing_site_root",
+    )?);
     // Resume is not an independently admitted mutation. Resolve aliases from
     // the materialized admission envelope for identity matching, then let
     // open_surface/attach enforce the admitted attach operation only if no
@@ -78,18 +83,21 @@ pub(crate) fn resume_or_open_surface(
         .and_then(|entry| entry.get("surface_id"))
         .and_then(Value::as_str)
         .map(ToString::to_string);
-    let requested_site_root = arguments
-        .get("site_root")
-        .and_then(Value::as_str)
-        .map(normalize_path);
     if let Some(record) = state.handles.values().find(|handle| {
         state.connections.values().any(|connection| {
             connection.logical_connection_id == handle.logical_connection_id
-                && (connection.binding_id.as_deref() == Some(resolved_binding_id.as_str())
-                    || resolved_surface_id
-                        .as_deref()
-                        .map(|surface| connection.surface_id == surface)
-                        .unwrap_or(false))
+                && handle.binding_id == connection.binding_id
+                && normalize_path(&handle.site_root) == requested_site_root
+                && normalize_path(&connection.site_root) == requested_site_root
+                && handle.surface_id == connection.surface_id
+                && connection_matches_requested_binding(
+                    connection.binding_id.as_deref(),
+                    &connection.site_root,
+                    &connection.surface_id,
+                    &resolved_binding_id,
+                    resolved_surface_id.as_deref(),
+                    &requested_site_root,
+                )
                 && connection_live(connection)
         })
     }) {
@@ -109,16 +117,14 @@ pub(crate) fn resume_or_open_surface(
     // attach or a concurrent binding inspection may already have established
     // the one live child for this admitted binding without creating a handle.
     if let Some(connection) = state.connections.values().find(|connection| {
-        (connection.binding_id.as_deref() == Some(resolved_binding_id.as_str())
-            || resolved_surface_id
-                .as_deref()
-                .map(|surface| connection.surface_id == surface)
-                .unwrap_or(false))
-            && requested_site_root
-                .as_deref()
-                .map(|root| normalize_path(&connection.site_root) == root)
-                .unwrap_or(true)
-            && connection_live(connection)
+        connection_matches_requested_binding(
+            connection.binding_id.as_deref(),
+            &connection.site_root,
+            &connection.surface_id,
+            &resolved_binding_id,
+            resolved_surface_id.as_deref(),
+            &requested_site_root,
+        ) && connection_live(connection)
     }) {
         let handle = format!("{}{}", SURFACE_HANDLE_PREFIX, new_id("h").replace('-', ""));
         let record = SurfaceHandle {
@@ -153,4 +159,84 @@ pub(crate) fn resume_or_open_surface(
     result["canonical_binding_id"] = json!(resolved_binding_id);
     result["binding_id_canonicalized"] = json!(binding_id != resolved_binding_id);
     Ok(result)
+}
+
+fn connection_matches_requested_binding(
+    connection_binding_id: Option<&str>,
+    connection_site_root: &str,
+    connection_surface_id: &str,
+    resolved_binding_id: &str,
+    resolved_surface_id: Option<&str>,
+    requested_site_root: &str,
+) -> bool {
+    if normalize_path(connection_site_root) != normalize_path(requested_site_root) {
+        return false;
+    }
+
+    let surface_matches = resolved_surface_id
+        .map(|surface| connection_surface_id == surface)
+        .unwrap_or(true);
+    let binding_matches = match connection_binding_id {
+        Some(binding_id) => binding_id == resolved_binding_id,
+        None => resolved_surface_id == Some(connection_surface_id),
+    };
+
+    surface_matches && binding_matches
+}
+
+#[cfg(test)]
+mod tests {
+    use super::connection_matches_requested_binding;
+
+    #[test]
+    fn resume_does_not_reuse_a_shared_surface_from_another_site() {
+        assert!(!connection_matches_requested_binding(
+            Some("andrey-user-site-inbox"),
+            "C:/Users/andrey/Narada",
+            "site-inbox",
+            "sonar-site-inbox",
+            Some("site-inbox"),
+            "C:/Users/andrey/src/narada.sonar",
+        ));
+    }
+
+    #[test]
+    fn resume_reuses_only_the_exact_binding_at_the_requested_site_root() {
+        assert!(connection_matches_requested_binding(
+            Some("sonar-site-inbox"),
+            "C:/Users/andrey/src/narada.sonar",
+            "site-inbox",
+            "sonar-site-inbox",
+            Some("site-inbox"),
+            "C:/Users/andrey/src/narada.sonar",
+        ));
+        assert!(!connection_matches_requested_binding(
+            Some("sonar-site-inbox"),
+            "C:/Users/andrey/Narada",
+            "site-inbox",
+            "sonar-site-inbox",
+            Some("site-inbox"),
+            "C:/Users/andrey/src/narada.sonar",
+        ));
+    }
+
+    #[test]
+    fn legacy_bindingless_connection_fallback_is_site_scoped() {
+        assert!(connection_matches_requested_binding(
+            None,
+            "C:/Users/andrey/src/narada.sonar",
+            "site-inbox",
+            "sonar-site-inbox",
+            Some("site-inbox"),
+            "C:/Users/andrey/src/narada.sonar",
+        ));
+        assert!(!connection_matches_requested_binding(
+            None,
+            "C:/Users/andrey/Narada",
+            "site-inbox",
+            "sonar-site-inbox",
+            Some("site-inbox"),
+            "C:/Users/andrey/src/narada.sonar",
+        ));
+    }
 }

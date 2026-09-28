@@ -16,7 +16,7 @@ fn native_loader_freshness_ignores_workspace_metadata_mtime() {
             tool_call_grace_ms: 100,
         },
         surface_root: String::new(),
-        workspace_root: env!("CARGO_MANIFEST_DIR").to_string(),
+        workspace_root: join_path(env!("CARGO_MANIFEST_DIR"), "../../.."),
         // Freshness is anchored to the native Rust artifact graph, not legacy TS metadata.
         started_ms: 0,
         run_id: "test-loader".to_string(),
@@ -34,6 +34,12 @@ fn native_loader_freshness_ignores_workspace_metadata_mtime() {
     assert_eq!(freshness["freshness_scope"], "native_loader_artifact");
     assert_eq!(freshness["reasons"], json!([]));
     assert_eq!(freshness["authority"], "native_rust");
+    assert!(
+        freshness["source_inventory"]["rust_source_count"]
+            .as_u64()
+            .expect("Rust source count")
+            > 10
+    );
     for file in freshness["source_files"].as_array().expect("source files") {
         let path = file["observation"]["path"].as_str().expect("source path");
         assert!(path.contains("native/src/"));
